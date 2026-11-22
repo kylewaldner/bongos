@@ -1227,14 +1227,21 @@ impl WorkflowEngine {
         self.publish(cx);
     }
 
-    /// Loads again the runs on disk this engine does not hold: after a handover the other
-    /// process never took, the runs handed over come back and continue. The runs loaded.
-    pub fn reload_runs(&self, cx: &mut App) -> Vec<RunId> {
+    /// While `on`, no run starts or restarts under `files` (a project's files): its writer moves
+    /// to another process ([`Lifecycle::refuse_starts_under`]).
+    pub fn refuse_starts_under(&self, files: &Path, on: bool) {
+        self.lifecycle().refuse_starts_under(files, on);
+    }
+
+    /// Loads again `runs`, those on disk this engine does not hold: after a handover the other
+    /// process never took, the runs it handed over come back and continue. Runs another handover
+    /// moved away stay away. The runs loaded.
+    pub fn reload_runs(&self, runs: &[RunId], cx: &mut App) -> Vec<RunId> {
         let Some(tree) = self.writes.tree(cx) else {
             log::error!("workflows: no work tree to load the runs again from");
             return Vec::new();
         };
-        let loaded = match self.lifecycle().load_new_runs(&tree) {
+        let loaded = match self.lifecycle().load_new_runs(&tree, runs) {
             Ok(report) => {
                 for (path, reason) in &report.skipped {
                     log::warn!("workflows: did not load {}: {reason}", path.display());

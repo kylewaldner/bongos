@@ -214,10 +214,13 @@ impl HostClient {
                     Ok(connection) => {
                         ask(&connection, &inner, command.clone(), &executor, true).await
                     }
-                    Err(error) => Err(error),
+                    Err(error) => Err(anyhow::Error::new(NotApplied(format!("{error:#}")))),
                 };
                 match answer {
-                    Err(error) if is_moving(&error, &inner.shared) && executor.now() < deadline => {
+                    Err(error)
+                        if is_moving(&error, inner.shared.moving.load(Ordering::SeqCst))
+                            && executor.now() < deadline =>
+                    {
                         executor.timer(MOVING_RETRY).await;
                     }
                     answer => return answer,
@@ -287,9 +290,27 @@ fn current_connection(inner: &Inner) -> Result<Arc<Connection>> {
     Ok(connection)
 }
 
-/// Whether `error` means the writer is moving, so the request is worth trying again.
-fn is_moving(error: &anyhow::Error, shared: &ClientShared) -> bool {
-    error.to_string() == MOVING_REFUSAL || shared.moving.load(Ordering::SeqCst)
+/// An error for a request the writer cannot have applied, so trying it again cannot apply it
+/// twice: it never reached the writer, or it was sent after the writer said it moves (a moving
+/// writer refuses every request) and the connection closed before the refusal came.
+#[derive(Debug)]
+pub(crate) struct NotApplied(pub(crate) String);
+
+impl std::fmt::Display for NotApplied {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NotApplied {}
+
+/// Whether `error` means the writer is moving, so the request is worth trying again: the writer
+/// refused it as moving, or, while the writer moves, the writer cannot have applied it
+/// ([`NotApplied`]). A request the old writer may have applied before its connection closed is
+/// not tried again.
+/// `moving` says whether the writer told this client it moves.
+pub(crate) fn is_moving(error: &anyhow::Error, moving: bool) -> bool {
+    error.to_string() == MOVING_REFUSAL || (moving && error.downcast_ref::<NotApplied>().is_some())
 }
 
 async fn ask(
@@ -300,6 +321,8 @@ async fn ask(
     timed: bool,
 ) -> Result<serde_json::Value> {
     let log = &inner.options.log;
+    // Sent after the writer said it moves: it refuses the request, never applies it.
+    let sent_while_moving = inner.shared.moving.load(Ordering::SeqCst);
     let (id, answer) = send_request(connection, command, log)?;
     let mut answer = answer.fuse();
     let answered = if timed {
@@ -325,6 +348,7 @@ async fn ask(
             }
             Err(anyhow!(text))
         }
+        Err(_) if sent_while_moving => Err(anyhow::Error::new(NotApplied(closed_message(log)))),
         Err(_) => Err(anyhow!(closed_message(log))),
     }
 }
@@ -339,7 +363,7 @@ fn send_request(
         bail!(not_answering(log));
     }
     if state.closed.load(Ordering::SeqCst) {
-        bail!(closed_message(log));
+        return Err(anyhow::Error::new(NotApplied(closed_message(log))));
     }
     let id = connection.next_id.fetch_add(1, Ordering::SeqCst);
     let (sender, receiver) = oneshot::channel();

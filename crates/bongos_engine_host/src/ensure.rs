@@ -34,6 +34,10 @@ pub trait SpawnedHost: Send {
     fn try_exit(&mut self) -> Option<String>;
     /// Hands the process to a thread that reaps it whenever it exits, so it never stays a zombie.
     fn release(self: Box<Self>);
+    /// Its process id, when it has one.
+    fn pid(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// Runs `<program> --engine-host <project id>` in a new session, stdin from `/dev/null`, stdout
@@ -76,6 +80,10 @@ impl SpawnedHost for SpawnedProcess {
             Ok(None) => None,
             Err(error) => Some(format!("unknown ({error})")),
         }
+    }
+
+    fn pid(&self) -> Option<u32> {
+        Some(self.0.id())
     }
 
     fn release(self: Box<Self>) {

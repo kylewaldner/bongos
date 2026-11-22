@@ -908,6 +908,9 @@ pub struct Lifecycle<R: Runner> {
     /// run that already waits is an update too.
     statuses: BTreeMap<RunId, (RunStatus, BTreeSet<NodeKey>)>,
     events: Vec<WorkflowEvent>,
+    /// The files of the projects whose writer moves to another process now: no run starts under
+    /// them ([`Self::refuse_starts_under`]).
+    moving: Vec<PathBuf>,
 }
 
 impl<R: Runner> Lifecycle<R> {
@@ -919,7 +922,30 @@ impl<R: Runner> Lifecycle<R> {
             runs: Vec::new(),
             statuses: BTreeMap::new(),
             events: Vec::new(),
+            moving: Vec::new(),
         }
+    }
+
+    /// While `on`, a start or restart of a run under `files` (a project's files) is refused: the
+    /// project's writer moves to another process, which loads the project's runs from disk, so
+    /// a run this process began now would run in both.
+    pub fn refuse_starts_under(&mut self, files: &Path, on: bool) {
+        self.moving.retain(|dir| dir != files);
+        if on {
+            self.moving.push(files.to_path_buf());
+        }
+    }
+
+    /// Refuses a run under `dir` while its project's writer moves.
+    fn refuse_moving(&self, dir: &Path) -> Result<(), Refusal> {
+        if self.moving.iter().any(|files| dir.starts_with(files)) {
+            return Err(Refusal::new(
+                RefusalKind::Held,
+                "This project's writer is moving to the engine host, so no run starts in it now.",
+                "Try again once the move is over.",
+            ));
+        }
+        Ok(())
     }
 
     pub fn runtime(&self) -> &Runtime<R> {
@@ -1171,6 +1197,7 @@ impl<R: Runner> Lifecycle<R> {
                 "Pick a task in the Work view.",
             )
         })?;
+        self.refuse_moving(&task.dir)?;
         if derive::shape(task, tree) == Shape::Group {
             return Err(Refusal::new(
                 RefusalKind::Group,
@@ -1496,6 +1523,7 @@ impl<R: Runner> Lifecycle<R> {
                 "Pick a project in the Work view.",
             ));
         };
+        self.refuse_moving(&project.task.dir)?;
         let name = request.workflow.clone().ok_or_else(|| {
             Refusal::new(
                 RefusalKind::UnknownWorkflow,
@@ -1757,20 +1785,26 @@ impl<R: Runner> Lifecycle<R> {
     /// loaded is [`RuntimeError::Duplicate`] and none of these load; a log that cannot be opened
     /// skips only its run.
     pub fn load_runs(&mut self, tree: &WorkTree) -> Result<LoadReport, RuntimeError> {
-        self.load_runs_where(tree, false)
+        self.load_runs_where(tree, None)
     }
 
-    /// [`Self::load_runs`] of only the runs not loaded yet: what a take-back after a failed
-    /// handover loads again, beside the runs that never left.
-    pub fn load_new_runs(&mut self, tree: &WorkTree) -> Result<LoadReport, RuntimeError> {
-        self.load_runs_where(tree, true)
+    /// [`Self::load_runs`] of only `runs`, those of them not loaded yet: what a take-back after a
+    /// failed handover loads again (the runs that handover moved), beside the runs that never
+    /// left. Runs another handover moved to another process stay there.
+    pub fn load_new_runs(
+        &mut self,
+        tree: &WorkTree,
+        runs: &[RunId],
+    ) -> Result<LoadReport, RuntimeError> {
+        self.load_runs_where(tree, Some(runs))
     }
 
     fn load_runs_where(
         &mut self,
         tree: &WorkTree,
-        skip_loaded: bool,
+        only: Option<&[RunId]>,
     ) -> Result<LoadReport, RuntimeError> {
+        let skip_loaded = only.is_some();
         let mut report = LoadReport::default();
         let mut entries: Vec<RunEntry> = Vec::new();
         let mut specs: Vec<RunSpec> = Vec::new();
@@ -1803,6 +1837,7 @@ impl<R: Runner> Lifecycle<R> {
             let project = task.id().and_then(|id| project_of(tree, id));
             for dir in dirs {
                 match self.read_run(tree, task, project.clone(), &dir) {
+                    Ok(Some((entry, _))) if only.is_some_and(|only| !only.contains(&entry.id)) => {}
                     Ok(Some((entry, _)))
                         if skip_loaded && self.runs.iter().any(|run| run.id == entry.id) => {}
                     Ok(Some((entry, _))) if seen.contains(&entry.id) => skip(
@@ -2356,6 +2391,7 @@ impl<R: Runner> Lifecycle<R> {
         commit: Option<String>,
     ) -> Result<RunId, Refusal> {
         let index = self.index(run)?;
+        self.refuse_moving(&self.runs[index].dir)?;
         let status = self.status_of(run)?;
         if status == RunStatus::Succeeded {
             return Err(wrong_state(status, "restart"));

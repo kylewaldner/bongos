@@ -22,10 +22,10 @@ use gpui::{App, AppContext as _, Task, TestAppContext};
 use crate::engine_host_tests::{Fixture, VERSION, branch_of, fixture, set_branch, wait_for};
 use crate::{
     ClientOptions, DrainChoice, EngineAccess, EngineAccesses, HandoverRequest, HandoverRuns,
-    HandoverTimes, HostClient, HostCommand, HostInfo, HostMode, MOVING_REFUSAL, MOVING_RETRY,
-    Moving, OpenedState, WriterHost, WriterHosts, WriterOptions, did_not_start, expect_handover,
-    install_handovers, live_host, open_state_with_hooks, read_host_file, take_writer_checked,
-    take_writer_from_window, write_host_file,
+    HandoverTimes, HostClient, HostCommand, HostInfo, HostMode, HostSpawner, MOVING_REFUSAL,
+    MOVING_RETRY, Moving, OpenedState, SpawnedHost, WriterHost, WriterHosts, WriterOptions,
+    did_not_start, expect_handover, install_handovers, live_host, open_state_with_hooks,
+    read_host_file, start_handover, take_writer_checked, take_writer_from_window, write_host_file,
 };
 
 const LONG: Duration = Duration::from_secs(60);
@@ -39,20 +39,24 @@ struct FakeState {
     /// What `host.json` said and whether the writer was still held when the runs were handed
     /// over.
     at_hand_over: Option<(Option<Moving>, bool)>,
+    /// The live runs.
+    runs: Vec<String>,
+    /// Whether starts under the project's files are refused now.
+    refusing: bool,
 }
 
 /// The window's runs: `runs` are live, `busy` of them run a node until [`finish_nodes`].
 struct FakeRuns {
     state: Rc<RefCell<FakeState>>,
-    runs: Vec<String>,
     location: Location,
     writer: Arc<StateWriter>,
 }
 
 impl HandoverRuns for FakeRuns {
     fn live_runs(&self, _repo: &ProjectRepo, _cx: &mut App) -> Result<Vec<String>> {
-        self.state.borrow_mut().log.push("live".to_string());
-        Ok(self.runs.clone())
+        let mut state = self.state.borrow_mut();
+        state.log.push("live".to_string());
+        Ok(state.runs.clone())
     }
 
     fn in_flight(&self, _runs: &[String], _cx: &App) -> usize {
@@ -93,8 +97,13 @@ impl HandoverRuns for FakeRuns {
         state.at_hand_over = Some((moving, !self.writer.is_released()));
     }
 
-    fn reload(&self, _cx: &mut App) {
-        self.state.borrow_mut().log.push("reload".to_string());
+    fn reload(&self, runs: &[String], _cx: &mut App) {
+        self.state.borrow_mut().log.push(format!("reload {runs:?}"));
+    }
+
+    fn refuse_starts(&self, files: &std::path::Path, on: bool, _cx: &mut App) {
+        assert_eq!(files, self.location.files);
+        self.state.borrow_mut().refusing = on;
     }
 }
 
@@ -129,11 +138,11 @@ fn window(
 ) -> Rc<RefCell<FakeState>> {
     let state = Rc::new(RefCell::new(FakeState {
         busy,
+        runs: runs.iter().map(ToString::to_string).collect(),
         ..FakeState::default()
     }));
     let fake = FakeRuns {
         state: state.clone(),
-        runs: runs.iter().map(ToString::to_string).collect(),
         location: fixture.location().clone(),
         writer: writer_of(fixture),
     };
@@ -275,6 +284,7 @@ async fn a_handover_drains_then_moves_the_writer_and_the_window_attaches_to_the_
         vec![
             "live".to_string(),
             "drain".to_string(),
+            "live".to_string(),
             format!("hand over [\"run-1\"] to {pid}"),
             "undrain".to_string(),
         ]
@@ -385,6 +395,7 @@ async fn a_window_with_no_live_run_hands_over_without_waiting(
         vec![
             "live".to_string(),
             "drain".to_string(),
+            "live".to_string(),
             format!("hand over [] to {pid}"),
             "undrain".to_string(),
         ]
@@ -437,6 +448,7 @@ async fn a_drain_past_its_timeout_asks_again_and_interrupt_them_now_moves_on(
             "live".to_string(),
             "drain".to_string(),
             "interrupt [\"run-1\"]".to_string(),
+            "live".to_string(),
             format!("hand over [\"run-1\"] to {pid}"),
             "undrain".to_string(),
         ]
@@ -474,6 +486,7 @@ async fn a_cancelled_handover_keeps_the_writer_in_the_window(cx: &mut TestAppCon
     assert!(refused.contains(crate::CANCELLED), "{refused}");
     assert!(watch.done.await.unwrap().is_err());
     assert_eq!(log(&state), vec!["live", "drain", "undrain"]);
+    assert!(!state.borrow().refusing, "runs start here again");
     assert!(!writer_of(&fixture).is_released());
     assert_eq!(read_host_file(fixture.location()).unwrap().moving, None);
     write(&fixture.repo, None, "still-here", cx).await.unwrap();
@@ -524,7 +537,8 @@ async fn a_host_that_never_takes_the_lock_gives_the_writer_back(cx: &mut TestApp
         branch_of(fixture.repo.state().unwrap(), "l1").as_deref(),
         Some("queued")
     );
-    assert!(log(&state).contains(&"reload".to_string()));
+    assert!(log(&state).contains(&"reload [\"run-1\"]".to_string()));
+    assert!(!state.borrow().refusing, "runs start here again");
     let info = live_host(fixture.location()).unwrap();
     assert_eq!((info.mode, info.moving.clone()), (HostMode::Window, None));
     // It serves again, and its own writes go to its own writer.
@@ -539,6 +553,115 @@ async fn a_host_that_never_takes_the_lock_gives_the_writer_back(cx: &mut TestApp
         .await
         .unwrap();
     assert!(fixture.repo.sink().is_none());
+}
+
+// A run that became live during the drain (loaded, restarted) moves with the others, and from
+// the host's ask until the window attached no run starts here.
+#[gpui::test]
+async fn a_run_live_by_the_end_of_the_drain_moves_too_and_none_starts_until_the_move_ends(
+    cx: &mut TestAppContext,
+    host_cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let state = window(&fixture, &["run-1"], 1, LONG, cx);
+    let taken = ask_for_writer(&fixture, cx);
+    wait_for(cx, |_| log(&state).contains(&"drain".to_string()));
+    assert!(
+        state.borrow().refusing,
+        "no run starts while the writer moves"
+    );
+    state.borrow_mut().runs.push("run-2".to_string());
+    finish_nodes(&state);
+    let writer = wait_for_writer(&taken, cx).unwrap();
+    let pid = std::process::id();
+    let handed = format!("hand over [\"run-1\", \"run-2\"] to {pid}");
+    assert!(log(&state).contains(&handed), "{:?}", log(&state));
+    assert!(
+        state.borrow().refusing,
+        "still refused between the release and the attach"
+    );
+    let (_host, _) = serve_host(&fixture, writer, host_cx);
+    wait_for(cx, |cx| is_remote(&fixture, cx));
+    assert!(!state.borrow().refusing, "runs start again once it moved");
+}
+
+/// A spawner that starts nothing and names this test process as the host it started.
+struct SilentSpawner;
+
+struct SilentChild;
+
+impl SpawnedHost for SilentChild {
+    fn try_exit(&mut self) -> Option<String> {
+        None
+    }
+
+    fn release(self: Box<Self>) {}
+
+    fn pid(&self) -> Option<u32> {
+        Some(std::process::id())
+    }
+}
+
+impl HostSpawner for SilentSpawner {
+    fn spawn(&self, _: &str, _: &std::path::Path) -> Result<Box<dyn SpawnedHost>> {
+        Ok(Box::new(SilentChild))
+    }
+}
+
+// `lanes: start` gave up on a host that did not ask in time and told the person it did not
+// start: when that host asks late, the window keeps the writer and stays local.
+#[gpui::test]
+async fn a_host_asking_after_lanes_start_gave_up_on_it_is_refused(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let start_timeout = Duration::from_millis(100);
+    let state = window(&fixture, &["run-1"], 0, start_timeout, cx);
+    let started = cx.update(|cx| {
+        start_handover(
+            &fixture.repo,
+            Arc::new(SilentSpawner),
+            fixture.log(),
+            HandoverRequest {
+                choice: DrainChoice::Wait,
+                ask_again: None,
+            },
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    cx.executor().advance_clock(start_timeout);
+    let Err(error) = started.await else {
+        panic!("lanes: start ended with the host it gave up on");
+    };
+    assert!(error.to_string().contains("did not start"), "{error:#}");
+
+    let taken = ask_for_writer(&fixture, cx);
+    let Err(refused) = wait_for_writer(&taken, cx) else {
+        panic!("a host the window gave up on took the writer");
+    };
+    assert!(refused.contains("gave up"), "{refused}");
+    assert_eq!(log(&state), Vec::<String>::new());
+    assert!(!writer_of(&fixture).is_released());
+    assert!(!is_remote(&fixture, cx));
+    assert!(!state.borrow().refusing);
+}
+
+// While the writer moves a request is tried again only when the writer refused it as moving or
+// cannot have applied it (never sent, or sent after the writer said it moves); one whose
+// connection closed while it was in flight before that may have been applied by the old writer,
+// so it is not sent again.
+#[test]
+fn only_a_moving_refusal_or_a_request_never_applied_is_tried_again() {
+    use crate::client::{NotApplied, is_moving};
+    let refused = anyhow::anyhow!(MOVING_REFUSAL);
+    let never_sent = anyhow::Error::new(NotApplied("the engine host closed".to_string()));
+    let in_flight = anyhow::anyhow!("the engine host closed the connection");
+    assert!(is_moving(&refused, false));
+    assert!(is_moving(&refused, true));
+    assert!(is_moving(&never_sent, true));
+    assert!(!is_moving(&never_sent, false));
+    assert!(!is_moving(&in_flight, true));
 }
 
 fn options_as(fixture: &Fixture, own_pid: u32) -> ClientOptions {

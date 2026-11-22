@@ -27,6 +27,7 @@
 //! Draining task checks and the writer participants other features register join step 2 later;
 //! they plug in beside [`HandoverRuns::drain`].
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -102,8 +103,10 @@ pub trait HandoverRuns {
     fn interrupt(&self, runs: &[String], cx: &mut App);
     /// `HandedOver { to_pid }` to each of `runs`, then unloads them.
     fn hand_over(&self, to_pid: u32, runs: &[String], cx: &mut App);
-    /// Loads again the runs on disk this process does not hold (a take-back).
-    fn reload(&self, cx: &mut App);
+    /// Loads again those of `runs` on disk this process does not hold (a take-back).
+    fn reload(&self, runs: &[String], cx: &mut App);
+    /// While `on`, no run starts under `files` (a project's files) here.
+    fn refuse_starts(&self, files: &Path, on: bool, cx: &mut App);
 }
 
 /// [`HandoverRuns`] of the app's workflow engine.
@@ -154,9 +157,15 @@ impl HandoverRuns for EngineRuns {
         }
     }
 
-    fn reload(&self, cx: &mut App) {
+    fn reload(&self, runs: &[String], cx: &mut App) {
         if let Some(engine) = cx.try_global::<WorkflowEngine>().cloned() {
-            engine.reload_runs(cx);
+            engine.reload_runs(runs, cx);
+        }
+    }
+
+    fn refuse_starts(&self, files: &Path, on: bool, cx: &mut App) {
+        if let Some(engine) = cx.try_global::<WorkflowEngine>() {
+            engine.refuse_starts_under(files, on);
         }
     }
 }
@@ -176,14 +185,18 @@ struct Handovers {
     runs: Rc<dyn HandoverRuns>,
     times: Rc<dyn Fn(&App) -> HandoverTimes>,
     client: ClientOptions,
-    /// The projects whose writer is moving away now.
-    moving: HashSet<String>,
+    /// The projects whose writer is moving away now, with their files (no run starts under them
+    /// until the move ends).
+    moving: HashMap<String, PathBuf>,
     /// What `lanes: start` asked for, by project, until the host asks for the writer.
     requests: HashMap<String, HandoverRequest>,
     /// Told when the host asked for the writer.
     began: HashMap<String, Vec<oneshot::Sender<()>>>,
     /// Told how the handover ended: the client of the new writer, or why the writer stayed.
     done: HashMap<String, Vec<oneshot::Sender<Result<HostClient, String>>>>,
+    /// The engine hosts `lanes: start` gave up on (they did not ask in time), by pid: a request
+    /// they make late is refused, since the window already told the person they did not start.
+    abandoned: HashSet<u32>,
 }
 
 impl Global for Handovers {}
@@ -200,17 +213,18 @@ pub fn install_handovers(
         runs,
         times,
         client,
-        moving: HashSet::new(),
+        moving: HashMap::new(),
         requests: HashMap::new(),
         began: HashMap::new(),
         done: HashMap::new(),
+        abandoned: HashSet::new(),
     });
 }
 
 /// Whether the writer of `project_id` is moving away from this process now.
 pub fn is_moving(project_id: &str, cx: &App) -> bool {
     cx.try_global::<Handovers>()
-        .is_some_and(|handovers| handovers.moving.contains(project_id))
+        .is_some_and(|handovers| handovers.moving.contains_key(project_id))
 }
 
 fn finish(project_id: &str, outcome: Result<HostClient, String>, cx: &mut App) {
@@ -218,10 +232,15 @@ fn finish(project_id: &str, outcome: Result<HostClient, String>, cx: &mut App) {
         return;
     }
     let handovers = cx.global_mut::<Handovers>();
-    handovers.moving.remove(project_id);
+    let files = handovers.moving.remove(project_id);
     handovers.requests.remove(project_id);
     handovers.began.remove(project_id);
-    for watcher in handovers.done.remove(project_id).unwrap_or_default() {
+    let watchers = handovers.done.remove(project_id).unwrap_or_default();
+    let runs = handovers.runs.clone();
+    if let Some(files) = files {
+        runs.refuse_starts(&files, false, cx);
+    }
+    for watcher in watchers {
         watcher.send(outcome.clone()).ok();
     }
 }
@@ -255,6 +274,16 @@ pub(crate) fn serve_handover(
     cx: &mut App,
 ) -> Task<Result<serde_json::Value>> {
     let id = repo.location().id.clone();
+    if cx
+        .try_global::<Handovers>()
+        .is_some_and(|handovers| handovers.abandoned.contains(&peer.pid()))
+    {
+        cx.global_mut::<Handovers>().abandoned.remove(&peer.pid());
+        return Task::ready(Err(anyhow!(
+            "this window gave up on engine host pid {} before it asked for the writer",
+            peer.pid()
+        )));
+    }
     let Some(handovers) = cx.try_global::<Handovers>() else {
         return Task::ready(Err(anyhow!(
             "this engine host does not hand its writer over"
@@ -265,9 +294,10 @@ pub(crate) fn serve_handover(
             "only an engine host of this bongos takes the writer over"
         )));
     }
-    if handovers.moving.contains(&id) {
+    if handovers.moving.contains_key(&id) {
         return Task::ready(Err(anyhow!(MOVING_REFUSAL)));
     }
+
     if repo.state().and_then(|state| state.writer()).is_none() {
         return Task::ready(Err(anyhow!(
             "this process does not hold the writer of {id}"
@@ -281,9 +311,13 @@ pub(crate) fn serve_handover(
         Err(error) => return Task::ready(Err(error)),
     };
     let to = Moving::to(peer.pid());
+    let files = repo.location().files.clone();
+    // From here until the move ends no run of the project starts here: the host loads the
+    // project's runs from disk, so a run begun here now would run in both processes.
+    runs_source.refuse_starts(&files, true, cx);
     let handovers = cx.global_mut::<Handovers>();
     let request = handovers.requests.remove(&id);
-    handovers.moving.insert(id.clone());
+    handovers.moving.insert(id.clone(), files);
     for watcher in handovers.began.remove(&id).unwrap_or_default() {
         watcher.send(()).ok();
     }
@@ -297,6 +331,7 @@ pub(crate) fn serve_handover(
         repo: repo.clone(),
         to,
         runs,
+        handed: Rc::new(RefCell::new(Vec::new())),
         runs_source,
         times,
         client,
@@ -324,7 +359,10 @@ struct Move {
     id: String,
     repo: ProjectRepo,
     to: Moving,
+    /// The live runs when the host asked; those it waits on and interrupts.
     runs: Vec<String>,
+    /// The runs handed over (`HandedOver` appended, unloaded): what a take-back loads again.
+    handed: Rc<RefCell<Vec<String>>>,
     runs_source: Rc<dyn HandoverRuns>,
     times: HandoverTimes,
     client: ClientOptions,
@@ -347,7 +385,21 @@ impl Move {
                 host.set_moving(Some(self.to.clone()))
             })?;
             *moving_written = true;
-            self.runs_source.hand_over(self.to.to_pid, &self.runs, cx);
+            // The live runs again, now: a run that was not live yet when the host asked (loaded
+            // since, or restarted before the move refused it) moves too.
+            let mut runs = self.runs.clone();
+            match self.runs_source.live_runs(&self.repo, cx) {
+                Ok(live) => {
+                    for run in live {
+                        if !runs.contains(&run) {
+                            runs.push(run);
+                        }
+                    }
+                }
+                Err(error) => log::error!("reading the live runs of {}: {error:#}", self.id),
+            }
+            self.runs_source.hand_over(self.to.to_pid, &runs, cx);
+            *self.handed.borrow_mut() = runs;
             self.repo.replace_sink(self.queue.clone());
             with_writer_host(&self.id, cx, |host, _| {
                 if let Some(server) = host.server() {
@@ -537,7 +589,8 @@ impl Move {
             })
             .detach();
         }
-        self.runs_source.reload(cx);
+        let handed = self.handed.borrow().clone();
+        self.runs_source.reload(&handed, cx);
         finish(&self.id, Err(did_not_start(&self.client.log)), cx);
     }
 }
@@ -867,7 +920,7 @@ pub fn expect_handover(
         bail!("this process does not hand writers over");
     }
     let handovers = cx.global_mut::<Handovers>();
-    if handovers.moving.contains(project_id) {
+    if handovers.moving.contains_key(project_id) {
         bail!("the writer of {project_id} is moving already");
     }
     let (began_sender, began) = oneshot::channel();
@@ -928,11 +981,21 @@ pub fn start_handover(
             _ = timeout => false,
         };
         let exited = child.try_exit();
+        let pid = child.pid();
         if exited.is_none() {
             child.release();
         }
         if !asked {
-            cx.update(|cx| finish(&id, Err(String::new()), cx));
+            cx.update(|cx| {
+                // It may still ask: refuse it then, as the person was told it did not start.
+                if exited.is_none()
+                    && let Some(pid) = pid
+                    && cx.has_global::<Handovers>()
+                {
+                    cx.global_mut::<Handovers>().abandoned.insert(pid);
+                }
+                finish(&id, Err(String::new()), cx)
+            });
             let exited = exited
                 .map(|status| format!(" (it exited: {status})"))
                 .unwrap_or_default();
