@@ -28,8 +28,9 @@ impl ProjectRepo {
             .cloned()
             .context("this process does not hold the project's writer")?;
         // Released before stopped, so the timer never reads a stop for good here.
+        // (`stop_backups` would stop them for good.)
         self.engine.backup.released.store(true, Ordering::SeqCst);
-        self.stop_backups();
+        self.engine.backup.stopped.store(true, Ordering::SeqCst);
         drop(self.engine.backup.branch_lock.lock().await);
         drop(self.engine.backup.push_lock.lock().await);
 

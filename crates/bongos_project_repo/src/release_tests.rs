@@ -162,6 +162,11 @@ fn a_shutdown_stops_the_backups_for_good_and_a_release_only_until_a_take_back() 
     released.retake_writer().unwrap();
     assert!(!released.backups_stopped() && !released.backups_released());
 
+    // A shutdown while the writer is released (or once it moved for good) ends the timer too.
+    block_on(released.release_writer(Duration::from_secs(1))).unwrap();
+    released.stop_backups();
+    assert!(released.backups_stopped() && !released.backups_released());
+
     let other = TempDir::new().unwrap();
     let shut_down = repo(&other);
     shut_down.stop_backups();

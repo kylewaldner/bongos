@@ -447,8 +447,10 @@ impl ProjectRepo {
     }
 
     /// Stops the backup timer: from now on no snapshot, push, thinning or copy starts. Part of
-    /// the host's shutdown, before the host lock is dropped.
+    /// the host's shutdown, before the host lock is dropped, and of a writer that moved for
+    /// good. Stops them for good even while the writer is released, so the timer ends.
     pub fn stop_backups(&self) {
+        self.engine.backup.released.store(false, Ordering::SeqCst);
         self.engine.backup.stopped.store(true, Ordering::SeqCst);
     }
 
