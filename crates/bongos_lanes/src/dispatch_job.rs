@@ -799,7 +799,7 @@ fn lane_holds(state: &LanesState, lane: &LaneId, run_id: &str) -> bool {
 }
 
 /// The task of a lane's job and its owner record; none for a job with no task.
-fn job_owner(state: &LanesState, lane: &LaneRecord) -> Option<(TaskId, OwnerRecord)> {
+pub(crate) fn job_owner(state: &LanesState, lane: &LaneRecord) -> Option<(TaskId, OwnerRecord)> {
     let RunSubject::Task(task) = &lane.job.as_ref()?.subject else {
         return None;
     };

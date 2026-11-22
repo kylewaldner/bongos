@@ -24,6 +24,7 @@ use bongos_workflow::RunStatus;
 use bongos_workflow_model::record::Lifecycle;
 use gpui::{App, Global};
 
+use crate::dispatch_job::job_owner;
 use crate::dispatcher::{JobEngine, held_task};
 use crate::store::{put_lane, put_owner, read_state, read_state_in};
 
@@ -62,8 +63,9 @@ pub enum LaneAfterJob {
     /// come back (it succeeded or was cancelled, was refused or never started) this is
     /// [`LaneAfterJob::Idle`].
     KeepRunning,
-    /// The lane halts with this text, and so does the task it holds. A run that can be retried
-    /// stays the lane's job, so a retry resumes the lane.
+    /// The lane halts with this text, and so does the job's own task (none for a job with no
+    /// task; another task the lane holds is left alone). A run that can be retried stays the
+    /// lane's job, so a retry resumes the lane.
     Halt(String),
 }
 
@@ -202,10 +204,15 @@ pub(crate) fn instance_use(
 /// the same transaction (they are lane jobs `tx` sees) are counted against the limit. The
 /// dispatcher's own picks use the same count, so an extension applies the same limit.
 ///
-/// It answers inside a dispatcher's transaction (the calls to a [`PickExtension`]), where the run
-/// engine is known; anywhere else it knows no limit and answers `Ok`.
+/// Call it only inside a dispatcher's transaction (the calls to a [`PickExtension`]), where the
+/// run engine is known. Called anywhere else it knows no limit: that is a caller's mistake, so it
+/// logs an error naming the workflow and answers `Ok`, as with no limit.
 pub fn instance_room(tx: &StateTx, workflow: &str) -> Result<(), WaitReason> {
     let Some(engine) = ENGINES.with(|engines| engines.borrow().last().cloned()) else {
+        log::error!(
+            "lanes: instance_room for {workflow} was called outside a dispatcher transaction, \
+             so no instance limit was checked"
+        );
         return Ok(());
     };
     let state = read_state(&tx.as_read())
@@ -260,7 +267,7 @@ fn lane_after(
     }
     let held = held_task(&state, lane);
     let mut updated = record.clone();
-    let mut owner = held.map(|(_, owner)| owner.clone());
+    let mut halted = None;
     match after {
         LaneAfterJob::KeepRunning if retryable => {
             updated.state = LaneState::Running;
@@ -284,25 +291,36 @@ fn lane_after(
             }
             updated.state = LaneState::Halted;
             updated.reason = Some(WaitReason::Failed(text.clone()));
-            if let Some(owner) = &mut owner {
+            // Only the job's own task halts with the lane, as with the default handling: a lane
+            // that still holds another task's owner (a free lane given a job with no task, or one
+            // for another task) leaves that owner alone, so a retry of the job resumes the lane
+            // and no owner is left halted with nothing to resume it.
+            if let Some((task, mut owner)) = job_owner(&state, record) {
                 owner.state = OwnerState::Halted;
                 owner.reason = Some(text);
                 owner.by = Author::System;
                 owner.since = now.to_string();
+                halted = Some((task, owner));
             }
         }
     }
-    let (mut updated, owner) = stop_at_job_boundary(&updated, owner.as_ref(), now);
+    // A stop asked for applies to the task the lane holds, at the boundary (an idle lane only).
+    let (mut updated, stopped) = stop_at_job_boundary(&updated, held.map(|(_, owner)| owner), now);
     if updated.state == LaneState::Stopped {
         updated.pause_requested = false;
     }
     if updated != *record {
         put_lane(tx, &updated)?;
     }
-    if let (Some((task, before)), Some(owner)) = (held, owner)
+    if let (Some((task, before)), Some(owner)) = (held, stopped)
         && *before != owner
     {
         put_owner(tx, task, &owner)?;
+    }
+    if let Some((task, owner)) = halted
+        && state.owners.get(&task) != Some(&owner)
+    {
+        put_owner(tx, &task, &owner)?;
     }
     Ok(())
 }
