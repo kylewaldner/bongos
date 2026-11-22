@@ -10,7 +10,9 @@
 //! dispatcher (`dispatcher`, `dispatch_job`) picks, starts and ends the lanes' jobs in one loop,
 //! with the pick extensions of other features (`pick_extension`) taking part in its picks;
 //! `adopt` gives a stopped or halted task to a free lane, and `accept_graph` lands the graph stamp.
-//! A prepared task's first job runs its rule's staleness script first (`staleness`).
+//! A prepared task's first job runs its rule's staleness script first (`staleness`). Other
+//! features decide what a waiting lane does through the lane wait handlers (`lane_waits`), whose
+//! asks reach the Work panel through the `lanes` needs-you source.
 
 mod accept_graph;
 mod actions;
@@ -27,6 +29,7 @@ mod host;
 mod job_trees;
 mod lane_control;
 mod lane_tree;
+mod lane_waits;
 mod locations;
 mod pick_extension;
 mod prepare;
@@ -87,6 +90,10 @@ pub use lane_tree::{
     ResetRequest, SAVE_EMAIL, SAVE_NAME, SAVED_REFS, SaveError, SaveTarget, Saved, add_tree,
     check_own_tree, git_tree_maker, lane_tree, merge_in_lane_tree, reset_tree, save_left_work,
 };
+pub use lane_waits::{
+    ASK_PREFIX, LaneAsk, LaneWaitAction, LaneWaitHandler, LaneWaitHandlers, NEEDS_YOU_SOURCE,
+    read_asks, register_needs_you,
+};
 pub use locations::{
     Fallback, LaneLocation, LaneLocations, Layer, LocationInputs, Place, RepositoryPlace,
     binding_of, check_lanes, check_overlap, resolve_lane, table_lane_ids, tree_name, tree_slug,
@@ -118,7 +125,8 @@ pub use task_trees::{
 
 /// Registers the settings, the `lanes` definition folder and the prompt check, the `lanes` state
 /// exporter, the live and activity sources, and the `lane-run-scope` approval hook, all over one
-/// [`LaneRuns`] kept as a global, and the lanes' [`LaneTaskTrees`] as the checks' tree provider.
+/// [`LaneRuns`] kept as a global, the lanes' [`LaneTaskTrees`] as the checks' tree provider, and
+/// the `lanes` needs-you source.
 /// Nothing here starts a lane; while `lanes.enabled` is false no lanes state is known, so the
 /// sources and the hook say nothing and no tree is lent.
 pub fn init(cx: &mut App) {
@@ -142,6 +150,7 @@ pub fn init(cx: &mut App) {
         cx,
     )));
     trees.register(cx);
+    register_needs_you(cx);
     register_host(cx);
 }
 

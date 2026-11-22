@@ -224,9 +224,15 @@ fn status_text(status: &LanesStatus) -> String {
     status
         .lanes
         .iter()
-        .map(|lane| match &lane.task {
-            Some(task) => format!("{}: {:?} on {task}", lane.id, lane.state),
-            None => format!("{}: {:?}", lane.id, lane.state),
+        .map(|lane| {
+            let line = match &lane.task {
+                Some(task) => format!("{}: {:?} on {task}", lane.id, lane.state),
+                None => format!("{}: {:?}", lane.id, lane.state),
+            };
+            match &lane.asked {
+                Some(text) => format!("{line}, needs you: {text}"),
+                None => line,
+            }
         })
         .collect::<Vec<_>>()
         .join("; ")
