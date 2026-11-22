@@ -13,9 +13,11 @@ mod host_file;
 pub mod protocol;
 pub mod server;
 mod socket;
+mod window;
+mod workflow;
 mod writer_host;
 
-pub use access::EngineAccess;
+pub use access::{EngineAccess, EngineAccesses};
 pub use attach::{OpenedState, open_state, open_state_with_hooks};
 pub use checks::{checks_handler, register_checks};
 pub use client::{ANSWER_TIMEOUT, ClientOptions, HostClient, Welcomed, not_answering};
@@ -29,11 +31,16 @@ pub use protocol::{
 };
 pub use server::EngineServer;
 pub use socket::{bind_socket, default_hosts_dir, socket_path};
+pub use window::{WindowHosting, WriterHosts, install_window};
+pub use workflow::{install_workflow_remote, register_workflow};
 pub use writer_host::{WriterHost, WriterOptions};
 
-/// Registers the commands this feature serves in the writer: task checks' `checks`.
+/// Registers the commands this feature serves in the writer (task checks' `checks`, the
+/// workflow engine's commands) and routes this process's workflow commands to a writer elsewhere.
 pub fn init(cx: &mut gpui::App) {
     register_checks(cx);
+    register_workflow(cx);
+    install_workflow_remote(cx);
 }
 
 #[cfg(test)]

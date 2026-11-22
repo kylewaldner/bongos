@@ -26,6 +26,7 @@ pub mod outcomes;
 pub mod picker;
 pub mod process;
 pub mod project_sources;
+pub mod remote;
 pub mod run_view;
 pub mod runner_claude;
 pub mod runner_codex;
@@ -52,6 +53,7 @@ pub use lifecycle::{
     Refusal, RefusalKind, RunId, RunStatus, RunTree, StartRequest, StartSubject, WorkflowEvent,
 };
 pub use node_status::{NodeStatus, NodeStatusSource, NodeStatusSources};
+pub use remote::{InstalledWorkflowRemote, WorkflowPayload, WorkflowRemote, WorkflowVerb, execute};
 pub use runs_panel::{RunsPanel, init_panel};
 pub use settings::WorkflowsSettings;
 pub use status_item::WorkflowStatus;

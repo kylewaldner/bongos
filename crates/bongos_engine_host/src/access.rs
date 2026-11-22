@@ -106,3 +106,43 @@ impl EngineAccess {
         }
     }
 }
+
+/// The [`EngineAccess`] of every project open in this process, by project id.
+#[derive(Default)]
+pub struct EngineAccesses(std::collections::BTreeMap<String, EngineAccess>);
+
+impl gpui::Global for EngineAccesses {}
+
+impl EngineAccesses {
+    pub fn set(project_id: impl Into<String>, access: EngineAccess, cx: &mut App) {
+        cx.default_global::<Self>()
+            .0
+            .insert(project_id.into(), access);
+    }
+
+    pub fn get(project_id: &str, cx: &App) -> Option<EngineAccess> {
+        cx.try_global::<Self>()?.0.get(project_id).cloned()
+    }
+
+    /// The access of the only project open, `None` with none or several.
+    pub fn only(cx: &App) -> Option<EngineAccess> {
+        let accesses = &cx.try_global::<Self>()?.0;
+        match accesses.len() {
+            1 => accesses.values().next().cloned(),
+            _ => None,
+        }
+    }
+
+    /// The access of every project, by id.
+    pub fn all(cx: &App) -> Vec<(String, EngineAccess)> {
+        cx.try_global::<Self>()
+            .map(|accesses| {
+                accesses
+                    .0
+                    .iter()
+                    .map(|(id, access)| (id.clone(), access.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}

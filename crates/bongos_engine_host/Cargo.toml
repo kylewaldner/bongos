@@ -15,6 +15,7 @@ doctest = false
 [dependencies]
 anyhow.workspace = true
 bongos_checks.workspace = true
+bongos_work.workspace = true
 bongos_project_repo.workspace = true
 bongos_project_repo_model.workspace = true
 bongos_workflow.workspace = true
@@ -25,6 +26,7 @@ libc.workspace = true
 log.workspace = true
 parking_lot.workspace = true
 paths.workspace = true
+settings.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

@@ -446,13 +446,29 @@ impl DefinitionWriter for RepoWriter {
 /// moved, and every change of the repository's refs compares master with the verified commit.
 /// The returned task does that until dropped.
 pub fn register_project_repo(loaded: Arc<LoadedProject>, cx: &mut App) -> Task<()> {
+    register_project_repo_following(loaded, None, cx)
+}
+
+/// [`register_project_repo`] for a repository whose changes come from `changes` (another
+/// process's writer reports them) when this process does not hold the writer.
+pub fn register_project_repo_following(
+    loaded: Arc<LoadedProject>,
+    changes: Option<futures::channel::mpsc::UnboundedReceiver<StateEvent>>,
+    cx: &mut App,
+) -> Task<()> {
     let name = seam_name(&loaded);
     note_open_repo(&loaded, cx);
+    let holds_writer = loaded
+        .repo()
+        .state()
+        .and_then(|state| state.writer())
+        .is_some();
     let events = loaded
         .repo()
         .state()
         .and_then(|state| state.writer())
-        .map(|writer| writer.subscribe());
+        .map(|writer| writer.subscribe())
+        .or(changes);
     loaded.repo().use_registered_checks(cx);
     DefinitionWriters::register(
         Arc::new(RepoWriter {
@@ -472,7 +488,7 @@ pub fn register_project_repo(loaded: Arc<LoadedProject>, cx: &mut App) -> Task<(
     let fs = WorkStore::global(cx).map(|store| store.read(cx).fs());
     cx.spawn(async move |cx| {
         let first = loaded.clone();
-        let is_writer = events.is_some();
+        let is_writer = holds_writer;
         cx.background_spawn(async move {
             if is_writer {
                 match first.repo().recover_landing().await {

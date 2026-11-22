@@ -112,20 +112,8 @@ pub enum HostCommand {
     Host(HostCtl),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum WorkflowVerb {
-    Start,
-    Pause,
-    Halt,
-    Resume,
-    Cancel,
-    Retry,
-    Restart,
-    Approve,
-    Revise,
-    ClearFinished,
-}
+/// The workflow engine's commands, defined with the engine.
+pub use bongos_workflow::WorkflowVerb;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
