@@ -16,7 +16,10 @@
 //! that may go ([`crate::done_owners`]), so a write of the checks' markers or done records, a
 //! committed transaction like any other, re-checks them. A lane waiting on its environment is
 //! looked at again only by the timer, a new verified commit or a lane command, so a write of this
-//! loop never wakes the loop into retrying the same failing environment.
+//! loop never wakes the loop into retrying the same failing environment. Each pass ends by asking
+//! the lane wait handlers about the waiting lanes ([`crate::lane_waits`]): a recheck they ask for
+//! evaluates its lane again when it comes due, and a lane waiting on a person is not evaluated
+//! again until `lanes: resume`.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -48,6 +51,7 @@ use crate::adopt::LeftWork;
 use crate::dispatch_job::HookedJob;
 use crate::job_trees::JobTrees;
 use crate::lane_control::{BOUND_REASON, LaneEvents, RunEnd, paused_reason};
+use crate::lane_waits::{WaitTracking, ask_in};
 use crate::locations::table_lane_ids;
 use crate::pick_extension::{
     ExtensionPick, JobChange, PickExtension, PickExtensions, PickPoint, extension_job_changed,
@@ -849,6 +853,8 @@ pub(crate) struct Inner {
     /// The ahead jobs whose run succeeded, by run, waiting for the landings it asked for.
     /// Dropping the dispatcher drops the waits; the next one waits again on its start.
     pub(crate) ahead_landings: RefCell<BTreeMap<String, Task<()>>>,
+    /// The questions to the lane wait handlers and the rechecks they asked for.
+    pub(crate) waits: RefCell<WaitTracking>,
 }
 
 /// What one lane's transaction decided.
@@ -900,6 +906,7 @@ impl Dispatcher {
             subscriptions: RefCell::new(Vec::new()),
             hooked: RefCell::new(BTreeMap::new()),
             ahead_landings: RefCell::new(BTreeMap::new()),
+            waits: RefCell::new(WaitTracking::default()),
         }))
     }
 
@@ -1185,11 +1192,15 @@ impl Dispatcher {
                 return;
             }
         };
+        // A lane whose recheck came due is evaluated as a full pass would.
+        let due = self.take_due();
         for lane in lanes {
+            let full = full || due.contains(&lane);
             if let Err(error) = self.evaluate_lane(&lane, full, cx) {
                 log::error!("lanes: evaluating {lane}: {error:#}");
             }
         }
+        self.settle_waits(cx);
     }
 
     fn evaluate_lane(&self, lane: &LaneId, full: bool, cx: &mut App) -> Result<()> {
@@ -1255,6 +1266,12 @@ impl Dispatcher {
         };
         let free = record.state == LaneState::Idle || (full && record.state == LaneState::Waiting);
         if !free || record.job.is_some() || !self.lane_exists(lane) {
+            return Ok(LaneStep::Nothing);
+        }
+        // A lane waiting on a person is evaluated again only once `lanes: resume` cleared it.
+        if record.state == LaneState::Waiting
+            && ask_in(tx, lane)?.is_some_and(|ask| ask.applies_to(record))
+        {
             return Ok(LaneStep::Nothing);
         }
         if let Some(reason) = self.0.overlapping.borrow().get(lane) {

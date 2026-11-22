@@ -1,6 +1,7 @@
 //! The run state of lanes in a project's state store, all in the `kv` namespace
-//! [`LANES_NAMESPACE`]: one owner record per owned top-level task under `owner/<task id>`, and one
-//! lane record per lane under `lane/<lane id>` (`lane/build-2`). Later records of the namespace
+//! [`LANES_NAMESPACE`]: one owner record per owned top-level task under `owner/<task id>`, one
+//! lane record per lane under `lane/<lane id>` (`lane/build-2`), and the ask of a lane waiting on
+//! a person under `ask/<lane id>` ([`crate::lane_waits`]). Later records of the namespace
 //! (the dispatcher's, interruptions, notifications) use other key prefixes.
 
 use anyhow::{Context as _, Result, bail};
@@ -115,11 +116,12 @@ pub fn delete_lane(tx: &mut StateTx, id: &LaneId) -> Result<()> {
     tx.kv(LANES_NAMESPACE).delete(&format!("{LANE_PREFIX}{id}"))
 }
 
-/// Removes every owner and lane record, leaving the other records of the namespace.
+/// Removes every owner and lane record, with the lanes' asks, leaving the other records of the
+/// namespace.
 pub(crate) fn clear_owners_and_lanes(tx: &mut StateTx) -> Result<()> {
     let mut kv = tx.kv(LANES_NAMESPACE);
     let mut keys = Vec::new();
-    for prefix in [OWNER_PREFIX, LANE_PREFIX] {
+    for prefix in [OWNER_PREFIX, LANE_PREFIX, crate::lane_waits::ASK_PREFIX] {
         keys.extend(kv.scan(prefix)?.into_iter().map(|(key, _)| key));
     }
     for key in keys {

@@ -1367,3 +1367,6 @@ mod pick_extension_tests;
 
 #[path = "definition_policy_tests.rs"]
 mod definition_policy_tests;
+
+#[path = "lane_waits_tests.rs"]
+mod lane_waits_tests;

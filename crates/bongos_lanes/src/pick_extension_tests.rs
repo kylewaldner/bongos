@@ -901,3 +901,31 @@ async fn the_first_extension_that_answers_decides(cx: &mut TestAppContext) {
         Some(WaitReason::Failed("second decides".to_string()))
     );
 }
+
+// A failing `verify_lane` at an extension job's start tells the extensions the job did not
+// start, clears it and frees its workflow's one instance for another lane.
+#[gpui::test]
+async fn a_failing_verify_tells_the_extensions_the_job_did_not_start(cx: &mut TestAppContext) {
+    let _profile = super::lane_waits_tests::failing_verify(&[build(1)], cx);
+    let harness = harness(&builds(2), graph(vec![leaf("a")]), &[("w", 1)]);
+    let extension = assigning(cx);
+
+    let _started = start(&harness, start_request(), cx).await;
+
+    let changes = extension.changes();
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    let (lane, _, change) = &changes[0];
+    assert_eq!(lane, &build(1));
+    assert_eq!(change, &not_started(super::lane_waits_tests::UNMOUNTED));
+    let waiting = harness.lane("build", 1);
+    assert_eq!(waiting.state, LaneState::Waiting);
+    assert_eq!(waiting.job, None);
+    assert_eq!(
+        waiting.reason,
+        Some(WaitReason::Environment(
+            super::lane_waits_tests::UNMOUNTED.to_string()
+        ))
+    );
+    assert_eq!(harness.engine.job_tasks(), ["a"]);
+    assert_eq!(harness.lane("build", 2).state, LaneState::Running);
+}

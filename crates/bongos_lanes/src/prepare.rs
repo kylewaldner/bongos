@@ -179,7 +179,7 @@ fn clear_marker(marker: &Path) -> Result<(), String> {
 }
 
 /// The problems as one wait reason.
-fn problems_reason(problems: &[Problem]) -> WaitReason {
+pub(crate) fn problems_reason(problems: &[Problem]) -> WaitReason {
     WaitReason::Environment(
         problems
             .iter()
