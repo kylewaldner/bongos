@@ -91,7 +91,8 @@ impl fmt::Display for Author {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Why a lane was asked to stop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StopCause {
     /// The owner asked the lanes to stop.
@@ -100,6 +101,23 @@ pub enum StopCause {
     Count,
     Rollout,
     Bound,
+    /// A pick extension stopped the lane; `text` ("queue fixes: item exhausted") is shown as the
+    /// stopped lane's reason.
+    Extension {
+        text: String,
+    },
+}
+
+impl fmt::Display for StopCause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StopCause::Stop => f.write_str("lanes stopped"),
+            StopCause::Count => f.write_str("lane count lowered"),
+            StopCause::Rollout => f.write_str("rollout"),
+            StopCause::Bound => f.write_str("bound reached"),
+            StopCause::Extension { text } => f.write_str(text),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +260,10 @@ pub struct JobRecord {
     pub started: String,
     #[serde(default)]
     pub definition_commit: Option<String>,
+    /// The kind of the extension work (`AssignedWork::Extension`) this job runs; `None` for a
+    /// job the picker assigned. An extension job's changes go to the pick extensions first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -501,27 +523,20 @@ pub fn owner_after_stop(owner: &OwnerRecord, cause: StopCause, now: &str) -> Own
         owner.state = OwnerState::Stopped;
         owner.since = now.to_string();
         owner.by = Author::System;
-        owner.reason = Some(
-            match cause {
-                StopCause::Stop => "lanes stopped",
-                StopCause::Count => "lane count lowered",
-                StopCause::Rollout => "rollout",
-                StopCause::Bound => "bound reached",
-            }
-            .to_string(),
-        );
+        owner.reason = Some(cause.to_string());
     }
     owner
 }
 
 /// Applies a pending stop when a lane's job has just ended and the lane is idle: the lane stops
-/// and its owner stops with it, keeping the lane.
+/// and its owner stops with it, keeping the lane. A stop by a pick extension shows its text as
+/// the lane's reason.
 pub fn stop_at_job_boundary(
     lane: &LaneRecord,
     owner: Option<&OwnerRecord>,
     now: &str,
 ) -> (LaneRecord, Option<OwnerRecord>) {
-    let Some(cause) = lane.stop_requested else {
+    let Some(cause) = lane.stop_requested.clone() else {
         return (lane.clone(), owner.cloned());
     };
     if lane.state != LaneState::Idle {
@@ -530,6 +545,9 @@ pub fn stop_at_job_boundary(
     let mut lane = lane.clone();
     lane.state = LaneState::Stopped;
     lane.stop_requested = None;
+    if let StopCause::Extension { text } = &cause {
+        lane.reason = Some(WaitReason::Other(text.clone()));
+    }
     let owner = owner.map(|owner| owner_after_stop(owner, cause, now));
     (lane, owner)
 }

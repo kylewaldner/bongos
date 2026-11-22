@@ -161,6 +161,8 @@ pub(crate) struct FakeEngine {
     jobs: RefCell<Vec<(StartRequest, LanesState)>>,
     dispatcher_starts: RefCell<Vec<StartRequest>>,
     status: RefCell<BTreeMap<String, (String, RunStatus)>>,
+    /// Runs with a record on disk that the engine did not load (a damaged log, say).
+    pub(crate) unloaded: RefCell<BTreeSet<String>>,
     limits: BTreeMap<String, u32>,
     /// The next job start is refused with this.
     refuse: RefCell<Option<Refusal>>,
@@ -193,6 +195,10 @@ impl JobEngine for FakeEngine {
 
     fn knows(&self, run: &str) -> bool {
         self.status.borrow().contains_key(run)
+    }
+
+    fn has_record(&self, run: &str, _cx: &App) -> bool {
+        self.knows(run) || self.unloaded.borrow().contains(run)
     }
 
     fn active_runs_of(&self, workflow: &str) -> Vec<RunId> {
@@ -274,6 +280,7 @@ fn fake_engine(writer: &Arc<StateWriter>, limits: &[(&str, u32)]) -> Rc<FakeEngi
         jobs: RefCell::new(Vec::new()),
         dispatcher_starts: RefCell::new(Vec::new()),
         status: RefCell::new(BTreeMap::new()),
+        unloaded: RefCell::new(BTreeSet::new()),
         limits: limits
             .iter()
             .map(|(name, limit)| (name.to_string(), *limit))
@@ -1139,6 +1146,7 @@ async fn a_failed_job_with_no_task_leaves_an_unrelated_owner_alone(cx: &mut Test
                 workflow: "w".to_string(),
                 started: SINCE.to_string(),
                 definition_commit: None,
+                extension: None,
             });
             put_lane(tx, &lane)?;
             put_owner(tx, &TaskId::new("z"), &owner)
@@ -1206,6 +1214,7 @@ async fn a_task_less_job_resumes_on_retry_and_ends(cx: &mut TestAppContext) {
                 workflow: "w".to_string(),
                 started: SINCE.to_string(),
                 definition_commit: None,
+                extension: None,
             });
             put_lane(tx, &lane)
         })
@@ -1267,3 +1276,6 @@ pub(crate) mod adopt_tests;
 mod counts_tests;
 #[path = "job_hooks_tests.rs"]
 mod job_hooks_tests;
+
+#[path = "pick_extension_tests.rs"]
+mod pick_extension_tests;

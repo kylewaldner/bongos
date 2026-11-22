@@ -10,6 +10,14 @@
 //! no longer holds it, was asked to stop or left the lane count: the pending `before_job` future
 //! is dropped, `after_job` hears [`HookEnd::StoppedBeforeStart`], and then the job is cleared. A
 //! started job is settled as soon as a status change of its run leaves its lane without it.
+//!
+//! A job a pick extension assigned (its work is `AssignedWork::Extension`) is settled by the pick
+//! extensions first: every path that clears it before its run started tells them
+//! [`JobChange::NotStarted`], a refused start [`JobChange::Refused`], and a status change of its
+//! run [`JobChange::Lifecycle`], each in the transaction that records the change. Only when no
+//! extension answers does the default handling below apply.
+
+use std::sync::Arc;
 
 use anyhow::Result;
 use bongos_lanes_model::{
@@ -27,6 +35,10 @@ use gpui::{App, Task};
 use crate::dispatcher::{Dispatcher, JobSetup, PendingJob, environment_refusal, held_task};
 use crate::hooks::{BeforeJob, JobEnd as HookEnd, JobHookCx, JobHooks, after_job_of};
 use crate::job_trees::CurrentJobTrees;
+use crate::pick_extension::{
+    JobChange, PickExtension, PickExtensions, extension_job_changed, lane_after_run,
+    lane_after_unstarted, with_engine,
+};
 use crate::store::{put_lane, put_owner, read_state, read_state_in};
 use crate::task_trees::LaneTaskTrees;
 
@@ -38,6 +50,18 @@ enum Cleared {
     Wait(WaitReason),
     Halt(String),
 }
+
+/// Whether a cleared job reached the run engine, which refused it, or never did.
+#[derive(Clone, Copy)]
+enum ClearedAt {
+    /// Before the run engine: trees not prepared, a hook refused, the state unreadable.
+    NotStarted,
+    /// The run engine refused the start.
+    Refused,
+}
+
+/// The reason an extension hears for a job dropped before its run started.
+pub const DROPPED_BEFORE_START: &str = "dropped before its run started";
 
 impl Cleared {
     fn text(&self) -> String {
@@ -88,7 +112,7 @@ impl Dispatcher {
 
     fn finish_start(&self, pending: PendingJob, setup: Result<JobSetup, WaitReason>, cx: &mut App) {
         let cleared = match setup {
-            Err(reason) => Some(Cleared::Wait(reason)),
+            Err(reason) => Some((Cleared::Wait(reason), ClearedAt::NotStarted)),
             Ok(setup) => {
                 let holds = self
                     .parts()
@@ -100,7 +124,9 @@ impl Dispatcher {
                         self.begin_hooks(pending, setup, cx);
                         return;
                     }
-                    Ok(true) => self.start_run(&pending, setup, cx),
+                    Ok(true) => self
+                        .start_run(&pending, setup, cx)
+                        .map(|cleared| (cleared, ClearedAt::Refused)),
                     Ok(false) => {
                         log::info!(
                             "lanes: {} no longer holds run {}, not starting it",
@@ -112,25 +138,30 @@ impl Dispatcher {
                     // The job cannot be started, so it is cleared and the lane waits.
                     Err(error) => {
                         log::error!("lanes: reading the state before a start: {error:#}");
-                        Some(Cleared::Wait(WaitReason::Other(format!(
-                            "reading the state before a start: {error:#}"
-                        ))))
+                        Some((
+                            Cleared::Wait(WaitReason::Other(format!(
+                                "reading the state before a start: {error:#}"
+                            ))),
+                            ClearedAt::NotStarted,
+                        ))
                     }
                 }
             }
         };
-        if let Some(cleared) = cleared {
-            self.clear_start(&pending, &cleared, cx);
+        if let Some((cleared, at)) = cleared {
+            self.clear_start(&pending, &cleared, at, cx);
         }
     }
 
     /// Clears a job whose start was refused, then evaluates.
-    fn clear_start(&self, pending: &PendingJob, cleared: &Cleared, cx: &mut App) {
+    fn clear_start(&self, pending: &PendingJob, cleared: &Cleared, at: ClearedAt, cx: &mut App) {
         let now = self.parts().host.now();
-        let result = self
-            .parts()
-            .writer
-            .transact(|tx| clear_job(tx, pending, cleared, &now));
+        let extensions = PickExtensions::extensions(cx);
+        let result = with_engine(&self.parts().engine, || {
+            self.parts()
+                .writer
+                .transact(|tx| clear_job(tx, pending, cleared, at, &extensions, &now))
+        });
         if let Err(error) = result {
             log::error!(
                 "lanes: clearing the refused job of {}: {error:#}",
@@ -204,12 +235,13 @@ impl Dispatcher {
 
         if let BeforeJob::Refuse { reason } = decision {
             let cleared = Cleared::Wait(reason);
+            let at = ClearedAt::NotStarted;
             if self.owes_after_job(&pending.lane) {
                 // An earlier hook said `Go`; it hears that the job did not start.
-                self.settle_then_clear(pending, HookEnd::StoppedBeforeStart, cleared, cx);
+                self.settle_then_clear(pending, HookEnd::StoppedBeforeStart, cleared, at, cx);
             } else {
                 self.0.hooked.borrow_mut().remove(&pending.lane);
-                self.clear_start(&pending, &cleared, cx);
+                self.clear_start(&pending, &cleared, at, cx);
             }
             return;
         }
@@ -219,7 +251,8 @@ impl Dispatcher {
             let cleared = Cleared::Wait(WaitReason::Other(format!(
                 "reading the state before a start: {error:#}"
             )));
-            self.settle_then_clear(pending, HookEnd::StoppedBeforeStart, cleared, cx);
+            let at = ClearedAt::NotStarted;
+            self.settle_then_clear(pending, HookEnd::StoppedBeforeStart, cleared, at, cx);
             return;
         }
         if let Err(error) = self
@@ -237,19 +270,27 @@ impl Dispatcher {
             }
             Some(cleared) => {
                 let reason = cleared.text();
-                self.settle_then_clear(pending, HookEnd::Refused { reason }, cleared, cx);
+                let end = HookEnd::Refused { reason };
+                self.settle_then_clear(pending, end, cleared, ClearedAt::Refused, cx);
             }
         }
     }
 
     /// Tells the hooks owed an `after_job` that the job ended with `end`, then clears the job.
-    fn settle_then_clear(&self, pending: PendingJob, end: HookEnd, cleared: Cleared, cx: &mut App) {
+    fn settle_then_clear(
+        &self,
+        pending: PendingJob,
+        end: HookEnd,
+        cleared: Cleared,
+        at: ClearedAt,
+        cx: &mut App,
+    ) {
         let lane = pending.lane.clone();
         self.settle(
             &lane,
             end,
             Some(Box::new(move |this, cx| {
-                this.clear_start(&pending, &cleared, cx)
+                this.clear_start(&pending, &cleared, at, cx)
             })),
             cx,
         );
@@ -294,10 +335,12 @@ impl Dispatcher {
             HookEnd::StoppedBeforeStart,
             Some(Box::new(move |this, cx| {
                 let now = this.parts().host.now();
-                let result = this
-                    .parts()
-                    .writer
-                    .transact(|tx| drop_job(tx, &lane_id, &run_id, &now));
+                let extensions = PickExtensions::extensions(cx);
+                let result = with_engine(&this.parts().engine, || {
+                    this.parts()
+                        .writer
+                        .transact(|tx| drop_job(tx, &lane_id, &run_id, &extensions, &now))
+                });
                 if let Err(error) = result {
                     log::error!("lanes: clearing the dropped job of {lane_id}: {error:#}");
                 }
@@ -483,10 +526,12 @@ impl Dispatcher {
         let graph = self.parts().host.graph(cx);
         let now = self.parts().host.now();
         let table = self.table();
-        let result = self
-            .parts()
-            .writer
-            .transact(|tx| job_changed(tx, run, *state, graph.as_ref(), &table, &now));
+        let extensions = PickExtensions::extensions(cx);
+        let result = with_engine(&self.parts().engine, || {
+            self.parts().writer.transact(|tx| {
+                job_changed(tx, run, *state, graph.as_ref(), &table, &extensions, &now)
+            })
+        });
         match result {
             Ok(Some(lane)) if matches!(state, RunStatus::Succeeded | RunStatus::Cancelled) => {
                 CurrentJobTrees::clear(&lane, cx);
@@ -499,18 +544,34 @@ impl Dispatcher {
     }
 }
 
-/// Clears a job whose start was refused, when the lane still holds it.
-fn clear_job(tx: &mut StateTx, pending: &PendingJob, cleared: &Cleared, now: &str) -> Result<()> {
+/// Clears a job whose start was refused, when the lane still holds it. An extension job's
+/// extensions hear the change first and, when one answers, decide the lane instead.
+fn clear_job(
+    tx: &mut StateTx,
+    pending: &PendingJob,
+    cleared: &Cleared,
+    at: ClearedAt,
+    extensions: &[Arc<dyn PickExtension>],
+    now: &str,
+) -> Result<()> {
     let state = read_state_in(tx)?;
     let Some(lane) = state.lanes.get(&pending.lane) else {
         return Ok(());
     };
-    let holds = lane
+    let Some(job) = lane
         .job
         .as_ref()
-        .is_some_and(|job| job.run_id == pending.job.run_id);
-    if !holds {
+        .filter(|job| job.run_id == pending.job.run_id)
+    else {
         return Ok(());
+    };
+    let reason = cleared.text();
+    let change = match at {
+        ClearedAt::NotStarted => JobChange::NotStarted { reason },
+        ClearedAt::Refused => JobChange::Refused { reason },
+    };
+    if let Some(after) = extension_job_changed(extensions, tx, &pending.lane, job, change) {
+        return lane_after_unstarted(tx, &pending.lane, &job.run_id, after, now);
     }
     let owner = job_owner(&state, lane);
     let mut lane = lane.clone();
@@ -557,11 +618,27 @@ fn resume_waiting(tx: &mut StateTx, lane: &LaneId, run_id: &str) -> Result<()> {
 }
 
 /// Clears a job dropped before its run started, when the lane still holds it. The lane is idle
-/// again, or stopped with its owner when a stop was asked for; the owner record stays.
-fn drop_job(tx: &mut StateTx, lane: &LaneId, run_id: &str, now: &str) -> Result<()> {
+/// again, or stopped with its owner when a stop was asked for; the owner record stays. An
+/// extension job's extensions hear [`JobChange::NotStarted`] first and, when one answers, decide
+/// the lane instead.
+fn drop_job(
+    tx: &mut StateTx,
+    lane: &LaneId,
+    run_id: &str,
+    extensions: &[Arc<dyn PickExtension>],
+    now: &str,
+) -> Result<()> {
     let state = read_state_in(tx)?;
     if !lane_holds(&state, lane, run_id) {
         return Ok(());
+    }
+    if let Some(job) = &state.lanes[lane].job {
+        let change = JobChange::NotStarted {
+            reason: DROPPED_BEFORE_START.to_string(),
+        };
+        if let Some(after) = extension_job_changed(extensions, tx, lane, job, change) {
+            return lane_after_unstarted(tx, lane, run_id, after, now);
+        }
     }
     let mut updated = state.lanes[lane].clone();
     updated.job = None;
@@ -598,6 +675,7 @@ fn job_changed(
     status: RunStatus,
     graph: Option<&PickGraph>,
     table: &LaneTable,
+    extensions: &[Arc<dyn PickExtension>],
     now: &str,
 ) -> Result<Option<LaneId>> {
     let state = read_state_in(tx)?;
@@ -657,6 +735,13 @@ fn job_changed(
     if !applies {
         return Ok(None);
     }
+    if let Some(job) = &lane.job {
+        let change = JobChange::Lifecycle(lifecycle_of(status));
+        if let Some(after) = extension_job_changed(extensions, tx, &id, job, change) {
+            lane_after_run(tx, &id, run, after, status, now)?;
+            return Ok(Some(id));
+        }
+    }
     let lane_kind_is_ahead = table
         .kinds
         .iter()
@@ -714,7 +799,7 @@ fn lane_holds(state: &LanesState, lane: &LaneId, run_id: &str) -> bool {
 }
 
 /// The task of a lane's job and its owner record; none for a job with no task.
-fn job_owner(state: &LanesState, lane: &LaneRecord) -> Option<(TaskId, OwnerRecord)> {
+pub(crate) fn job_owner(state: &LanesState, lane: &LaneRecord) -> Option<(TaskId, OwnerRecord)> {
     let RunSubject::Task(task) = &lane.job.as_ref()?.subject else {
         return None;
     };

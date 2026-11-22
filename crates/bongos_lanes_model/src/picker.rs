@@ -62,6 +62,27 @@ pub struct InstanceUse {
     pub reserved: u32,
 }
 
+impl InstanceUse {
+    /// Whether one more instance of `workflow` fits, with `assigned` more taken earlier in the
+    /// same transaction: the instance check of rule 4, shared by the picker and by
+    /// `bongos_lanes::instance_room`.
+    pub fn room(&self, workflow: &str, assigned: u32) -> Result<(), WaitReason> {
+        let Some(limit) = self.limit else {
+            return Ok(());
+        };
+        let active = self.active_runs.len() as u32 + self.reserved + assigned;
+        if active >= limit {
+            return Err(WaitReason::InstanceLimit {
+                workflow: workflow.to_string(),
+                active,
+                limit,
+                run: self.active_runs.first().cloned(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// A bound the dispatcher was started with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickBound {
@@ -129,6 +150,10 @@ pub struct Assignment {
     /// Run the staleness script first, and the rule's refresh workflow when it says stale
     /// (rule 8).
     pub refresh_first: bool,
+    /// The run id the job's run gets. A pick extension that already wrote it into its own claim
+    /// sets it; `None` has the dispatcher reserve a new one. The picker never sets it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -559,6 +584,7 @@ impl<'a> Picker<'a> {
                     rank: best.rank,
                     owner_change,
                     refresh_first: best.value.refresh_first,
+                    run_id: None,
                 })
             }
             None => PickOutcome::Nothing {
@@ -1183,21 +1209,10 @@ impl<'a> Picker<'a> {
         let Some(usage) = self.opts.instances.get(workflow) else {
             return Ok(());
         };
-        let Some(limit) = usage.limit else {
-            return Ok(());
-        };
-        let active = usage.active_runs.len() as u32
-            + usage.reserved
-            + self.opts.assigned.get(workflow).copied().unwrap_or(0);
-        if active >= limit {
-            return Err(WaitReason::InstanceLimit {
-                workflow: workflow.to_string(),
-                active,
-                limit,
-                run: usage.active_runs.first().cloned(),
-            });
-        }
-        Ok(())
+        usage.room(
+            workflow,
+            self.opts.assigned.get(workflow).copied().unwrap_or(0),
+        )
     }
 }
 

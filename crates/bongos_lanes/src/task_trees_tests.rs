@@ -94,6 +94,7 @@ fn state(state: OwnerState, job_task: &str) -> LanesState {
         workflow: "build".to_string(),
         started: SINCE.to_string(),
         definition_commit: None,
+        extension: None,
     });
     let docs = LaneId::new("docs", 1);
     LanesState {
@@ -450,6 +451,7 @@ async fn tip_and_env_answer_per_repository_with_the_profiles_edits(cx: &mut Test
         workflow: "build".to_string(),
         started: SINCE.to_string(),
         definition_commit: None,
+        extension: None,
     };
     let extra = cx.update(|cx| JobRepositories::extra(&job, &WorkTree::default(), "app", cx));
     assert_eq!(extra, ["lib"]);

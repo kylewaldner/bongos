@@ -711,6 +711,25 @@ impl WorkflowEngine {
         self.runs.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Whether `run` has a record on disk: it is loaded, or a task or project of the loaded work
+    /// tree has a `runs/<id>` directory for it (a run whose log could not be loaded still has one).
+    /// `None` when no work tree is loaded, so it cannot be told.
+    pub fn run_recorded(&self, run: &str, cx: &App) -> Option<bool> {
+        if self.lifecycle().status(run).is_some() {
+            return Some(true);
+        }
+        let tree = self.writes.tree(cx)?;
+        // An id that is not one path component names no run directory.
+        if run.is_empty() || run == "." || run == ".." || run.contains(['/', '\\']) {
+            return Some(false);
+        }
+        Some(tree.tasks().into_iter().any(|task| {
+            bongos_work_model::layout::runs_dir(&task.dir)
+                .join(run)
+                .exists()
+        }))
+    }
+
     /// Checks the definition `name`, or every definition with no name.
     pub fn validate(&self, name: Option<&str>) -> Result<Report, DefinitionError> {
         definitions::validate_definitions(&self.dirs, name)

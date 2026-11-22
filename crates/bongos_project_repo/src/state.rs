@@ -772,8 +772,9 @@ impl<'a> StateTx<'a> {
         read_meta(self.connection, VERIFIED_COMMIT_KEY)
     }
 
-    /// A read of the state as this transaction sees it, for code that takes a [`StateRead`].
-    pub(crate) fn as_read(&self) -> StateRead<'a> {
+    /// A read of the state as this transaction sees it, its own writes included, for code that
+    /// takes a [`StateRead`].
+    pub fn as_read(&self) -> StateRead<'a> {
         StateRead {
             connection: self.connection,
         }
