@@ -3,11 +3,14 @@
 //! matching and ranking are in `bongos_avy_model`.
 
 pub mod actions;
+pub mod jump;
 pub mod overlay;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod visible;
 
+#[cfg(test)]
+mod jump_tests;
 #[cfg(test)]
 mod overlay_tests;
 #[cfg(test)]
