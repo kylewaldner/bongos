@@ -133,6 +133,26 @@ pub fn check_own_tree(path: &Path, own: &Path, forbidden: &Forbidden) -> Result<
     Ok(real)
 }
 
+/// Refuses a second tree that is, holds or sits inside one of the lane's own tip trees, with links
+/// resolved: its reset must never reach a tree that may hold authored work.
+pub(crate) fn check_apart_from_tips(tree: &Path, locations: &LaneLocations) -> Result<(), String> {
+    let real = resolved(tree);
+    for item in &locations.items {
+        if !matches!(item.place, Place::Tree { base: false, .. }) {
+            continue;
+        }
+        let tip = resolved(&item.path);
+        if real.starts_with(&tip) || tip.starts_with(&real) {
+            return Err(format!(
+                "{} is not this lane's second tree to reset: it overlaps its tree {}",
+                tree.display(),
+                item.path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Checks with git that `tree` is a linked worktree of the repository whose primary checkout is
 /// `repository`, with its own top at `tree` (not a directory inside another checkout).
 async fn check_linked_worktree(git: &Git, tree: &Path, repository: &Path) -> Result<(), String> {
@@ -348,11 +368,14 @@ fn git_error(error: GitError) -> String {
 
 /// Resets the lane tree of `request` onto its new run branch, adding it first when missing. Every
 /// check runs before anything is written; a failed save leaves the tree as it was and nothing is
-/// reset.
+/// reset. A second tree is only reset and cleaned where it stands, never saved or moved to a branch.
 pub async fn reset_tree(git: &Git, request: &ResetRequest) -> Result<ResetOutcome, String> {
     let location = request.location()?;
     let tree = location.path.as_path();
     check_own_tree(tree, &location.path, &request.forbidden)?;
+    if request.second {
+        check_apart_from_tips(tree, &request.locations)?;
+    }
     let added = std::fs::symlink_metadata(tree).is_err();
     if added {
         add_tree(
@@ -367,6 +390,10 @@ pub async fn reset_tree(git: &Git, request: &ResetRequest) -> Result<ResetOutcom
         check_own_tree(tree, &location.path, &request.forbidden)?;
     }
     check_linked_worktree(git, tree, &request.repository).await?;
+
+    if request.second {
+        return reset_second(git, request, tree, added).await;
+    }
 
     let head = git
         .run(
@@ -413,12 +440,7 @@ pub async fn reset_tree(git: &Git, request: &ResetRequest) -> Result<ResetOutcom
     )
     .await
     .map_err(git_error)?;
-    let mut clean = vec!["clean".to_string(), "-q".to_string(), "-fd".to_string()];
-    for dir in inside(tree, &request.named_dirs()) {
-        clean.push(format!("--exclude=/{dir}/"));
-    }
-    let clean: Vec<&str> = clean.iter().map(String::as_str).collect();
-    git.run(tree, &clean).await.map_err(git_error)?;
+    clean_tree(git, request, tree).await?;
     git.run(
         tree,
         &[
@@ -436,6 +458,45 @@ pub async fn reset_tree(git: &Git, request: &ResetRequest) -> Result<ResetOutcom
     .await
     .map_err(git_error)?;
     Ok(ResetOutcome { added, saved, head })
+}
+
+/// `git clean -fd` in `tree`, keeping the binding's named directories of this tree that sit inside
+/// it (and, as always, ignored files).
+async fn clean_tree(git: &Git, request: &ResetRequest, tree: &Path) -> Result<(), String> {
+    let mut clean = vec!["clean".to_string(), "-q".to_string(), "-fd".to_string()];
+    for dir in inside(tree, &request.named_dirs()) {
+        clean.push(format!("--exclude=/{dir}/"));
+    }
+    let clean: Vec<&str> = clean.iter().map(String::as_str).collect();
+    git.run(tree, &clean).await.map_err(git_error)?;
+    Ok(())
+}
+
+/// The reset of a second tree, already checked to be the lane's own linked worktree: `git reset
+/// --hard` and `git clean -fd` where it stands. It holds no authored work, so nothing is saved,
+/// and it never takes a branch (the tip tree has the run branch), so `HEAD` stays where it is.
+async fn reset_second(
+    git: &Git,
+    request: &ResetRequest,
+    tree: &Path,
+    added: bool,
+) -> Result<ResetOutcome, String> {
+    git.run(
+        tree,
+        &["-c", "submodule.recurse=false", "reset", "-q", "--hard"],
+    )
+    .await
+    .map_err(git_error)?;
+    clean_tree(git, request, tree).await?;
+    let head = git
+        .run(tree, &["rev-parse", "--verify", "HEAD^{commit}"])
+        .await
+        .map_err(git_error)?;
+    Ok(ResetOutcome {
+        added,
+        saved: None,
+        head,
+    })
 }
 
 /// The commit `branch_ref` is at, `None` when it does not exist.

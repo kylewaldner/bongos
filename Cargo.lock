@@ -2568,6 +2568,7 @@ name = "bongos_lanes"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bongos_checks",
  "bongos_lanes_model",
  "bongos_project_repo",
  "bongos_project_repo_model",

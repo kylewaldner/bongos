@@ -14,6 +14,7 @@ doctest = false
 
 [dependencies]
 anyhow.workspace = true
+bongos_checks.workspace = true
 bongos_lanes_model.workspace = true
 bongos_project_repo.workspace = true
 bongos_project_repo_model.workspace = true

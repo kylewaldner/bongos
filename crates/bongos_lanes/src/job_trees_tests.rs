@@ -14,6 +14,7 @@ use crate::job_trees::{
 };
 use crate::lane_tree::LastEnd;
 use crate::lane_tree_tests::{Fixture, RUN_1, RUN_2, TASK_BRANCH, git, last};
+use crate::task_trees::SecondTreeLeases;
 
 const BOTH_TABLE: &str = r#"schema = 1
 
@@ -83,6 +84,7 @@ async fn a_registered_extra_repository_gets_its_tree_in_the_job_trees(cx: &mut T
     let started = start_job_trees(
         &fixture.git,
         &start(&fixture, RUN_1, vec![lib_job(&fixture, RUN_1)]),
+        &SecondTreeLeases::default(),
         &fresh,
     )
     .await
@@ -126,6 +128,7 @@ async fn a_repository_the_binding_does_not_list_gets_a_fresh_tree(cx: &mut TestA
     let started = start_job_trees(
         &fixture.git,
         &start(&fixture, RUN_1, vec![lib_job(&fixture, RUN_1)]),
+        &SecondTreeLeases::default(),
         &fresh,
     )
     .await
@@ -146,15 +149,20 @@ async fn a_failing_reset_or_a_lane_out_of_the_table_waits_and_deletes_nothing(
     let fixture = Fixture::new();
     let tip = fixture.tip();
     let fresh = async |_: &JobRepository| -> Result<PathBuf, String> { Err("unused".to_string()) };
-    start_job_trees(&fixture.git, &start(&fixture, RUN_1, Vec::new()), &fresh)
-        .await
-        .unwrap();
+    start_job_trees(
+        &fixture.git,
+        &start(&fixture, RUN_1, Vec::new()),
+        &SecondTreeLeases::default(),
+        &fresh,
+    )
+    .await
+    .unwrap();
     std::fs::write(tip.join("new.txt"), "left by the run\n").unwrap();
 
     // A lane removed from the table is never reset.
     let mut removed = start(&fixture, RUN_2, Vec::new());
     removed.table_lanes = vec![LaneId::new("build", 2)];
-    let reason = start_job_trees(&fixture.git, &removed, &fresh)
+    let reason = start_job_trees(&fixture.git, &removed, &SecondTreeLeases::default(), &fresh)
         .await
         .unwrap_err();
     assert!(
@@ -176,7 +184,7 @@ async fn a_failing_reset_or_a_lane_out_of_the_table_waits_and_deletes_nothing(
     std::fs::write(&lock, "").unwrap();
     let mut failed = start(&fixture, RUN_2, Vec::new());
     failed.primary.last = Some(last(RUN_1, LastEnd::Succeeded));
-    let reason = start_job_trees(&fixture.git, &failed, &fresh)
+    let reason = start_job_trees(&fixture.git, &failed, &SecondTreeLeases::default(), &fresh)
         .await
         .unwrap_err();
     assert!(

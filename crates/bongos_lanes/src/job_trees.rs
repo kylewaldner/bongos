@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
 use bongos_lanes_model::{JobRecord, LaneId, WaitReason};
 use bongos_work_model::store::WorkTree;
@@ -14,6 +15,7 @@ use gpui::{App, Global};
 
 use crate::lane_tree::{Forbidden, LastRun, ResetRequest, Saved, lane_tree, reset_tree};
 use crate::locations::{LaneLocations, LocationInputs};
+use crate::task_trees::SecondTreeLeases;
 
 /// Names the repositories a job works in besides its primary one.
 pub type ExtraRepositories = fn(&JobRecord, &WorkTree) -> Vec<String>;
@@ -93,28 +95,54 @@ impl JobTrees {
     }
 }
 
-/// The trees of each lane's current job, in memory only.
-#[derive(Default)]
-pub struct CurrentJobTrees {
-    lanes: BTreeMap<LaneId, JobTrees>,
-}
+/// The trees of each lane's current job, in memory only. Clones share one map, so a reader that
+/// has no `App` (the task trees the checks ask) sees what the job start sets.
+#[derive(Clone, Default)]
+pub struct CurrentJobTrees(Arc<RwLock<BTreeMap<LaneId, JobTrees>>>);
 
 impl Global for CurrentJobTrees {}
 
 impl CurrentJobTrees {
+    /// The app's map, made empty on first use.
+    pub fn global(cx: &mut App) -> Self {
+        cx.default_global::<Self>().clone()
+    }
+
     pub fn set(lane: LaneId, trees: JobTrees, cx: &mut App) {
-        cx.default_global::<Self>().lanes.insert(lane, trees);
+        Self::global(cx).insert(lane, trees);
     }
 
     pub fn of(lane: &LaneId, cx: &App) -> Option<JobTrees> {
-        cx.try_global::<Self>()?.lanes.get(lane).cloned()
+        cx.try_global::<Self>()?.get(lane)
     }
 
     /// Forgets the trees of `lane`'s job when it ends.
     pub fn clear(lane: &LaneId, cx: &mut App) {
-        if cx.has_global::<Self>() {
-            cx.global_mut::<Self>().lanes.remove(lane);
+        if let Some(map) = cx.try_global::<Self>() {
+            map.remove(lane);
         }
+    }
+
+    pub fn insert(&self, lane: LaneId, trees: JobTrees) {
+        self.0
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(lane, trees);
+    }
+
+    pub fn get(&self, lane: &LaneId) -> Option<JobTrees> {
+        self.0
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(lane)
+            .cloned()
+    }
+
+    pub fn remove(&self, lane: &LaneId) {
+        self.0
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(lane);
     }
 }
 
@@ -195,6 +223,9 @@ pub struct JobStart {
 pub struct StartedTrees {
     pub trees: JobTrees,
     pub saved: Vec<(String, Saved)>,
+    /// The repositories whose second tree was leased at the start, so not reset now; the next
+    /// job start resets it.
+    pub second_leased: Vec<String>,
 }
 
 /// What a lane must never reset or clean, from the app's inputs: every primary checkout and the
@@ -228,12 +259,16 @@ pub fn forbidden_for(
 }
 
 /// Makes the trees of a job: for each repository, the lane's persistent tree reset onto the run
-/// branch when the binding lists it, else a fresh tree from `fresh`. Any failure refuses the start
-/// as an environment wait with nothing deleted; trees reset before the failure stay on their new
-/// run branch.
+/// branch when the binding lists it, else a fresh tree from `fresh`; then the lane's second tree
+/// of it, when the binding gives one, reset where it stands (`reset --hard`, `clean -fd`). A
+/// second tree leased at that moment is left as it is and the start does not wait; the following
+/// start resets it. The reset holds the tree like a lease, so none is lent while it runs. Any
+/// failure refuses the start as an environment wait with nothing deleted; trees reset before the
+/// failure stay as reset.
 pub async fn start_job_trees<F>(
     git: &Git,
     start: &JobStart,
+    leases: &SecondTreeLeases,
     fresh: &F,
 ) -> Result<StartedTrees, WaitReason>
 where
@@ -247,21 +282,26 @@ where
     }
     let mut trees: Option<JobTrees> = None;
     let mut saved = Vec::new();
+    let mut second_leased = Vec::new();
     for repository in std::iter::once(&start.primary).chain(&start.extra) {
+        let request = |second: bool| ResetRequest {
+            locations: start.locations.clone(),
+            repo: repository.name.clone(),
+            repository: repository.repository.clone(),
+            second,
+            add_from: repository.add_from.clone(),
+            start: repository.start.clone(),
+            run_branch: repository.run_branch.clone(),
+            last: if second {
+                None
+            } else {
+                repository.last.clone()
+            },
+            save_max_file_bytes: start.save_max_file_bytes,
+            forbidden: start.forbidden.clone(),
+        };
         let path = if lane_tree(&start.locations, &repository.name, false).is_ok() {
-            let request = ResetRequest {
-                locations: start.locations.clone(),
-                repo: repository.name.clone(),
-                repository: repository.repository.clone(),
-                second: false,
-                add_from: repository.add_from.clone(),
-                start: repository.start.clone(),
-                run_branch: repository.run_branch.clone(),
-                last: repository.last.clone(),
-                save_max_file_bytes: start.save_max_file_bytes,
-                forbidden: start.forbidden.clone(),
-            };
-            let outcome = reset_tree(git, &request)
+            let outcome = reset_tree(git, &request(false))
                 .await
                 .map_err(|message| WaitReason::Environment(format!("{lane}: {message}")))?;
             if let Some(save) = outcome.saved {
@@ -276,11 +316,27 @@ where
                 .await
                 .map_err(|message| WaitReason::Environment(format!("{lane}: {message}")))?
         };
+        if let Ok(second) = lane_tree(&start.locations, &repository.name, true) {
+            match leases.try_hold(&second.path) {
+                None => second_leased.push(repository.name.clone()),
+                // A named binding, never `_`: the hold must last across the reset's await so no
+                // lease is given while the tree is reset.
+                Some(_hold) => {
+                    reset_tree(git, &request(true))
+                        .await
+                        .map_err(|message| WaitReason::Environment(format!("{lane}: {message}")))?;
+                }
+            }
+        }
         match &mut trees {
             None => trees = Some(JobTrees::new(repository.name.clone(), path)),
             Some(trees) => trees.insert(repository.name.clone(), path),
         }
     }
     let trees = trees.expect("the primary repository is always started");
-    Ok(StartedTrees { trees, saved })
+    Ok(StartedTrees {
+        trees,
+        saved,
+        second_leased,
+    })
 }

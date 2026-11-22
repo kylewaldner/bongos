@@ -5,8 +5,9 @@
 //! Also where a lane's trees and directories go and how they are made (`locations`, `create`,
 //! `prepare`), the job environment (`env`), the project profile seam and the job hooks; a job's
 //! trees (`job_trees`), the reset and save of a lane's persistent tree and the merge in it
-//! (`lane_tree`), and the worktree roots lanes give a hand start (`roots`). The dispatcher
-//! (`dispatcher`, `dispatch_job`) picks, starts and ends the lanes' jobs in one loop.
+//! (`lane_tree`), the worktree roots lanes give a hand start (`roots`), and a task's trees with
+//! the exclusive leases of a lane's second tree that the checks ask for (`task_trees`). The
+//! dispatcher (`dispatcher`, `dispatch_job`) picks, starts and ends the lanes' jobs in one loop.
 
 mod actions;
 mod create;
@@ -26,6 +27,7 @@ mod runs;
 mod scope;
 mod settings;
 mod store;
+mod task_trees;
 
 use std::sync::Arc;
 
@@ -74,6 +76,10 @@ pub use store::{
     LANE_PREFIX, LANES_NAMESPACE, OWNER_PREFIX, delete_lane, put_lane, put_owner, read_state,
     read_state_in, write_state,
 };
+pub use task_trees::{
+    LaneLease, LaneTaskTrees, LaneTreeSetup, ProcessEnv, SecondTreeLeases, TopLevelOf, TreeHold,
+    process_env,
+};
 
 /// Registers the settings, the `lanes` definition folder and the prompt check, the `lanes` state
 /// exporter, the live and activity sources, and the `lane-run-scope` approval hook, all over one
@@ -118,5 +124,7 @@ mod roots_tests;
 mod runs_tests;
 #[cfg(test)]
 mod scope_tests;
+#[cfg(test)]
+mod task_trees_tests;
 #[cfg(test)]
 mod test_support;
