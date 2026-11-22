@@ -16,7 +16,7 @@
 //! - When the task already has checks running (a person's run, or this key's stopped try still
 //!   ending) the node waits for them to end, then starts.
 //! - A drain stops the node's checks and reports nothing for it: whoever drained takes the key over
-//!   (the engine's [`ChecksEngine::drain`] names it). When the drain is abandoned
+//!   (the engine's [`ChecksEngine::drain`] names it, and a key waiting to start too). When the drain is abandoned
 //!   ([`ChecksEngine::undrain`]), the key's checks start again from the kept parts.
 //! - After a relaunch the processes an earlier bongos left running for the parts are stopped when
 //!   the engine first follows the project's store, and again by [`BuiltinNode::recover`] for each
@@ -281,6 +281,18 @@ impl ChecksNode {
     pub fn new(engine: &Entity<ChecksEngine>, cx: &mut App) -> (Arc<Self>, Rc<ChecksNodeStatus>) {
         let (messages, receiver) = mpsc::unbounded();
         let shared = Arc::new(Mutex::new(Shared::default()));
+        // A drain names every key in flight here, waiting ones included, not only those whose
+        // checks run: a key waiting for a repeat or behind another run of its task is in flight
+        // in the workflow run all the same.
+        let tries = Arc::downgrade(&shared);
+        engine.update(cx, |engine, _| {
+            engine.node_tries.push(Rc::new(move || {
+                tries.upgrade().map_or_else(Vec::new, |shared| {
+                    let shared = shared.lock().unwrap_or_else(PoisonError::into_inner);
+                    shared.current.keys().cloned().collect()
+                })
+            }));
+        });
         let worker = Rc::new(RefCell::new(Worker {
             engine: engine.downgrade(),
             shared: shared.clone(),

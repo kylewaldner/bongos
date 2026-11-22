@@ -59,6 +59,9 @@ pub use actions::{
     lanes, register,
 };
 pub use adopt::{AdoptRequest, Adopted, LeftWork};
+/// The writers' participants live in the engine host, which drains them at a handover; lanes
+/// and other features register theirs here.
+pub use bongos_engine_host::{WriterParticipant, WriterParticipants};
 pub use bongos_lanes_model::{AssignedWork, Assignment, EnvEdit, Problem, StopCause};
 pub use create::{CreateError, check_root, create_below_existing, lexical};
 pub use definitions::{LANES_FILE, LANES_FOLDER, prompt_lane_diagnostics, validate_folder};

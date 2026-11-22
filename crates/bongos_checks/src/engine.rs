@@ -421,7 +421,14 @@ pub struct ChecksEngine {
     pub(crate) next_landing: u64,
     /// Receives the jobs of landing checks while the engine lives.
     pub(crate) landing_jobs: Option<Task<()>>,
+    /// The workflow checks keys in flight, read from each [`crate::workflow_node::ChecksNode`]
+    /// over this engine: whether their checks run, or they wait (for the next repeat, behind
+    /// another run of the task, or for the drain to end). A drain names them all.
+    pub(crate) node_tries: Vec<NodeTries>,
 }
+
+/// Reads the `(run, key)` of a checks node's tries in flight.
+pub(crate) type NodeTries = Rc<dyn Fn() -> Vec<(RunId, NodeKey)>>;
 
 impl EventEmitter<ChecksEvent> for ChecksEngine {}
 
@@ -453,6 +460,7 @@ impl ChecksEngine {
             landing: BTreeMap::new(),
             next_landing: 0,
             landing_jobs: None,
+            node_tries: Vec::new(),
         }
     }
 
@@ -812,7 +820,10 @@ impl ChecksEngine {
     ///
     /// Resolves once every run has ended, or once the grace has passed on the engine's clock,
     /// whichever comes first, with the workflow nodes whose runs it stopped (none for manual
-    /// runs). Every landing check that runs is stopped too and answered no verdict, "the engine
+    /// runs) and every other workflow checks key in flight then: one waiting for its next
+    /// repeat, behind another run of its task, or to start while drained. Each such key is
+    /// taken over by whoever drained (its try stops once the run records `ChecksDrained`), so a
+    /// waiting checks key never holds the drain of the workflow runs. Every landing check that runs is stopped too and answered no verdict, "the engine
     /// is moving to the host", once its process has ended (so the landing keeps its trees until
     /// then), and a landing job that arrives while drained is answered so at once; the landing
     /// tries again later.
@@ -861,6 +872,7 @@ impl ChecksEngine {
             TaskChecksSettings::get_global(cx).kill_grace_seconds,
         ));
         let bound = self.clock.sleep(grace);
+        let node_tries = self.node_tries.clone();
         cx.spawn(async move |_, _| {
             if let Some(ended) = ended {
                 let mut ended = ended.fuse();
@@ -872,6 +884,15 @@ impl ChecksEngine {
             }
             for leases in leases {
                 leases.borrow_mut().clear();
+            }
+            // Read now, once the runs stopped: a stopped node's try waits again to start, and
+            // a key that finished meanwhile is reported as usual, so it is not named.
+            for tries in &node_tries {
+                for node in tries() {
+                    if !stopped.contains(&node) {
+                        stopped.push(node);
+                    }
+                }
             }
             stopped
         })

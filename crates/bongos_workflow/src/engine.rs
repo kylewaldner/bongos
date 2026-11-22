@@ -1212,6 +1212,19 @@ impl WorkflowEngine {
         self.lifecycle().runtime_mut().undrain();
     }
 
+    /// Records that a drain stopped the check of checks key `key` of `run`
+    /// ([`crate::runtime::Runtime::checks_drained`]): the key counts as parked, and the run starts
+    /// it again from its checkpoint, with no person, wherever it is loaded next.
+    pub fn checks_drained(&self, run: &str, key: &NodeKey, cx: &mut App) -> Result<(), String> {
+        let recorded = self
+            .lifecycle()
+            .runtime_mut()
+            .checks_drained(run, key)
+            .map_err(|error| error.to_string());
+        self.publish(cx);
+        recorded
+    }
+
     /// "Interrupt them now" at a handover: the processes of `runs` stop and the runs with a node
     /// in flight are recorded interrupted, as at quit.
     pub fn interrupt_runs(&self, runs: &[RunId], cx: &mut App) {

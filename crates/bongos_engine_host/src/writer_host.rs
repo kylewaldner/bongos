@@ -11,6 +11,7 @@ use chrono::Utc;
 use gpui::App;
 
 use crate::host_file::{HostInfo, Moving, read_host_file, write_host_file};
+use crate::participants::WriterParticipants;
 use crate::protocol::HostMode;
 use crate::server::EngineServer;
 use crate::socket::{bind_socket, default_hosts_dir, socket_path};
@@ -67,6 +68,10 @@ impl WriterHost {
         };
         let serve = host.options.serve_socket;
         host.announce(serve, cx)?;
+        // This process is the project's writer from now on (a window that opened it first, or
+        // the engine host right after taking the lock): the writer participants begin here.
+        let id = host.repo.location().id.clone();
+        WriterParticipants::started(&id, cx);
         Ok(host)
     }
 

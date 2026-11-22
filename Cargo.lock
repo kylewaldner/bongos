@@ -2428,6 +2428,7 @@ dependencies = [
  "bongos_work",
  "bongos_work_model",
  "bongos_workflow",
+ "bongos_workflow_model",
  "chrono",
  "futures 0.3.32",
  "gpui",
