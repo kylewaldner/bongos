@@ -65,8 +65,9 @@ sleep 1
 
 # 1. M-; the word, RET shows the labels at once, and `a` jumps to the word.
 act keys alt+semicolon
+# No pause before Return: the 500 ms char timer would show the labels first, and Return would
+# then cancel the labelled jump.
 type_text "$WORD"
-sleep 1
 act keys Return
 act keys a
 type_text MARK
