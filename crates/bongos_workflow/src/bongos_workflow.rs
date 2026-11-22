@@ -80,6 +80,10 @@ mod dispatch_flow_tests;
 #[cfg(test)]
 mod dispatch_tests;
 #[cfg(test)]
+mod drain_tests;
+#[cfg(test)]
+mod instances_tests;
+#[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]
 mod mcp_tests;
