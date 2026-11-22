@@ -142,7 +142,7 @@ pub(crate) fn on_edited(
     let (now, interval, version) = {
         let buffer = buffer.read(cx);
         (
-            Instant::now(),
+            cx.background_executor().now(),
             buffer.transaction_group_interval(),
             buffer.version(),
         )
