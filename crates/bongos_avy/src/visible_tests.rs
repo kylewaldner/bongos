@@ -407,3 +407,38 @@ async fn the_match_under_the_cursor_is_dropped(cx: &mut TestAppContext) {
     let panes: Vec<PaneText> = visible(&workspace, cx);
     assert_eq!(sorted(collect(Mode::Line, "", &panes, id), cx), vec![8]);
 }
+
+#[gpui::test]
+async fn matches_outside_the_visible_columns_get_no_candidates(cx: &mut TestAppContext) {
+    let (workspace, cx) = setup(cx).await;
+    let text = format!("zz{}zz", " ".repeat(300));
+    let end = text.len() - 2;
+    let editor = only_editor(&workspace, &text, cx);
+    cx.update(|window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.set_soft_wrap_mode(SoftWrap::None, cx)
+        });
+        move_cursor(&editor, 150, window, cx);
+    });
+    paint(cx);
+    let id = editor.entity_id();
+    let offsets = |cx: &mut VisualTestContext| {
+        let panes = visible(&workspace, cx);
+        let found = collect(Mode::CharTimer, "zz", &panes, id);
+        starts(&found, cx)
+            .into_iter()
+            .map(|(_, offset)| offset)
+            .collect::<Vec<_>>()
+    };
+    // The match past the right edge is laid out but not on screen.
+    assert_eq!(offsets(cx), vec![0]);
+
+    // Scrolled to the far end, the first match is off to the left and the last one is in view.
+    cx.update(|window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.set_scroll_position(point(290., 0.), window, cx)
+        });
+    });
+    paint(cx);
+    assert_eq!(offsets(cx), vec![end]);
+}

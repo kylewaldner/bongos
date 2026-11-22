@@ -73,6 +73,8 @@ pub struct PaneText {
     snapshot: DisplaySnapshot,
     /// The window x of the editor's first text column, after horizontal scrolling.
     x_origin: f32,
+    /// The window x range of the text area; a character drawn outside it is not visible.
+    x_visible: Range<f32>,
 }
 
 impl PaneText {
@@ -171,6 +173,7 @@ fn pane_text(editor: &Entity<Editor>, window: &mut Window, cx: &mut App) -> Opti
         cursor_screen,
         snapshot,
         x_origin,
+        x_visible: f32::from(layout.content_origin.x)..f32::from(layout.text_right),
     })
 }
 
@@ -238,6 +241,12 @@ pub fn collect(mode: Mode, query: &str, panes: &[PaneText], origin: EntityId) ->
             if is_origin && range.start == pane.cursor {
                 return;
             }
+            let screen = pane.screen_point(row, range.start);
+            // The row is laid out whole: a match scrolled off to the left or past the right edge
+            // is not on visible text.
+            if !pane.x_visible.contains(&screen.x) {
+                return;
+            }
             let start = buffer.anchor_after(range.start);
             let end = if range.end == range.start {
                 start
@@ -247,7 +256,7 @@ pub fn collect(mode: Mode, query: &str, panes: &[PaneText], origin: EntityId) ->
             candidates.push(Candidate {
                 editor: pane.editor.clone(),
                 range: start..end,
-                screen: pane.screen_point(row, range.start),
+                screen,
             });
         };
         for row in &pane.rows {

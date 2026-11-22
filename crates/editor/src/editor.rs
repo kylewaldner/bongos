@@ -1266,6 +1266,8 @@ pub struct VisibleTextLayout {
     pub line_height: Pixels,
     pub em_advance: Pixels,
     pub scroll_pixel_x: Pixels,
+    /// The right edge of the text area.
+    pub text_right: Pixels,
     /// Rows that are entirely visible; a partially visible first or last row is excluded.
     pub fully_visible_rows: Range<DisplayRow>,
 }
@@ -9415,6 +9417,7 @@ impl Editor {
             line_height,
             em_advance: position_map.em_advance,
             scroll_pixel_x: position_map.scroll_pixel_position.x.into(),
+            text_right: position_map.text_hitbox.right(),
             fully_visible_rows: DisplayRow(first)..DisplayRow(last.max(first)),
         })
     }
