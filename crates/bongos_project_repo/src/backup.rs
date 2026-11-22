@@ -344,10 +344,10 @@ pub(crate) struct BackupEngine {
     /// `None` reads the overrides registered in the app.
     overrides: Mutex<Option<Arc<ProjectValueOverrides>>>,
     /// Serializes snapshots and thinning, which both move the state branch.
-    branch_lock: futures::lock::Mutex<()>,
+    pub(crate) branch_lock: futures::lock::Mutex<()>,
     /// One push at a time; never held by a snapshot.
-    push_lock: futures::lock::Mutex<()>,
-    stopped: AtomicBool,
+    pub(crate) push_lock: futures::lock::Mutex<()>,
+    pub(crate) stopped: AtomicBool,
     push_timeout: Mutex<Option<PushTimeout>>,
     /// `None` reads the activity sources registered in the app.
     activity: Mutex<Option<Vec<Arc<dyn ActivitySource>>>>,

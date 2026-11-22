@@ -11,8 +11,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use bongos_project_repo_model::{
@@ -169,8 +170,27 @@ impl StateStore {
         location: &Location,
         hooks: &StateApplyHooks,
     ) -> Result<StateWriter, OpenError> {
+        Self::open_writer_locking(location, hooks, LockWait::No)
+    }
+
+    /// [`Self::open_writer_with_hooks`] that waits on the lock until the process holding it
+    /// lets it go (a blocking `flock`), instead of answering `HeldBy`. The engine host calls it
+    /// while a window hands the writer over to it. Blocks: call it off the main thread.
+    pub fn open_writer_waiting(
+        location: &Location,
+        hooks: &StateApplyHooks,
+    ) -> Result<StateWriter, OpenError> {
+        Self::open_writer_locking(location, hooks, LockWait::Yes)
+    }
+
+    fn open_writer_locking(
+        location: &Location,
+        hooks: &StateApplyHooks,
+        wait: LockWait,
+    ) -> Result<StateWriter, OpenError> {
         let hooks = hooks.seal();
-        let lock = take_host_lock(&location.state.join(layout::HOST_LOCK_FILE))?;
+        let lock_path = location.state.join(layout::HOST_LOCK_FILE);
+        let lock = take_host_lock(&lock_path, wait)?;
         let connection = open_connection(&location.state.join(layout::STATE_DB_FILE))?;
         exec(&connection, "PRAGMA journal_mode=WAL")?;
         for statement in SCHEMA {
@@ -181,7 +201,9 @@ impl StateStore {
             definitions: Mutex::new((None, Arc::new(DefinitionTree::default()))),
             hooks,
             subscribers: Mutex::new(Vec::new()),
-            _lock: lock,
+            lock: Mutex::new(Some(lock)),
+            lock_path,
+            released: AtomicBool::new(false),
         })
     }
 
@@ -218,8 +240,15 @@ fn open_connection(path: &Path) -> Result<Connection> {
     Ok(connection)
 }
 
+/// Whether taking the host lock waits for its holder.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LockWait {
+    No,
+    Yes,
+}
+
 #[cfg(unix)]
-fn take_host_lock(path: &Path) -> Result<File, OpenError> {
+fn take_host_lock(path: &Path, wait: LockWait) -> Result<File, OpenError> {
     use std::os::fd::AsRawFd as _;
 
     let mut file = OpenOptions::new()
@@ -229,8 +258,19 @@ fn take_host_lock(path: &Path) -> Result<File, OpenError> {
         .truncate(false)
         .open(path)
         .with_context(|| format!("opening {}", path.display()))?;
-    // SAFETY: the descriptor is open for the duration of the call.
-    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    let operation = match wait {
+        LockWait::No => libc::LOCK_EX | libc::LOCK_NB,
+        LockWait::Yes => libc::LOCK_EX,
+    };
+    let result = loop {
+        // SAFETY: the descriptor is open for the duration of the call.
+        let result = unsafe { libc::flock(file.as_raw_fd(), operation) };
+        if result != 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+        {
+            continue;
+        }
+        break result;
+    };
     if result != 0 {
         let error = std::io::Error::last_os_error();
         if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
@@ -247,7 +287,7 @@ fn take_host_lock(path: &Path) -> Result<File, OpenError> {
 }
 
 #[cfg(not(unix))]
-fn take_host_lock(path: &Path) -> Result<File, OpenError> {
+fn take_host_lock(path: &Path, _wait: LockWait) -> Result<File, OpenError> {
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -279,6 +319,17 @@ pub(crate) fn read_holder_pid(file: &mut File) -> Option<u32> {
     None
 }
 
+/// Unlocks a held lock file before it is closed.
+#[cfg(unix)]
+fn unlock(file: &File) {
+    use std::os::fd::AsRawFd as _;
+    // SAFETY: the descriptor is open for the duration of the call.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+}
+
+#[cfg(not(unix))]
+fn unlock(_file: &File) {}
+
 fn write_pid(file: &mut File) -> std::io::Result<()> {
     file.set_len(0)?;
     file.seek(SeekFrom::Start(0))?;
@@ -290,7 +341,8 @@ fn exec(connection: &Connection, sql: &str) -> Result<()> {
     connection.exec(sql)?()
 }
 
-/// The single writer of a project's state. Dropping it releases the host lock.
+/// The single writer of a project's state. Dropping it releases the host lock, and so does
+/// [`StateWriter::release`] when the writer moves to another process.
 pub struct StateWriter {
     // Declared before the lock so the database closes before the lock is released.
     connection: Mutex<Connection>,
@@ -298,10 +350,68 @@ pub struct StateWriter {
     definitions: Mutex<(Option<String>, Arc<DefinitionTree>)>,
     hooks: Arc<[Arc<dyn StateApplyHook>]>,
     subscribers: Mutex<Vec<mpsc::UnboundedSender<StateEvent>>>,
-    _lock: File,
+    /// The held `host.lock`; `None` once released.
+    lock: Mutex<Option<File>>,
+    lock_path: PathBuf,
+    /// Set by [`Self::release`]: every write is refused from then on, until [`Self::retake`].
+    released: AtomicBool,
 }
 
+/// What a write on a released writer answers.
+pub const RELEASED_MESSAGE: &str =
+    "this process gave the project's writer to another process; the write goes there";
+
 impl StateWriter {
+    /// Lets the writer go: waits for the transaction in progress to commit, then refuses every
+    /// later write and unlocks `host.lock`, so another process's `open_writer` takes it. Reads
+    /// still work on the connection, which stays open. Subscribers stay subscribed and hear
+    /// what [`Self::relay`] sends them. Idempotent.
+    pub fn release(&self) {
+        // Held while the flag flips, so no transaction is between its start and its commit.
+        let _connection = self.connection.lock();
+        self.released.store(true, Ordering::SeqCst);
+        if let Some(lock) = self.lock.lock().take() {
+            unlock(&lock);
+            drop(lock);
+        }
+    }
+
+    /// Whether [`Self::release`] let the writer go (and no [`Self::retake`] took it back).
+    pub fn is_released(&self) -> bool {
+        self.released.load(Ordering::SeqCst)
+    }
+
+    /// Takes the lock back after [`Self::release`], when the process it was given to never took
+    /// it: `HeldBy` while another process holds it. Writes work again afterwards.
+    pub fn retake(&self) -> Result<(), OpenError> {
+        let _connection = self.connection.lock();
+        let mut lock = self.lock.lock();
+        if lock.is_some() {
+            return Ok(());
+        }
+        *lock = Some(take_host_lock(&self.lock_path, LockWait::No)?);
+        self.released.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Sends `event` to this writer's subscribers: once released, the events of the writer in
+    /// the other process reach what subscribed here (the views follow the new writer).
+    pub fn relay(&self, event: StateEvent) {
+        if !self.is_released() {
+            return;
+        }
+        self.subscribers
+            .lock()
+            .retain(|subscriber| subscriber.unbounded_send(event.clone()).is_ok());
+    }
+
+    fn refuse_released(&self) -> Result<()> {
+        if self.is_released() {
+            bail!(RELEASED_MESSAGE);
+        }
+        Ok(())
+    }
+
     /// Runs `f` in one transaction, then the state apply hooks, then commits. An error from `f`
     /// or from a hook changes nothing.
     pub fn transact<T>(&self, f: impl FnOnce(&mut StateTx) -> Result<T>) -> Result<T> {
@@ -324,6 +434,7 @@ impl StateWriter {
         f: impl FnOnce(&mut StateTx) -> Result<T>,
     ) -> Result<T> {
         let connection = self.connection.lock();
+        self.refuse_released()?;
         exec(&connection, "BEGIN IMMEDIATE").context("starting a state transaction")?;
         // Rolls back if `f` or a hook panics, so the connection is never left inside a
         // transaction.
@@ -372,6 +483,7 @@ impl StateWriter {
         f: impl FnOnce(&mut StateTx) -> Result<T>,
     ) -> Result<T> {
         let connection = self.connection.lock();
+        self.refuse_released()?;
         if let Some(copy) = keep_copy {
             let target = copy
                 .to_str()
