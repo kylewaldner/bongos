@@ -84,6 +84,8 @@ mod dispatch_tests;
 #[cfg(test)]
 mod drain_tests;
 #[cfg(test)]
+mod handover_tests;
+#[cfg(test)]
 mod instances_tests;
 #[cfg(test)]
 mod lifecycle_tests;

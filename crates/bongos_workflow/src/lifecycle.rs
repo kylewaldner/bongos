@@ -1757,6 +1757,20 @@ impl<R: Runner> Lifecycle<R> {
     /// loaded is [`RuntimeError::Duplicate`] and none of these load; a log that cannot be opened
     /// skips only its run.
     pub fn load_runs(&mut self, tree: &WorkTree) -> Result<LoadReport, RuntimeError> {
+        self.load_runs_where(tree, false)
+    }
+
+    /// [`Self::load_runs`] of only the runs not loaded yet: what a take-back after a failed
+    /// handover loads again, beside the runs that never left.
+    pub fn load_new_runs(&mut self, tree: &WorkTree) -> Result<LoadReport, RuntimeError> {
+        self.load_runs_where(tree, true)
+    }
+
+    fn load_runs_where(
+        &mut self,
+        tree: &WorkTree,
+        skip_loaded: bool,
+    ) -> Result<LoadReport, RuntimeError> {
         let mut report = LoadReport::default();
         let mut entries: Vec<RunEntry> = Vec::new();
         let mut specs: Vec<RunSpec> = Vec::new();
@@ -1789,6 +1803,8 @@ impl<R: Runner> Lifecycle<R> {
             let project = task.id().and_then(|id| project_of(tree, id));
             for dir in dirs {
                 match self.read_run(tree, task, project.clone(), &dir) {
+                    Ok(Some((entry, _)))
+                        if skip_loaded && self.runs.iter().any(|run| run.id == entry.id) => {}
                     Ok(Some((entry, _))) if seen.contains(&entry.id) => skip(
                         &mut report,
                         &dir,
@@ -2123,6 +2139,48 @@ impl<R: Runner> Lifecycle<R> {
             self.note_all();
         }
         changed
+    }
+
+    /// "Interrupt them now" at a handover: the processes of `runs` stop and each run with a node
+    /// in flight gets `Interrupted` with those keys, as at quit. The other runs go on. Whether
+    /// any run was interrupted.
+    pub fn interrupt_runs(&mut self, runs: &[RunId]) -> bool {
+        let changed = self.runtime.interrupt_runs(runs);
+        if changed {
+            self.note_all();
+        }
+        changed
+    }
+
+    /// The handover of `runs` to the process `to_pid`: `HandedOver { to_pid }` to each that is
+    /// not over, then each leaves this lifecycle without another event
+    /// ([`Self::unload`]), so nothing here writes to them again, a later quit included.
+    pub fn hand_over_runs(&mut self, to_pid: u32, runs: &[RunId]) {
+        self.runtime.hand_over_runs(to_pid, runs);
+        for run in runs {
+            self.unload(run);
+        }
+    }
+
+    /// Drops `run` from this lifecycle and its runtime without appending any event or stopping
+    /// anything: it belongs to another process now. Whether it was loaded.
+    pub fn unload(&mut self, run: &str) -> bool {
+        let Some(index) = self.runs.iter().position(|entry| entry.id == run) else {
+            return false;
+        };
+        self.runtime.unload(run);
+        self.runs.remove(index);
+        self.statuses.remove(run);
+        true
+    }
+
+    /// The runs whose directory is under `dir` (a project's files), in start order.
+    pub fn runs_under(&self, dir: &Path) -> Vec<RunId> {
+        self.runs
+            .iter()
+            .filter(|entry| entry.dir.starts_with(dir))
+            .map(|entry| entry.id.clone())
+            .collect()
     }
 
     /// Pauses `run`: no new node starts, the running ones finish, then it reads Paused.
