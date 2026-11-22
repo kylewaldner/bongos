@@ -10,8 +10,7 @@ use tempfile::TempDir;
 
 use crate::test_support::{git, location, task_with_todos, writer};
 use crate::{
-    OpenError, ProjectRepo, RELEASED_MESSAGE, StateApplyHooks, StateEvent, StateHandle,
-    StateStore,
+    OpenError, ProjectRepo, RELEASED_MESSAGE, StateApplyHooks, StateEvent, StateHandle, StateStore,
 };
 use bongos_work_model::TodoState;
 
@@ -67,7 +66,6 @@ fn a_pending_transaction_commits_before_the_lock_goes() {
     let (entered, in_transaction) = std::sync::mpsc::channel();
     let (finish, finishing) = std::sync::mpsc::channel::<()>();
     let writing = {
-        let writer = writer.clone();
         std::thread::spawn(move || {
             writer.transact(|tx| {
                 entered.send(()).unwrap();
@@ -87,11 +85,7 @@ fn a_pending_transaction_commits_before_the_lock_goes() {
     releasing.join().unwrap().unwrap();
     let next =
         StateStore::open_writer_with_hooks(repo.location(), &StateApplyHooks::new()).unwrap();
-    assert!(
-        next.read(|read| read.task("slow"))
-            .unwrap()
-            .is_some()
-    );
+    assert!(next.read(|read| read.task("slow")).unwrap().is_some());
 }
 
 #[test]
@@ -124,7 +118,10 @@ fn a_released_writer_relays_the_next_writers_events_and_can_be_taken_back() {
     repo.retake_writer().unwrap();
     assert!(!writer.is_released());
     assert!(!repo.backups_stopped());
-    assert!(Arc::ptr_eq(repo.state().unwrap().writer().unwrap(), &writer));
+    assert!(Arc::ptr_eq(
+        repo.state().unwrap().writer().unwrap(),
+        &writer
+    ));
     set_task(&writer, "back").unwrap();
     assert!(matches!(
         StateStore::open_writer_with_hooks(repo.location(), &StateApplyHooks::new()),

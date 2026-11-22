@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
-use bongos_project_repo::{Location, OpenError, StateApplyHooks, StateReader, StateStore, StateWriter};
+use bongos_project_repo::{
+    Location, OpenError, StateApplyHooks, StateReader, StateStore, StateWriter,
+};
 use gpui::BackgroundExecutor;
 
 use crate::client::{ClientOptions, HostClient};
@@ -65,8 +67,8 @@ pub fn open_state_with_hooks(
                 Err(OpenError::Store(error)) => return Err(error),
             }
         };
-        let still_moving = read_host_file(location)
-            .is_some_and(|info| move_in_progress(&info).is_some());
+        let still_moving =
+            read_host_file(location).is_some_and(|info| move_in_progress(&info).is_some());
         match held_by {
             Some(pid) if !still_moving => {
                 return attach(location, pid, options, executor);
@@ -89,7 +91,9 @@ fn attach(
 ) -> Result<OpenedState> {
     let held_by = pid.map_or_else(|| "pid unknown".to_string(), |pid| format!("pid {pid}"));
     let host = live_host(location).ok_or_else(|| {
-        anyhow!("this project is open in another bongos process ({held_by}); work there or close it")
+        anyhow!(
+            "this project is open in another bongos process ({held_by}); work there or close it"
+        )
     })?;
     let socket = host.socket.clone().ok_or_else(|| {
         anyhow!(

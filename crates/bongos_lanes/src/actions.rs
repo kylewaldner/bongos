@@ -803,7 +803,10 @@ fn hand_over_and_start(
         window_handle
             .update(cx, |_, window, cx| {
                 workspace.update(cx, |workspace, cx| {
-                    let labels = DRAIN_AGAIN_CHOICES.iter().map(ToString::to_string).collect();
+                    let labels = DRAIN_AGAIN_CHOICES
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect();
                     let then = Box::new(
                         move |index: usize,
                               _: &mut Workspace,

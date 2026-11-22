@@ -50,7 +50,10 @@ pub fn not_answering(log: &Path) -> String {
 }
 
 fn closed_message(log: &Path) -> String {
-    format!("the engine host closed the connection; see {}", log.display())
+    format!(
+        "the engine host closed the connection; see {}",
+        log.display()
+    )
 }
 
 /// How a client connects.
@@ -214,9 +217,7 @@ impl HostClient {
                     Err(error) => Err(error),
                 };
                 match answer {
-                    Err(error)
-                        if is_moving(&error, &inner.shared) && executor.now() < deadline =>
-                    {
+                    Err(error) if is_moving(&error, &inner.shared) && executor.now() < deadline => {
                         executor.timer(MOVING_RETRY).await;
                     }
                     answer => return answer,
@@ -245,11 +246,7 @@ impl HostClient {
         topics: Option<Vec<HostTopic>>,
     ) -> Result<mpsc::UnboundedReceiver<HostEvent>> {
         let (sender, receiver) = mpsc::unbounded();
-        self.inner
-            .shared
-            .subscribers
-            .lock()
-            .push((topics, sender));
+        self.inner.shared.subscribers.lock().push((topics, sender));
         let connection = self.inner.connection.lock().clone();
         subscribe_once(&connection)?;
         Ok(receiver)
@@ -277,7 +274,11 @@ fn current_connection(inner: &Inner) -> Result<Arc<Connection>> {
     if !closed || !inner.shared.moving.load(Ordering::SeqCst) {
         return Ok(current.clone());
     }
-    let connection = Arc::new(open_connection(&inner.socket, &inner.options, &inner.shared)?);
+    let connection = Arc::new(open_connection(
+        &inner.socket,
+        &inner.options,
+        &inner.shared,
+    )?);
     if !inner.shared.subscribers.lock().is_empty() {
         subscribe_once(&connection)?;
     }

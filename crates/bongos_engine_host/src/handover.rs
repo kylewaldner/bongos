@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 use bongos_project_repo::{
-    Location, LocalSink, OpenError, PeerIdentity, ProjectRepo, RepoCommand, RepoReply,
+    LocalSink, Location, OpenError, PeerIdentity, ProjectRepo, RepoCommand, RepoReply,
     StateApplyHooks, StateEvent, StateOp, StateSink, StateStore, StateWriter,
 };
 use bongos_project_repo_model::Author;
@@ -256,7 +256,9 @@ pub(crate) fn serve_handover(
 ) -> Task<Result<serde_json::Value>> {
     let id = repo.location().id.clone();
     let Some(handovers) = cx.try_global::<Handovers>() else {
-        return Task::ready(Err(anyhow!("this engine host does not hand its writer over")));
+        return Task::ready(Err(anyhow!(
+            "this engine host does not hand its writer over"
+        )));
     };
     if !peer.same_executable() {
         return Task::ready(Err(anyhow!(
@@ -267,7 +269,9 @@ pub(crate) fn serve_handover(
         return Task::ready(Err(anyhow!(MOVING_REFUSAL)));
     }
     if repo.state().and_then(|state| state.writer()).is_none() {
-        return Task::ready(Err(anyhow!("this process does not hold the writer of {id}")));
+        return Task::ready(Err(anyhow!(
+            "this process does not hold the writer of {id}"
+        )));
     }
     let runs_source = handovers.runs.clone();
     let times = (handovers.times)(cx);
@@ -339,7 +343,9 @@ impl Move {
         cx.update(|cx| -> Result<()> {
             // `moving` is on disk before any run is handed over or the lock let go, so a crash
             // from here on is a move in progress to the next opener.
-            with_writer_host(&self.id, cx, |host, _| host.set_moving(Some(self.to.clone())))?;
+            with_writer_host(&self.id, cx, |host, _| {
+                host.set_moving(Some(self.to.clone()))
+            })?;
             *moving_written = true;
             self.runs_source.hand_over(self.to.to_pid, &self.runs, cx);
             self.repo.replace_sink(self.queue.clone());
@@ -359,7 +365,11 @@ impl Move {
             .await?;
         // The runs of other projects, if any, go on here.
         cx.update(|cx| self.runs_source.undrain(cx));
-        log::info!("released the writer of {} to pid {}", self.id, self.to.to_pid);
+        log::info!(
+            "released the writer of {} to pid {}",
+            self.id,
+            self.to.to_pid
+        );
         Ok(())
     }
 
@@ -514,12 +524,7 @@ impl Move {
         if let Err(error) = with_writer_host(&self.id, cx, |host, cx| host.take_back(cx)) {
             log::error!("announcing {} again: {error:#}", self.id);
         }
-        if let Some(writer) = self
-            .repo
-            .state()
-            .and_then(|state| state.writer())
-            .cloned()
-        {
+        if let Some(writer) = self.repo.state().and_then(|state| state.writer()).cloned() {
             let local = Arc::new(TakenBack(LocalSink::new(
                 writer,
                 cx.background_executor().clone(),
@@ -656,7 +661,11 @@ impl QueueSink {
 
     /// Sends the queued writes to `target` one after the other, in the order they came, then
     /// every later write straight to it. Resolves once the queue is empty.
-    pub fn switch_to(self: &Arc<Self>, target: Arc<dyn StateSink>, executor: &BackgroundExecutor) -> Task<()> {
+    pub fn switch_to(
+        self: &Arc<Self>,
+        target: Arc<dyn StateSink>,
+        executor: &BackgroundExecutor,
+    ) -> Task<()> {
         self.inner.lock().target = Target::Flushing;
         let this = self.clone();
         executor.spawn(async move {
@@ -771,8 +780,12 @@ pub fn take_writer_from_window(
             location.id, window.pid
         )
     })?;
-    let client = HostClient::connect(&socket, options, executor)
-        .map_err(|error| format!("asking the window (pid {}) for the writer: {error:#}", window.pid))?;
+    let client = HostClient::connect(&socket, options, executor).map_err(|error| {
+        format!(
+            "asking the window (pid {}) for the writer: {error:#}",
+            window.pid
+        )
+    })?;
 
     enum Heard {
         Locked(Result<StateWriter, OpenError>),
@@ -902,7 +915,9 @@ pub fn start_handover(
             Ok(child) => child,
             Err(error) => {
                 cx.update(|cx| finish(&id, Err(String::new()), cx));
-                return Err(error.context(format!("starting the engine host; see {}", log.display())));
+                return Err(
+                    error.context(format!("starting the engine host; see {}", log.display()))
+                );
             }
         };
         let timeout = cx.background_executor().timer(times.start_timeout).fuse();
@@ -918,7 +933,9 @@ pub fn start_handover(
         }
         if !asked {
             cx.update(|cx| finish(&id, Err(String::new()), cx));
-            let exited = exited.map(|status| format!(" (it exited: {status})")).unwrap_or_default();
+            let exited = exited
+                .map(|status| format!(" (it exited: {status})"))
+                .unwrap_or_default();
             bail!(
                 "the engine host did not start within {}s{exited}; see {}",
                 times.start_timeout.as_secs(),

@@ -817,7 +817,10 @@ fn host_connections(cx: &mut TestAppContext) -> usize {
 }
 
 /// Waits for `condition`, letting the app run, with a generous guard against a hang.
-pub(crate) fn wait_for(cx: &mut TestAppContext, mut condition: impl FnMut(&mut TestAppContext) -> bool) {
+pub(crate) fn wait_for(
+    cx: &mut TestAppContext,
+    mut condition: impl FnMut(&mut TestAppContext) -> bool,
+) {
     let guard = std::time::Instant::now() + Duration::from_secs(30);
     loop {
         cx.run_until_parked();

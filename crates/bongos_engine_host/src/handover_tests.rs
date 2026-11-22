@@ -215,12 +215,18 @@ fn serve_host(
 
 fn is_remote(fixture: &Fixture, cx: &mut TestAppContext) -> bool {
     let id = fixture.location().id.clone();
-    cx.update(|cx| EngineAccesses::get(&id, cx)).is_some_and(|access| !access.is_local())
+    cx.update(|cx| EngineAccesses::get(&id, cx))
+        .is_some_and(|access| !access.is_local())
 }
 
 /// Moves the branch of task `l1` from `from` to `to` (a compare-and-set, so a write that does
 /// not land in order is a conflict that changes nothing).
-fn write(repo: &ProjectRepo, from: Option<&str>, to: &str, cx: &TestAppContext) -> Task<Result<()>> {
+fn write(
+    repo: &ProjectRepo,
+    from: Option<&str>,
+    to: &str,
+    cx: &TestAppContext,
+) -> Task<Result<()>> {
     let repo = repo.clone();
     let ops = vec![StateOp::Set {
         task: "l1".to_string(),
@@ -254,7 +260,9 @@ async fn a_handover_drains_then_moves_the_writer_and_the_window_attaches_to_the_
     let taken = ask_for_writer(&fixture, cx);
     wait_for(cx, |_| log(&state).contains(&"drain".to_string()));
     // The window still holds the writer during the drain: its own write lands at once.
-    write(&fixture.repo, Some("before"), "during", cx).await.unwrap();
+    write(&fixture.repo, Some("before"), "during", cx)
+        .await
+        .unwrap();
     let during = generation(fixture.repo.state().unwrap());
     assert!(during > before, "{during} > {before}");
     assert!(taken.try_recv().is_err(), "the host waits on the lock");
@@ -287,7 +295,9 @@ async fn a_handover_drains_then_moves_the_writer_and_the_window_attaches_to_the_
     assert!(after > during, "{after} > {during}");
 
     // From now on the window writes through the host and reads what the host wrote.
-    write(&fixture.repo, Some("queued"), "later", cx).await.unwrap();
+    write(&fixture.repo, Some("queued"), "later", cx)
+        .await
+        .unwrap();
     assert_eq!(branch_of(host_state, "l1").as_deref(), Some("later"));
     assert_eq!(
         branch_of(fixture.repo.state().unwrap(), "l1").as_deref(),
@@ -498,9 +508,8 @@ async fn a_host_that_never_takes_the_lock_gives_the_writer_back(cx: &mut TestApp
         cx.executor(),
     )
     .unwrap();
-    let released = cx.background_spawn(
-        asking.request_unbounded(HostCommand::Host(crate::HostCtl::Handover)),
-    );
+    let released =
+        cx.background_spawn(asking.request_unbounded(HostCommand::Host(crate::HostCtl::Handover)));
     wait_for(cx, |_| writer_of(&fixture).is_released());
     let queued = write(&fixture.repo, None, "queued", cx);
     released.await.unwrap();
@@ -526,7 +535,9 @@ async fn a_host_that_never_takes_the_lock_gives_the_writer_back(cx: &mut TestApp
     )
     .unwrap();
     assert_eq!(client.welcomed().mode, HostMode::Window);
-    write(&fixture.repo, Some("queued"), "back", cx).await.unwrap();
+    write(&fixture.repo, Some("queued"), "back", cx)
+        .await
+        .unwrap();
     assert!(fixture.repo.sink().is_none());
 }
 
@@ -537,12 +548,9 @@ fn options_as(fixture: &Fixture, own_pid: u32) -> ClientOptions {
     options
 }
 
-/// A pid that ran and ended.
-fn dead_pid() -> u32 {
-    let mut child = std::process::Command::new("true").spawn().unwrap();
-    let pid = child.id();
-    child.wait().unwrap();
-    pid
+/// A pid no process has: above the largest pid Linux hands out (`pid_max` is at most 2^22).
+fn dead_pid(n: u32) -> u32 {
+    i32::MAX as u32 - n
 }
 
 // A third process opening the project while `moving` is set does not keep the lock: it waits
@@ -575,7 +583,10 @@ async fn an_opener_during_a_move_waits_and_attaches_as_a_client(cx: &mut TestApp
         retaken = retaken || fixture.repo.retake_writer().is_ok();
         retaken
     });
-    assert!(opened.try_recv().is_err(), "it waits while the move is recorded");
+    assert!(
+        opened.try_recv().is_err(),
+        "it waits while the move is recorded"
+    );
     cx.update(|cx| host.take_back(cx)).unwrap();
 
     let mut result = None;
@@ -622,8 +633,8 @@ async fn a_stale_move_with_both_processes_dead_is_ignored(cx: &mut TestAppContex
     cx.executor().allow_parking();
     let fixture = fixture();
     let location = fixture.location().clone();
-    let dead_window = dead_pid();
-    let dead_host = dead_pid();
+    let dead_window = dead_pid(1);
+    let dead_host = dead_pid(2);
     futures::executor::block_on(fixture.repo.release_writer(LONG)).unwrap();
     write_host_file(
         &location,
