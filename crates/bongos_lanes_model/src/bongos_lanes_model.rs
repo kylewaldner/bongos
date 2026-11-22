@@ -33,8 +33,9 @@ pub use state::{
     stop_at_job_boundary, stop_lane,
 };
 pub use table::{
-    Binding, Diagnostic, DispatchRule, Exemption, LaneKind, LaneTable, ParseError, Pin, TreeSpec,
-    ValidationContext, names_lane_instance, parse, prompt_lane_problems, validate_lane_table,
+    Binding, Diagnostic, DispatchRule, Exemption, LaneKind, LaneTable, Locations, ParseError, Pin,
+    TreeMode, TreeSpec, ValidationContext, names_lane_instance, parse, prompt_lane_problems,
+    validate_lane_table,
 };
 
 #[cfg(test)]

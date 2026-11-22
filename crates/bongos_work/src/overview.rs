@@ -280,11 +280,7 @@ pub(crate) fn dump_text(rows: &[RepositoryRow], stats: &Stats) -> String {
     for row in rows {
         writeln!(text, "repository {}", row.name).ok();
         writeln!(text, "  path: {}", row.path.display()).ok();
-        let source = match row.root_source {
-            RootSource::Own => "own",
-            RootSource::Default => "default",
-            RootSource::Central => "central",
-        };
+        let source = row.root_source.label();
         writeln!(
             text,
             "  root: {source} {}",
