@@ -10,6 +10,7 @@
 //! dispatcher (`dispatcher`, `dispatch_job`) picks, starts and ends the lanes' jobs in one loop,
 //! with the pick extensions of other features (`pick_extension`) taking part in its picks;
 //! `adopt` gives a stopped or halted task to a free lane, and `accept_graph` lands the graph stamp.
+//! A prepared task's first job runs its rule's staleness script first (`staleness`).
 
 mod accept_graph;
 mod actions;
@@ -34,6 +35,7 @@ mod roots;
 mod runs;
 mod scope;
 mod settings;
+mod staleness;
 mod store;
 mod task_trees;
 
@@ -58,10 +60,11 @@ pub use create::{CreateError, check_root, create_below_existing, lexical};
 pub use definitions::{LANES_FILE, LANES_FOLDER, prompt_lane_diagnostics, validate_folder};
 pub use dispatch_job::{DROPPED_BEFORE_START, HISTORY_BY};
 pub use dispatcher::{
-    DEFAULT_DISPATCHER, DISPATCHER_KEY, Dispatcher, DispatcherConfig, DispatcherRecord, JobCommit,
-    JobDefinitionPolicy, JobEngine, JobSetup, Lanes, LanesHost, LanesParts, LanesStarted,
-    NOT_STARTED_BEFORE_A_CRASH, NOTHING_READY, PROJECT_UNATTENDED, RecordedBound, StartLanes,
-    StartRefusal, VerifiedCommitPolicy, dispatcher_record, put_dispatcher,
+    AheadLanding, DEFAULT_DISPATCHER, DISPATCHER_KEY, Dispatcher, DispatcherConfig,
+    DispatcherRecord, JobCommit, JobDefinitionPolicy, JobEngine, JobSetup, Lanes, LanesHost,
+    LanesParts, LanesStarted, NOT_STARTED_BEFORE_A_CRASH, NOTHING_READY, PROJECT_UNATTENDED,
+    RecordedBound, StartLanes, StartRefusal, VerifiedCommitPolicy, dispatcher_record,
+    put_dispatcher,
 };
 pub use done_owners::CLEARED_NO_CHECKS;
 pub use env::{apply_env, second_tree_env, tip_env};
@@ -100,6 +103,10 @@ pub use roots::{LaneRootResolver, LaneTables};
 pub use runs::{LaneActivity, LaneLiveSource, LaneRuns, OwnedScope, SOURCE_NAME};
 pub use scope::LaneRunScope;
 pub use settings::{LanesHostSettings, LanesOnInterruption, LanesOnLastWindowClose, LanesSettings};
+pub use staleness::{
+    PinnedTree, Staleness, StalenessCheck, run_staleness_script, staleness_answer,
+    staleness_program,
+};
 pub use store::{
     LANE_PREFIX, LANES_NAMESPACE, OWNER_PREFIX, delete_lane, delete_owner, put_lane, put_owner,
     read_state, read_state_in, write_state,
@@ -170,6 +177,8 @@ mod roots_tests;
 mod runs_tests;
 #[cfg(test)]
 mod scope_tests;
+#[cfg(test)]
+mod staleness_tests;
 #[cfg(test)]
 mod task_trees_tests;
 #[cfg(test)]

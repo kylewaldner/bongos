@@ -108,6 +108,10 @@ pub struct LaneStatus {
 pub struct LanesStatus {
     /// `None` when no dispatcher was started.
     pub phase: Option<DispatcherPhase>,
+    /// The commit the lane table is read at.
+    pub table_commit: Option<String>,
+    /// Why a newer lane table is not adopted, while the definition policy says to wait.
+    pub table_wait: Option<String>,
     pub lanes: Vec<LaneStatus>,
 }
 
@@ -305,11 +309,16 @@ fn status(parts: &LanesParts) -> Result<LanesStatus> {
     let (state, record) = parts
         .writer
         .transact(|tx| Ok((read_state_in(tx)?, dispatcher_record(tx)?)))?;
-    let phase = record.map(|record| match (&record.ended, &record.stopped_by) {
-        (Some(end), _) => DispatcherPhase::Ended(*end),
-        (None, Some(_)) => DispatcherPhase::Pausing,
-        (None, None) => DispatcherPhase::Running,
-    });
+    let phase = record
+        .as_ref()
+        .map(|record| match (&record.ended, &record.stopped_by) {
+            (Some(end), _) => DispatcherPhase::Ended(*end),
+            (None, Some(_)) => DispatcherPhase::Pausing,
+            (None, None) => DispatcherPhase::Running,
+        });
+    let (table_commit, table_wait) = record
+        .map(|record| (record.table_commit, record.table_wait))
+        .unwrap_or_default();
     let lanes = state
         .lanes
         .values()
@@ -322,7 +331,12 @@ fn status(parts: &LanesParts) -> Result<LanesStatus> {
             stop_requested: lane.stop_requested.is_some(),
         })
         .collect();
-    Ok(LanesStatus { phase, lanes })
+    Ok(LanesStatus {
+        phase,
+        table_commit,
+        table_wait,
+        lanes,
+    })
 }
 
 /// How the dispatcher's run ends with the lanes in `state`, or `None` while a lane is not at

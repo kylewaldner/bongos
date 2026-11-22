@@ -164,6 +164,7 @@ fn queue_job(run_id: Option<&str>) -> Assignment {
         reason: "queue item".to_string(),
         owner_change: Vec::new(),
         refresh_first: false,
+        refresh: None,
         run_id: run_id.map(str::to_string),
     }
 }

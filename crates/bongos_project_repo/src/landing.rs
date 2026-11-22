@@ -391,6 +391,14 @@ impl ProjectRepo {
         self.engine.last_events.lock().get(change_id).cloned()
     }
 
+    /// Whether this process is landing `change_id` or will at once: a `land` of it runs, or it
+    /// is a quick edit made here whose landing has not returned yet. A `Requested` change that is
+    /// neither, with no landing event, was left by an earlier process.
+    pub fn landing_in_process(&self, change_id: &str) -> bool {
+        self.engine.is_landing(change_id)
+            || self.engine.quick_edits_to_land.lock().contains(change_id)
+    }
+
     /// The repository's events from now on.
     pub fn repo_events(&self) -> mpsc::UnboundedReceiver<RepoEvent> {
         let (sender, receiver) = mpsc::unbounded();
