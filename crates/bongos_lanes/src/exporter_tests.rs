@@ -6,7 +6,7 @@ use tempfile::TempDir;
 use util::rel_path::{RelPath, RelPathBuf};
 
 use crate::exporter::{EXPORT_NAMESPACE, LanesExporter, STATE_FILE};
-use crate::store::{LANES_NAMESPACE, OWNERS_NAMESPACE, read_state, write_state};
+use crate::store::{LANES_NAMESPACE, read_state, write_state};
 use crate::test_support::{lanes_state, writer};
 
 fn file(name: &str, text: &str) -> (RelPathBuf, String) {
@@ -16,21 +16,15 @@ fn file(name: &str, text: &str) -> (RelPathBuf, String) {
     )
 }
 
-/// Every row the exporter keeps, by namespace and key.
-fn rows(read: &StateRead) -> Vec<(String, String, toml::Value)> {
-    let mut all = Vec::new();
-    for namespace in [OWNERS_NAMESPACE, LANES_NAMESPACE] {
-        for (key, value) in read.kv(namespace).scan("").unwrap() {
-            all.push((namespace.to_string(), key, value));
-        }
-    }
-    all
+/// Every row of the lanes namespace, by key.
+fn rows(read: &StateRead) -> Vec<(String, toml::Value)> {
+    read.kv(LANES_NAMESPACE).scan("").unwrap()
 }
 
 #[test]
-fn lanes_the_exporter_owns_the_lanes_folder() {
+fn lanes_the_exporter_owns_the_lanes_file() {
     assert_eq!(LanesExporter.namespace(), EXPORT_NAMESPACE);
-    assert_eq!(STATE_FILE, "lanes/state.toml");
+    assert_eq!(STATE_FILE, "lanes.toml");
 }
 
 #[test]
@@ -39,12 +33,21 @@ fn lanes_owner_and_lane_records_round_trip_through_the_exporter() {
     let source = writer(&root);
     let state = lanes_state();
     source.transact(|tx| write_state(tx, &state)).unwrap();
+    let records = source.read(|read| Ok(rows(read))).unwrap();
+    // The dispatcher record is never exported: a restore never claims a live host.
+    source
+        .transact(|tx| {
+            tx.kv(LANES_NAMESPACE)
+                .put("dispatcher", toml::Value::String("host 1".to_string()))
+        })
+        .unwrap();
 
     let files = source.read(|read| LanesExporter.export(read)).unwrap();
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].0.as_unix_str(), STATE_FILE);
     assert!(files[0].1.contains("[owners.feature]"), "{}", files[0].1);
     assert!(files[0].1.contains("[lanes.build-1"), "{}", files[0].1);
+    assert!(!files[0].1.contains("host 1"), "{}", files[0].1);
 
     // Restore into another store that holds a stale owner and lane: they are replaced.
     let other_root = TempDir::new().unwrap();
@@ -55,7 +58,13 @@ fn lanes_owner_and_lane_records_round_trip_through_the_exporter() {
         stale_lane.clone(),
         bongos_lanes_model::LaneRecord::new(&stale_lane, bongos_lanes_model::LaneState::Halted),
     );
-    target.transact(|tx| write_state(tx, &stale)).unwrap();
+    target
+        .transact(|tx| {
+            write_state(tx, &stale)?;
+            tx.kv(LANES_NAMESPACE)
+                .put("dispatcher", toml::Value::String("a live host".to_string()))
+        })
+        .unwrap();
     target
         .transact(|tx| LanesExporter.import(tx, &files))
         .unwrap();
@@ -63,7 +72,8 @@ fn lanes_owner_and_lane_records_round_trip_through_the_exporter() {
     assert_eq!(target.read(read_state).unwrap(), state);
     assert_eq!(
         target.read(|read| Ok(rows(read))).unwrap(),
-        source.read(|read| Ok(rows(read))).unwrap()
+        records,
+        "the owner and lane records come back as they were, and no dispatcher record"
     );
 }
 
@@ -110,7 +120,12 @@ fn lanes_a_malformed_snapshot_is_refused_and_leaves_the_state_alone() {
         file("elsewhere/state.toml", ""),
     ] {
         let result = target.transact(|tx| LanesExporter.import(tx, std::slice::from_ref(&bad)));
-        assert!(result.is_err(), "{} was accepted: {}", bad.0.as_unix_str(), bad.1);
+        assert!(
+            result.is_err(),
+            "{} was accepted: {}",
+            bad.0.as_unix_str(),
+            bad.1
+        );
         assert_eq!(target.read(|read| Ok(rows(read))).unwrap(), before);
     }
 }

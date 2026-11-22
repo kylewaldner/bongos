@@ -1,13 +1,15 @@
 //! The `lane-run-scope` approval hook, one of the `declared-scope` rule's hooks: a change by a
 //! workflow run that a lane runs as its job is approved when everything it touches is inside the
 //! `documents/` or `tasks/` folder of the top-level task its lane owns. The lane and its task come
-//! from the lanes state ([`LaneRuns::owned_scope`]), never from the change. An edit of the owned
-//! task's own definition, or anything outside the scope, waits for a person. A run no lane holds
-//! (one started by hand) gets no opinion here, so without another rule it waits for a person too.
+//! from the lanes state ([`LaneRuns::owned_scope_in`]), never from the change. An edit of the
+//! owned task's own definition, anything outside the scope, and any change by a run no lane holds
+//! (one started by hand) get no opinion here, so they wait for a person.
 
-use bongos_project_repo::{ApprovalHook, ApprovalHooks, ApprovalInput, ApprovalOpinion, AutomaticRule};
+use bongos_project_repo::{
+    ApprovalHook, ApprovalHooks, ApprovalInput, ApprovalOpinion, AutomaticRule,
+};
 use bongos_project_repo_model::AuthorKind;
-use bongos_project_repo_model::layout::{DOCUMENTS_DIR, TASK_FILE, TASKS_DIR};
+use bongos_project_repo_model::layout::{DOCUMENTS_DIR, TASKS_DIR};
 use gpui::App;
 
 use crate::runs::LaneRuns;
@@ -57,6 +59,39 @@ fn below(folder: &str, task_folder: &str) -> bool {
     task_folder.starts_with(&format!("{}{TASKS_DIR}/", prefix(folder)))
 }
 
+/// Whether every task and file `input`'s change touches lies under the `documents/` or `tasks/`
+/// folder of the top-level task `task`, in master and in the change. The task's own `task.toml`
+/// (its goal, edges, size, checks, work kind and areas) is outside.
+fn inside_owned_task(input: &ApprovalInput, task: &str) -> bool {
+    let Some(root) = input.master.node(task) else {
+        return false;
+    };
+    let folder = root.folder.as_str();
+    let summary = input.summary;
+    let touched = summary
+        .tasks_added
+        .iter()
+        .chain(&summary.tasks_removed)
+        .chain(&summary.tasks_redefined)
+        .chain(&summary.reparented);
+    for id in touched {
+        if id == task {
+            return false;
+        }
+        for tree in [input.master, input.change] {
+            if let Some(node) = tree.node(id)
+                && !below(folder, &node.folder)
+            {
+                return false;
+            }
+        }
+    }
+    summary
+        .files
+        .iter()
+        .all(|(path, _)| in_owned_scope(folder, path))
+}
+
 impl ApprovalHook for LaneRunScope {
     fn name(&self) -> &str {
         Self::NAME
@@ -74,51 +109,12 @@ impl ApprovalHook for LaneRunScope {
         let Some(run) = author.run.as_deref() else {
             return ApprovalOpinion::NoOpinion;
         };
-        let Some(scope) = self.runs.owned_scope(input.project_id, run) else {
+        let Some(scope) = self.runs.owned_scope_in(input.project_id, run) else {
             return ApprovalOpinion::NoOpinion;
         };
         let (lane, task) = (&scope.lane, scope.task.0.as_str());
-        let Some(root) = input.master.node(task) else {
-            return ApprovalOpinion::NeedsPerson(format!(
-                "lane {lane} owns task {task}, which is not in master"
-            ));
-        };
-        let folder = root.folder.as_str();
-        let own_file = format!("{}{TASK_FILE}", prefix(folder));
-        let touched = input
-            .summary
-            .tasks_added
-            .iter()
-            .chain(&input.summary.tasks_removed)
-            .chain(&input.summary.tasks_redefined)
-            .chain(&input.summary.reparented);
-        for id in touched {
-            if id == task {
-                return ApprovalOpinion::NeedsPerson(format!(
-                    "lane {lane} edits {own_file}, the definition of its task {task}"
-                ));
-            }
-            for tree in [input.master, input.change] {
-                if let Some(node) = tree.node(id)
-                    && !below(folder, &node.folder)
-                {
-                    return ApprovalOpinion::NeedsPerson(format!(
-                        "task {id} is outside the task {task} lane {lane} owns"
-                    ));
-                }
-            }
-        }
-        for (path, _) in &input.summary.files {
-            if *path == own_file {
-                return ApprovalOpinion::NeedsPerson(format!(
-                    "lane {lane} edits {own_file}, the definition of its task {task}"
-                ));
-            }
-            if !in_owned_scope(folder, path) {
-                return ApprovalOpinion::NeedsPerson(format!(
-                    "{path} is outside the documents and tasks of task {task} that lane {lane} owns"
-                ));
-            }
+        if !inside_owned_task(input, task) {
+            return ApprovalOpinion::NoOpinion;
         }
         ApprovalOpinion::Approve(format!(
             "lane {lane} run {run} changed only the documents and tasks of its task {task}"

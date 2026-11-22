@@ -5,8 +5,8 @@
 
 use std::path::Path;
 
-use bongos_lanes_model::{LaneTable, ValidationContext, parse, prompt_lane_problems};
 use bongos_lanes_model::validate_lane_table;
+use bongos_lanes_model::{LaneTable, ValidationContext, parse, prompt_lane_problems};
 use bongos_project_repo::DefinitionFolders;
 use bongos_project_repo_model::Problem;
 use bongos_workflow::ValidationHooks;
@@ -87,33 +87,47 @@ fn lane_table_near(dir: &Path) -> Option<LaneTable> {
     parse(&text).ok()
 }
 
-/// The validation hook: every prompt of `definition` that names an instance of a declared lane
-/// kind is an error on the node's `prompt` line, whose message names the prompt's own line. A
-/// project with no lane table is not checked.
+/// Whether a dispatch rule of `table` names the workflow `name` (to run or to refresh).
+fn named_by_a_rule(table: &LaneTable, name: &str) -> bool {
+    table.rules.iter().any(|rule| {
+        [&rule.workflow, &rule.refresh]
+            .into_iter()
+            .flatten()
+            .any(|named| named.value == name)
+    })
+}
+
+/// The validation hook, run by `workflow: validate` and by the workflow landing check: every
+/// prompt or script of a workflow that a dispatch rule names, that names an instance of a
+/// declared lane kind (`build-2`), is an error on the node's `prompt` or `script` line, whose
+/// message names the file's own line. A project with no lane table, and a workflow no rule
+/// names, are not checked.
 pub fn prompt_lane_diagnostics(definition: &Definition, dir: &Path) -> Vec<Diagnostic> {
     let Some(table) = lane_table_near(dir) else {
         return Vec::new();
     };
+    if !named_by_a_rule(&table, &definition.name) {
+        return Vec::new();
+    }
     let kinds = table.kind_names();
     let mut out = Vec::new();
     for node in &definition.nodes {
-        let Some(prompt) = &node.prompt else {
-            continue;
-        };
-        // A prompt that cannot be read is reported by the definition's own validation.
-        let Ok(text) = std::fs::read_to_string(dir.join(&prompt.value)) else {
-            continue;
-        };
-        out.extend(
-            prompt_lane_problems(&prompt.value, &text, &kinds)
-                .into_iter()
-                .map(|problem| Diagnostic {
-                    node: Some(node.name.clone()),
-                    line: prompt.line,
-                    severity: Severity::Error,
-                    message: problem.message,
-                }),
-        );
+        for file in [&node.prompt, &node.script].into_iter().flatten() {
+            // A file that cannot be read is reported by the definition's own validation.
+            let Ok(text) = std::fs::read_to_string(dir.join(&file.value)) else {
+                continue;
+            };
+            out.extend(
+                prompt_lane_problems(&file.value, &text, &kinds)
+                    .into_iter()
+                    .map(|problem| Diagnostic {
+                        node: Some(node.name.clone()),
+                        line: file.line,
+                        severity: Severity::Error,
+                        message: problem.message,
+                    }),
+            );
+        }
     }
     out
 }

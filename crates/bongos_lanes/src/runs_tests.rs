@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use bongos_lanes_model::{LaneId, TaskId};
+use bongos_lanes_model::{LaneId, OwnerState, TaskId};
 use bongos_project_repo::{ActivitySource, LiveSource};
 use bongos_project_repo_model::checks::{CheckOutcome, LiveFacts, StartedInput, started_unchanged};
 use bongos_project_repo_model::{Author, ChangeMeta, summarize};
@@ -36,7 +36,10 @@ fn lanes_a_lane_owned_task_counts_as_started() {
 
     // Check 6 keeps the shape of the owned task.
     let master = tree_with(&[("tasks/feature", ""), ("tasks/other", "")]);
-    let new = tree_with(&[("tasks/feature", "size = 3\n"), ("tasks/other", "size = 3\n")]);
+    let new = tree_with(&[
+        ("tasks/feature", "size = 3\n"),
+        ("tasks/other", "size = 3\n"),
+    ]);
     let summary = summarize(&master, &new);
     let meta = ChangeMeta::new("resize", Author::agent("agent"));
     let outcome = started_unchanged(&StartedInput {
@@ -56,6 +59,29 @@ fn lanes_a_lane_owned_task_counts_as_started() {
 }
 
 #[test]
+fn lanes_an_owner_counts_as_started_while_active_stopped_halted_or_ahead() {
+    for (state, started) in [
+        (OwnerState::Active, true),
+        (OwnerState::Stopped, true),
+        (OwnerState::Halted, true),
+        (OwnerState::Ahead, true),
+        (OwnerState::Prepared, false),
+        (OwnerState::Done, false),
+    ] {
+        let mut lanes = lanes_state();
+        lanes.owners.get_mut(&TaskId::new("feature")).unwrap().state = state;
+        // No job on the task, so only the owner record can make it started.
+        for lane in lanes.lanes.values_mut() {
+            lane.job = None;
+        }
+        let runs = LaneRuns::default();
+        runs.set(PROJECT, lanes);
+        let source = LaneLiveSource { runs };
+        assert_eq!(source.started("feature"), started, "{state}");
+    }
+}
+
+#[test]
 fn lanes_a_task_is_no_longer_started_once_its_lanes_state_is_forgotten() {
     let runs = runs();
     let source = LaneLiveSource { runs: runs.clone() };
@@ -67,7 +93,9 @@ fn lanes_a_task_is_no_longer_started_once_its_lanes_state_is_forgotten() {
 fn lanes_runs_load_from_the_state_store() {
     let root = TempDir::new().unwrap();
     let writer = writer(&root);
-    writer.transact(|tx| write_state(tx, &lanes_state())).unwrap();
+    writer
+        .transact(|tx| write_state(tx, &lanes_state()))
+        .unwrap();
     let runs = LaneRuns::default();
     writer.read(|read| runs.load(PROJECT, read)).unwrap();
     assert_eq!(runs.state(PROJECT), lanes_state());
@@ -77,14 +105,16 @@ fn lanes_runs_load_from_the_state_store() {
 fn lanes_the_owned_scope_of_a_lane_run_is_its_lanes_task() {
     let runs = runs();
     assert_eq!(
-        runs.owned_scope(PROJECT, "run-lane"),
+        runs.owned_scope_in(PROJECT, "run-lane"),
         Some(OwnedScope {
             lane: LaneId::new("build", 1),
             task: TaskId::new("feature"),
         })
     );
-    assert_eq!(runs.owned_scope(PROJECT, "run-by-hand"), None);
-    assert_eq!(runs.owned_scope("project-2", "run-lane"), None);
+    assert_eq!(runs.owned_scope_in(PROJECT, "run-by-hand"), None);
+    assert_eq!(runs.owned_scope_in("project-2", "run-lane"), None);
+    assert_eq!(runs.owned_scope("run-lane"), Some(TaskId::new("feature")));
+    assert_eq!(runs.owned_scope("run-by-hand"), None);
 }
 
 #[test]

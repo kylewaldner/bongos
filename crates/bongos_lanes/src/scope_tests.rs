@@ -4,18 +4,25 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use bongos_project_repo::{ApprovalHook, ApprovalInput, ApprovalOpinion, AutomaticRule};
-use bongos_project_repo_model::checks::{ApprovalPolicy, ApprovalVerdict, Judgment, LiveFacts, judge};
+use bongos_project_repo_model::checks::{
+    ApprovalPolicy, ApprovalVerdict, Judgment, LiveFacts, judge,
+};
 use bongos_project_repo_model::{Author, AuthorKind, ChangeMeta, ChangeSummary, FileChange};
 
 use crate::runs::LaneRuns;
 use crate::scope::LaneRunScope;
 use crate::test_support::{lanes_state, tree};
+use bongos_lanes_model::{LanesState, OwnerState, TaskId};
 
 const PROJECT: &str = "project-1";
 
 fn hook() -> LaneRunScope {
+    hook_with(lanes_state())
+}
+
+fn hook_with(state: LanesState) -> LaneRunScope {
     let runs = LaneRuns::default();
-    runs.set(PROJECT, lanes_state());
+    runs.set(PROJECT, state);
     LaneRunScope::new(runs)
 }
 
@@ -41,10 +48,18 @@ fn opinion_and_verdict(
     author: Author,
     summary: &ChangeSummary,
 ) -> (ApprovalOpinion, ApprovalVerdict) {
+    judged_by(&hook(), author, summary)
+}
+
+/// `hook`'s opinion of `summary` by `author`, and check 9's verdict with only this hook.
+fn judged_by(
+    hook: &LaneRunScope,
+    author: Author,
+    summary: &ChangeSummary,
+) -> (ApprovalOpinion, ApprovalVerdict) {
     let master = tree(&["tasks/feature", "tasks/feature/tasks/leaf", "tasks/other"]);
     let meta = ChangeMeta::new("change", author);
     let live = LiveFacts::from_states(BTreeMap::new());
-    let hook = hook();
     let opinion = hook.judge(&ApprovalInput {
         change_id: "c1",
         project_id: PROJECT,
@@ -58,8 +73,12 @@ fn opinion_and_verdict(
     });
     let kind = meta.author.kind();
     let policy = ApprovalPolicy::default();
-    assert_eq!(policy.rule_for(kind), hook.rule());
-    let rule_opinions = [(hook.name().to_string(), opinion.clone())];
+    // Check 9 consults a rule's hook only for the author kinds the policy gives that rule.
+    let rule_opinions = if policy.rule_for(kind) == hook.rule() {
+        vec![(hook.name().to_string(), opinion.clone())]
+    } else {
+        Vec::new()
+    };
     let verdict = judge(&Judgment {
         policy: &policy,
         author_kind: kind,
@@ -94,7 +113,10 @@ fn lanes_the_hook_is_the_declared_scope_rule() {
 #[test]
 fn lanes_a_lane_runs_change_inside_its_owned_documents_and_tasks_is_approved() {
     let (opinion, verdict) = opinion_and_verdict(workflow_run("run-lane"), &inside());
-    assert!(matches!(opinion, ApprovalOpinion::Approve(_)), "{opinion:?}");
+    assert!(
+        matches!(opinion, ApprovalOpinion::Approve(_)),
+        "{opinion:?}"
+    );
     assert!(verdict.is_approved(), "{verdict:?}");
 }
 
@@ -123,36 +145,77 @@ fn lanes_a_lane_runs_edit_of_its_top_level_task_toml_waits_for_a_person() {
         &["feature"],
     );
     let (opinion, verdict) = opinion_and_verdict(workflow_run("run-lane"), &own_file);
-    match &opinion {
-        ApprovalOpinion::NeedsPerson(reason) => {
-            assert!(reason.contains("tasks/feature/task.toml"), "{reason}")
-        }
-        other => panic!("expected a person, got {other:?}"),
-    }
+    assert_eq!(opinion, ApprovalOpinion::NoOpinion);
     assert!(!verdict.is_approved(), "{verdict:?}");
+    assert!(verdict.waiting_reason().is_some());
 
     // The file alone, without the summary naming the task, waits too.
     let file_only = summary(&[("tasks/feature/task.toml", FileChange::Modified)], &[]);
-    let (opinion, _) = opinion_and_verdict(workflow_run("run-lane"), &file_only);
-    assert!(matches!(opinion, ApprovalOpinion::NeedsPerson(_)), "{opinion:?}");
+    let (opinion, verdict) = opinion_and_verdict(workflow_run("run-lane"), &file_only);
+    assert_eq!(opinion, ApprovalOpinion::NoOpinion);
+    assert!(!verdict.is_approved(), "{verdict:?}");
+
+    // With the documents change beside it, the whole change still waits.
+    let mixed = summary(
+        &[
+            ("tasks/feature/documents/design.md", FileChange::Added),
+            ("tasks/feature/task.toml", FileChange::Modified),
+        ],
+        &["feature"],
+    );
+    let (opinion, verdict) = opinion_and_verdict(workflow_run("run-lane"), &mixed);
+    assert_eq!(opinion, ApprovalOpinion::NoOpinion);
+    assert!(!verdict.is_approved(), "{verdict:?}");
 }
 
 #[test]
 fn lanes_a_lane_runs_change_outside_its_owned_scope_waits_for_a_person() {
     for outside in [
-        summary(&[("tasks/other/task.toml", FileChange::Modified)], &["other"]),
+        summary(
+            &[("tasks/other/task.toml", FileChange::Modified)],
+            &["other"],
+        ),
         summary(&[("tasks/feature/plan.md", FileChange::Modified)], &[]),
         summary(&[("project.toml", FileChange::Modified)], &[]),
         summary(
-            &[("tasks/feature/documents/../../other/task.toml", FileChange::Modified)],
+            &[(
+                "tasks/feature/documents/../../other/task.toml",
+                FileChange::Modified,
+            )],
             &[],
         ),
     ] {
         let (opinion, verdict) = opinion_and_verdict(workflow_run("run-lane"), &outside);
-        assert!(
-            matches!(opinion, ApprovalOpinion::NeedsPerson(_)),
-            "{outside:?}: {opinion:?}"
-        );
+        assert_eq!(opinion, ApprovalOpinion::NoOpinion, "{outside:?}");
         assert!(!verdict.is_approved());
+    }
+}
+
+#[test]
+fn lanes_a_lane_preparing_its_task_ahead_lands_inside_it_but_a_stopped_owner_waits() {
+    let with_owner = |state: OwnerState| {
+        let mut lanes = lanes_state();
+        lanes.owners.get_mut(&TaskId::new("feature")).unwrap().state = state;
+        hook_with(lanes)
+    };
+    let (opinion, verdict) = judged_by(
+        &with_owner(OwnerState::Ahead),
+        workflow_run("run-lane"),
+        &inside(),
+    );
+    assert!(
+        matches!(opinion, ApprovalOpinion::Approve(_)),
+        "{opinion:?}"
+    );
+    assert!(verdict.is_approved(), "{verdict:?}");
+    for state in [
+        OwnerState::Stopped,
+        OwnerState::Halted,
+        OwnerState::Prepared,
+        OwnerState::Done,
+    ] {
+        let (opinion, verdict) = judged_by(&with_owner(state), workflow_run("run-lane"), &inside());
+        assert_eq!(opinion, ApprovalOpinion::NoOpinion, "{state}");
+        assert!(!verdict.is_approved(), "{state}: {verdict:?}");
     }
 }

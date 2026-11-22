@@ -42,7 +42,10 @@ fn lanes_a_valid_table_lands_with_its_workflows_and_tasks_taken_as_known() {
 #[test]
 fn lanes_an_invalid_table_is_refused_by_line() {
     // A kind lists a rule nobody declared, on line 6.
-    let undeclared = TABLE.replace("rules = [\"implement\"]", "rules = [\"implement\", \"ship\"]");
+    let undeclared = TABLE.replace(
+        "rules = [\"implement\"]",
+        "rules = [\"implement\", \"ship\"]",
+    );
     let found = reasons("lanes/lanes.toml", &undeclared);
     assert_eq!(found.len(), 1, "{found:?}");
     assert!(
@@ -134,6 +137,67 @@ fn lanes_a_prompt_naming_a_lane_instance_is_refused_by_line() {
         .collect();
     assert_eq!(errors.len(), 1, "{:?}", report.definitions[0].diagnostics);
     assert_eq!(errors[0].severity, Severity::Error);
+}
+
+#[test]
+fn lanes_a_landing_whose_prompt_names_a_lane_instance_is_refused_by_line() {
+    let root = TempDir::new().unwrap();
+    let definitions = definitions(&root, "Read the plan.\nAsk build-2 for help.\n");
+    bongos_workflow::ValidationHooks::register(prompt_lane_diagnostics);
+    // Check 5 (`workflow-valid`) over the change's workflows folder, as a landing runs it.
+    let refusals = bongos_workflow::landing::problems(
+        &definitions.join("workflows"),
+        &["implement".to_string()],
+    );
+    assert_eq!(
+        refusals,
+        [
+            "workflow implement step: node implement, line 7: prompt implement.md line 2 names lane \
+          build-2; name the kind"
+        ],
+    );
+}
+
+#[test]
+fn lanes_a_landing_with_an_invalid_lane_table_is_refused_by_file_and_line() {
+    // Check 1 shows each problem of a registered folder as `<file>: <reason>`.
+    let undeclared = TABLE.replace("rules = [\"implement\"]", "rules = [\"ship\"]");
+    let problems = validate_folder(Path::new("lanes/lanes.toml"), &undeclared);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    let shown = problems[0].to_string();
+    assert!(shown.starts_with("lanes/lanes.toml: line 6: "), "{shown}");
+}
+
+#[test]
+fn lanes_a_workflow_no_dispatch_rule_names_is_not_checked() {
+    let root = TempDir::new().unwrap();
+    let definitions = definitions(&root, "Hand over to build-2.\n");
+    let dir = definitions.join("workflows").join("implement");
+    let other = WORKFLOW.replace("name = \"implement step\"", "name = \"tidy\"");
+    let definition = bongos_workflow_model::parse(&other).unwrap();
+    assert!(prompt_lane_diagnostics(&definition, &dir).is_empty());
+}
+
+#[test]
+fn lanes_a_script_naming_a_lane_instance_is_refused_by_line() {
+    let root = TempDir::new().unwrap();
+    let definitions = definitions(&root, "Implement it.\n");
+    let dir = definitions.join("workflows").join("implement");
+    fs::write(dir.join("gather.py"), "import os\n\nprint('build-1')\n").unwrap();
+    let workflow = WORKFLOW.replace(
+        "[ends.done]",
+        "[nodes.gather]\nkind = \"program\"\nscript = \"gather.py\"\nroutes = [{ to = \"done\" }]\n\n[ends.done]",
+    );
+    let definition = bongos_workflow_model::parse(&workflow).unwrap();
+    let found = prompt_lane_diagnostics(&definition, &dir);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].node.as_deref(), Some("gather"));
+    assert!(
+        found[0]
+            .message
+            .contains("prompt gather.py line 3 names lane build-1"),
+        "{found:?}"
+    );
 }
 
 #[test]

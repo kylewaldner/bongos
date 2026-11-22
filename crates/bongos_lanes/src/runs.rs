@@ -40,12 +40,18 @@ pub struct OwnedScope {
     pub task: TaskId,
 }
 
-/// Whether an owner in `state` holds its task for its lane.
+/// Whether an owner in `state` makes its task started: a lane holds it, working, stopped, halted
+/// or preparing it ahead.
 fn holds_task(state: OwnerState) -> bool {
     matches!(
         state,
-        OwnerState::Active | OwnerState::Stopped | OwnerState::Halted
+        OwnerState::Active | OwnerState::Stopped | OwnerState::Halted | OwnerState::Ahead
     )
+}
+
+/// Whether an owner in `state` lets its lane's runs land inside the task on their own.
+fn works_in_task(state: OwnerState) -> bool {
+    matches!(state, OwnerState::Active | OwnerState::Ahead)
 }
 
 impl LaneRuns {
@@ -83,19 +89,23 @@ impl LaneRuns {
             .unwrap_or_default()
     }
 
-    /// The scope of the run `run_id` of `project_id` when a lane runs it as its job: the lane and
-    /// the top-level task the lane owns. `None` for a run no lane holds, as one started by hand.
-    pub fn owned_scope(&self, project_id: &str, run_id: &str) -> Option<OwnedScope> {
+    /// The top-level task whose lane runs `run_id` as its job, in any project. `None` for a run
+    /// no lane holds, as one started by hand.
+    pub fn owned_scope(&self, run_id: &str) -> Option<TaskId> {
         let known = self.read();
-        let state = known.projects.get(project_id)?;
-        let lane = state.lanes.values().find(|lane| {
-            lane.job
-                .as_ref()
-                .is_some_and(|job| job.run_id == run_id)
-        })?;
-        let id = lane.id();
-        let task = state.task_of(&id)?.clone();
-        Some(OwnedScope { lane: id, task })
+        known
+            .projects
+            .values()
+            .find_map(|state| scope_in(state, run_id))
+            .map(|scope| scope.task)
+    }
+
+    /// The scope of the run `run_id` of `project_id` when a lane runs it as its job: the lane and
+    /// the top-level task the lane owns, with the owner `active` or `ahead`. `None` for a run no
+    /// lane holds, as one started by hand.
+    pub fn owned_scope_in(&self, project_id: &str, run_id: &str) -> Option<OwnedScope> {
+        let known = self.read();
+        scope_in(known.projects.get(project_id)?, run_id)
     }
 
     /// Whether a lane owns `task_id` or runs a job on it, in any project.
@@ -158,6 +168,20 @@ impl LaneRuns {
             })
             .collect()
     }
+}
+
+/// The lane whose job is `run_id` in `state`, and the task its owner record names in state
+/// `active` or `ahead`.
+fn scope_in(state: &LanesState, run_id: &str) -> Option<OwnedScope> {
+    let lane = state
+        .lanes
+        .values()
+        .find(|lane| lane.job.as_ref().is_some_and(|job| job.run_id == run_id))?
+        .id();
+    let task = state.owners.iter().find_map(|(task, owner)| {
+        (owner.lane.as_ref() == Some(&lane) && works_in_task(owner.state)).then(|| task.clone())
+    })?;
+    Some(OwnedScope { lane, task })
 }
 
 /// Makes a task that a lane owns (or works on) started, so a landing never changes the shape of
