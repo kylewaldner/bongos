@@ -17,6 +17,7 @@ mod create;
 mod definitions;
 mod dispatch_job;
 mod dispatcher;
+mod done_owners;
 mod env;
 mod exporter;
 mod hooks;
@@ -59,6 +60,7 @@ pub use dispatcher::{
     NOTHING_READY, PROJECT_UNATTENDED, RecordedBound, StartLanes, StartRefusal,
     VerifiedCommitPolicy, dispatcher_record, put_dispatcher,
 };
+pub use done_owners::CLEARED_NO_CHECKS;
 pub use env::{apply_env, second_tree_env, tip_env};
 pub use exporter::{EXPORT_NAMESPACE, LanesExporter, STATE_FILE};
 pub use hooks::{AFTER_TREE_CREATED, JobHook, JobHooks};
@@ -89,18 +91,19 @@ pub use runs::{LaneActivity, LaneLiveSource, LaneRuns, OwnedScope, SOURCE_NAME};
 pub use scope::LaneRunScope;
 pub use settings::{LanesHostSettings, LanesOnInterruption, LanesOnLastWindowClose, LanesSettings};
 pub use store::{
-    LANE_PREFIX, LANES_NAMESPACE, OWNER_PREFIX, delete_lane, put_lane, put_owner, read_state,
-    read_state_in, write_state,
+    LANE_PREFIX, LANES_NAMESPACE, OWNER_PREFIX, delete_lane, delete_owner, put_lane, put_owner,
+    read_state, read_state_in, write_state,
 };
 pub use task_trees::{
-    LaneLease, LaneTaskTrees, LaneTreeSetup, ProcessEnv, SecondTreeLeases, TopLevelOf, TreeHold,
-    process_env,
+    LaneLease, LaneTaskTrees, LaneTreeSetup, OwedTasks, ProcessEnv, SecondTreeLeases, TopLevelOf,
+    TreeHold, no_top_level, open_projects_owed, process_env,
 };
 
 /// Registers the settings, the `lanes` definition folder and the prompt check, the `lanes` state
 /// exporter, the live and activity sources, and the `lane-run-scope` approval hook, all over one
-/// [`LaneRuns`] kept as a global. Nothing here starts a lane; while `lanes.enabled` is false no
-/// lanes state is known, so the sources and the hook say nothing.
+/// [`LaneRuns`] kept as a global, and the lanes' [`LaneTaskTrees`] as the checks' tree provider.
+/// Nothing here starts a lane; while `lanes.enabled` is false no lanes state is known, so the
+/// sources and the hook say nothing and no tree is lent.
 pub fn init(cx: &mut App) {
     use ::settings::Settings as _;
     LanesSettings::register(cx);
@@ -110,8 +113,18 @@ pub fn init(cx: &mut App) {
     LiveSources::register(Arc::new(LaneLiveSource { runs: runs.clone() }), cx);
     ActivitySources::global().register(Arc::new(LaneActivity { runs: runs.clone() }));
     LaneRunScope::register(runs.clone(), cx);
-    cx.set_global(runs);
+    cx.set_global(runs.clone());
     bongos_work::WorktreeRootResolvers::register(Arc::new(LaneRootResolver), cx);
+    let trees = LaneTaskTrees::new(
+        runs,
+        CurrentJobTrees::global(cx),
+        no_top_level(),
+        process_env(),
+    );
+    trees.set_owed(open_projects_owed(bongos_work::OpenProjectRepos::global(
+        cx,
+    )));
+    trees.register(cx);
 }
 
 #[cfg(test)]
@@ -124,6 +137,8 @@ mod create_tests;
 mod definitions_tests;
 #[cfg(test)]
 mod dispatcher_tests;
+#[cfg(test)]
+mod done_owners_tests;
 #[cfg(test)]
 mod env_tests;
 #[cfg(test)]

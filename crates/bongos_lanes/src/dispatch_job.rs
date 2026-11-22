@@ -19,6 +19,7 @@ use gpui::App;
 use crate::dispatcher::{Dispatcher, JobSetup, PendingJob, environment_refusal};
 use crate::job_trees::CurrentJobTrees;
 use crate::store::{put_lane, put_owner, read_state, read_state_in};
+use crate::task_trees::LaneTaskTrees;
 
 /// Who the history entries of lanes are written by.
 pub const HISTORY_BY: &str = "lanes";
@@ -95,11 +96,15 @@ impl Dispatcher {
     /// Starts the run of a job its lane still holds; returns how to clear a refusal.
     fn start_run(&self, pending: &PendingJob, setup: JobSetup, cx: &mut App) -> Option<Cleared> {
         let trees = setup.trees.clone();
+        let lane_trees = setup.lane_trees.clone();
         let request = self.start_request(pending, setup);
         match self.parts().engine.start(request, cx) {
             Ok(_) => {
                 if let Some(trees) = trees {
                     CurrentJobTrees::set(pending.lane.clone(), trees, cx);
+                }
+                if let (Some(setup), Some(task_trees)) = (lane_trees, LaneTaskTrees::global(cx)) {
+                    task_trees.set_lane(&self.0.config.project, pending.lane.clone(), setup);
                 }
                 None
             }

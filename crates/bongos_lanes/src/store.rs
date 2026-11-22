@@ -97,6 +97,12 @@ pub fn put_owner(tx: &mut StateTx, task: &TaskId, owner: &OwnerRecord) -> Result
         .put(&format!("{OWNER_PREFIX}{}", task.0), value)
 }
 
+/// Removes the owner record of `task`.
+pub fn delete_owner(tx: &mut StateTx, task: &TaskId) -> Result<()> {
+    tx.kv(LANES_NAMESPACE)
+        .delete(&format!("{OWNER_PREFIX}{}", task.0))
+}
+
 /// Writes the record of its lane.
 pub fn put_lane(tx: &mut StateTx, lane: &LaneRecord) -> Result<()> {
     let value = toml::Value::try_from(lane).context("serializing a lane")?;
