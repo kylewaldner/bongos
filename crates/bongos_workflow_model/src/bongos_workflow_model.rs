@@ -9,6 +9,7 @@
 //! `test-support`) drives it with scripted results.
 
 pub mod definition;
+pub mod env;
 pub mod failure;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake;
@@ -23,6 +24,7 @@ pub mod template;
 pub mod validate;
 
 pub use definition::{Definition, ParseError, Warning, parse};
+pub use env::EnvEdit;
 pub use failure::{Failure, FailureClass, FailureReason};
 pub use inputs::{InputValue, resolve};
 pub use layers::{Layer, LayerDirs, Resolution, Resolved};
