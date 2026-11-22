@@ -6,11 +6,14 @@
 //! `prepare`), the job environment (`env`), the project profile seam and the job hooks; a job's
 //! trees (`job_trees`), the reset and save of a lane's persistent tree and the merge in it
 //! (`lane_tree`), the worktree roots lanes give a hand start (`roots`), and a task's trees with
-//! the exclusive leases of a lane's second tree that the checks ask for (`task_trees`).
+//! the exclusive leases of a lane's second tree that the checks ask for (`task_trees`). The
+//! dispatcher (`dispatcher`, `dispatch_job`) picks, starts and ends the lanes' jobs in one loop.
 
 mod actions;
 mod create;
 mod definitions;
+mod dispatch_job;
+mod dispatcher;
 mod env;
 mod exporter;
 mod hooks;
@@ -37,6 +40,13 @@ pub use actions::{
 pub use bongos_lanes_model::{EnvEdit, Problem};
 pub use create::{CreateError, check_root, create_below_existing, lexical};
 pub use definitions::{LANES_FILE, LANES_FOLDER, prompt_lane_diagnostics, validate_folder};
+pub use dispatch_job::HISTORY_BY;
+pub use dispatcher::{
+    DEFAULT_DISPATCHER, DISPATCHER_KEY, Dispatcher, DispatcherConfig, DispatcherRecord, JobCommit,
+    JobDefinitionPolicy, JobEngine, JobSetup, Lanes, LanesHost, LanesParts, LanesStarted,
+    NOTHING_READY, PROJECT_UNATTENDED, RecordedBound, StartLanes, StartRefusal,
+    VerifiedCommitPolicy, dispatcher_record, put_dispatcher,
+};
 pub use env::{apply_env, second_tree_env, tip_env};
 pub use exporter::{EXPORT_NAMESPACE, LanesExporter, STATE_FILE};
 pub use hooks::{AFTER_TREE_CREATED, JobHook, JobHooks};
@@ -63,7 +73,8 @@ pub use runs::{LaneActivity, LaneLiveSource, LaneRuns, OwnedScope, SOURCE_NAME};
 pub use scope::LaneRunScope;
 pub use settings::{LanesHostSettings, LanesOnInterruption, LanesOnLastWindowClose, LanesSettings};
 pub use store::{
-    LANE_PREFIX, LANES_NAMESPACE, OWNER_PREFIX, put_lane, put_owner, read_state, write_state,
+    LANE_PREFIX, LANES_NAMESPACE, OWNER_PREFIX, delete_lane, put_lane, put_owner, read_state,
+    read_state_in, write_state,
 };
 pub use task_trees::{
     LaneLease, LaneTaskTrees, LaneTreeSetup, ProcessEnv, SecondTreeLeases, TopLevelOf, TreeHold,
@@ -93,6 +104,8 @@ mod actions_tests;
 mod create_tests;
 #[cfg(test)]
 mod definitions_tests;
+#[cfg(test)]
+mod dispatcher_tests;
 #[cfg(test)]
 mod env_tests;
 #[cfg(test)]
