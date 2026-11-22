@@ -514,7 +514,7 @@ fn a_duplicated_task_id_is_dropped_whatever_the_input_order() {
     for tasks in [
         vec![w("a"), w("b"), finished.clone()],
         vec![finished.clone(), w("b"), w("a")],
-        vec![w("b"), w("a"), finished.clone()],
+        vec![w("b"), w("a"), finished],
     ] {
         let graph = graph(&["a", "b"], tasks);
         assert!(graph.task(&id("b")).is_none());
