@@ -7,7 +7,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -349,8 +349,8 @@ async fn a_handover_drains_then_moves_the_writer_and_the_window_attaches_to_the_
             "drain checks".to_string(),
             "live".to_string(),
             format!("hand over [\"run-1\"] to {pid}"),
-            "undrain".to_string(),
             "undrain checks".to_string(),
+            "undrain".to_string(),
         ]
     );
     let (moving, held) = state.borrow().at_hand_over.clone().unwrap();
@@ -464,8 +464,8 @@ async fn a_window_with_no_live_run_hands_over_without_waiting(
             "drain checks".to_string(),
             "live".to_string(),
             format!("hand over [] to {pid}"),
-            "undrain".to_string(),
             "undrain checks".to_string(),
+            "undrain".to_string(),
         ]
     );
     let (_host, _) = serve_host(&fixture, writer, host_cx);
@@ -519,8 +519,8 @@ async fn a_drain_past_its_timeout_asks_again_and_interrupt_them_now_moves_on(
             "interrupt [\"run-1\"]".to_string(),
             "live".to_string(),
             format!("hand over [\"run-1\"] to {pid}"),
-            "undrain".to_string(),
             "undrain checks".to_string(),
+            "undrain".to_string(),
         ]
     );
     let (_host, _) = serve_host(&fixture, writer, host_cx);
@@ -557,7 +557,7 @@ async fn a_cancelled_handover_keeps_the_writer_in_the_window(cx: &mut TestAppCon
     assert!(watch.done.await.unwrap().is_err());
     assert_eq!(
         log(&state),
-        vec!["live", "drain", "drain checks", "undrain", "undrain checks"]
+        vec!["live", "drain", "drain checks", "undrain checks", "undrain"]
     );
     assert!(!state.borrow().refusing, "runs start here again");
     assert!(!writer_of(&fixture).is_released());
@@ -610,7 +610,12 @@ async fn a_host_that_never_takes_the_lock_gives_the_writer_back(cx: &mut TestApp
         branch_of(fixture.repo.state().unwrap(), "l1").as_deref(),
         Some("queued")
     );
-    assert!(log(&state).contains(&"reload [\"run-1\"]".to_string()));
+    // Task checks then the runs undrain (the reverse of the drain), then the runs load again.
+    let logged = log(&state);
+    assert_eq!(
+        logged[logged.len() - 3..],
+        ["undrain checks", "undrain", "reload [\"run-1\"]"]
+    );
     assert!(!state.borrow().refusing, "runs start here again");
     let info = live_host(fixture.location()).unwrap();
     assert_eq!((info.mode, info.moving.clone()), (HostMode::Window, None));
@@ -929,6 +934,29 @@ async fn an_opener_during_a_move_waits_and_attaches_as_a_client(cx: &mut TestApp
     }
 }
 
+// A take-back whose socket cannot be bound again still clears the move in `host.json`, so no
+// opener waits on a move that ended: it names the window with no move and no socket.
+#[gpui::test]
+async fn a_take_back_that_cannot_serve_still_clears_the_move(cx: &mut TestAppContext) {
+    let fixture = fixture();
+    let mut host = cx
+        .update(|cx| WriterHost::start(fixture.repo.clone(), fixture.writer_options(true), cx))
+        .unwrap();
+    let socket = host.info().socket.clone().unwrap();
+    host.set_moving(Some(Moving::to(std::process::id())))
+        .unwrap();
+    host.stop_accepting();
+    // Something that is not a socket now sits where the socket would be bound again.
+    std::fs::create_dir_all(socket.join("blocked")).unwrap();
+
+    assert!(cx.update(|cx| host.take_back(cx)).is_err());
+    let info = read_host_file(fixture.location()).unwrap();
+    assert_eq!(
+        (info.pid, info.moving, info.socket),
+        (std::process::id(), None, None)
+    );
+}
+
 // An opener that read `host.json` before the move was written and then won the lock reads it
 // again and lets the lock go at once.
 #[gpui::test]
@@ -1005,6 +1033,8 @@ struct FakeParticipant {
     log: Rc<RefCell<Vec<String>>>,
     runs: Option<Rc<RefCell<FakeState>>>,
     gate: RefCell<Option<oneshot::Receiver<()>>>,
+    /// Its undrain fails (after recording it).
+    fails: bool,
 }
 
 impl FakeParticipant {
@@ -1015,11 +1045,23 @@ impl FakeParticipant {
         gate: Option<oneshot::Receiver<()>>,
         cx: &mut TestAppContext,
     ) {
+        Self::register_with(name, log, runs, gate, false, cx);
+    }
+
+    fn register_with(
+        name: &'static str,
+        log: &Rc<RefCell<Vec<String>>>,
+        runs: Option<&Rc<RefCell<FakeState>>>,
+        gate: Option<oneshot::Receiver<()>>,
+        fails: bool,
+        cx: &mut TestAppContext,
+    ) {
         let participant = Rc::new(Self {
             name,
             log: log.clone(),
             runs: runs.cloned(),
             gate: RefCell::new(gate),
+            fails,
         });
         cx.update(|cx| WriterParticipants::register(participant, cx));
     }
@@ -1048,8 +1090,12 @@ impl WriterParticipant for FakeParticipant {
         }
     }
 
-    fn undrain(&self, project: &str, _cx: &mut App) {
+    fn undrain(&self, project: &str, _cx: &mut App) -> Result<()> {
         self.push(format!("{} undrain {project}", self.name));
+        if self.fails {
+            anyhow::bail!("{} cannot undrain", self.name);
+        }
+        Ok(())
     }
 }
 
@@ -1105,8 +1151,8 @@ async fn a_run_in_a_check_gets_checks_drained_for_exactly_the_returned_key(
             format!("checks drained run-1 {}", check_key()),
             "live".to_string(),
             format!("hand over [\"run-1\", \"run-2\"] to {pid}"),
-            "undrain".to_string(),
             "undrain checks".to_string(),
+            "undrain".to_string(),
         ]
     );
     let (_host, _) = serve_host(&fixture, writer, host_cx);
@@ -1247,8 +1293,8 @@ async fn participants_drain_in_order_only_after_the_runs_and_checks_drained(
             format!("p2 drain {id} busy=0"),
             "live".to_string(),
             format!("hand over [\"run-1\", \"run-2\"] to {pid}"),
-            "undrain".to_string(),
             "undrain checks".to_string(),
+            "undrain".to_string(),
         ]
     );
     let (_host, _) = serve_host(&fixture, writer, host_cx);
@@ -1317,8 +1363,8 @@ async fn a_cancel_while_a_check_stops_records_checks_drained_before_undraining_c
             "drain".to_string(),
             "drain checks".to_string(),
             format!("checks drained run-1 {}", check_key()),
-            "undrain".to_string(),
             "undrain checks".to_string(),
+            "undrain".to_string(),
         ]
     );
     assert!(!writer_of(&fixture).is_released());
@@ -1376,8 +1422,8 @@ async fn a_cancel_asked_again_while_a_check_stops_records_checks_drained_first(
             "drain".to_string(),
             "drain checks".to_string(),
             format!("checks drained run-1 {}", check_key()),
-            "undrain".to_string(),
             "undrain checks".to_string(),
+            "undrain".to_string(),
         ]
     );
 }
@@ -1428,8 +1474,8 @@ async fn interrupt_them_now_waits_for_the_stopped_checks_to_be_recorded_first(
             "interrupt [\"run-1\"]".to_string(),
             "live".to_string(),
             format!("hand over [\"run-1\"] to {pid}"),
-            "undrain".to_string(),
             "undrain checks".to_string(),
+            "undrain".to_string(),
         ]
     );
     let (_host, _) = serve_host(&fixture, writer, host_cx);
@@ -1463,10 +1509,323 @@ async fn with_no_participant_and_no_check_the_drain_is_the_runs_alone(
             "drain checks".to_string(),
             "live".to_string(),
             format!("hand over [\"run-1\"] to {pid}"),
-            "undrain".to_string(),
             "undrain checks".to_string(),
+            "undrain".to_string(),
         ]
     );
     let (_host, _) = serve_host(&fixture, writer, host_cx);
     wait_for(cx, |cx| is_remote(&fixture, cx));
+}
+
+/// Stands in for the system's answer to whether a process runs: every process runs until
+/// [`Self::kill`]; counts the questions.
+#[derive(Clone, Default)]
+struct FakeLiveness {
+    killed: Arc<AtomicBool>,
+    asked: Arc<AtomicUsize>,
+}
+
+impl FakeLiveness {
+    fn install(&self, cx: &mut TestAppContext) {
+        let this = self.clone();
+        cx.update(|cx| {
+            crate::set_process_check(
+                Arc::new(move |_, _| {
+                    this.asked.fetch_add(1, Ordering::SeqCst);
+                    !this.killed.load(Ordering::SeqCst)
+                }),
+                cx,
+            )
+        });
+    }
+
+    fn kill(&self) {
+        self.killed.store(true, Ordering::SeqCst);
+    }
+
+    fn revive(&self) {
+        self.killed.store(false, Ordering::SeqCst);
+    }
+
+    fn asked(&self) -> usize {
+        self.asked.load(Ordering::SeqCst)
+    }
+}
+
+/// A host that asks the window for the writer and never waits on the lock: the connection and
+/// the request, which resolves once the window released the writer.
+fn ask_and_never_lock(
+    fixture: &Fixture,
+    cx: &TestAppContext,
+) -> (HostClient, Task<Result<serde_json::Value>>) {
+    let socket = live_host(fixture.location()).unwrap().socket.unwrap();
+    let asking = HostClient::connect(
+        &socket,
+        fixture.client_options(ClientKind::Cli),
+        cx.executor(),
+    )
+    .unwrap();
+    let released =
+        cx.background_spawn(asking.request_unbounded(HostCommand::Host(crate::HostCtl::Handover)));
+    (asking, released)
+}
+
+/// Exactly one writer, in the window: it holds the lock (another open is refused), its writer
+/// is not released, and `host.json` names it with no move.
+fn assert_one_writer_in_the_window(fixture: &Fixture) {
+    assert!(!writer_of(fixture).is_released());
+    let hooks = StateApplyHooks::new();
+    assert!(matches!(
+        StateStore::open_writer_with_hooks(fixture.location(), &hooks),
+        Err(OpenError::HeldBy { .. })
+    ));
+    let info = live_host(fixture.location()).unwrap();
+    assert_eq!((info.mode, info.moving), (HostMode::Window, None));
+}
+
+/// The window with live run-1 and the participants `names` (registered in that order, those in
+/// `failing` failing to undrain), whose handovers ask the returned liveness.
+fn window_with_participants(
+    fixture: &Fixture,
+    names: &[&'static str],
+    failing: &[&'static str],
+    cx: &mut TestAppContext,
+) -> (Rc<RefCell<FakeState>>, FakeLiveness) {
+    let state = Rc::new(RefCell::new(FakeState {
+        runs: vec!["run-1".to_string()],
+        ..FakeState::default()
+    }));
+    let participants = Rc::new(RefCell::new(Vec::new()));
+    for name in names {
+        FakeParticipant::register_with(
+            name,
+            &participants,
+            Some(&state),
+            None,
+            failing.contains(name),
+            cx,
+        );
+    }
+    let state = window_from(fixture, state, LONG, cx);
+    let liveness = FakeLiveness::default();
+    liveness.install(cx);
+    (state, liveness)
+}
+
+/// One handover to a host that asks, never takes the lock and is then killed while `moving`
+/// names it. Checks the window took the writer back and said the host did not start; returns
+/// what the window logged from the kill on.
+async fn kill_the_host_during_the_move(
+    fixture: &Fixture,
+    state: &Rc<RefCell<FakeState>>,
+    liveness: &FakeLiveness,
+    cx: &mut TestAppContext,
+) -> Vec<String> {
+    liveness.revive();
+    let id = fixture.location().id.clone();
+    let watch = cx
+        .update(|cx| expect_handover(&id, wait_request(), cx))
+        .unwrap();
+    let (_asking, released) = ask_and_never_lock(fixture, cx);
+    released.await.unwrap();
+    assert!(writer_of(fixture).is_released());
+    let moving = read_host_file(fixture.location()).unwrap().moving;
+    assert_eq!(moving.map(|m| m.to_pid), Some(std::process::id()));
+    let before = log(state).len();
+
+    liveness.kill();
+    let Err(error) = watch.done.await.unwrap() else {
+        panic!("the window attached to a host that was killed");
+    };
+    assert_eq!(error, did_not_start(&fixture.log()));
+    assert_one_writer_in_the_window(fixture);
+    assert!(!state.borrow().refusing, "runs start here again");
+    log(state)[before..].to_vec()
+}
+
+/// What a take-back logs: the participants `undrained` in that order, task checks, the runs,
+/// the participants `started` in that order, then run-1 loads again.
+fn take_back_order(id: &str, undrained: &[&str], started: &[&str]) -> Vec<String> {
+    let mut order: Vec<String> = undrained
+        .iter()
+        .map(|name| format!("{name} undrain {id}"))
+        .collect();
+    order.push("undrain checks".to_string());
+    order.push("undrain".to_string());
+    order.extend(started.iter().map(|name| format!("{name} started {id}")));
+    order.push("reload [\"run-1\"]".to_string());
+    order
+}
+
+// The host is killed while `moving` names it: the window takes the writer back and undrains in
+// the reverse of the drain: participant 2, participant 1, task checks (`ChecksEngine::undrain`),
+// the runs (`Runtime::undrain`); then the participants start and the handed-over runs load
+// again. A second handover killed the same way ends the same way, with one writer each time.
+#[gpui::test]
+async fn a_host_killed_during_the_move_gives_the_writer_back_undrained_in_reverse(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let id = fixture.location().id.clone();
+    let (state, liveness) = window_with_participants(&fixture, &["p1", "p2"], &[], cx);
+    for _ in 0..2 {
+        let logged = kill_the_host_during_the_move(&fixture, &state, &liveness, cx).await;
+        assert_eq!(logged, take_back_order(&id, &["p2", "p1"], &["p1", "p2"]));
+    }
+    // The writer works here again.
+    write(&fixture.repo, None, "back", cx).await.unwrap();
+}
+
+// A single participant undrains, then starts again.
+#[gpui::test]
+async fn a_single_participant_undrains_then_starts_at_a_take_back(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let id = fixture.location().id.clone();
+    let (state, liveness) = window_with_participants(&fixture, &["p1"], &[], cx);
+    let logged = kill_the_host_during_the_move(&fixture, &state, &liveness, cx).await;
+    assert_eq!(logged, take_back_order(&id, &["p1"], &["p1"]));
+}
+
+// A participant whose undrain fails does not stop the take-back: the others undrain, task checks
+// and the runs undrain, every participant starts, and the window ends with the one writer.
+#[gpui::test]
+async fn a_failing_participant_undrain_does_not_stop_the_take_back(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let id = fixture.location().id.clone();
+    let (state, liveness) = window_with_participants(&fixture, &["p1", "p2"], &["p2"], cx);
+    let logged = kill_the_host_during_the_move(&fixture, &state, &liveness, cx).await;
+    assert_eq!(logged, take_back_order(&id, &["p2", "p1"], &["p1", "p2"]));
+}
+
+// A third process holds the lock as the take-back begins, past the time the window logs it
+// still waits: the window never gives up (that would leave no writer, `moving` set and the runs
+// unloaded), keeps trying while it holds it, and takes the writer once it lets go.
+#[gpui::test]
+async fn a_take_back_waits_out_a_third_process_holding_the_lock(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let id = fixture.location().id.clone();
+    let (state, liveness) = window_with_participants(&fixture, &["p1"], &[], cx);
+    // Every failed try is past the warning.
+    cx.update(|cx| crate::set_take_back_warn_every(Duration::ZERO, cx));
+    let mut watch = cx
+        .update(|cx| expect_handover(&id, wait_request(), cx))
+        .unwrap();
+    let (_asking, released) = ask_and_never_lock(&fixture, cx);
+    released.await.unwrap();
+    let hooks = StateApplyHooks::new();
+    let third = StateStore::open_writer_with_hooks(fixture.location(), &hooks).unwrap();
+
+    let asked = liveness.asked();
+    liveness.kill();
+    // The window looked at the host at least three more times and found it gone each time.
+    wait_for(cx, |_| liveness.asked() >= asked + 3);
+    assert!(
+        writer_of(&fixture).is_released(),
+        "the third process holds it"
+    );
+    assert!(matches!(watch.done.try_recv(), Ok(None)), "still trying");
+    assert!(!log(&state).contains(&"reload [\"run-1\"]".to_string()));
+    assert!(
+        read_host_file(fixture.location()).unwrap().moving.is_some(),
+        "the move is not over until the writer is back"
+    );
+
+    drop(third);
+    let Err(error) = watch.done.await.unwrap() else {
+        panic!("the window attached to a host that was killed");
+    };
+    assert_eq!(error, did_not_start(&fixture.log()));
+    assert_one_writer_in_the_window(&fixture);
+    let logged = log(&state);
+    assert_eq!(
+        logged[logged.len() - 5..],
+        take_back_order(&id, &["p1"], &["p1"])
+    );
+}
+
+// A cancelled handover undrains the participants too, in reverse, before task checks and the
+// runs, and starts them again: the writer never left.
+#[gpui::test]
+async fn a_cancel_undrains_the_participants_in_reverse_then_checks_then_runs(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let id = fixture.location().id.clone();
+    let (state, _liveness) = window_with_participants(&fixture, &["p1", "p2"], &[], cx);
+    let watch = cx
+        .update(|cx| {
+            expect_handover(
+                &id,
+                HandoverRequest {
+                    choice: DrainChoice::Cancel,
+                    ask_again: None,
+                },
+                cx,
+            )
+        })
+        .unwrap();
+    let taken = ask_for_writer(&fixture, cx);
+    assert!(wait_for_writer(&taken, cx).is_err());
+    assert!(watch.done.await.unwrap().is_err());
+    let logged = log(&state);
+    let at = logged
+        .iter()
+        .position(|line| line == "drain checks")
+        .unwrap();
+    let mut expected = take_back_order(&id, &["p2", "p1"], &["p1", "p2"]);
+    expected.pop();
+    assert_eq!(logged[at + 1..], expected);
+    assert_one_writer_in_the_window(&fixture);
+}
+
+// A move whose writer and target both ended (pid and start time checked) is stale: the next
+// opener clears it from `host.json` and keeps the writer. A live target, or a live writer, makes
+// it not stale: the opener lets the lock go and `moving` stays.
+#[test]
+fn a_stale_move_is_cleared_by_the_next_opener_and_a_live_one_is_not() {
+    let fixture = fixture();
+    let location = fixture.location().clone();
+    futures::executor::block_on(fixture.repo.release_writer(LONG)).unwrap();
+    let (window_pid, host_pid) = (dead_pid(10), dead_pid(11));
+    let record = || {
+        write_host_file(
+            &location,
+            &HostInfo {
+                pid: window_pid,
+                start_time: Some(7),
+                socket: None,
+                bongos_version: VERSION.to_string(),
+                mode: HostMode::Window,
+                started: chrono::Utc::now(),
+                moving: Some(Moving {
+                    to_pid: host_pid,
+                    to_start_time: Some(9),
+                }),
+            },
+        )
+        .unwrap();
+    };
+    let hooks = StateApplyHooks::new();
+    for live in [
+        vec![(host_pid, Some(9))],
+        vec![(window_pid, Some(7))],
+        vec![(host_pid, Some(9)), (window_pid, Some(7))],
+    ] {
+        record();
+        let alive = |pid: u32, start: Option<u64>| live.contains(&(pid, start));
+        let won = crate::take_writer_checked_by(&location, &hooks, 1, &alive).unwrap();
+        assert!(won.is_none(), "{live:?} live: the opener lets the lock go");
+        assert!(read_host_file(&location).unwrap().moving.is_some());
+    }
+    // Both pids run again, but as other processes (other start times): still stale.
+    record();
+    let reused = |_: u32, start: Option<u64>| start == Some(1);
+    let kept = crate::take_writer_checked_by(&location, &hooks, 1, &reused).unwrap();
+    assert!(kept.is_some(), "a stale move does not hold the opener off");
+    assert_eq!(read_host_file(&location).unwrap().moving, None);
 }

@@ -499,6 +499,12 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
 
     init_cursor_hide_mode(cx);
 
+    // Closing the last window with live runs, from the platform or the CloseWindow action,
+    // does what `lanes.on_last_window_close` says first, and closes the window afterwards.
+    cx.set_global(workspace::CloseWindowGuard(std::rc::Rc::new(
+        bongos_lanes::close_window_after_lanes,
+    )));
+
     cx.observe_new(|_multi_workspace: &mut MultiWorkspace, window, cx| {
         let Some(window) = window else {
             return;

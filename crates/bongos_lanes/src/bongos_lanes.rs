@@ -12,7 +12,8 @@
 //! `adopt` gives a stopped or halted task to a free lane, and `accept_graph` lands the graph stamp.
 //! A prepared task's first job runs its rule's staleness script first (`staleness`). Other
 //! features decide what a waiting lane does through the lane wait handlers (`lane_waits`), whose
-//! asks reach the Work panel through the `lanes` needs-you source.
+//! asks reach the Work panel through the `lanes` needs-you source. Closing the last window with
+//! live runs does what `lanes.on_last_window_close` says first (`last_window`).
 
 mod accept_graph;
 mod actions;
@@ -30,6 +31,7 @@ mod job_trees;
 mod lane_control;
 mod lane_tree;
 mod lane_waits;
+mod last_window;
 mod locations;
 mod pick_extension;
 mod prepare;
@@ -98,6 +100,11 @@ pub use lane_tree::{
 pub use lane_waits::{
     ASK_PREFIX, LaneAsk, LaneWaitAction, LaneWaitHandler, LaneWaitHandlers, NEEDS_YOU_SOURCE,
     read_asks, register_needs_you,
+};
+pub use last_window::{
+    CloseFirst, CloseOutcome, LAST_WINDOW_CHOICES, LAST_WINDOW_DETAIL, LAST_WINDOW_QUESTION,
+    LastWindowAnswer, LastWindowChoice, LastWindowClose, answer_of, close_first, close_last_window,
+    close_window_after_lanes,
 };
 pub use locations::{
     Fallback, LaneLocation, LaneLocations, Layer, LocationInputs, Place, RepositoryPlace,
@@ -183,6 +190,8 @@ mod host_tests;
 mod job_trees_tests;
 #[cfg(test)]
 mod lane_tree_tests;
+#[cfg(test)]
+mod last_window_tests;
 #[cfg(test)]
 mod locations_tests;
 #[cfg(test)]
