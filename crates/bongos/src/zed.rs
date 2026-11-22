@@ -5682,6 +5682,7 @@ mod tests {
                 "language_selector",
                 "languages",
                 "lanes",
+                "lanes_view",
                 "line_ending_selector",
                 "linear",
                 "lsp_tool",

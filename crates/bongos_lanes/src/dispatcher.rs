@@ -508,6 +508,10 @@ pub struct LanesStarted {
     pub attached: bool,
     /// The dispatcher this process runs; `None` when attached.
     pub dispatcher: Option<Dispatcher>,
+    /// The bound the start asked for when it attached to a dispatcher that already runs: that
+    /// run keeps the bound it started with, so this one is not applied, and is kept here for the
+    /// caller to report.
+    pub unapplied_bound: Option<PickBound>,
 }
 
 /// The lanes of one project.
@@ -593,6 +597,7 @@ fn start_verified(
     let table = host
         .lane_table(&table_commit)
         .map_err(StartRefusal::Table)?;
+    crate::roots::LaneTables::set(project.clone(), Arc::new(table.clone()), cx);
     let lanes = table_lane_ids(&table, &project, profile.as_deref());
     host.check_locations(&table, &lanes, cx)
         .map_err(StartRefusal::Locations)?;
@@ -604,6 +609,7 @@ fn start_verified(
             run_id: record.run_id,
             attached: true,
             dispatcher: None,
+            unapplied_bound: request.bound,
         });
     }
     // Recovery (the run engine loaded the runs before): a dead host's dispatcher run is closed
@@ -686,6 +692,7 @@ fn start_verified(
         run_id,
         attached: false,
         dispatcher: Some(dispatcher),
+        unapplied_bound: None,
     })
 }
 

@@ -12,9 +12,12 @@ use bongos_lanes_model::{
     DryRun, JobRecord, LaneId, LaneState, LanesState, PickOutcome, RunSubject, TaskId, WaitReason,
     Waiting,
 };
-use bongos_project_repo::{Git, Location, ProjectRepo, StateHandle, StateStore};
+use bongos_project_repo::{Git, Location, ProjectRepo, StateEvent, StateHandle, StateStore};
 use bongos_workflow_model::record::NodeKey;
-use gpui::{App, Entity, KeyBinding, Stateful, Task, TestAppContext, VisualTestContext, actions};
+use gpui::{
+    App, AppContext as _, Entity, KeyBinding, Stateful, Task, TestAppContext, VisualTestContext,
+    actions,
+};
 use project::Project;
 use settings::{Settings as _, SettingsStore};
 use tempfile::TempDir;
@@ -320,4 +323,177 @@ async fn the_point_moves_focus_into_a_section_and_back(cx: &mut TestAppContext) 
     });
     cx.simulate_keystrokes("x");
     assert_eq!(pokes.load(Ordering::SeqCst), 1);
+}
+
+/// A source with a goal for each task, a lifecycle for each run, and a channel of changes the test
+/// sends on. Its status is replaced by the test.
+struct LiveSource {
+    status: std::cell::RefCell<LanesStatus>,
+    changes: std::cell::RefCell<Option<futures::channel::mpsc::UnboundedReceiver<StateEvent>>>,
+}
+
+impl LanesSource for LiveSource {
+    fn status(&self, _cx: &App) -> Result<LanesStatus> {
+        Ok(self.status.borrow().clone())
+    }
+
+    fn goal(&self, task: &TaskId, _cx: &App) -> Option<String> {
+        Some(format!("goal of {}", task.0))
+    }
+
+    fn run_lifecycle(&self, run: &str, _cx: &App) -> Option<String> {
+        Some(format!("{run} is running"))
+    }
+
+    fn changes(&self) -> Option<futures::channel::mpsc::UnboundedReceiver<StateEvent>> {
+        self.changes.borrow_mut().take()
+    }
+}
+
+fn working_status(task: &str) -> LanesStatus {
+    let mut lane = lane_status(1, LaneState::Running);
+    lane.task = Some(TaskId::new(task));
+    lane.job = Some(JobRecord {
+        run_id: "run-1".to_string(),
+        subject: RunSubject::Task(TaskId::new(task)),
+        workflow: "build".to_string(),
+        started: SINCE.to_string(),
+        definition_commit: None,
+        extension: None,
+    });
+    LanesStatus {
+        phase: Some(DispatcherPhase::Running),
+        table_commit: None,
+        table_wait: None,
+        lanes: vec![lane, lane_status(2, LaneState::Idle)],
+    }
+}
+
+fn changed() -> StateEvent {
+    StateEvent::Changed {
+        generation: 1,
+        task_ids: Vec::new(),
+        namespaces: Vec::new(),
+    }
+}
+
+fn open_view_with_clock(
+    source: Rc<dyn LanesSource>,
+    now: chrono::DateTime<chrono::Utc>,
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> Entity<LanesView> {
+    workspace.update_in(cx, |workspace, window, cx| {
+        let view = cx.new(|cx| LanesView::with_clock(source, Rc::new(move || now), cx));
+        workspace.add_item_to_active_pane(Box::new(view.clone()), None, true, window, cx);
+        view
+    })
+}
+
+fn clock_at(text: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(text)
+        .unwrap()
+        .with_timezone(&chrono::Utc)
+}
+
+#[gpui::test]
+async fn a_lane_row_shows_its_goal_run_lifecycle_and_time_in_job(cx: &mut TestAppContext) {
+    let (workspace, cx) = workspace_window(cx).await;
+    let source = Rc::new(LiveSource {
+        status: std::cell::RefCell::new(working_status("leaf")),
+        changes: Default::default(),
+    });
+    // The job started at 10:00:00; the injected clock says 10:12:30.
+    let view = open_view_with_clock(source, clock_at("2026-03-01T10:12:30Z"), &workspace, cx);
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        let row = &view.rows().unwrap().rows[0];
+        assert_eq!(row.goal.as_deref(), Some("goal of leaf"));
+        assert_eq!(row.run_lifecycle.as_deref(), Some("run-1 is running"));
+        assert_eq!(row.in_job.as_deref(), Some("12m"));
+        // A lane with no job has none of these.
+        let idle = &view.rows().unwrap().rows[1];
+        assert_eq!((idle.goal.as_ref(), idle.in_job.as_ref()), (None, None));
+    });
+}
+
+#[gpui::test]
+async fn the_view_reads_again_when_the_lanes_change(cx: &mut TestAppContext) {
+    let (workspace, cx) = workspace_window(cx).await;
+    let (sender, receiver) = futures::channel::mpsc::unbounded();
+    let source = Rc::new(LiveSource {
+        status: std::cell::RefCell::new(working_status("first")),
+        changes: std::cell::RefCell::new(Some(receiver)),
+    });
+    let view = open_view_with_clock(
+        source.clone(),
+        clock_at("2026-03-01T10:00:00Z"),
+        &workspace,
+        cx,
+    );
+    cx.run_until_parked();
+    let goal = |cx: &mut VisualTestContext| {
+        view.read_with(cx, |view, _| view.rows().unwrap().rows[0].goal.clone())
+    };
+    assert_eq!(goal(cx).as_deref(), Some("goal of first"));
+
+    // The state changes; nothing asks the view to refresh but the change event.
+    *source.status.borrow_mut() = working_status("second");
+    assert_eq!(goal(cx).as_deref(), Some("goal of first"));
+    sender.unbounded_send(changed()).unwrap();
+    cx.run_until_parked();
+    assert_eq!(goal(cx).as_deref(), Some("goal of second"));
+}
+
+#[gpui::test]
+async fn the_keys_act_on_the_row_at_point(cx: &mut TestAppContext) {
+    use crate::lanes_view::LanesViewCommand;
+    let (workspace, cx) = workspace_window(cx).await;
+    let source = Rc::new(LiveSource {
+        status: std::cell::RefCell::new(working_status("leaf")),
+        changes: Default::default(),
+    });
+    let view = open_view_with_clock(source, clock_at("2026-03-01T10:00:00Z"), &workspace, cx);
+    cx.run_until_parked();
+    let seen = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = seen.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&view, move |_, command: &LanesViewCommand, _| {
+            sink.borrow_mut().push(command.clone())
+        })
+        .detach();
+    });
+    let build_1 = LaneId::new("build", 1);
+    let build_2 = LaneId::new("build", 2);
+
+    // The point starts on build-1, which works on `leaf` in `run-1`.
+    view.update(cx, |view, cx| {
+        view.open_task(cx);
+        view.open_run(cx);
+        view.pause_lane(cx);
+        view.continue_lane(cx);
+        view.stop_lane(cx);
+        view.dry_run(cx);
+    });
+    assert_eq!(
+        *seen.borrow(),
+        [
+            LanesViewCommand::OpenTask(TaskId::new("leaf")),
+            LanesViewCommand::OpenRun("run-1".to_string()),
+            LanesViewCommand::Pause(build_1.clone()),
+            LanesViewCommand::Continue(build_1.clone()),
+            LanesViewCommand::Stop(build_1),
+            LanesViewCommand::DryRun,
+        ]
+    );
+
+    // On the idle lane there is no task and no run to open, but its lane still takes commands.
+    seen.borrow_mut().clear();
+    view.update_in(cx, |view, window, cx| {
+        view.set_point(1, window, cx);
+        view.open_task(cx);
+        view.open_run(cx);
+        view.pause_lane(cx);
+    });
+    assert_eq!(*seen.borrow(), [LanesViewCommand::Pause(build_2)]);
 }

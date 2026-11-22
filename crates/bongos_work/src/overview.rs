@@ -78,22 +78,21 @@ impl RootLayers {
         cx.default_global::<Self>().0.push(source);
     }
 
+    /// The root and layer the last registered source that answers decides for the repository
+    /// `name`; `None` when no source decides it.
+    pub fn decided(name: &str, cx: &gpui::App) -> Option<RootLayer> {
+        cx.try_global::<Self>()
+            .and_then(|layers| layers.0.iter().rev().find_map(|source| source(name, cx)))
+    }
+
     /// The root and layer that won for `row`: the last registered source that answers, else the
     /// root and layer of the user's settings the row was computed with. The Repositories screen
     /// shows the root with its layer.
     pub fn winning(row: &RepositoryRow, cx: &gpui::App) -> RootLayer {
-        cx.try_global::<Self>()
-            .and_then(|layers| {
-                layers
-                    .0
-                    .iter()
-                    .rev()
-                    .find_map(|source| source(&row.name, cx))
-            })
-            .unwrap_or_else(|| RootLayer {
-                template: row.template.clone(),
-                source: row.root_source.clone(),
-            })
+        Self::decided(&row.name, cx).unwrap_or_else(|| RootLayer {
+            template: row.template.clone(),
+            source: row.root_source.clone(),
+        })
     }
 }
 
@@ -176,6 +175,8 @@ pub(crate) struct Inputs {
     /// The git dirs the store already knows, by repository path.
     pub(crate) known: HashMap<PathBuf, GitDirInfo>,
     pub(crate) poll_decider: fn(&Path) -> bool,
+    /// For each repository (in order), the root a layer above the user's settings decided.
+    pub(crate) layers: Vec<Option<RootLayer>>,
 }
 
 /// The rows for `inputs`, and the git dirs it had to look up (for the store's cache). Blocking
@@ -190,7 +191,7 @@ pub(crate) async fn compute(
     };
     let mut learned = HashMap::new();
     let mut rows = Vec::new();
-    for (repository, old) in inputs.repositories.iter().zip(old) {
+    for (index, (repository, old)) in inputs.repositories.iter().zip(old).enumerate() {
         let path = expand_home(&repository.path);
         let info = match inputs.known.get(&path) {
             Some(info) => Some(info.clone()),
@@ -208,15 +209,19 @@ pub(crate) async fn compute(
             .map(|task| (task.id, task.slug))
             .collect();
         let slow_poll = info.is_some_and(|info| info.slow_poll);
-        rows.push(row(repository, &inputs.layout, old_root, slow_poll));
+        let layer = inputs.layers.get(index).and_then(Option::as_ref);
+        rows.push(row(repository, &inputs.layout, layer, old_root, slow_poll));
     }
     (rows, learned)
 }
 
-/// The row of `repository`. Probes the file system for the writability of the root.
+/// The row of `repository`. Probes the file system for the writability of the root. `layer` is
+/// the root a layer above the user's settings decided, if one did: its template and label are the
+/// row's, and the preview and problem are computed from it.
 pub(crate) fn row(
     repository: &Repository,
     layout: &Layout,
+    layer: Option<&RootLayer>,
     old_root: Vec<(String, String)>,
     slow_poll: bool,
 ) -> RepositoryRow {
@@ -228,9 +233,13 @@ pub(crate) fn row(
         },
         None => RootSource::Central,
     };
+    let (root_source, template_text) = match layer {
+        Some(layer) => (layer.source.clone(), layer.template.as_deref()),
+        None => (root_source, template.map(|configured| configured.text)),
+    };
     let path = expand_home(&repository.path);
     let rendered = preview_path(
-        template.map(|configured| configured.text),
+        template_text,
         &repository.name,
         Path::new(&repository.path),
         &layout.home,
@@ -247,7 +256,7 @@ pub(crate) fn row(
         name: repository.name.clone(),
         path,
         root_source,
-        template: template.map(|configured| configured.text.to_string()),
+        template: template_text.map(str::to_string),
         preview,
         problem,
         slow_poll,

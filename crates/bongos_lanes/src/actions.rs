@@ -37,6 +37,7 @@ use crate::LanesSettings;
 use crate::accept_graph::{Accepted, accept_graph};
 use crate::adopt::{AdoptRequest, Adopted};
 use crate::dispatcher::Lanes;
+use crate::lanes_view::LanesViewCommand;
 use crate::store::read_state;
 
 pub mod lanes {
@@ -201,7 +202,7 @@ fn accept_graph_action(
 }
 
 /// Sends a `lanes:` command to the writer and shows what it answers.
-fn send_lanes_command(
+pub(crate) fn send_lanes_command(
     access: EngineAccess,
     verb: LanesVerb,
     payload: LanesPayload,
@@ -993,4 +994,40 @@ pub fn register(workspace: &mut Workspace) {
     workspace.register_action(adopt_action);
     workspace.register_action(accept_graph_action);
     register_action::<lanes::Dump>(workspace);
+}
+
+/// Carries out what a key of the view asked for: a command on a lane goes to the writer, the dry
+/// run opens its buffer. Opening a task or a run is left to a listener of the view's events.
+pub(crate) fn carry_out_view_command(
+    workspace: &mut Workspace,
+    _view: &gpui::Entity<crate::lanes_view::LanesView>,
+    command: &LanesViewCommand,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let (verb, lane) = match command {
+        LanesViewCommand::DryRun => {
+            window.dispatch_action(Box::new(lanes::DryRun), cx);
+            return;
+        }
+        LanesViewCommand::OpenTask(_) | LanesViewCommand::OpenRun(_) => return,
+        LanesViewCommand::Pause(lane) => (LanesVerb::Pause, lane),
+        LanesViewCommand::Continue(lane) => (LanesVerb::Resume, lane),
+        LanesViewCommand::Stop(lane) => (LanesVerb::Stop, lane),
+    };
+    if !LanesSettings::get_global(cx).enabled {
+        show_toast(workspace, OFF_MESSAGE, cx);
+        return;
+    }
+    let Some((_, access)) = sole_project(cx) else {
+        show_toast(workspace, ENGINE_HOST_MESSAGE, cx);
+        return;
+    };
+    let ctx = WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx));
+    let payload = LanesPayload {
+        lane: Some(lane.to_string()),
+        person: Some(ctx.author.name),
+        ..LanesPayload::default()
+    };
+    send_lanes_command(access, verb, payload, window, cx);
 }

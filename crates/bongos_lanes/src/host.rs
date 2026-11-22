@@ -205,7 +205,7 @@ fn handle(
                     cx.update(|cx| cx.set_global(HostDispatcher(Some(dispatcher))));
                     Ok(message(format!("Lanes started (run {run})")))
                 } else {
-                    Ok(message(format!("Lanes already run (run {run})")))
+                    Ok(message(started_message(&started)))
                 }
             }))
         }
@@ -223,6 +223,28 @@ fn handle(
             "`dry run` is not served by the engine host of this build yet"
         )))),
         LanesVerb::AcceptGraph => unreachable!("handled above"),
+    }
+}
+
+/// What a start answers: it started, or lanes already run and any bound the start asked for was
+/// not applied to the run in force.
+pub(crate) fn started_message(started: &crate::LanesStarted) -> String {
+    let run = &started.run_id;
+    if started.dispatcher.is_some() {
+        return format!("Lanes started (run {run})");
+    }
+    match &started.unapplied_bound {
+        Some(PickBound::Within(group)) => format!(
+            "Lanes already run (run {run}); the bound within {} was not applied, the run keeps \
+             the bound it started with",
+            group.0
+        ),
+        Some(PickBound::Until(task)) => format!(
+            "Lanes already run (run {run}); the bound until {} was not applied, the run keeps \
+             the bound it started with",
+            task.0
+        ),
+        None => format!("Lanes already run (run {run})"),
     }
 }
 

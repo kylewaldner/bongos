@@ -25,10 +25,18 @@ pub struct LaneTables {
 impl Global for LaneTables {}
 
 impl LaneTables {
+    /// Records the table of `project_id`. When it differs from the one held, the Repositories
+    /// screen's rows are computed again, because the project's `[locations]` layer may now answer.
     pub fn set(project_id: impl Into<String>, table: Arc<LaneTable>, cx: &mut App) {
-        cx.default_global::<Self>()
+        let previous = cx
+            .default_global::<Self>()
             .tables
-            .insert(project_id.into(), table);
+            .insert(project_id.into(), table.clone());
+        if previous.as_deref() != Some(&*table)
+            && let Some(store) = bongos_work::WorkStore::global(cx)
+        {
+            store.update(cx, |store, cx| store.refresh_root_layers(cx));
+        }
     }
 
     pub fn get(project_id: &str, cx: &App) -> Option<Arc<LaneTable>> {

@@ -13,8 +13,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
-use bongos_lanes_model::{DryRun, explain};
-use bongos_project_repo::ProjectRepo;
+use bongos_lanes_model::{DryRun, LaneId, TaskId, explain};
+use bongos_project_repo::{ProjectRepo, StateEvent};
+use chrono::{DateTime, Utc};
+use futures::StreamExt as _;
+use futures::channel::mpsc;
 use gpui::{
     App, Context, EventEmitter, FocusHandle, Focusable, Global, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, SharedString, Stateful,
@@ -27,7 +30,7 @@ use workspace::item::{Item, ItemEvent};
 
 use crate::LanesSettings;
 use crate::lane_control::{LanesStatus, status_from_read};
-use crate::lanes_rows::{LanesViewRows, RowFacts, lanes_view_rows};
+use crate::lanes_rows::{LanesViewRows, RowFacts, lanes_view_rows, time_in_job};
 use crate::read_modes::load;
 use crate::store::read_state;
 use crate::wait_text::{WaitTextFn, WaitTextFormatters};
@@ -73,8 +76,59 @@ impl LanesViewSections {
     }
 }
 
+/// The actions of the Lanes view on the row at point. The keys (`enter`, `p`, `c`, `S`, `o`, `d`,
+/// `g`) are bound to them separately; each acts on the row the point is on.
+pub mod lanes_view {
+    use gpui::actions;
+
+    actions!(
+        lanes_view,
+        [
+            /// Opens the task of the row at point.
+            OpenTask,
+            /// Pauses the lane at point after its current job.
+            PauseLane,
+            /// Continues (resumes) the lane at point.
+            ContinueLane,
+            /// Stops the lane at point at its next job boundary.
+            StopLane,
+            /// Opens the run of the lane at point.
+            OpenRun,
+            /// Shows what each lane would take now.
+            DryRun,
+            /// Reads the lanes again.
+            Refresh,
+        ]
+    );
+}
+
+/// What a key of the Lanes view asks for, on the row at point. The view emits it; the workspace
+/// carries it out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LanesViewCommand {
+    OpenTask(TaskId),
+    OpenRun(String),
+    Pause(LaneId),
+    Continue(LaneId),
+    Stop(LaneId),
+    DryRun,
+}
+
 /// Where the view reads the lanes from.
 pub trait LanesSource {
+    /// The goal (name) of a task, for the lane rows.
+    fn goal(&self, _task: &TaskId, _cx: &App) -> Option<String> {
+        None
+    }
+    /// The lifecycle of a run (`running`, `halted`, ...), for the lane rows.
+    fn run_lifecycle(&self, _run: &str, _cx: &App) -> Option<String> {
+        None
+    }
+    /// A stream that yields whenever the lanes' state changed, so the view reads again. `None`
+    /// for a source that cannot tell.
+    fn changes(&self) -> Option<mpsc::UnboundedReceiver<StateEvent>> {
+        None
+    }
     /// The lanes' status, from the run state and records.
     fn status(&self, cx: &App) -> Result<LanesStatus>;
     /// A dry run of the same moment, for the ready and waiting counts and the reason of an idle
@@ -91,6 +145,28 @@ pub struct StoreLanes {
 }
 
 impl LanesSource for StoreLanes {
+    fn goal(&self, task: &TaskId, cx: &App) -> Option<String> {
+        let tree = bongos_work::WorkStore::global(cx)?.read(cx).snapshot()?;
+        let graph = bongos_lanes_model::from_work_tree(
+            &tree,
+            &self.repo.location().id,
+            &bongos_lanes_model::LiveFacts::default(),
+        )?;
+        graph.task(task).map(|task| task.name.clone())
+    }
+
+    fn run_lifecycle(&self, run: &str, cx: &App) -> Option<String> {
+        let engine = cx.try_global::<bongos_workflow::WorkflowEngine>()?;
+        engine
+            .lifecycle()
+            .status(run)
+            .map(|status| format!("{status:?}").to_lowercase())
+    }
+
+    fn changes(&self) -> Option<mpsc::UnboundedReceiver<StateEvent>> {
+        Some(self.repo.state()?.opened_writer()?.subscribe())
+    }
+
     fn status(&self, _cx: &App) -> Result<LanesStatus> {
         self.repo
             .state()
@@ -139,11 +215,23 @@ pub struct LanesView {
     sections: Vec<ViewSection>,
     point: usize,
     focus_handle: FocusHandle,
+    /// The time "time in job" is measured to.
+    clock: Rc<dyn Fn() -> DateTime<Utc>>,
     _dry_task: Option<Task<()>>,
+    _changes_task: Option<Task<()>>,
 }
 
 impl LanesView {
     pub fn new(source: Rc<dyn LanesSource>, cx: &mut Context<Self>) -> Self {
+        Self::with_clock(source, Rc::new(Utc::now), cx)
+    }
+
+    /// A view that measures the time in job to the time `clock` gives.
+    pub fn with_clock(
+        source: Rc<dyn LanesSource>,
+        clock: Rc<dyn Fn() -> DateTime<Utc>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let sections = LanesViewSections::sections(cx)
             .into_iter()
             .map(|section| ViewSection {
@@ -161,9 +249,22 @@ impl LanesView {
             sections,
             point: 0,
             focus_handle: cx.focus_handle(),
+            clock,
             _dry_task: None,
+            _changes_task: None,
         };
         view.refresh(cx);
+        view._changes_task = view.source.changes().map(|mut changes| {
+            cx.spawn(async move |this: WeakEntity<Self>, cx| {
+                while changes.next().await.is_some() {
+                    // Changes that came meanwhile are read by the same refresh.
+                    while changes.try_recv().is_ok() {}
+                    if this.update(cx, |this, cx| this.refresh(cx)).is_err() {
+                        break;
+                    }
+                }
+            })
+        });
         view
     }
 
@@ -219,15 +320,24 @@ impl LanesView {
 
     fn rebuild(&mut self, cx: &mut Context<Self>) {
         if let Some(status) = &self.status {
-            self.rows = Some(lanes_view_rows(
+            let source = &self.source;
+            let mut rows = lanes_view_rows(
                 status,
                 &RowFacts {
-                    goal: &|_| None,
-                    run_lifecycle: &|_| None,
+                    goal: &|task| source.goal(task, cx),
+                    run_lifecycle: &|run| source.run_lifecycle(run, cx),
                 },
                 self.dry.as_ref(),
                 &WaitTextFormatters::global(cx),
-            ));
+            );
+            let now = (self.clock)();
+            for row in &mut rows.rows {
+                row.in_job = row
+                    .job_started
+                    .as_deref()
+                    .and_then(|started| time_in_job(started, now));
+            }
+            self.rows = Some(rows);
         }
         let len = self.point_rows().len();
         self.point = self.point.min(len.saturating_sub(1));
@@ -269,6 +379,61 @@ impl LanesView {
         cx.notify();
     }
 
+    /// The lane row at point, with its task and run; `None` on any other row. A row of what
+    /// needs a person counts as its lane.
+    fn lane_at_point(&self) -> Option<(LaneId, Option<TaskId>, Option<String>)> {
+        let rows = self.rows.as_ref()?;
+        let lane = match self.point()? {
+            PointRow::Lane(index) => rows.rows.get(index)?,
+            PointRow::NeedsYou(index) => {
+                let lane = &rows.needs_you.get(index)?.lane;
+                rows.rows.iter().find(|row| &row.id == lane)?
+            }
+            PointRow::Section(..) => return None,
+        };
+        Some((lane.id.clone(), lane.task.clone(), lane.run.clone()))
+    }
+
+    /// `enter`: asks to open the task of the row at point.
+    pub fn open_task(&mut self, cx: &mut Context<Self>) {
+        if let Some((_, Some(task), _)) = self.lane_at_point() {
+            cx.emit(LanesViewCommand::OpenTask(task));
+        }
+    }
+
+    /// `o`: asks to open the run of the lane at point.
+    pub fn open_run(&mut self, cx: &mut Context<Self>) {
+        if let Some((_, _, Some(run))) = self.lane_at_point() {
+            cx.emit(LanesViewCommand::OpenRun(run));
+        }
+    }
+
+    /// `p`: asks to pause the lane at point.
+    pub fn pause_lane(&mut self, cx: &mut Context<Self>) {
+        if let Some((lane, ..)) = self.lane_at_point() {
+            cx.emit(LanesViewCommand::Pause(lane));
+        }
+    }
+
+    /// `c`: asks to continue the lane at point.
+    pub fn continue_lane(&mut self, cx: &mut Context<Self>) {
+        if let Some((lane, ..)) = self.lane_at_point() {
+            cx.emit(LanesViewCommand::Continue(lane));
+        }
+    }
+
+    /// `S`: asks to stop the lane at point.
+    pub fn stop_lane(&mut self, cx: &mut Context<Self>) {
+        if let Some((lane, ..)) = self.lane_at_point() {
+            cx.emit(LanesViewCommand::Stop(lane));
+        }
+    }
+
+    /// `d`: asks for the dry run.
+    pub fn dry_run(&mut self, cx: &mut Context<Self>) {
+        cx.emit(LanesViewCommand::DryRun);
+    }
+
     /// `n` and `p`: moves the point by `offset` rows.
     pub fn move_point(&mut self, offset: isize, window: &mut Window, cx: &mut Context<Self>) {
         let next = (self.point as isize + offset).max(0) as usize;
@@ -277,6 +442,7 @@ impl LanesView {
 }
 
 impl EventEmitter<()> for LanesView {}
+impl EventEmitter<LanesViewCommand> for LanesView {}
 
 impl Focusable for LanesView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -323,6 +489,9 @@ impl Render for LanesView {
                     if let Some(lifecycle) = &lane.run_lifecycle {
                         text.push_str(&format!(" ({lifecycle})"));
                     }
+                }
+                if let Some(in_job) = &lane.in_job {
+                    text.push_str(&format!("  {in_job} in job"));
                 }
                 if let Some(reason) = &lane.reason {
                     text.push_str(&format!("  {reason}"));
@@ -414,6 +583,15 @@ impl Render for LanesView {
             .on_action(cx.listener(|this, _: &menu::SelectPrevious, window, cx| {
                 this.move_point(-1, window, cx)
             }))
+            .on_action(cx.listener(|this, _: &lanes_view::OpenTask, _, cx| this.open_task(cx)))
+            .on_action(cx.listener(|this, _: &lanes_view::PauseLane, _, cx| this.pause_lane(cx)))
+            .on_action(
+                cx.listener(|this, _: &lanes_view::ContinueLane, _, cx| this.continue_lane(cx)),
+            )
+            .on_action(cx.listener(|this, _: &lanes_view::StopLane, _, cx| this.stop_lane(cx)))
+            .on_action(cx.listener(|this, _: &lanes_view::OpenRun, _, cx| this.open_run(cx)))
+            .on_action(cx.listener(|this, _: &lanes_view::DryRun, _, cx| this.dry_run(cx)))
+            .on_action(cx.listener(|this, _: &lanes_view::Refresh, _, cx| this.refresh(cx)))
             .size_full()
             .overflow_y_scroll()
             .children(lines)
@@ -449,5 +627,7 @@ pub fn show_lanes_view(
         return;
     }
     let view = cx.new(|cx| LanesView::new(source, cx));
+    cx.subscribe_in(&view, window, crate::actions::carry_out_view_command)
+        .detach();
     workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
 }

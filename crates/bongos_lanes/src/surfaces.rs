@@ -24,6 +24,7 @@ use crate::dry_run::{DryRunInputs, dry_run_buffer_in};
 use crate::lanes_view::{StoreLanes, show_lanes_view};
 use crate::profile::{LaneProfileSource, LaneProfiles};
 use crate::read_modes::load;
+use crate::roots::LaneTables;
 use crate::store::read_state;
 use crate::summary::{
     HandoverNote, KindCount, SummaryInputs, SummarySections, WorkflowSummary, summary_text,
@@ -125,6 +126,7 @@ pub fn dry_run_action(
         return;
     };
     let location = repo.location().clone();
+    let project_id = location.id.clone();
     let limit = LanesSettings::get_global(cx).dry_run_limit as usize;
     let loading = cx.background_spawn(async move { load(&location, limit).await });
     cx.spawn_in(window, async move |workspace, cx| {
@@ -132,6 +134,7 @@ pub fn dry_run_action(
         workspace
             .update_in(cx, |workspace, window, cx| match loaded {
                 Ok(loaded) => {
+                    LaneTables::set(project_id, Arc::new(loaded.table.clone()), cx);
                     let text = dry_run_buffer_in(
                         &DryRunInputs {
                             graph: &loaded.graph,
@@ -261,7 +264,13 @@ pub fn ungated_steps(dirs: &LayerDirs, names: &[String]) -> BTreeMap<String, Vec
         let steps = definition
             .nodes
             .iter()
-            .filter(|node| node.gate.is_none() && merges_or_deploys(node))
+            .filter(|node| {
+                // Only a gate before the step holds it; a gate after it asks once it is done.
+                let gated = node.gate.as_ref().is_some_and(|gate| {
+                    gate.when == bongos_workflow_model::definition::GateWhen::Before
+                });
+                !gated && merges_or_deploys(node)
+            })
             .map(|node| node.name.clone())
             .collect();
         found.insert(name.clone(), steps);
@@ -330,6 +339,7 @@ pub fn summarize_then_start(
                         return;
                     }
                 };
+                LaneTables::set(project_id.clone(), Arc::new(table.clone()), cx);
                 let context = SummaryContext {
                     project_id,
                     profile,
