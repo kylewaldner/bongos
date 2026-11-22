@@ -2,10 +2,18 @@
 //! and the prompt check of workflow validation, the run state of lanes in a project's state store
 //! with its snapshot exporter, the live and activity sources a project repository reads, the
 //! `lane-run-scope` approval hook, and the lane commands (hidden while `lanes.enabled` is false).
+//! Also where a lane's trees and directories go and how they are made (`locations`, `create`,
+//! `prepare`), the job environment (`env`), the project profile seam and the job hooks.
 
 mod actions;
+mod create;
 mod definitions;
+mod env;
 mod exporter;
+mod hooks;
+mod locations;
+mod prepare;
+mod profile;
 mod runs;
 mod scope;
 mod settings;
@@ -19,8 +27,21 @@ use gpui::App;
 pub use actions::{
     ENGINE_HOST_MESSAGE, LanesToast, OFF_MESSAGE, action_types, init_palette, lanes, register,
 };
+pub use bongos_lanes_model::{EnvEdit, Problem};
+pub use create::{CreateError, check_root, create_below_existing, lexical};
 pub use definitions::{LANES_FILE, LANES_FOLDER, prompt_lane_diagnostics, validate_folder};
+pub use env::{apply_env, second_tree_env, tip_env};
 pub use exporter::{EXPORT_NAMESPACE, LanesExporter, STATE_FILE};
+pub use hooks::{AFTER_TREE_CREATED, JobHook, JobHooks};
+pub use locations::{
+    Fallback, LaneLocation, LaneLocations, Layer, LocationInputs, Place, RepositoryPlace,
+    binding_of, check_lanes, check_overlap, resolve_lane, table_lane_ids, tree_name, tree_slug,
+};
+pub use prepare::{
+    FreeSpace, MakeTree, PrepareRequest, PreparedLane, TreeRequest, check_floors, prepare_lane,
+    system_free_space, wait_lane,
+};
+pub use profile::{LaneProfileSource, LaneProfiles};
 pub use runs::{LaneActivity, LaneLiveSource, LaneRuns, OwnedScope, SOURCE_NAME};
 pub use scope::LaneRunScope;
 pub use settings::{LanesHostSettings, LanesOnInterruption, LanesOnLastWindowClose, LanesSettings};
@@ -47,9 +68,17 @@ pub fn init(cx: &mut App) {
 #[cfg(test)]
 mod actions_tests;
 #[cfg(test)]
+mod create_tests;
+#[cfg(test)]
 mod definitions_tests;
 #[cfg(test)]
+mod env_tests;
+#[cfg(test)]
 mod exporter_tests;
+#[cfg(test)]
+mod locations_tests;
+#[cfg(test)]
+mod prepare_tests;
 #[cfg(test)]
 mod runs_tests;
 #[cfg(test)]
