@@ -42,6 +42,7 @@ use futures::channel::mpsc;
 use gpui::{App, Task};
 use serde::{Deserialize, Serialize};
 
+use crate::dispatch_job::HookedJob;
 use crate::job_trees::JobTrees;
 use crate::lane_control::{BOUND_REASON, LaneEvents, RunEnd, paused_reason};
 use crate::locations::table_lane_ids;
@@ -584,6 +585,9 @@ pub(crate) struct Inner {
     /// Each lane's `jobs_done` when this dispatcher first saw it, for `max_jobs`.
     baseline: RefCell<BTreeMap<LaneId, u32>>,
     triggers: RefCell<Vec<Task<()>>>,
+    /// The jobs that passed the job hooks, by lane, until their `after_job` resolved. A lane
+    /// listed here is not evaluated.
+    pub(crate) hooked: RefCell<BTreeMap<LaneId, HookedJob>>,
 }
 
 /// What one lane's transaction decided.
@@ -616,6 +620,7 @@ impl Dispatcher {
             ended: Cell::new(false),
             baseline: RefCell::new(BTreeMap::new()),
             triggers: RefCell::new(Vec::new()),
+            hooked: RefCell::new(BTreeMap::new()),
         }))
     }
 
@@ -745,7 +750,8 @@ impl Dispatcher {
             }
         }
         inner.passing.set(false);
-        if self.end_if_at_rest(cx) {
+        // The run does not end while a lane's `after_job` is still to resolve.
+        if !self.settling() && self.end_if_at_rest(cx) {
             inner.ended.set(true);
         } else if self.run_ended() {
             inner.ended.set(true);
@@ -763,7 +769,10 @@ impl Dispatcher {
     fn pass(&self, full: bool, cx: &mut App) {
         self.0.passes.set(self.0.passes.get() + 1);
         let lanes = match self.begin_pass(cx) {
-            Ok(state) => state.lanes.into_keys().collect::<Vec<_>>(),
+            Ok(state) => {
+                self.sweep_hooked(&state, cx);
+                state.lanes.into_keys().collect::<Vec<_>>()
+            }
             Err(error) => {
                 log::error!("lanes: reading the lanes state: {error:#}");
                 return;
@@ -777,6 +786,10 @@ impl Dispatcher {
     }
 
     fn evaluate_lane(&self, lane: &LaneId, full: bool, cx: &mut App) -> Result<()> {
+        // A job in the job hooks keeps its lane until the hooks' `after_job` resolved.
+        if self.0.hooked.borrow().contains_key(lane) {
+            return Ok(());
+        }
         let parts = self.parts().clone();
         for _ in 0..MAX_RESTARTS {
             let master = self.0.verified.borrow().clone();

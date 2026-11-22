@@ -197,8 +197,9 @@ fn stop(
 }
 
 /// A stop of one lane. A running lane, and a waiting lane that holds a reserved job, finish the
-/// job first; an idle lane or a waiting lane with no job stops at once; a halted or paused lane
-/// records the request and stays as it is.
+/// job first (a job still in its hooks' `before_job` is dropped by the next pass instead); an
+/// idle lane or a waiting lane with no job stops at once; a halted or paused lane records the
+/// request and stays as it is.
 fn stop_one(tx: &mut StateTx, state: &LanesState, lane: &LaneRecord, now: &str) -> Result<()> {
     let mut updated = lane.clone();
     match lane.state {

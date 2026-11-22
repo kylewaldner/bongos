@@ -1,11 +1,18 @@
 //! A lane job's start and end. The start runs after the transaction that reserved the job's run
-//! id: the job's trees and environment are prepared, then the run is started. A refusal is
-//! cleared in a second transaction: one of the machine leaves the lane waiting, any other halts
-//! the lane and its task. The end of a job comes from its run's status changes.
+//! id: the job's trees and environment are prepared, the job hooks' `before_job` are awaited (when
+//! any hook is registered), then the run is started. A refusal is cleared in a second
+//! transaction: one of the machine leaves the lane waiting, any other halts the lane and its
+//! task. The end of a job comes from its run's status changes.
+//!
+//! A job that went through the job hooks is kept in [`Dispatcher`]'s `hooked` list until every
+//! hook owed an `after_job` got it; its lane is not evaluated meanwhile. A pass drops a job whose
+//! hooks are still pending when its lane no longer holds it, was asked to stop or left the lane
+//! count: the pending `before_job` future is dropped, `after_job` hears
+//! [`HookEnd::StoppedBeforeStart`], and then the job is cleared.
 
 use anyhow::Result;
 use bongos_lanes_model::{
-    AssignedWork, Author, JobEnd, JobEndInput, LaneId, LaneRecord, LaneState, LaneTable,
+    AssignedWork, Author, JobEnd, JobEndInput, JobRecord, LaneId, LaneRecord, LaneState, LaneTable,
     LanesState, OwnerRecord, OwnerState, PickGraph, RunSubject, TaskId, WaitReason,
     lane_after_retry, owner_after_job_end, short_run, stop_at_job_boundary,
 };
@@ -13,10 +20,11 @@ use bongos_project_repo::{CommitId, StateTx};
 use bongos_work_model::HistoryEntry;
 use bongos_workflow::{RunStatus, StartRequest, StartSubject, WorkflowEvent};
 use bongos_workflow_model::InputValue;
-use bongos_workflow_model::record::{LaneRef, StartedBy};
-use gpui::App;
+use bongos_workflow_model::record::{EndState, LaneRef, Lifecycle, StartedBy};
+use gpui::{App, Task};
 
-use crate::dispatcher::{Dispatcher, JobSetup, PendingJob, environment_refusal};
+use crate::dispatcher::{Dispatcher, JobSetup, PendingJob, environment_refusal, held_task};
+use crate::hooks::{BeforeJob, JobEnd as HookEnd, JobHookCx, JobHooks, after_job_of};
 use crate::job_trees::CurrentJobTrees;
 use crate::store::{put_lane, put_owner, read_state, read_state_in};
 use crate::task_trees::LaneTaskTrees;
@@ -29,6 +37,36 @@ enum Cleared {
     Wait(WaitReason),
     Halt(String),
 }
+
+impl Cleared {
+    fn text(&self) -> String {
+        match self {
+            Cleared::Wait(reason) => reason.to_string(),
+            Cleared::Halt(text) => text.clone(),
+        }
+    }
+}
+
+/// A job that went through the job hooks, until its `after_job` resolved.
+pub(crate) struct HookedJob {
+    job: JobRecord,
+    hcx: JobHookCx,
+    phase: HookPhase,
+}
+
+enum HookPhase {
+    /// `before_job` is pending; dropping the task drops the pending hook's future.
+    Before(Task<()>),
+    /// `before_job` resolved and the start is being decided.
+    Deciding,
+    /// The run started; the last state its status changes reported.
+    Started(Lifecycle),
+    /// `after_job` is running.
+    After,
+}
+
+/// What clears a job once its hooks' `after_job` resolved.
+type Then = Box<dyn FnOnce(&Dispatcher, &mut App)>;
 
 impl Dispatcher {
     /// Prepares the job's trees and environment, then starts its run.
@@ -57,6 +95,10 @@ impl Dispatcher {
                     .read(read_state)
                     .map(|state| lane_holds(&state, &pending.lane, &pending.job.run_id));
                 match holds {
+                    Ok(true) if !JobHooks::hooks(cx).is_empty() => {
+                        self.begin_hooks(pending, setup, cx);
+                        return;
+                    }
                     Ok(true) => self.start_run(&pending, setup, cx),
                     Ok(false) => {
                         log::info!(
@@ -76,14 +118,18 @@ impl Dispatcher {
                 }
             }
         };
-        let Some(cleared) = cleared else {
-            return;
-        };
+        if let Some(cleared) = cleared {
+            self.clear_start(&pending, &cleared, cx);
+        }
+    }
+
+    /// Clears a job whose start was refused, then evaluates.
+    fn clear_start(&self, pending: &PendingJob, cleared: &Cleared, cx: &mut App) {
         let now = self.parts().host.now();
         let result = self
             .parts()
             .writer
-            .transact(|tx| clear_job(tx, &pending, &cleared, &now));
+            .transact(|tx| clear_job(tx, pending, cleared, &now));
         if let Err(error) = result {
             log::error!(
                 "lanes: clearing the refused job of {}: {error:#}",
@@ -91,6 +137,256 @@ impl Dispatcher {
             );
         }
         self.schedule(false, cx);
+    }
+
+    /// Awaits the job hooks' `before_job`, then starts the run unless a hook refused or the job
+    /// was dropped meanwhile.
+    fn begin_hooks(&self, pending: PendingJob, setup: JobSetup, cx: &mut App) {
+        let hcx = JobHookCx::new(
+            pending.lane.clone(),
+            pending.job.run_id.clone(),
+            self.parts().writer.clone(),
+        );
+        let decision = JobHooks::before_job(&pending.lane, &pending.job, hcx.clone(), cx);
+        let weak = self.downgrade();
+        let lane = pending.lane.clone();
+        let job = pending.job.clone();
+        let task = cx.spawn(async move |cx| {
+            let decision = decision.await;
+            if let Some(inner) = weak.upgrade() {
+                cx.update(|cx| Dispatcher(inner).hooks_decided(pending, setup, decision, cx));
+            }
+        });
+        self.0.hooked.borrow_mut().insert(
+            lane,
+            HookedJob {
+                job,
+                hcx,
+                phase: HookPhase::Before(task),
+            },
+        );
+    }
+
+    /// Every hook's `before_job` resolved (or one refused).
+    fn hooks_decided(
+        &self,
+        pending: PendingJob,
+        setup: JobSetup,
+        decision: BeforeJob,
+        cx: &mut App,
+    ) {
+        let before = {
+            let mut hooked = self.0.hooked.borrow_mut();
+            let Some(entry) = hooked
+                .get_mut(&pending.lane)
+                .filter(|entry| entry.job.run_id == pending.job.run_id)
+            else {
+                return;
+            };
+            entry.hcx.finish();
+            std::mem::replace(&mut entry.phase, HookPhase::Deciding)
+        };
+        // This runs inside that task, at its end; it is let finish rather than cancelled.
+        if let HookPhase::Before(task) = before {
+            task.detach();
+        }
+
+        if let BeforeJob::Refuse { reason } = decision {
+            let cleared = Cleared::Wait(reason);
+            if self.owes_after_job(&pending.lane) {
+                // An earlier hook said `Go`; it hears that the job did not start.
+                self.settle_then_clear(pending, HookEnd::StoppedBeforeStart, cleared, cx);
+            } else {
+                self.0.hooked.borrow_mut().remove(&pending.lane);
+                self.clear_start(&pending, &cleared, cx);
+            }
+            return;
+        }
+
+        let state = match self.parts().writer.read(read_state) {
+            Ok(state) => state,
+            Err(error) => {
+                log::error!("lanes: reading the state before a start: {error:#}");
+                let cleared = Cleared::Wait(WaitReason::Other(format!(
+                    "reading the state before a start: {error:#}"
+                )));
+                self.settle_then_clear(pending, HookEnd::StoppedBeforeStart, cleared, cx);
+                return;
+            }
+        };
+        if self.drops(&state, &pending.lane, &pending.job.run_id) {
+            self.drop_hooked(&pending.lane, cx);
+            return;
+        }
+        if let Err(error) = self
+            .parts()
+            .writer
+            .transact(|tx| resume_waiting(tx, &pending.lane, &pending.job.run_id))
+        {
+            log::error!("lanes: showing {} running: {error:#}", pending.lane);
+        }
+        match self.start_run(&pending, setup, cx) {
+            None => {
+                if let Some(entry) = self.0.hooked.borrow_mut().get_mut(&pending.lane) {
+                    entry.phase = HookPhase::Started(Lifecycle::Created);
+                }
+            }
+            Some(cleared) => {
+                let reason = cleared.text();
+                self.settle_then_clear(pending, HookEnd::Refused { reason }, cleared, cx);
+            }
+        }
+    }
+
+    /// Tells the hooks owed an `after_job` that the job ended with `end`, then clears the job.
+    fn settle_then_clear(&self, pending: PendingJob, end: HookEnd, cleared: Cleared, cx: &mut App) {
+        let lane = pending.lane.clone();
+        self.settle(
+            &lane,
+            end,
+            Some(Box::new(move |this, cx| {
+                this.clear_start(&pending, &cleared, cx)
+            })),
+            cx,
+        );
+    }
+
+    fn owes_after_job(&self, lane: &LaneId) -> bool {
+        self.0
+            .hooked
+            .borrow()
+            .get(lane)
+            .is_some_and(|entry| entry.hcx.owes())
+    }
+
+    /// Whether the job `run_id` of `lane`, not started yet, is dropped: the lane no longer holds
+    /// it, a stop was asked for, or the lane left the lane count.
+    fn drops(&self, state: &LanesState, lane: &LaneId, run_id: &str) -> bool {
+        let Some(record) = state.lanes.get(lane) else {
+            return true;
+        };
+        !lane_holds(state, lane, run_id)
+            || record.stop_requested.is_some()
+            || !self.lane_exists(lane)
+    }
+
+    /// Drops a job whose run has not started: a pending `before_job` future is dropped, the hooks
+    /// owed an `after_job` hear [`HookEnd::StoppedBeforeStart`], then the job is cleared.
+    fn drop_hooked(&self, lane: &LaneId, cx: &mut App) {
+        let (before, run_id) = {
+            let mut hooked = self.0.hooked.borrow_mut();
+            let Some(entry) = hooked.get_mut(lane) else {
+                return;
+            };
+            entry.hcx.finish();
+            let before = std::mem::replace(&mut entry.phase, HookPhase::Deciding);
+            (before, entry.job.run_id.clone())
+        };
+        drop(before);
+        log::info!("lanes: {lane} dropped run {run_id} before it started");
+        let lane_id = lane.clone();
+        self.settle(
+            lane,
+            HookEnd::StoppedBeforeStart,
+            Some(Box::new(move |this, cx| {
+                let now = this.parts().host.now();
+                let result = this
+                    .parts()
+                    .writer
+                    .transact(|tx| drop_job(tx, &lane_id, &run_id, &now));
+                if let Err(error) = result {
+                    log::error!("lanes: clearing the dropped job of {lane_id}: {error:#}");
+                }
+                this.schedule(false, cx);
+            })),
+            cx,
+        );
+    }
+
+    /// Calls `after_job` of every hook owed one for `lane`'s job, then `then`; the lane is
+    /// evaluated again only after both.
+    fn settle(&self, lane: &LaneId, end: HookEnd, then: Option<Then>, cx: &mut App) {
+        let (owed, job) = {
+            let mut hooked = self.0.hooked.borrow_mut();
+            let Some(entry) = hooked.get_mut(lane) else {
+                return;
+            };
+            entry.phase = HookPhase::After;
+            (entry.hcx.take_owed(), entry.job.clone())
+        };
+        let done = after_job_of(owed, lane, &job, &end, cx);
+        let weak = self.downgrade();
+        let lane = lane.clone();
+        cx.spawn(async move |cx| {
+            done.await;
+            let Some(inner) = weak.upgrade() else {
+                return;
+            };
+            cx.update(|cx| {
+                let this = Dispatcher(inner);
+                if let Some(then) = then {
+                    then(&this, cx);
+                }
+                let mut hooked = this.0.hooked.borrow_mut();
+                if hooked
+                    .get(&lane)
+                    .is_some_and(|entry| entry.job.run_id == job.run_id)
+                {
+                    hooked.remove(&lane);
+                }
+                drop(hooked);
+                this.schedule(false, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// At the start of a pass: drops the jobs still in `before_job` that `state` no longer lets
+    /// start, and ends the hooked jobs whose lane no longer holds their run.
+    pub(crate) fn sweep_hooked(&self, state: &LanesState, cx: &mut App) {
+        let mut dropped = Vec::new();
+        let mut ended = Vec::new();
+        for (lane, entry) in self.0.hooked.borrow().iter() {
+            match &entry.phase {
+                HookPhase::Before(_) => {
+                    if self.drops(state, lane, &entry.job.run_id) {
+                        dropped.push(lane.clone());
+                    }
+                }
+                HookPhase::Started(lifecycle) => {
+                    if !lane_holds(state, lane, &entry.job.run_id) {
+                        ended.push((lane.clone(), *lifecycle));
+                    }
+                }
+                HookPhase::Deciding | HookPhase::After => {}
+            }
+        }
+        for lane in dropped {
+            self.drop_hooked(&lane, cx);
+        }
+        for (lane, lifecycle) in ended {
+            self.settle(&lane, HookEnd::Lifecycle(lifecycle), None, cx);
+        }
+    }
+
+    /// Whether a lane's `after_job` is still to resolve.
+    pub(crate) fn settling(&self) -> bool {
+        self.0
+            .hooked
+            .borrow()
+            .values()
+            .any(|entry| matches!(entry.phase, HookPhase::After))
+    }
+
+    /// Records the state a hooked job's run reported.
+    fn note_lifecycle(&self, run: &str, status: RunStatus) {
+        for entry in self.0.hooked.borrow_mut().values_mut() {
+            if entry.job.run_id == run
+                && let HookPhase::Started(lifecycle) = &mut entry.phase
+            {
+                *lifecycle = lifecycle_of(status);
+            }
+        }
     }
 
     /// Starts the run of a job its lane still holds; returns how to clear a refusal.
@@ -161,6 +457,7 @@ impl Dispatcher {
     /// owners; then the lanes are evaluated, since a run's end may free an instance.
     pub fn on_workflow_event(&self, event: &WorkflowEvent, cx: &mut App) {
         let WorkflowEvent::Changed { run, state, .. } = event;
+        self.note_lifecycle(run, *state);
         let graph = self.parts().host.graph(cx);
         let now = self.parts().host.now();
         let table = self.table();
@@ -215,6 +512,60 @@ fn clear_job(tx: &mut StateTx, pending: &PendingJob, cleared: &Cleared, now: &st
         }
     }
     put_lane(tx, &lane)
+}
+
+/// Shows a lane that a hook's `set_wait` showed waiting as running again, when it still holds
+/// the job about to start. A requested pause keeps its reason.
+fn resume_waiting(tx: &mut StateTx, lane: &LaneId, run_id: &str) -> Result<()> {
+    let state = read_state_in(tx)?;
+    if !lane_holds(&state, lane, run_id) {
+        return Ok(());
+    }
+    let record = &state.lanes[lane];
+    if record.state != LaneState::Waiting {
+        return Ok(());
+    }
+    let mut updated = record.clone();
+    updated.state = LaneState::Running;
+    if !updated.pause_requested {
+        updated.reason = None;
+    }
+    put_lane(tx, &updated)
+}
+
+/// Clears a job dropped before its run started, when the lane still holds it. The lane is idle
+/// again, or stopped with its owner when a stop was asked for; the owner record stays.
+fn drop_job(tx: &mut StateTx, lane: &LaneId, run_id: &str, now: &str) -> Result<()> {
+    let state = read_state_in(tx)?;
+    if !lane_holds(&state, lane, run_id) {
+        return Ok(());
+    }
+    let mut updated = state.lanes[lane].clone();
+    updated.job = None;
+    updated.state = LaneState::Idle;
+    updated.reason = None;
+    let held = held_task(&state, lane);
+    let (updated, owner) = stop_at_job_boundary(&updated, held.map(|(_, owner)| owner), now);
+    put_lane(tx, &updated)?;
+    if let (Some((task, before)), Some(owner)) = (held, owner)
+        && *before != owner
+    {
+        put_owner(tx, task, &owner)?;
+    }
+    Ok(())
+}
+
+/// The lifecycle a run status reports.
+fn lifecycle_of(status: RunStatus) -> Lifecycle {
+    match status {
+        RunStatus::Queued => Lifecycle::Queued,
+        RunStatus::Running | RunStatus::WaitingOnYou => Lifecycle::Running,
+        RunStatus::Pausing | RunStatus::Paused => Lifecycle::Paused,
+        RunStatus::Halted => Lifecycle::Halted,
+        RunStatus::Succeeded => Lifecycle::Ended(EndState::Succeeded),
+        RunStatus::Failed => Lifecycle::Ended(EndState::Failed),
+        RunStatus::Cancelled => Lifecycle::Cancelled,
+    }
 }
 
 /// Applies a run's status change to the lane whose job it is. Returns that lane.

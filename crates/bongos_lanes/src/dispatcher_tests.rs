@@ -1226,3 +1226,6 @@ async fn a_start_is_skipped_when_the_lane_no_longer_holds_the_run(cx: &mut TestA
 
 #[path = "lane_control_tests.rs"]
 mod lane_control_tests;
+
+#[path = "job_hooks_tests.rs"]
+mod job_hooks_tests;

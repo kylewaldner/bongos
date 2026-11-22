@@ -52,7 +52,7 @@ pub use dispatcher::{
 pub use done_owners::CLEARED_NO_CHECKS;
 pub use env::{apply_env, second_tree_env, tip_env};
 pub use exporter::{EXPORT_NAMESPACE, LanesExporter, STATE_FILE};
-pub use hooks::{AFTER_TREE_CREATED, JobHook, JobHooks};
+pub use hooks::{AFTER_TREE_CREATED, BEFORE_JOB, BeforeJob, JobEnd, JobHook, JobHookCx, JobHooks};
 pub use job_trees::{
     CurrentJobTrees, ExtraRepositories, JobRepositories, JobRepository, JobStart, JobTrees,
     StartedTrees, forbidden_for, start_job_trees,
