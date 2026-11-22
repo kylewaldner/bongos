@@ -916,6 +916,11 @@ impl Dispatcher {
         &self.0.config.run_id
     }
 
+    /// Whether the dispatcher's run ended; no pass runs any more.
+    pub fn has_ended(&self) -> bool {
+        self.0.ended.get()
+    }
+
     /// How many passes ran, for tests.
     pub fn passes(&self) -> usize {
         self.0.passes.get()

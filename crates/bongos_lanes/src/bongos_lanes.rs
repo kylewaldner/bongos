@@ -70,7 +70,10 @@ pub use done_owners::CLEARED_NO_CHECKS;
 pub use env::{apply_env, second_tree_env, tip_env};
 pub use exporter::{EXPORT_NAMESPACE, LanesExporter, STATE_FILE};
 pub use hooks::{AFTER_TREE_CREATED, BEFORE_JOB, BeforeJob, JobEnd, JobHook, JobHookCx, JobHooks};
-pub use host::{LanesPayload, ProjectLanesHost, ensure_window_lanes, register_host};
+pub use host::{
+    HOST_PREFIX, HostDispatcher, LanesPayload, ProjectLanesHost, WINDOW_PREFIX, dispatcher_running,
+    ensure_window_lanes, register_host,
+};
 pub use job_trees::{
     CurrentJobTrees, ExtraRepositories, JobRepositories, JobRepository, JobStart, JobTrees,
     StartedTrees, forbidden_for, start_job_trees,

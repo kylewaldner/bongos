@@ -84,6 +84,8 @@ struct Shared {
     stopping: AtomicBool,
     next_connection: AtomicU64,
     connections: Mutex<Vec<Arc<Connection>>>,
+    /// Told each time a client connects or goes.
+    watchers: Mutex<Vec<mpsc::UnboundedSender<()>>>,
 }
 
 impl Shared {
@@ -107,6 +109,13 @@ impl Shared {
         self.connections
             .lock()
             .retain(|connection| connection.id != id);
+        self.connections_changed();
+    }
+
+    fn connections_changed(&self) {
+        self.watchers
+            .lock()
+            .retain(|watcher| watcher.unbounded_send(()).is_ok());
     }
 }
 
@@ -142,6 +151,7 @@ impl EngineServer {
             stopping: AtomicBool::new(false),
             next_connection: AtomicU64::new(0),
             connections: Mutex::new(Vec::new()),
+            watchers: Mutex::new(Vec::new()),
         });
         let (incoming, mut requests) = mpsc::unbounded::<Incoming>();
 
@@ -210,6 +220,13 @@ impl EngineServer {
     /// How many clients are connected now.
     pub fn connection_count(&self) -> usize {
         self.shared.connections.lock().len()
+    }
+
+    /// A message each time a client connects or goes, from now on.
+    pub fn watch_connections(&self) -> mpsc::UnboundedReceiver<()> {
+        let (sender, receiver) = mpsc::unbounded();
+        self.shared.watchers.lock().push(sender);
+        receiver
     }
 }
 
@@ -329,6 +346,7 @@ fn serve_connection(
         .spawn(move || write_lines(writer, closer, lines))
         .context("starting a connection's writing thread")?;
     shared.connections.lock().push(connection.clone());
+    shared.connections_changed();
     let generation = welcome.writer.generation().unwrap_or(0);
     let welcomed = connection.send(&ServerMessage::Welcome {
         protocol: PROTOCOL_VERSION,
