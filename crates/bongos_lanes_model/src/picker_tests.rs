@@ -1,10 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::graph::*;
 use crate::picker::*;
 use crate::rank::critical_path;
+use crate::stamp::{self, StampFile};
 use crate::state::*;
-use crate::table::{LaneTable, parse};
+use crate::table::{LaneTable, OwnerMode, parse};
 
 fn id(text: &str) -> TaskId {
     TaskId::new(text)
@@ -1124,10 +1125,12 @@ fn random_case(rng: &mut Rng) -> Case {
     }
 
     let build_rules = rng.pick(&["[\"step\", \"any\"]", "[]", "[\"any\"]"]);
+    let build_areas = rng.pick(&["", "areas = false\n"]);
+    let design_ahead = rng.pick(&["", "ahead = { cap = 1 }\n", "ahead = { cap = 2 }\n"]);
     let mut text = format!(
-        "[[kind]]\nname = \"build\"\ncount = {}\nrules = {build_rules}\n[[kind]]\nname = \"design\"\ncount = {}\nrules = [\"prepare\"]\n",
+        "[[kind]]\nname = \"build\"\ncount = {}\nrules = {build_rules}\n{build_areas}[[kind]]\nname = \"design\"\ncount = {}\nrules = [\"prepare\"]\n{design_ahead}",
         1 + rng.below(3),
-        rng.below(2),
+        rng.below(3),
     );
     text.push_str("[rules.step]\nwork_kind = \"step\"\nworkflow = \"w1\"\n");
     text.push_str("[rules.any]\nstate = [\"ready\", \"in-progress\"]\nuse_todo_workflow = true\n");
@@ -1217,6 +1220,27 @@ fn random_case(rng: &mut Rng) -> Case {
         opts.counts.insert("build".to_string(), rng.below(3) as u32);
     }
 
+    // Sometimes a recorded stamp: the graph's own, or one from before an edge was added.
+    if rng.chance(30) {
+        let mut recorded_tasks = tasks.clone();
+        if rng.chance(50)
+            && let Some(task) = recorded_tasks.last_mut()
+        {
+            task.edges.push(PickEdge {
+                kind: EdgeKind::After,
+                target: TaskId::new("elsewhere"),
+                unblock: "merged".to_string(),
+                reached: true,
+                progress: String::new(),
+            });
+        }
+        let recorded = PickGraph::new(
+            top.iter().map(|name| TaskId::new(name.clone())).collect(),
+            recorded_tasks,
+        );
+        opts.stamp = Some(StampFile::from_stamp(&stamp::compute(&recorded, &table)));
+    }
+
     // Sometimes list a task id a second time, with different data.
     if rng.chance(25) {
         let mut copy = rng.pick(&tasks).clone();
@@ -1280,4 +1304,945 @@ fn results_do_not_depend_on_input_order() {
     }
     // The generator reaches assignments as well as waits.
     assert!(assigned > 0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Areas, pins, ahead kinds, staleness and the stamp
+// ---------------------------------------------------------------------------------------------
+
+fn tagged(mut task: PickTask, tags: &[&str]) -> PickTask {
+    task.areas = tags.iter().map(|tag| tag.to_string()).collect();
+    task
+}
+
+fn area(tag: &str, with: &str, where_: &str) -> WaitReason {
+    WaitReason::Area {
+        tag: tag.to_string(),
+        with: id(with),
+        where_: where_.to_string(),
+    }
+}
+
+fn with_lane(mut state: LanesState, on: LaneId, lane_state: LaneState) -> LanesState {
+    state
+        .lanes
+        .insert(on.clone(), LaneRecord::new(&on, lane_state));
+    state
+}
+
+fn area_graph() -> PickGraph {
+    graph(
+        &["a", "b", "c"],
+        vec![
+            tagged(w("a"), &["ui"]),
+            tagged(w("b"), &["db", "ui"]),
+            tagged(w("c"), &["db"]),
+        ],
+    )
+}
+
+fn area_pair() -> PickGraph {
+    graph(
+        &["a", "b"],
+        vec![tagged(w("a"), &["ui"]), tagged(w("b"), &["db", "ui"])],
+    )
+}
+
+// PRD 9, first rule: a lane takes a new task only when no conflicting task is in flight on
+// another lane, and the reason names the tag, the task and where it is.
+#[test]
+fn a_new_task_waits_for_a_conflicting_task_in_flight_on_another_lane() {
+    let table = builds(2);
+    let state = owners(&[("a", OwnerState::Active, Some(lane("build", 2)))]);
+    assert_eq!(
+        picked(&pick_on(&area_graph(), &state, &table, &lane("build", 1))),
+        pair("c", "w")
+    );
+    let found = reasons(&pick_on(&area_pair(), &state, &table, &lane("build", 1)));
+    let expected = area("ui", "a", "in flight on build-2");
+    assert!(found.contains(&("b".to_string(), expected.clone())), "{found:?}");
+    assert_eq!(expected.to_string(), "area ui shared with a, in flight on build-2");
+
+    // From an empty state the dry run lets the second lane see the first one's claim.
+    let dry = explain(&area_pair(), &LanesState::default(), &table, &PickOptions::default());
+    assert_eq!(picked(&dry.per_lane[0].1), pair("a", "w"));
+    assert!(
+        reasons(&dry.per_lane[1].1)
+            .contains(&("b".to_string(), area("ui", "a", "in flight on build-1")))
+    );
+    assert_eq!(dry.waiting.len(), 1);
+    assert_eq!(dry.waiting[0].reason, area("ui", "a", "in flight on build-1"));
+}
+
+// PRD 9: halted and stopped tasks count as in flight, and so does an unowned task started past
+// its first job.
+#[test]
+fn halted_and_stopped_tasks_count_as_in_flight() {
+    let table = builds(2);
+    for (owner_state, where_) in [
+        (OwnerState::Halted, "halted on build-2"),
+        (OwnerState::Stopped, "stopped on build-2"),
+    ] {
+        let state = owners(&[("a", owner_state, Some(lane("build", 2)))]);
+        let found = reasons(&pick_on(&area_pair(), &state, &table, &lane("build", 1)));
+        assert!(
+            found.contains(&("b".to_string(), area("ui", "a", where_))),
+            "{owner_state}: {found:?}"
+        );
+    }
+
+    let mut a1 = w("a1");
+    a1.state = TaskState::Done;
+    let mut a2 = w("a2");
+    a2.active_run = Some("run-1".to_string());
+    let started = graph(
+        &["A", "b"],
+        vec![
+            tagged(PickTask::group("A", &["a1", "a2"]), &["ui"]),
+            a1,
+            a2,
+            tagged(w("b"), &["ui"]),
+        ],
+    );
+    let found = reasons(&pick_on(
+        &started,
+        &LanesState::default(),
+        &table,
+        &lane("build", 1),
+    ));
+    assert!(found.contains(&("b".to_string(), area("ui", "A", "in flight"))), "{found:?}");
+
+    // A task stopped on a lane that is gone is picked up first; the conflicting new task waits.
+    let state = owners(&[("a", OwnerState::Stopped, Some(lane("build", 3)))]);
+    let dry = explain(&area_pair(), &state, &table, &PickOptions::default());
+    assert_eq!(picked(&dry.per_lane[0].1), pair("a", "w"));
+    assert!(
+        reasons(&dry.per_lane[1].1)
+            .contains(&("b".to_string(), area("ui", "a", "in flight on build-1")))
+    );
+}
+
+/// A: group a1, a2; B: group b1, b2; both tagged ui, A first in order.
+fn two_owned() -> PickGraph {
+    graph(
+        &["A", "B"],
+        vec![
+            tagged(PickTask::group("A", &["a1", "a2"]), &["ui"]),
+            w("a1"),
+            w("a2"),
+            tagged(PickTask::group("B", &["b1", "b2"]), &["ui"]),
+            w("b1"),
+            w("b2"),
+        ],
+    )
+}
+
+// PRD 9, second rule: a job of an owned task waits while a conflicting in-flight task on another
+// lane is earlier in order, or has a live job.
+#[test]
+fn an_owned_job_waits_for_an_earlier_conflicting_task_or_a_live_job() {
+    let table = builds(2);
+    let state = owners(&[
+        ("A", OwnerState::Active, Some(lane("build", 1))),
+        ("B", OwnerState::Active, Some(lane("build", 2))),
+    ]);
+    let graph = two_owned();
+    assert_eq!(
+        reasons(&pick_on(&graph, &state, &table, &lane("build", 2)))[0],
+        ("b1".to_string(), area("ui", "A", "in flight on build-1"))
+    );
+    assert_eq!(
+        picked(&pick_on(&graph, &state, &table, &lane("build", 1))),
+        pair("a1", "w")
+    );
+
+    let busy = with_lane(state.clone(), lane("build", 2), LaneState::Running);
+    assert_eq!(
+        reasons(&pick_on(&graph, &busy, &table, &lane("build", 1)))[0],
+        ("a1".to_string(), area("ui", "B", "live job on build-2"))
+    );
+
+    // A task pair exemption lets both run.
+    let exempt = table_with_exemption("tasks = [\"A\", \"B\"]");
+    assert_eq!(
+        picked(&pick_on(&graph, &state, &exempt, &lane("build", 2))),
+        pair("b1", "w")
+    );
+    assert_eq!(
+        picked(&pick_on(&graph, &busy, &exempt, &lane("build", 1))),
+        pair("a1", "w")
+    );
+}
+
+fn table_with_exemption(exempt: &str) -> LaneTable {
+    table(&format!(
+        "[[kind]]\nname = \"build\"\ncount = 2\n[[exempt]]\n{exempt}\n"
+    ))
+}
+
+// PRD 9: a kind with `areas = false` ignores the area rule; an exemption by tags lets the
+// listed tags run together, one by tasks lets the two tasks run together.
+#[test]
+fn areas_off_and_exemptions_let_conflicting_tasks_run() {
+    let state = owners(&[("a", OwnerState::Active, Some(lane("build", 2)))]);
+    let off = table("[[kind]]\nname = \"build\"\ncount = 2\nareas = false\n");
+    assert_eq!(
+        picked(&pick_on(&area_graph(), &state, &off, &lane("build", 1))),
+        pair("b", "w")
+    );
+
+    let by_tags = table_with_exemption("tags = [\"ui\", \"billing\"]");
+    assert_eq!(
+        picked(&pick_on(&area_graph(), &state, &by_tags, &lane("build", 1))),
+        pair("b", "w")
+    );
+    let by_tasks = table_with_exemption("tasks = [\"a\", \"b\"]");
+    assert_eq!(
+        picked(&pick_on(&area_graph(), &state, &by_tasks, &lane("build", 1))),
+        pair("b", "w")
+    );
+
+    // An exemption of a tag the two do not share, or of another task pair, does not help.
+    for other in ["tags = [\"db\"]", "tasks = [\"a\", \"c\"]", "tasks = [\"b\"]"] {
+        let table = table_with_exemption(other);
+        assert_eq!(
+            picked(&pick_on(&area_graph(), &state, &table, &lane("build", 1))),
+            pair("c", "w"),
+            "{other}"
+        );
+    }
+}
+
+// PRD 13: pins to a lane and to a kind; a pin to a lane that is not running waits, and no other
+// lane takes the task.
+#[test]
+fn a_pin_to_a_lane_that_is_not_running_never_goes_elsewhere() {
+    let graph = graph(&["a"], vec![w("a")]);
+    let pinned = |target: &str| {
+        table(&format!(
+            "[[kind]]\nname = \"build\"\ncount = 2\n[[kind]]\nname = \"design\"\n[[pin]]\ntask = \"a\"\n{target}\n"
+        ))
+    };
+    let not_running = WaitReason::PinNotRunning {
+        to: "build-2".to_string(),
+    };
+    let stopped = with_lane(LanesState::default(), lane("build", 2), LaneState::Stopped);
+    let to_lane = pinned("lane = \"build-2\"");
+    let dry = explain(&graph, &stopped, &to_lane, &PickOptions::default());
+    for (on, outcome) in &dry.per_lane {
+        if *on == lane("build", 2) {
+            continue;
+        }
+        let found = reasons(outcome);
+        assert_eq!(found, vec![("a".to_string(), not_running.clone())], "{on}");
+    }
+    assert_eq!(
+        not_running.to_string(),
+        "pinned to build-2, which is not running"
+    );
+
+    // A pin to a lane above the count waits the same way.
+    let gone = pinned("lane = \"build-3\"");
+    let dry = explain(&graph, &LanesState::default(), &gone, &PickOptions::default());
+    assert!(dry.per_lane.iter().all(|(_, outcome)| reasons(outcome)
+        == vec![(
+            "a".to_string(),
+            WaitReason::PinNotRunning {
+                to: "build-3".to_string()
+            }
+        )]));
+
+    // A pin to a kind: only a lane of that kind takes it.
+    let to_kind = pinned("kind = \"design\"");
+    let dry = explain(&graph, &LanesState::default(), &to_kind, &PickOptions::default());
+    assert_eq!(
+        reasons(&dry.per_lane[0].1),
+        vec![(
+            "a".to_string(),
+            WaitReason::Pin {
+                to: "design".to_string()
+            }
+        )]
+    );
+    assert_eq!(dry.per_lane[2].0, lane("design", 1));
+    assert_eq!(picked(&dry.per_lane[2].1), pair("a", "w"));
+}
+
+fn ahead_table(cap: u32, design_count: u32) -> LaneTable {
+    table(&format!(
+        r#"
+[[kind]]
+name = "build"
+rules = ["step"]
+
+[[kind]]
+name = "design"
+count = {design_count}
+ahead = {{ cap = {cap} }}
+rules = ["prepare"]
+
+[rules.step]
+work_kind = "step"
+workflow = "implement"
+
+[rules.prepare]
+work_kind = "design"
+workflow = "prepare"
+"#
+    ))
+}
+
+/// Features F1 to F4, each a design leaf then a step leaf, every one tagged ui.
+fn features() -> Vec<PickTask> {
+    let mut tasks = Vec::new();
+    for n in 1..=4 {
+        let name = format!("F{n}");
+        let design = format!("{name}.d");
+        let step = format!("{name}.s");
+        tasks.push(tagged(
+            PickTask::group(&name, &[design.as_str(), step.as_str()]),
+            &["ui"],
+        ));
+        tasks.push(with_kind(PickTask::leaf(&design), "design"));
+        tasks.push(after(
+            with_kind(PickTask::leaf(&step), "step"),
+            &design,
+            false,
+            "ready; needs merged",
+        ));
+    }
+    tasks
+}
+
+fn feature_graph(tasks: Vec<PickTask>) -> PickGraph {
+    graph(&["F1", "F2", "F3", "F4"], tasks)
+}
+
+// PRD 16: the cap counts prepared tasks not yet started plus preparations running.
+#[test]
+fn the_ahead_cap_counts_prepared_unstarted_and_running_preparations() {
+    let table = ahead_table(2, 3);
+    let state = owners(&[
+        ("F1", OwnerState::Prepared, None),
+        ("F2", OwnerState::Ahead, Some(lane("design", 2))),
+    ]);
+    let cap = WaitReason::AheadCap { n: 2, cap: 2 };
+    let found = reasons(&pick_on(
+        &feature_graph(features()),
+        &state,
+        &table,
+        &lane("design", 1),
+    ));
+    assert!(found.contains(&("F3.d".to_string(), cap.clone())), "{found:?}");
+    assert!(found.contains(&("F4.d".to_string(), cap.clone())));
+    assert!(found.contains(&(
+        "F2.d".to_string(),
+        WaitReason::Owner {
+            lane: lane("design", 2),
+            state: OwnerState::Ahead
+        }
+    )));
+    assert_eq!(
+        cap.to_string(),
+        "ahead cap reached: 2 prepared or preparing (cap 2)"
+    );
+
+    // Once F1 has a started leaf it no longer counts, so one preparation may start.
+    let mut tasks = features();
+    tasks[1].started = true;
+    let graph = feature_graph(tasks);
+    let dry = explain(&graph, &state, &table, &PickOptions::default());
+    let (_, first) = &dry.per_lane[1];
+    assert_eq!(dry.per_lane[1].0, lane("design", 1));
+    assert_eq!(picked(first), pair("F3.d", "prepare"));
+    assert_eq!(
+        assignment(first).owner_change,
+        vec![OwnerChange {
+            task: id("F3"),
+            from: None,
+            from_lane: None,
+            to: OwnerState::Ahead,
+            lane: Some(lane("design", 1)),
+        }]
+    );
+    // design-2 resumes its own preparation, and design-3 sees the cap full again.
+    assert_eq!(picked(&dry.per_lane[2].1), pair("F2.d", "prepare"));
+    assert!(reasons(&dry.per_lane[3].1).contains(&("F4.d".to_string(), cap)));
+}
+
+// PRD 16: an ahead lane needs every edge target of the top-level task finished, not merely
+// reached; and area rules do not apply to it.
+#[test]
+fn an_ahead_lane_needs_finished_targets_and_ignores_areas() {
+    let table = ahead_table(2, 1);
+    let mut tasks = features();
+    // F1 is merged (its edge from F2 is reached) but not done; F2 comes after F1.
+    tasks[0].state = TaskState::Merged;
+    tasks[1].state = TaskState::Done;
+    tasks[3] = after(tasks[3].clone(), "F1", true, "");
+    let state = owners(&[("F3", OwnerState::Active, Some(lane("build", 1)))]);
+
+    // F2 ranks before F4 but waits; F4 shares area ui with F3, in flight on build-1, yet the
+    // ahead lane prepares it.
+    let outcome = pick_on(
+        &feature_graph(tasks.clone()),
+        &state,
+        &table,
+        &lane("design", 1),
+    );
+    assert_eq!(picked(&outcome), pair("F4.d", "prepare"));
+
+    let first_two = graph(&["F1", "F2"], tasks[..6].to_vec());
+    let found = reasons(&pick_on(&first_two, &state, &table, &lane("design", 1)));
+    assert!(
+        found.contains(&(
+            "F2.d".to_string(),
+            WaitReason::Dependency {
+                on: id("F1"),
+                progress: "merged reached; an ahead lane waits until it is finished".to_string()
+            }
+        )),
+        "{found:?}"
+    );
+
+    tasks[0].state = TaskState::Done;
+    let first_two = graph(&["F1", "F2"], tasks[..6].to_vec());
+    let outcome = pick_on(&first_two, &state, &table, &lane("design", 1));
+    assert_eq!(picked(&outcome), pair("F2.d", "prepare"));
+}
+
+// Rule 8: a first job on a prepared, unrefreshed owner whose rule has staleness refreshes first.
+#[test]
+fn a_prepared_unrefreshed_owner_with_staleness_refreshes_first() {
+    let with_staleness = table(
+        "[[kind]]\nname = \"build\"\nrules = [\"step\"]\n[rules.step]\nwork_kind = \"step\"\nworkflow = \"implement\"\nstaleness = \"lanes/scripts/stale\"\nrefresh = \"refresh\"\n",
+    );
+    let without = table(
+        "[[kind]]\nname = \"build\"\nrules = [\"step\"]\n[rules.step]\nwork_kind = \"step\"\nworkflow = \"implement\"\n",
+    );
+    let graph = graph(
+        &["F"],
+        vec![
+            PickTask::group("F", &["F.s"]),
+            with_kind(PickTask::leaf("F.s"), "step"),
+        ],
+    );
+    let prepared = owners(&[("F", OwnerState::Prepared, None)]);
+    let mut refreshed = prepared.clone();
+    refreshed.owners.get_mut(&id("F")).unwrap().refreshed = true;
+    let cases = [
+        (&prepared, &with_staleness, true),
+        (&refreshed, &with_staleness, false),
+        (&prepared, &without, false),
+        (&LanesState::default(), &with_staleness, false),
+    ];
+    for (state, table, expected) in cases {
+        let outcome = pick_on(&graph, state, table, &lane("build", 1));
+        assert_eq!(picked(&outcome), pair("F.s", "implement"));
+        assert_eq!(assignment(&outcome).refresh_first, expected);
+    }
+}
+
+// PRD 18: a stale stamp stops every lane with the diff; a matching stamp or none changes nothing;
+// a status change does not make the stamp stale.
+#[test]
+fn a_stale_stamp_stops_every_lane() {
+    let table = builds(2);
+    let recorded = StampFile::from_stamp(&stamp::compute(&graph_two(), &table));
+    let opts = PickOptions {
+        stamp: Some(recorded),
+        ..PickOptions::default()
+    };
+    let state = LanesState::default();
+    let fresh = explain(&graph_two(), &state, &table, &opts);
+    assert_eq!(fresh, explain(&graph_two(), &state, &table, &PickOptions::default()));
+
+    let mut progressed = w("a");
+    progressed.state = TaskState::InProgress;
+    progressed.started = true;
+    let moved_on = graph(&["a", "b"], vec![progressed, w("b")]);
+    assert_eq!(
+        picked(&pick(&moved_on, &state, &table, &lane("build", 1), &opts)),
+        pair("a", "w")
+    );
+
+    let changed = graph(&["a", "b"], vec![w("a"), after(w("b"), "a", true, "")]);
+    let halted = owners(&[("a", OwnerState::Halted, Some(lane("build", 2)))]);
+    for state in [LanesState::default(), halted] {
+        let dry = explain(&changed, &state, &table, &opts);
+        for (_, outcome) in &dry.per_lane {
+            let found = reasons(outcome);
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].0, "b");
+            let WaitReason::StaleGraph { diff } = &found[0].1 else {
+                panic!("expected a stale graph, got {found:?}");
+            };
+            assert_eq!(diff.to_string(), "graph changed since the stamp: changed b");
+        }
+        assert_eq!(dry.ready, 0);
+        assert!(matches!(
+            dry.waiting[0].reason,
+            WaitReason::StaleGraph { .. }
+        ));
+    }
+    // Without a stamp the check is off.
+    assert_eq!(
+        picked(&pick_on(&changed, &LanesState::default(), &table, &lane("build", 1))),
+        pair("a", "w")
+    );
+}
+
+fn reason_kind(reason: &WaitReason) -> &'static str {
+    match reason {
+        WaitReason::Dependency { .. } => "dependency",
+        WaitReason::Area { .. } => "area",
+        WaitReason::Owner { .. } => "owner",
+        WaitReason::Pin { .. } => "pin",
+        WaitReason::PinNotRunning { .. } => "pin not running",
+        WaitReason::AheadCap { .. } => "ahead cap",
+        WaitReason::StaleGraph { .. } => "stale graph",
+        WaitReason::InstanceLimit { .. } => "instance limit",
+        WaitReason::NoWorkflow => "no workflow",
+        WaitReason::LaneKind { .. } => "lane kind",
+        WaitReason::ActiveRun { .. } => "active run",
+        WaitReason::Held { .. } => "held",
+        WaitReason::Bound => "bound",
+        WaitReason::Finished => "finished",
+        WaitReason::Environment(_) => "environment",
+        WaitReason::Failed(_) => "failed",
+        WaitReason::Other(_) => "other",
+    }
+}
+
+fn dry_run_reasons(dry: &DryRun) -> BTreeSet<&'static str> {
+    let mut found: BTreeSet<&'static str> = dry
+        .waiting
+        .iter()
+        .map(|waiting| reason_kind(&waiting.reason))
+        .collect();
+    for (_, outcome) in &dry.per_lane {
+        if let PickOutcome::Nothing { reasons, .. } = outcome {
+            found.extend(reasons.iter().map(|waiting| reason_kind(&waiting.reason)));
+        }
+    }
+    found
+}
+
+// PRD 19: the dry run surfaces every reason the picker gives. Environment and Failed are lane
+// record reasons the dispatcher sets; the picker never gives them.
+#[test]
+fn the_dry_run_surfaces_every_wait_reason() {
+    let step = |name: &str| with_kind(PickTask::leaf(name), "step");
+    let mut running = step("run");
+    running.active_run = Some("run-1".to_string());
+    let mut held = step("hold");
+    held.held = Some("moving".to_string());
+    let tasks = vec![
+        tagged(step("own"), &["ui"]),
+        tagged(step("ar"), &["ui"]),
+        after(step("dep"), "x", false, "ready; needs merged"),
+        step("x"),
+        step("pn"),
+        step("pnr"),
+        with_kind(PickTask::leaf("nw"), "docs"),
+        running,
+        held,
+        step("fin"),
+        PickTask::group("prep", &["prep.d"]),
+        with_kind(PickTask::leaf("prep.d"), "design"),
+        PickTask::group("feat", &["feat.d"]),
+        with_kind(PickTask::leaf("feat.d"), "design"),
+    ];
+    let top = [
+        "own", "ar", "dep", "x", "pn", "pnr", "nw", "run", "hold", "fin", "prep", "feat",
+    ];
+    let graph = graph(&top, tasks);
+    let mut table = ahead_table(1, 1);
+    table.kinds[0].count = 2;
+    let pins = parse(
+        "schema = 1\n[[pin]]\ntask = \"pn\"\nkind = \"design\"\n[[pin]]\ntask = \"pnr\"\nlane = \"build-3\"\n",
+    )
+    .unwrap();
+    table.pins = pins.pins;
+    let state = owners(&[
+        ("own", OwnerState::Active, Some(lane("build", 2))),
+        ("prep", OwnerState::Prepared, None),
+        ("fin", OwnerState::Done, None),
+    ]);
+    let opts = PickOptions {
+        instances: BTreeMap::from([(
+            "implement".to_string(),
+            InstanceUse {
+                limit: Some(1),
+                active_runs: vec!["run-9".to_string()],
+                reserved: 0,
+            },
+        )]),
+        ..PickOptions::default()
+    };
+    let dry = explain(&graph, &state, &table, &opts);
+    let mut found = dry_run_reasons(&dry);
+
+    // The bound and a stale graph, each in its own dry run.
+    let bounded = PickOptions {
+        bound: Some(PickBound::Within(id("feat"))),
+        ..opts.clone()
+    };
+    found.extend(dry_run_reasons(&explain(&graph, &state, &table, &bounded)));
+    let stale = PickOptions {
+        stamp: Some(StampFile::from_stamp(&stamp::compute(
+            &PickGraph::new(Vec::new(), Vec::new()),
+            &table,
+        ))),
+        ..opts
+    };
+    found.extend(dry_run_reasons(&explain(&graph, &state, &table, &stale)));
+
+    let expected: BTreeSet<&'static str> = [
+        "dependency",
+        "area",
+        "owner",
+        "pin",
+        "pin not running",
+        "ahead cap",
+        "stale graph",
+        "instance limit",
+        "no workflow",
+        "lane kind",
+        "active run",
+        "held",
+        "bound",
+        "finished",
+        "other",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(found, expected);
+    // The waiting list itself names the area and the cap.
+    let waiting: Vec<&'static str> = dry
+        .waiting
+        .iter()
+        .map(|waiting| reason_kind(&waiting.reason))
+        .collect();
+    assert!(waiting.contains(&"area"), "{waiting:?}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Property: two lanes picking one after the other never take conflicting work
+// ---------------------------------------------------------------------------------------------
+
+struct Concurrency {
+    graph: PickGraph,
+    table: LaneTable,
+    state: LanesState,
+    opts: PickOptions,
+}
+
+const PICKING: [(&str, u32); 4] = [("build", 1), ("build", 2), ("design", 1), ("design", 2)];
+
+fn concurrency_case(rng: &mut Rng) -> Concurrency {
+    let mut tasks = Vec::new();
+    let mut top: Vec<String> = Vec::new();
+    for index in 0..2 + rng.below(4) {
+        let name = format!("t{index}");
+        let mut task = PickTask::leaf(&name);
+        for tag in ["ui", "db"] {
+            if rng.chance(35) {
+                task.areas.push(tag.to_string());
+            }
+        }
+        for target in &top {
+            if rng.chance(25) {
+                task.edges.push(PickEdge {
+                    kind: EdgeKind::After,
+                    target: TaskId::new(target.clone()),
+                    unblock: "merged".to_string(),
+                    reached: rng.chance(60),
+                    progress: String::new(),
+                });
+            }
+        }
+        let kids = if rng.chance(60) { 1 + rng.below(3) } else { 0 };
+        let mut leaves = Vec::new();
+        for child in 0..kids.max(1) {
+            let mut leaf = if kids == 0 {
+                task.clone()
+            } else {
+                PickTask::leaf(&format!("{name}.{child}"))
+            };
+            leaf.work_kind = Some(if child == 0 && kids > 0 && rng.chance(60) {
+                "design".to_string()
+            } else {
+                "step".to_string()
+            });
+            leaf.state = *rng.pick(&[
+                TaskState::Ready,
+                TaskState::Ready,
+                TaskState::InProgress,
+                TaskState::Done,
+            ]);
+            leaf.started = leaf.state != TaskState::Ready || rng.chance(15);
+            leaf.active_run = rng.chance(8).then(|| format!("run-{name}.{child}"));
+            leaf.open_todo = rng.chance(80).then(|| OpenTodo {
+                index: 0,
+                name: "implement".to_string(),
+                workflow: Some("w1".to_string()),
+            });
+            if kids > 0 {
+                for tag in ["ui", "db"] {
+                    if rng.chance(15) {
+                        leaf.areas.push(tag.to_string());
+                    }
+                }
+            }
+            leaves.push(leaf);
+        }
+        if kids > 0 {
+            task.shape = Shape::Group;
+            task.children = leaves.iter().map(|leaf| leaf.id.clone()).collect();
+            task.state = if leaves.iter().all(|leaf| leaf.is_finished()) {
+                TaskState::Done
+            } else {
+                TaskState::InProgress
+            };
+            tasks.push(task);
+            tasks.extend(leaves);
+        } else {
+            tasks.extend(leaves);
+        }
+        top.push(name);
+    }
+    let graph = PickGraph::new(top.iter().map(|t| TaskId::new(t.clone())).collect(), tasks);
+
+    let mut text = format!(
+        "{}[[kind]]\nname = \"build\"\ncount = 2\nrules = [\"step\", \"any\"]\n{}[[kind]]\nname = \"design\"\ncount = 2\nrules = [\"prepare\"]\nahead = {{ cap = {} }}\n",
+        if rng.chance(15) { "owner = \"self\"\n" } else { "" },
+        if rng.chance(20) { "areas = false\n" } else { "" },
+        1 + rng.below(2),
+    );
+    text.push_str("[rules.step]\nwork_kind = \"step\"\nworkflow = \"w1\"\n");
+    text.push_str("[rules.any]\nuse_todo_workflow = true\n");
+    text.push_str("[rules.prepare]\nwork_kind = \"design\"\nworkflow = \"w2\"\n");
+    if rng.chance(20) {
+        text.push_str("[[exempt]]\ntags = [\"ui\"]\n");
+    }
+    if rng.chance(20) {
+        let a = rng.pick(&top).clone();
+        let b = rng.pick(&top).clone();
+        text.push_str(&format!("[[exempt]]\ntasks = [\"{a}\", \"{b}\"]\n"));
+    }
+    if rng.chance(15) {
+        let task = rng.pick(&top).clone();
+        let target = rng.pick(&["lane = \"build-1\"", "lane = \"build-2\"", "kind = \"build\""]);
+        text.push_str(&format!("[[pin]]\ntask = \"{task}\"\n{target}\n"));
+    }
+    let table = table(&text);
+
+    // Owner records: at most one holding and one ahead record per lane.
+    let units: BTreeSet<TaskId> = graph
+        .leaves()
+        .map(|leaf| unit_of(&graph, &table, &leaf.id))
+        .collect();
+    let mut free_lanes = vec![
+        Some(lane("build", 1)),
+        Some(lane("build", 2)),
+        Some(lane("design", 1)),
+        Some(lane("design", 2)),
+        Some(lane("build", 3)),
+        None,
+    ];
+    rng.shuffle(&mut free_lanes);
+    let mut state = LanesState::default();
+    for unit in units {
+        if !rng.chance(45) {
+            continue;
+        }
+        let owner_state = *rng.pick(&[
+            OwnerState::Active,
+            OwnerState::Stopped,
+            OwnerState::Halted,
+            OwnerState::Ahead,
+            OwnerState::Prepared,
+            OwnerState::Done,
+        ]);
+        let on = match owner_state {
+            OwnerState::Prepared | OwnerState::Done => None,
+            _ => match free_lanes.pop() {
+                Some(on) => on,
+                None => continue,
+            },
+        };
+        state.owners.insert(unit, owner(owner_state, on));
+    }
+    for (kind, index) in PICKING {
+        if rng.chance(40) {
+            let on = lane(kind, index);
+            let lane_state = *rng.pick(&[LaneState::Idle, LaneState::Running, LaneState::Paused]);
+            state
+                .lanes
+                .insert(on.clone(), LaneRecord::new(&on, lane_state));
+        }
+    }
+    let mut opts = PickOptions::default();
+    if rng.chance(30) {
+        opts.instances.insert(
+            "w1".to_string(),
+            InstanceUse {
+                limit: Some(1 + rng.below(2) as u32),
+                ..InstanceUse::default()
+            },
+        );
+    }
+    Concurrency {
+        graph,
+        table,
+        state,
+        opts,
+    }
+}
+
+fn unit_of(graph: &PickGraph, table: &LaneTable, leaf: &TaskId) -> TaskId {
+    match table.owner {
+        OwnerMode::Top => graph.top_level_of(leaf),
+        OwnerMode::SelfOwned => leaf.clone(),
+    }
+}
+
+fn ahead_count(graph: &PickGraph, state: &LanesState) -> usize {
+    state
+        .owners
+        .iter()
+        .filter(|(task, owner)| match owner.state {
+            OwnerState::Ahead => true,
+            OwnerState::Prepared => graph.task(task).is_some() && !graph.has_started_leaf(task),
+            _ => false,
+        })
+        .count()
+}
+
+/// Applies what the dispatcher's transaction writes for an outcome: the owner changes, the
+/// instance count and, when `running`, the lane's live job.
+fn apply(
+    state: &mut LanesState,
+    opts: &mut PickOptions,
+    on: &LaneId,
+    outcome: &PickOutcome,
+    running: bool,
+) {
+    let changes = match outcome {
+        PickOutcome::Assign(assignment) => {
+            *opts.assigned.entry(assignment.workflow.clone()).or_insert(0) += 1;
+            if running {
+                state
+                    .lanes
+                    .insert(on.clone(), LaneRecord::new(on, LaneState::Running));
+            }
+            &assignment.owner_change
+        }
+        PickOutcome::Nothing { owner_change, .. } => owner_change,
+        PickOutcome::Hold(_) => return,
+    };
+    for change in changes {
+        let record = state
+            .owners
+            .entry(change.task.clone())
+            .or_insert_with(|| owner(change.to, None));
+        record.state = change.to;
+        record.lane = change.lane.clone();
+    }
+}
+
+fn leaf_of(outcome: &PickOutcome) -> Option<TaskId> {
+    match outcome {
+        PickOutcome::Assign(Assignment {
+            work: AssignedWork::Leaf { task, .. },
+            ..
+        }) => Some(task.clone()),
+        _ => None,
+    }
+}
+
+fn area_lane(table: &LaneTable, on: &LaneId) -> bool {
+    table
+        .kinds
+        .iter()
+        .find(|kind| kind.name == on.kind)
+        .is_some_and(|kind| kind.areas && kind.ahead.is_none())
+}
+
+#[test]
+fn two_lanes_in_either_order_never_take_conflicting_work() {
+    let mut rng = Rng(0x2026_1121_a5ea_0004);
+    let mut both_assigned = 0;
+    let mut area_checked = 0;
+    let mut ahead_started = 0;
+    for case_index in 0..400 {
+        let case = concurrency_case(&mut rng);
+        let cap = case
+            .table
+            .kinds
+            .iter()
+            .find_map(|kind| kind.ahead.as_ref())
+            .map_or(0, |ahead| ahead.cap as usize);
+        for (first, second) in PICKING
+            .iter()
+            .flat_map(|a| PICKING.iter().map(move |b| (a, b)))
+            .filter(|(a, b)| a != b)
+        {
+            let a = lane(first.0, first.1);
+            let b = lane(second.0, second.1);
+            for running in [false, true] {
+                let mut state = case.state.clone();
+                for on in [&a, &b] {
+                    state
+                        .lanes
+                        .insert(on.clone(), LaneRecord::new(on, LaneState::Idle));
+                }
+                let before = ahead_count(&case.graph, &state);
+                let mut opts = case.opts.clone();
+                let out_a = pick(&case.graph, &state, &case.table, &a, &opts);
+                apply(&mut state, &mut opts, &a, &out_a, running);
+                let out_b = pick(&case.graph, &state, &case.table, &b, &opts);
+                apply(&mut state, &mut opts, &b, &out_b, running);
+                let context = format!("case {case_index}, {a} then {b}, running {running}");
+
+                let after = ahead_count(&case.graph, &state);
+                assert!(
+                    after <= before.max(cap),
+                    "{context}: ahead count {before} -> {after} with cap {cap}"
+                );
+                if after > before {
+                    ahead_started += 1;
+                }
+                let (Some(leaf_a), Some(leaf_b)) = (leaf_of(&out_a), leaf_of(&out_b)) else {
+                    continue;
+                };
+                both_assigned += 1;
+                assert_ne!(leaf_a, leaf_b, "{context}: same leaf");
+                let unit_a = unit_of(&case.graph, &case.table, &leaf_a);
+                let unit_b = unit_of(&case.graph, &case.table, &leaf_b);
+                assert_ne!(unit_a, unit_b, "{context}: same task");
+                if area_lane(&case.table, &a) && area_lane(&case.table, &b) {
+                    let conflict = area_conflict(
+                        &case.table,
+                        &unit_a,
+                        &case.graph.subtree_areas(&unit_a),
+                        &unit_b,
+                        &case.graph.subtree_areas(&unit_b),
+                    );
+                    assert_eq!(
+                        conflict, None,
+                        "{context}: {leaf_a} and {leaf_b} conflict"
+                    );
+                    if !case.graph.subtree_areas(&unit_a).is_empty() {
+                        area_checked += 1;
+                    }
+                }
+            }
+        }
+    }
+    // The generator reaches the interesting cases.
+    assert!(both_assigned > 100, "{both_assigned}");
+    assert!(area_checked > 20, "{area_checked}");
+    assert!(ahead_started > 20, "{ahead_started}");
 }
