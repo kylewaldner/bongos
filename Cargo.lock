@@ -2566,6 +2566,7 @@ dependencies = [
 name = "bongos_lanes_model"
 version = "0.1.0"
 dependencies = [
+ "bongos_work_model",
  "bongos_workflow_model",
  "serde",
  "serde_json",
