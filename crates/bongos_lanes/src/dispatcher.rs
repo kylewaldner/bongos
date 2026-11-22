@@ -184,7 +184,14 @@ pub trait LanesHost {
     /// has lanes.
     fn is_repository_project(&self) -> bool;
 
-    /// The lane table at the verified commit `commit`.
+    /// Reads, off the main thread, what [`Self::lane_table`] and [`Self::stamp`] answer at
+    /// `commit`. Every caller awaits it before asking either of them about a commit, so they
+    /// never run git on the main thread.
+    fn load_commit(&self, _commit: &str, _cx: &mut App) -> Task<()> {
+        Task::ready(())
+    }
+
+    /// The lane table at the verified commit `commit`, once [`Self::load_commit`] read it.
     fn lane_table(&self, commit: &str) -> Result<LaneTable, String>;
 
     /// Resolves the locations of `lanes` and checks that no two overlap
@@ -235,12 +242,13 @@ pub trait LanesHost {
     /// The lane's persistent trees `job` ran in, each with what saving the work it left there
     /// needs (`lanes: adopt` saves it before cancelling the job's run). The request's `last` names
     /// `job`'s run. With no persistent tree (fresh run worktrees, kept by the run) there is none.
-    fn left_work(&self, _lane: &LaneId, _job: &JobRecord, _cx: &App) -> Vec<LeftWork> {
-        Vec::new()
+    /// Asked after [`Self::load_commit`] of the verified commit; any git it needs runs in the task.
+    fn left_work(&self, _lane: &LaneId, _job: &JobRecord, _cx: &App) -> Task<Vec<LeftWork>> {
+        Task::ready(Vec::new())
     }
 
     /// The recorded graph stamp (`lanes/stamp.toml`) at the verified commit `commit`; `None` when
-    /// there is none, which turns the stamp check off.
+    /// there is none, which turns the stamp check off. Asked after [`Self::load_commit`].
     fn stamp(&self, _commit: &str) -> Result<Option<StampFile>, String> {
         Ok(None)
     }
@@ -458,6 +466,10 @@ impl Lanes {
         cx.spawn(async move |cx| {
             if let Some(verify) = verify {
                 verify.await.map_err(StartRefusal::Profile)?;
+            }
+            if let Ok(Some(commit)) = parts.writer.read(|read| read.verified_commit()) {
+                let loading = cx.update(|cx| host.load_commit(&commit, cx));
+                loading.await;
             }
             let result = cx.update(|cx| start_verified(parts, events, project, request, cx));
             if let Ok(LanesStarted {
@@ -902,7 +914,11 @@ impl Dispatcher {
                         return;
                     };
                     if let RepoEvent::VerifiedCommitChanged { commit } = event {
-                        cx.update(|cx| Dispatcher(inner).verified_commit_changed(commit, cx));
+                        let dispatcher = Dispatcher(inner);
+                        let loading =
+                            cx.update(|cx| dispatcher.parts().host.load_commit(&commit, cx));
+                        loading.await;
+                        cx.update(|cx| dispatcher.verified_commit_changed(commit, cx));
                     }
                 }
             }));

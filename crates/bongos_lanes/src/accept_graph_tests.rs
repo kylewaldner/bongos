@@ -4,16 +4,20 @@
 use std::sync::Arc;
 
 use bongos_project_repo::{
-    Git, Identity, Location, MAIN_BRANCH, ProjectRepo, StateApplyHooks, StateHandle, StateStore,
+    ClientKind, Git, Identity, LandingEvent, Location, MAIN_BRANCH, PeerIdentity, PersonClaim,
+    ProjectRepo, StateApplyHooks, StateHandle, StateStore, peer_identity,
 };
 use bongos_project_repo_model::PersonAtKeyboard;
 use bongos_work_model::commands::Context as WorkContext;
 use chrono::{DateTime, Utc};
+use futures::StreamExt as _;
 use futures::executor::block_on;
 use gpui::TestAppContext;
 use tempfile::TempDir;
 
-use crate::accept_graph::{Accepted, accept_graph_now, read_stamp, stamp_at, stamp_path};
+use crate::accept_graph::{
+    Accepted, accept_graph_for_peer, accept_graph_now, read_stamp, stamp_at, stamp_path,
+};
 
 const TABLE: &str =
     "schema = 1\n[[kind]]\nname = \"build\"\ncount = 2\n[[pin]]\ntask = \"l1\"\nkind = \"build\"\n";
@@ -136,4 +140,61 @@ async fn accept_graph_lands_the_stamp_of_master_once(cx: &mut TestAppContext) {
         .unwrap();
     assert_eq!(again, Accepted::Unchanged { digest });
     assert_eq!(main_commit(&repo), commit);
+}
+
+fn peer(kind: ClientKind) -> PeerIdentity {
+    let (ours, _theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+    peer_identity(&ours, kind).unwrap()
+}
+
+fn claim() -> Option<PersonClaim> {
+    Some(PersonClaim {
+        name: "kim".to_string(),
+    })
+}
+
+// The writer lands the stamp as the person only for a window of its own executable that sent a
+// claim; a command-line peer's claim is ignored, so its change is made but never approved.
+#[gpui::test]
+async fn a_rerouted_accept_graph_lands_for_a_window_peers_claim_and_waits_for_a_cli_peers(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let root = TempDir::new().unwrap();
+    let repo = project(&root);
+    cx.update(|cx| {
+        crate::definitions::register(cx);
+        repo.use_registered_checks(cx);
+    });
+    let master = main_commit(&repo);
+
+    let Accepted::Landing { change_id, .. } =
+        accept_graph_for_peer(&repo, claim(), &peer(ClientKind::Cli), "work/", now())
+            .await
+            .unwrap()
+    else {
+        panic!("the change is made and its landing runs on");
+    };
+    // No approval row was written for the CLI peer's claim, and master did not move.
+    assert!(repo.approvals(&change_id).unwrap().is_empty());
+    assert_eq!(main_commit(&repo), master);
+
+    let mut events = repo.landing_events();
+    let Accepted::Landing { change_id, .. } =
+        accept_graph_for_peer(&repo, claim(), &peer(ClientKind::Window), "work/", now())
+            .await
+            .unwrap()
+    else {
+        panic!("the change is made and its landing runs on");
+    };
+    // The landing runs on in the writer; its end arrives as an event.
+    let commit = loop {
+        match events.next().await {
+            Some((id, LandingEvent::Landed { commit })) if id == change_id => break commit,
+            Some(_) => {}
+            None => panic!("the landing events ended"),
+        }
+    };
+    assert_eq!(main_commit(&repo), commit);
+    assert!(!repo.approvals(&change_id).unwrap().is_empty());
 }

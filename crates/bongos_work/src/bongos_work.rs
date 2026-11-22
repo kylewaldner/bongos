@@ -21,6 +21,7 @@ mod modes;
 mod move_commands;
 mod oneoffs;
 mod open;
+mod opening;
 mod overview;
 mod panel;
 mod project_repos;
@@ -62,11 +63,13 @@ pub use detail::{
 pub use focus::{FOCUS_KEY, Focus, KVP_NAMESPACE, Target, focus_task, is_project_top, target};
 pub use master_files::{MASTER_SUFFIX, MasterFile, master_file, master_file_at};
 pub use modals::{Check, MINIBUFFER_NAME, Then, ask, ask_checked, pick};
+pub use opening::{OpenedProject, ProjectOpener, ProjectOpening, ProjectServed};
 pub use overview::{OldRootTask, RepositoryRow, RootProblem, RootSource, old_root_tasks};
 pub use panel::{WorkPanel, init_panel, task_at_point};
 pub use project_repos::{
     LandingVerdict, LandingWatch, OpenProjectRepos, abandon_proposal, approve_and_watch,
-    approve_proposal, project_repo_of, register_project_repo, watch_landings,
+    approve_proposal, project_repo_of, register_project_repo, register_project_repo_following,
+    watch_landings,
 };
 pub use rebase::RebaseState;
 pub use ref_watch::{REF_WATCH_LATENCY, SLOW_POLL_INTERVAL};

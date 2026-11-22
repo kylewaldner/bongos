@@ -21,6 +21,7 @@ use crate::actions::{OFF_MESSAGE, show_toast, workflow};
 use crate::definitions::DefinitionError;
 use crate::engine::{EditTarget, WorkflowEngine};
 use crate::lifecycle::{ClearedRun, GateField, Refusal, RunId, RunStatus};
+use crate::remote::{InstalledWorkflowRemote, WorkflowPayload, WorkflowRemote, WorkflowVerb};
 use crate::shipped::TEMPLATES;
 use crate::worktrees::{
     ClearPlan, ClearReport, FinishedRun, Git, GitError, apply_clear, plan_clear,
@@ -331,10 +332,152 @@ pub(crate) fn on<A: Action>(
             show_toast(workspace, OFF_MESSAGE.to_string(), cx);
             return;
         }
+        if route_remote::<A>(workspace, window, cx) {
+            return;
+        }
         if let Some(engine) = WorkflowEngine::ensure(cx) {
             then(engine, workspace, window, cx);
         }
     });
+}
+
+/// The command `A` as it is sent to a writer, and whether it reads the definition again.
+fn remote_verb<A: Action>() -> Option<(WorkflowVerb, bool)> {
+    let id = std::any::TypeId::of::<A>();
+    let is = |other: std::any::TypeId| id == other;
+    let verbs = [
+        (
+            std::any::TypeId::of::<workflow::Run>(),
+            WorkflowVerb::Start,
+            false,
+        ),
+        (
+            std::any::TypeId::of::<workflow::Pause>(),
+            WorkflowVerb::Pause,
+            false,
+        ),
+        (
+            std::any::TypeId::of::<workflow::Halt>(),
+            WorkflowVerb::Halt,
+            false,
+        ),
+        (
+            std::any::TypeId::of::<workflow::Resume>(),
+            WorkflowVerb::Resume,
+            false,
+        ),
+        (
+            std::any::TypeId::of::<workflow::RetryStep>(),
+            WorkflowVerb::Retry,
+            false,
+        ),
+        (
+            std::any::TypeId::of::<workflow::RetryStepFresh>(),
+            WorkflowVerb::Retry,
+            true,
+        ),
+        (
+            std::any::TypeId::of::<workflow::Restart>(),
+            WorkflowVerb::Restart,
+            false,
+        ),
+        (
+            std::any::TypeId::of::<workflow::Cancel>(),
+            WorkflowVerb::Cancel,
+            false,
+        ),
+        (
+            std::any::TypeId::of::<workflow::Approve>(),
+            WorkflowVerb::Approve,
+            false,
+        ),
+        (
+            std::any::TypeId::of::<workflow::Revise>(),
+            WorkflowVerb::Revise,
+            false,
+        ),
+        (
+            std::any::TypeId::of::<workflow::ClearFinished>(),
+            WorkflowVerb::ClearFinished,
+            false,
+        ),
+    ];
+    verbs
+        .into_iter()
+        .find(|(action, _, _)| is(*action))
+        .map(|(_, verb, fresh)| (verb, fresh))
+}
+
+/// Sends the command `A` to the process that holds the engine, when this process does not: a
+/// window that attached to another's writer. `false` when the command runs here. A client has no
+/// engine to ask for the run's gate or the workflow's picker, so `workflow: run` starts the
+/// workflow the todo names, `approve` approves as is and `revise` asks for its comment here.
+fn route_remote<A: Action>(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> bool {
+    let Some((verb, fresh)) = remote_verb::<A>() else {
+        return false;
+    };
+    let Some(remote) = InstalledWorkflowRemote::get(cx) else {
+        return false;
+    };
+    let task_id = bongos_work::task_at_point(workspace, window, cx);
+    if !remote.is_remote(task_id.as_deref(), cx) {
+        return false;
+    }
+    if verb == WorkflowVerb::Start && task_id.is_none() {
+        show_toast(workspace, NO_TASK.to_string(), cx);
+        return true;
+    }
+    let payload = WorkflowPayload {
+        run: crate::run_view::active_run(workspace, cx),
+        task_id,
+        fresh,
+        ..WorkflowPayload::default()
+    };
+    if verb == WorkflowVerb::Revise {
+        bongos_work::ask(
+            workspace,
+            "What should the run change".to_string(),
+            "",
+            false,
+            Box::new(move |comment, workspace, window, cx| {
+                let payload = WorkflowPayload {
+                    comment: Some(comment),
+                    ..payload.clone()
+                };
+                send_remote(remote.clone(), verb, payload, workspace, window, cx);
+            }),
+            window,
+            cx,
+        );
+    } else {
+        send_remote(remote, verb, payload, workspace, window, cx);
+    }
+    true
+}
+
+fn send_remote(
+    remote: std::rc::Rc<dyn WorkflowRemote>,
+    verb: WorkflowVerb,
+    payload: WorkflowPayload,
+    _workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sending = remote.send(verb, payload, cx);
+    cx.spawn_in(window, async move |workspace, cx| {
+        let message = match sending.await {
+            Ok(message) => message,
+            Err(error) => format!("{error:#}"),
+        };
+        workspace
+            .update(cx, |workspace, cx| show_toast(workspace, message, cx))
+            .ok();
+    })
+    .detach();
 }
 
 /// [`on`] for a command on a run: the active run of the task at point, or the only active run.

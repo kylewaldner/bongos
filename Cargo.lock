@@ -2051,6 +2051,7 @@ dependencies = [
  "bongos_chat_model",
  "bongos_checks",
  "bongos_emacs",
+ "bongos_engine_host",
  "bongos_extensions",
  "bongos_isearch",
  "bongos_java",
@@ -2417,6 +2418,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "bongos_engine_host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bongos_checks",
+ "bongos_project_repo",
+ "bongos_project_repo_model",
+ "bongos_work",
+ "bongos_work_model",
+ "bongos_workflow",
+ "chrono",
+ "futures 0.3.32",
+ "gpui",
+ "libc",
+ "log",
+ "parking_lot",
+ "paths",
+ "serde",
+ "serde_json",
+ "settings",
+ "sha2",
+ "tempfile",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "bongos_extensions"
 version = "0.1.0"
 dependencies = [
@@ -2569,6 +2596,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bongos_checks",
+ "bongos_engine_host",
  "bongos_lanes_model",
  "bongos_project_repo",
  "bongos_project_repo_model",
@@ -2586,7 +2614,9 @@ dependencies = [
  "release_channel",
  "semver",
  "serde",
+ "serde_json",
  "settings",
+ "smol",
  "tempfile",
  "thiserror 2.0.17",
  "toml 0.8.23",
@@ -2989,6 +3019,7 @@ dependencies = [
  "release_channel",
  "sandbox",
  "semver",
+ "serde",
  "serde_json",
  "settings",
  "sysinfo 0.37.2",

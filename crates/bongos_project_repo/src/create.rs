@@ -83,7 +83,13 @@ pub struct ProjectRepo {
     pub(crate) state: Option<StateHandle>,
     /// The landing queue and its waiters, shared by every clone.
     pub(crate) engine: std::sync::Arc<crate::landing_queue::Engine>,
+    /// Where this process sends the project's writes when it does not hold the writer, shared by
+    /// every clone; `None` until one is set.
+    pub(crate) sink: SharedSink,
 }
+
+type SharedSink =
+    std::sync::Arc<parking_lot::RwLock<Option<std::sync::Arc<dyn crate::sink::StateSink>>>>;
 
 impl std::fmt::Debug for ProjectRepo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -103,6 +109,7 @@ impl ProjectRepo {
             git,
             state: None,
             engine: Default::default(),
+            sink: Default::default(),
         }
     }
 
@@ -110,6 +117,54 @@ impl ProjectRepo {
     pub fn with_state(mut self, state: StateHandle) -> Self {
         self.state = Some(state);
         self
+    }
+
+    /// From now on this project's writes that this process cannot make itself go to `sink`: the
+    /// state ops of every write, and the repository commands when this process does not hold
+    /// the writer (another process's engine host, reached through its socket). Seen by every
+    /// clone of this repository.
+    pub fn replace_sink(&self, sink: std::sync::Arc<dyn crate::sink::StateSink>) {
+        *self.sink.write() = Some(sink);
+    }
+
+    /// The sink set by [`Self::replace_sink`], if any.
+    pub fn sink(&self) -> Option<std::sync::Arc<dyn crate::sink::StateSink>> {
+        self.sink.read().clone()
+    }
+
+    /// Applies `ops` in one transaction, labeled with `origin`: through the sink when one is
+    /// set, else on this process's writer. Without either the write is refused.
+    pub async fn apply_state(
+        &self,
+        ops: Vec<crate::state_ops::StateOp>,
+        origin: bongos_project_repo_model::Author,
+    ) -> anyhow::Result<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        if let Some(sink) = self.sink() {
+            return sink.apply(ops, origin).await;
+        }
+        let Some(writer) = self.state.as_ref().and_then(StateHandle::writer) else {
+            anyhow::bail!("this project is open in another bongos process; work there or close it");
+        };
+        let notes = writer.transact_with(&origin, &ops, |tx| tx.apply_ops(&ops))?;
+        for note in notes {
+            log::info!("{note}");
+        }
+        Ok(())
+    }
+
+    /// Sends `command` to the sink: for a process that does not hold the writer. A process that
+    /// holds it calls the repository itself.
+    pub async fn send_command(
+        &self,
+        command: crate::sink::RepoCommand,
+    ) -> anyhow::Result<crate::sink::RepoReply> {
+        let Some(sink) = self.sink() else {
+            anyhow::bail!("this project is open in another bongos process; work there or close it");
+        };
+        sink.repo(command).await
     }
 
     pub fn location(&self) -> &Location {

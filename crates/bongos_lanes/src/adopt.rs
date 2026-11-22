@@ -90,15 +90,22 @@ struct Checked {
 }
 
 fn adopt(parts: LanesParts, request: AdoptRequest, cx: &mut App) -> Task<Result<Adopted>> {
-    let checked = match check(&parts, &request, cx) {
-        Ok(checked) => checked,
-        Err(error) => return Task::ready(Err(error)),
-    };
-    let left = match &checked.halted_job {
-        Some((lane, job)) => parts.host.left_work(lane, job, cx),
-        None => Vec::new(),
+    // The lane table at the verified commit is read off the main thread first.
+    let loading = match parts.writer.read(|read| read.verified_commit()) {
+        Ok(Some(commit)) => parts.host.load_commit(&commit, cx),
+        _ => Task::ready(()),
     };
     cx.spawn(async move |cx| {
+        loading.await;
+        let (checked, left) = cx.update(|cx| -> Result<_> {
+            let checked = check(&parts, &request, cx)?;
+            let left = match &checked.halted_job {
+                Some((lane, job)) => parts.host.left_work(lane, job, cx),
+                None => Task::ready(Vec::new()),
+            };
+            Ok((checked, left))
+        })?;
+        let left = left.await;
         let mut saved = Vec::new();
         let mut unreadable = None;
         for work in &left {

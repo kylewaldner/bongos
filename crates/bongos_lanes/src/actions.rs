@@ -11,9 +11,11 @@
 use std::any::TypeId;
 use std::rc::Rc;
 
+use crate::host::LanesPayload;
 use anyhow::Result;
+use bongos_engine_host::{EngineAccess, EngineAccesses, HostCommand, LanesVerb};
 use bongos_lanes_model::{AdoptRefusal, Author, LaneId, LaneState, LanesState, OwnerState, TaskId};
-use bongos_project_repo::ProjectRepositorySettings;
+use bongos_project_repo::{ProjectRepo, ProjectRepositorySettings};
 use bongos_work_model::PersonAtKeyboard;
 use bongos_work_model::commands::Context as WorkContext;
 use command_palette_hooks::CommandPaletteFilter;
@@ -156,6 +158,16 @@ fn accept_graph_action(
         .branch_prefix
         .clone();
     let ctx = WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx));
+    if let Some((_, access)) = sole_project(cx) {
+        // The writer lands the stamp: it takes the person from this window's claim, and from no
+        // other peer's.
+        let payload = LanesPayload {
+            person: Some(ctx.author.name),
+            ..LanesPayload::default()
+        };
+        send_lanes_command(access, LanesVerb::AcceptGraph, payload, window, cx);
+        return;
+    }
     let accepting = accept_graph(repo, ctx, prefix, cx);
     cx.spawn_in(window, async move |workspace, cx| {
         let message = accepted_message(&accepting.await);
@@ -166,6 +178,88 @@ fn accept_graph_action(
     .detach();
 }
 
+/// Sends a `lanes:` command to the writer and shows what it answers.
+fn send_lanes_command(
+    access: EngineAccess,
+    verb: LanesVerb,
+    payload: LanesPayload,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sending = access.request(
+        HostCommand::Lanes {
+            verb,
+            payload: serde_json::to_value(payload).unwrap_or_default(),
+        },
+        cx,
+    );
+    cx.spawn_in(window, async move |workspace, cx| {
+        let message = match sending.await {
+            Ok(answer) => answer_message(&answer),
+            Err(error) => format!("{error:#}"),
+        };
+        workspace
+            .update(cx, |workspace, cx| show_toast(workspace, &message, cx))
+            .ok();
+    })
+    .detach();
+}
+
+/// A `lanes:` command that goes to the engine host: asks which lane for the ones that act on a
+/// lane, then sends it. With no engine host to reach it says the lanes run there.
+fn register_host_command<A: gpui::Action>(workspace: &mut Workspace, verb: LanesVerb) {
+    workspace.register_action(
+        move |workspace, _: &A, window: &mut Window, cx: &mut Context<Workspace>| {
+            if !LanesSettings::get_global(cx).enabled {
+                show_toast(workspace, OFF_MESSAGE, cx);
+                return;
+            }
+            let Some((repo, access)) = sole_project(cx) else {
+                show_toast(workspace, ENGINE_HOST_MESSAGE, cx);
+                return;
+            };
+            if !matches!(verb, LanesVerb::Stop | LanesVerb::Pause | LanesVerb::Resume) {
+                send_lanes_command(access, verb, LanesPayload::default(), window, cx);
+                return;
+            }
+            let Some(state) = repo.state().and_then(|state| state.read(read_state).ok()) else {
+                show_toast(workspace, "The lanes cannot be read", cx);
+                return;
+            };
+            let mut lanes: Vec<Option<LaneId>> =
+                state.lanes.values().map(|l| Some(l.id())).collect();
+            if verb == LanesVerb::Stop {
+                lanes.insert(0, None);
+            }
+            let labels = lanes
+                .iter()
+                .map(|lane| {
+                    lane.as_ref()
+                        .map_or("All lanes".to_string(), ToString::to_string)
+                })
+                .collect();
+            let then = Box::new(
+                move |index: usize,
+                      _: &mut Workspace,
+                      window: &mut Window,
+                      cx: &mut Context<Workspace>| {
+                    let Some(choice) = lanes.get(index) else {
+                        return;
+                    };
+                    let ctx = WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx));
+                    let payload = LanesPayload {
+                        lane: choice.as_ref().map(ToString::to_string),
+                        person: Some(ctx.author.name),
+                        ..LanesPayload::default()
+                    };
+                    send_lanes_command(access.clone(), verb, payload, window, cx);
+                },
+            );
+            pick(workspace, "Lane".to_string(), labels, then, window, cx);
+        },
+    );
+}
+
 /// The toast of an accept.
 pub fn accepted_message(result: &Result<Accepted>) -> String {
     match result {
@@ -174,6 +268,10 @@ pub fn accepted_message(result: &Result<Accepted>) -> String {
             &commit[..commit.len().min(12)]
         ),
         Ok(Accepted::Unchanged { .. }) => "The task graph is already accepted".to_string(),
+        Ok(Accepted::Landing { change_id, .. }) => format!(
+            "Accepting the task graph: its landing runs on (change {change_id}); if it waits, \
+             approve it with project: approve"
+        ),
         Err(error) => format!("Could not accept the task graph: {error:#}"),
     }
 }
@@ -237,8 +335,61 @@ pub fn adopt_as_person(
     lanes.adopt(request, cx)
 }
 
-/// The lanes this window reaches, when it reaches them. Without them, `lanes: adopt` says the
-/// lanes run in the engine host.
+/// What `lanes: adopt` runs against: the lanes this window holds, or the engine host reached
+/// through the socket (the adopt then runs in the writer, with this window's person claim).
+#[derive(Clone)]
+enum AdoptHost {
+    Window(Rc<Lanes>),
+    Socket {
+        repo: ProjectRepo,
+        access: EngineAccess,
+    },
+}
+
+impl AdoptHost {
+    /// The host `lanes: adopt` runs against: the engine host of the only project open, else the
+    /// lanes this window holds.
+    fn of(cx: &App) -> Option<Self> {
+        if let Some((repo, access)) = sole_project(cx) {
+            return Some(Self::Socket { repo, access });
+        }
+        cx.try_global::<WindowLanes>()
+            .and_then(|window_lanes| window_lanes.0.clone())
+            .map(Self::Window)
+    }
+
+    fn read_state(&self) -> Result<LanesState> {
+        match self {
+            Self::Window(lanes) => lanes.parts.writer.read(read_state),
+            Self::Socket { repo, .. } => repo
+                .state()
+                .ok_or_else(|| anyhow::anyhow!("the project's state is not open"))?
+                .read(read_state),
+        }
+    }
+}
+
+/// What an adopt came to, as the window shows it.
+enum AdoptOutcome {
+    Done(String),
+    /// A halted job's tree cannot be read; carries the refusal to show above the drop choice.
+    Unreadable(String),
+    Failed(String),
+}
+
+/// The only project repository open and the way to reach its engines, when a window has both.
+pub(crate) fn sole_project(cx: &App) -> Option<(ProjectRepo, EngineAccess)> {
+    let repos = bongos_work::OpenProjectRepos::listed(cx);
+    let [project] = repos.as_slice() else {
+        return None;
+    };
+    let repo = project.repo().clone();
+    let access = EngineAccesses::get(&repo.location().id, cx)?;
+    Some((repo, access))
+}
+
+/// The lanes this window reaches, when it reaches them. Without them (and without an engine host
+/// to ask), `lanes: adopt` says the lanes run in the engine host.
 #[derive(Default)]
 pub struct WindowLanes(pub Option<Rc<Lanes>>);
 
@@ -305,11 +456,11 @@ fn pick(
 }
 
 fn read_lanes_state(
-    lanes: &Lanes,
+    host: &AdoptHost,
     workspace: &mut Workspace,
     cx: &mut Context<Workspace>,
 ) -> Option<LanesState> {
-    match lanes.parts.writer.read(read_state) {
+    match host.read_state() {
         Ok(state) => Some(state),
         Err(error) => {
             show_toast(
@@ -334,10 +485,7 @@ fn adopt_action(
         show_toast(workspace, OFF_MESSAGE, cx);
         return;
     }
-    let Some(lanes) = cx
-        .try_global::<WindowLanes>()
-        .and_then(|window_lanes| window_lanes.0.clone())
-    else {
+    let Some(lanes) = AdoptHost::of(cx) else {
         show_toast(workspace, ENGINE_HOST_MESSAGE, cx);
         return;
     };
@@ -371,7 +519,7 @@ fn adopt_action(
 }
 
 fn ask_lane(
-    lanes: Rc<Lanes>,
+    lanes: AdoptHost,
     task: TaskId,
     workspace: &mut Workspace,
     window: &mut Window,
@@ -426,10 +574,64 @@ fn ask_lane(
     pick(workspace, placeholder, labels, then, window, cx);
 }
 
+/// Starts the adopt of `args` as the person at the keyboard: in the lanes this window holds, or
+/// through the socket with the person's claim, which the writer trusts only from a window.
+fn start_adopt(
+    lanes: &AdoptHost,
+    args: &AdoptArgs,
+    ctx: &WorkContext,
+    cx: &mut App,
+) -> Task<AdoptOutcome> {
+    match lanes {
+        AdoptHost::Window(lanes) => {
+            let adopting = adopt_as_person(lanes, args.clone(), ctx, cx);
+            cx.spawn(async move |_| {
+                let result = adopting.await;
+                let message = adopted_message(&result);
+                match &result {
+                    Ok(_) => AdoptOutcome::Done(message),
+                    Err(error)
+                        if matches!(
+                            error.downcast_ref::<AdoptRefusal>(),
+                            Some(AdoptRefusal::UnreadableTree(_))
+                        ) =>
+                    {
+                        AdoptOutcome::Unreadable(message)
+                    }
+                    Err(_) => AdoptOutcome::Failed(message),
+                }
+            })
+        }
+        AdoptHost::Socket { access, .. } => {
+            let payload = LanesPayload {
+                task: Some(args.task.to_string()),
+                lane: Some(args.lane.to_string()),
+                reason: Some(args.reason.clone()),
+                confirm_drop: args.confirm_drop,
+                person: Some(ctx.author.name.clone()),
+            };
+            let sending = access.request(
+                HostCommand::Lanes {
+                    verb: LanesVerb::Adopt,
+                    payload: serde_json::to_value(payload).unwrap_or_default(),
+                },
+                cx,
+            );
+            cx.spawn(async move |_| match sending.await {
+                Ok(answer) => match answer.get("unreadable").and_then(|text| text.as_str()) {
+                    Some(text) => AdoptOutcome::Unreadable(text.to_string()),
+                    None => AdoptOutcome::Done(answer_message(&answer)),
+                },
+                Err(error) => AdoptOutcome::Failed(format!("{error:#}")),
+            })
+        }
+    }
+}
+
 /// Runs the adopt as the person at the keyboard and shows its result. A tree that cannot be read
 /// asks whether to drop its work, and a confirmed drop runs the adopt again with `confirm_drop`.
 fn run_adopt(
-    lanes: Rc<Lanes>,
+    lanes: AdoptHost,
     args: AdoptArgs,
     workspace: &mut Workspace,
     window: &mut Window,
@@ -440,23 +642,22 @@ fn run_adopt(
         return;
     }
     let ctx = WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx));
-    let adopting = adopt_as_person(&lanes, args.clone(), &ctx, cx);
+    let adopting = start_adopt(&lanes, &args, &ctx, cx);
     let showing = cx.spawn_in(window, async move |workspace, cx| {
-        let result = adopting.await;
+        let outcome = adopting.await;
         workspace
             .update_in(cx, |workspace, window, cx| {
-                let unreadable = !args.confirm_drop
-                    && result.as_ref().err().is_some_and(|error| {
-                        matches!(
-                            error.downcast_ref::<AdoptRefusal>(),
-                            Some(AdoptRefusal::UnreadableTree(_))
-                        )
-                    });
-                if !unreadable {
-                    show_toast(workspace, &adopted_message(&result), cx);
-                    return;
-                }
-                let placeholder = adopted_message(&result);
+                let placeholder = match outcome {
+                    AdoptOutcome::Done(message) | AdoptOutcome::Failed(message) => {
+                        show_toast(workspace, &message, cx);
+                        return;
+                    }
+                    AdoptOutcome::Unreadable(message) if args.confirm_drop => {
+                        show_toast(workspace, &message, cx);
+                        return;
+                    }
+                    AdoptOutcome::Unreadable(message) => message,
+                };
                 let choices = DROP_CHOICES.iter().map(ToString::to_string).collect();
                 let then = Box::new(
                     move |index: usize,
@@ -483,15 +684,24 @@ fn run_adopt(
     showing.detach();
 }
 
+/// The text a host answered with.
+fn answer_message(answer: &serde_json::Value) -> String {
+    answer
+        .get("message")
+        .and_then(|text| text.as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// Registers the handlers of the actions of lanes on `workspace`. None is bound to a key.
 pub fn register(workspace: &mut Workspace) {
-    register_action::<lanes::Show>(workspace);
-    register_action::<lanes::Start>(workspace);
-    register_action::<lanes::Stop>(workspace);
-    register_action::<lanes::Pause>(workspace);
-    register_action::<lanes::Resume>(workspace);
-    register_action::<lanes::DryRun>(workspace);
-    register_action::<lanes::Pick>(workspace);
+    register_host_command::<lanes::Show>(workspace, LanesVerb::Status);
+    register_host_command::<lanes::Start>(workspace, LanesVerb::Start);
+    register_host_command::<lanes::Stop>(workspace, LanesVerb::Stop);
+    register_host_command::<lanes::Pause>(workspace, LanesVerb::Pause);
+    register_host_command::<lanes::Resume>(workspace, LanesVerb::Resume);
+    register_host_command::<lanes::DryRun>(workspace, LanesVerb::DryRun);
+    register_host_command::<lanes::Pick>(workspace, LanesVerb::Pick);
     workspace.register_action(adopt_action);
     workspace.register_action(accept_graph_action);
     register_action::<lanes::Dump>(workspace);
