@@ -2947,6 +2947,11 @@
       "max_output_mb": 10,
     },
   },
+  "lanes": {
+    // Whether lanes are on. While it is off, no engine host starts and it only says "lanes
+    // are off (lanes.enabled)".
+    "enabled": false,
+  },
   "task_checks": {
     // Whether task checks are on. It is on by default; set it to false and no check runs,
     // no record is written and every task check command is hidden and only says "Task

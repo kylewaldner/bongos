@@ -1,6 +1,7 @@
 // Disable command line from opening on release mode
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod engine_host;
 mod zed;
 
 #[cfg(all(test, not(target_os = "windows")))]
@@ -291,6 +292,11 @@ fn main() {
     if args.version {
         println!("{}", bongos_version::version_line());
         return;
+    }
+
+    // The engine host never opens a window and is not the app's single instance.
+    if let Some(project_id) = args.engine_host.clone() {
+        engine_host::run(project_id, args.probe);
     }
 
     if args.system_specs {
@@ -1674,6 +1680,14 @@ struct Args {
 
     #[arg(long, hide = true)]
     dump_all_actions: bool,
+
+    /// Runs a headless host of the workflow engine for one project, with no window.
+    #[arg(long, hide = true, value_name = "PROJECT_ID")]
+    engine_host: Option<String>,
+
+    /// With `--engine-host`, exits 0 once the engine is initialized and its settings are on.
+    #[arg(long, hide = true, requires = "engine_host")]
+    probe: bool,
 
     /// Output current environment variables as JSON to stdout
     #[arg(long, hide = true)]
