@@ -365,6 +365,9 @@ impl Move {
 
     /// Step 2: no new node starts; waits for the running ones, asking again past the timeout.
     async fn drain(&self, request: Option<HandoverRequest>, cx: &mut AsyncApp) -> Result<()> {
+        // Task checks are stopped beside this drain (their nodes then count as parked), and the
+        // writer participants other features register drain after both, in registration
+        // order; neither exists yet, so the drain is the runs' alone.
         let mut drained = cx.update(|cx| self.runs_source.drain(cx)).fuse();
         let mut choice = request
             .as_ref()
