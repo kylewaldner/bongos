@@ -381,11 +381,7 @@ pub async fn reset_tree(git: &Git, request: &ResetRequest) -> Result<ResetOutcom
         .await
         .map_err(git_error)?;
     let branch_ref = format!("refs/heads/{}", request.run_branch);
-    let existing = git
-        .run(tree, &["rev-parse", "-q", "--verify", &branch_ref])
-        .await
-        .ok();
-    if let Some(existing) = existing
+    if let Some(existing) = branch_at(git, tree, &branch_ref).await
         && existing != head
     {
         return Err(format!(
@@ -397,9 +393,26 @@ pub async fn reset_tree(git: &Git, request: &ResetRequest) -> Result<ResetOutcom
 
     let saved = save(git, request).await?;
 
-    git.run(tree, &["reset", "-q", "--hard"])
-        .await
-        .map_err(git_error)?;
+    // Checked again after the save: `checkout -B` below must never move a branch off a commit
+    // the save (or anything else) put on it.
+    if let Some(existing) = branch_at(git, tree, &branch_ref).await
+        && existing != head
+    {
+        return Err(format!(
+            "the run branch {} is at {} after the save, not at its start {}; nothing was reset",
+            request.run_branch,
+            short(&existing),
+            short(&head)
+        ));
+    }
+
+    // A user's `submodule.recurse` must not make the reset touch submodule work.
+    git.run(
+        tree,
+        &["-c", "submodule.recurse=false", "reset", "-q", "--hard"],
+    )
+    .await
+    .map_err(git_error)?;
     let mut clean = vec!["clean".to_string(), "-q".to_string(), "-fd".to_string()];
     for dir in inside(tree, &request.named_dirs()) {
         clean.push(format!("--exclude=/{dir}/"));
@@ -409,6 +422,8 @@ pub async fn reset_tree(git: &Git, request: &ResetRequest) -> Result<ResetOutcom
     git.run(
         tree,
         &[
+            "-c",
+            "submodule.recurse=false",
             "checkout",
             "-q",
             "--force",
@@ -421,6 +436,13 @@ pub async fn reset_tree(git: &Git, request: &ResetRequest) -> Result<ResetOutcom
     .await
     .map_err(git_error)?;
     Ok(ResetOutcome { added, saved, head })
+}
+
+/// The commit `branch_ref` is at, `None` when it does not exist.
+async fn branch_at(git: &Git, tree: &Path, branch_ref: &str) -> Option<String> {
+    git.run(tree, &["rev-parse", "-q", "--verify", branch_ref])
+        .await
+        .ok()
 }
 
 /// The named directories inside `tree`, relative to it, with `/` between components.
@@ -439,8 +461,32 @@ fn inside(tree: &Path, dirs: &[PathBuf]) -> Vec<String> {
         .collect()
 }
 
+/// A path git printed, byte for byte (a file name need not be UTF-8).
+#[cfg(unix)]
+fn path_from_git(bytes: &[u8]) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+}
+
+#[cfg(not(unix))]
+fn path_from_git(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// A path's bytes as git reads them from a pathspec file.
+#[cfg(unix)]
+fn path_bytes(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(not(unix))]
+fn path_bytes(path: &Path) -> Vec<u8> {
+    path.to_string_lossy().as_bytes().to_vec()
+}
+
 /// The paths `git status --porcelain -z` lists (ignored files excluded), both sides of a rename.
-fn changed_paths(status: &[u8]) -> Vec<String> {
+fn changed_paths(status: &[u8]) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let mut fields = status
         .split(|byte| *byte == 0)
@@ -450,12 +496,12 @@ fn changed_paths(status: &[u8]) -> Vec<String> {
             continue;
         }
         let code = &entry[..2];
-        paths.push(String::from_utf8_lossy(&entry[3..]).into_owned());
+        paths.push(path_from_git(&entry[3..]));
         // A rename or copy is followed by its source.
         if (code.contains(&b'R') || code.contains(&b'C'))
             && let Some(source) = fields.next()
         {
-            paths.push(String::from_utf8_lossy(source).into_owned());
+            paths.push(path_from_git(source));
         }
     }
     paths.sort();
@@ -463,10 +509,41 @@ fn changed_paths(status: &[u8]) -> Vec<String> {
     paths
 }
 
+/// Git arguments with no hook run: a save must not be stopped or changed by the user's hooks.
+fn no_hooks<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    ["-c", "core.hooksPath=/dev/null"]
+        .into_iter()
+        .chain(args.iter().copied())
+        .collect()
+}
+
+/// Writes `paths` NUL-separated, as `--pathspec-file-nul` reads them.
+fn write_pathspec(file: &Path, paths: &[&Path]) -> Result<(), String> {
+    let mut list = Vec::new();
+    for path in paths {
+        list.extend_from_slice(&path_bytes(path));
+        list.push(0);
+    }
+    std::fs::write(file, &list).map_err(|error| format!("writing {}: {error}", file.display()))
+}
+
+/// The changes a save keeps, sorted out from the status.
+struct Changes {
+    /// Changed paths present on disk: added from the disk.
+    present: Vec<PathBuf>,
+    /// Changed paths gone from the disk: removed.
+    gone: Vec<PathBuf>,
+    /// Changed paths left out (too large, or in a named directory): kept as at `HEAD`.
+    dropped: Vec<PathBuf>,
+}
+
 /// Saves the tree's uncommitted work when the rule says so: only a lane's tip tree, only after a
-/// run that failed, halted or was cancelled. Changed files go into one commit made from a
-/// separate index (the tree's own index is not touched), on the run branch when the tree is on
-/// the last run's branch, else at `refs/bongos/saved/<lane>/<run id>`; never on any other branch.
+/// run that failed, halted or was cancelled. Changes staged in the tree's index go into one
+/// commit, then the changed files on disk into another on top of it, each made only when it
+/// changes something and each from a separate index (the tree's own index is not touched). The
+/// save goes on the run branch when the tree is on the last run's branch and the new run does not
+/// reuse that branch, else at `refs/bongos/saved/<lane>/<run id>`; never on any other branch.
+/// No hook runs and nothing is signed.
 async fn save(git: &Git, request: &ResetRequest) -> Result<Option<Saved>, String> {
     let Some(last) = &request.last else {
         return Ok(None);
@@ -484,17 +561,19 @@ async fn save(git: &Git, request: &ResetRequest) -> Result<Option<Saved>, String
             last.run_id
         )
     };
+    // No optional locks: the status must not rewrite the tree's index.
     let status = git
         .output(
             tree,
-            &[
+            &no_hooks(&[
+                "--no-optional-locks",
                 "status",
                 "--porcelain",
                 "-z",
                 "--untracked-files=all",
                 "--ignored=no",
                 "--no-renames",
-            ],
+            ]),
         )
         .await
         .map_err(|error| refused(error.to_string()))?;
@@ -504,26 +583,35 @@ async fn save(git: &Git, request: &ResetRequest) -> Result<Option<Saved>, String
         ));
     }
     let excluded = inside(tree, &request.named_dirs());
-    let mut selected = Vec::new();
+    let mut changes = Changes {
+        present: Vec::new(),
+        gone: Vec::new(),
+        dropped: Vec::new(),
+    };
     let mut skipped = Vec::new();
     for path in changed_paths(&status.stdout) {
-        if excluded
-            .iter()
-            .any(|dir| path == *dir || path.starts_with(&format!("{dir}/")))
-        {
+        if excluded.iter().any(|dir| path.starts_with(dir)) {
+            changes.dropped.push(path);
             continue;
         }
         match std::fs::symlink_metadata(tree.join(&path)) {
             Ok(metadata) if metadata.is_file() && metadata.len() > request.save_max_file_bytes => {
-                skipped.push((path, metadata.len()));
+                skipped.push((path.to_string_lossy().into_owned(), metadata.len()));
+                changes.dropped.push(path);
             }
-            Ok(_) => selected.push(path),
-            // Deleted: the deletion is saved.
-            Err(error) if error.kind() == ErrorKind::NotFound => selected.push(path),
-            Err(error) => return Err(refused(format!("reading {path}: {error}"))),
+            Ok(_) => changes.present.push(path),
+            // Deleted (or a parent is now a file): the deletion is saved.
+            Err(error)
+                if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) =>
+            {
+                changes.gone.push(path)
+            }
+            Err(error) => {
+                return Err(refused(format!("reading {}: {error}", path.display())));
+            }
         }
     }
-    if selected.is_empty() {
+    if changes.present.is_empty() && changes.gone.is_empty() {
         return Ok((!skipped.is_empty()).then_some(Saved {
             commit: None,
             skipped,
@@ -542,14 +630,36 @@ async fn save(git: &Git, request: &ResetRequest) -> Result<Option<Saved>, String
         )
         .await
         .map_err(|error| refused(error.to_string()))?;
-    let index = PathBuf::from(index);
-    let pathspec = index.with_extension("paths");
-    let result = commit_saved(git, request, last, word, &index, &pathspec, &selected).await;
-    for file in [&index, &pathspec] {
+    let files = SaveFiles::at(PathBuf::from(index));
+    let result = commit_saved(git, request, last, word, &files, &changes).await;
+    for file in files.all() {
         std::fs::remove_file(file).ok();
     }
     let commit = result.map_err(refused)?;
     Ok(Some(Saved { commit, skipped }))
+}
+
+/// The scratch files of a save, all in the tree's git directory.
+struct SaveFiles {
+    index: PathBuf,
+    present: PathBuf,
+    gone: PathBuf,
+    dropped: PathBuf,
+}
+
+impl SaveFiles {
+    fn at(index: PathBuf) -> Self {
+        Self {
+            present: index.with_extension("paths"),
+            gone: index.with_extension("gone"),
+            dropped: index.with_extension("dropped"),
+            index,
+        }
+    }
+
+    fn all(&self) -> [&Path; 4] {
+        [&self.index, &self.present, &self.gone, &self.dropped]
+    }
 }
 
 async fn commit_saved(
@@ -557,62 +667,108 @@ async fn commit_saved(
     request: &ResetRequest,
     last: &LastRun,
     word: &str,
-    index: &Path,
-    pathspec: &Path,
-    selected: &[String],
+    files: &SaveFiles,
+    changes: &Changes,
 ) -> Result<Option<(String, SaveTarget)>, String> {
     let tree = request.location()?.path.as_path();
-    for file in [index, pathspec] {
+    for file in files.all() {
         match std::fs::remove_file(file) {
             Ok(()) => {}
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return Err(format!("removing {}: {error}", file.display())),
         }
     }
-    let mut list = Vec::new();
-    for path in selected {
-        list.extend_from_slice(path.as_bytes());
-        list.push(0);
-    }
-    std::fs::write(pathspec, &list)
-        .map_err(|error| format!("writing {}: {error}", pathspec.display()))?;
+    let own_index = git
+        .run(
+            tree,
+            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+        )
+        .await
+        .map_err(git_error)?;
     let saving = git
         .clone()
-        .env("GIT_INDEX_FILE", index)
+        .env("GIT_INDEX_FILE", &files.index)
         .env("GIT_LITERAL_PATHSPECS", "1")
         .env("GIT_AUTHOR_NAME", SAVE_NAME)
         .env("GIT_AUTHOR_EMAIL", SAVE_EMAIL)
         .env("GIT_COMMITTER_NAME", SAVE_NAME)
         .env("GIT_COMMITTER_EMAIL", SAVE_EMAIL);
-    let parent = saving
-        .run(tree, &["rev-parse", "--verify", "HEAD^{commit}"])
+    let run = async |args: &[&str]| saving.run(tree, &no_hooks(args)).await.map_err(git_error);
+    let commit = async |written: &str, parent: &str, message: &str| {
+        run(&[
+            "commit-tree",
+            "--no-gpg-sign",
+            written,
+            "-p",
+            parent,
+            "-m",
+            message,
+        ])
         .await
-        .map_err(git_error)?;
-    saving
-        .run(tree, &["read-tree", &parent])
-        .await
-        .map_err(git_error)?;
-    let pathspec_arg = format!("--pathspec-from-file={}", pathspec.display());
-    saving
-        .run(tree, &["add", "-A", "--pathspec-file-nul", &pathspec_arg])
-        .await
-        .map_err(git_error)?;
-    let written = saving.run(tree, &["write-tree"]).await.map_err(git_error)?;
-    let parent_tree = saving
-        .run(tree, &["rev-parse", &format!("{parent}^{{tree}}")])
-        .await
-        .map_err(git_error)?;
-    if written == parent_tree {
+    };
+    let parent = run(&["rev-parse", "--verify", "HEAD^{commit}"]).await?;
+    let parent_tree = run(&["rev-parse", &format!("{parent}^{{tree}}")]).await?;
+    let mut top = parent.clone();
+    let mut top_tree = parent_tree.clone();
+
+    // What is staged, from a copy of the tree's index with the left-out paths as at HEAD. An
+    // index git cannot write as a tree (a conflict) is not saved; its files on disk are.
+    let staged = match std::fs::copy(&own_index, &files.index) {
+        Ok(_) => {
+            if !changes.dropped.is_empty() {
+                let dropped: Vec<&Path> = changes.dropped.iter().map(PathBuf::as_path).collect();
+                write_pathspec(&files.dropped, &dropped)?;
+                let arg = format!("--pathspec-from-file={}", files.dropped.display());
+                run(&["reset", "-q", &parent, "--pathspec-file-nul", &arg]).await?;
+            }
+            run(&["write-tree"]).await.ok()
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("copying {own_index}: {error}")),
+    };
+    if let Some(staged) = staged
+        && staged != top_tree
+    {
+        let message = format!("staged work left by {word} run {}", last.run_id);
+        top = commit(&staged, &top, &message).await?;
+        top_tree = staged;
+    }
+
+    // The files on disk, from HEAD: present ones added, gone ones removed. A path git does not
+    // know is no error either way.
+    run(&["read-tree", &parent]).await?;
+    let present: Vec<&Path> = changes.present.iter().map(PathBuf::as_path).collect();
+    if !present.is_empty() {
+        write_pathspec(&files.present, &present)?;
+        let arg = format!("--pathspec-from-file={}", files.present.display());
+        // `--force`: a listed path that git ignores was added to the index by hand; keep it.
+        run(&["add", "-A", "--force", "--pathspec-file-nul", &arg]).await?;
+    }
+    let gone: Vec<&Path> = changes.gone.iter().map(PathBuf::as_path).collect();
+    if !gone.is_empty() {
+        write_pathspec(&files.gone, &gone)?;
+        let arg = format!("--pathspec-from-file={}", files.gone.display());
+        run(&[
+            "rm",
+            "-q",
+            "-r",
+            "--force",
+            "--cached",
+            "--ignore-unmatch",
+            "--pathspec-file-nul",
+            &arg,
+        ])
+        .await?;
+    }
+    let written = run(&["write-tree"]).await?;
+    if written != top_tree {
+        let message = format!("work left by {word} run {}", last.run_id);
+        top = commit(&written, &top, &message).await?;
+    }
+    if top == parent {
         return Ok(None);
     }
-    let message = format!("work left by {word} run {}", last.run_id);
-    let commit = saving
-        .run(
-            tree,
-            &["commit-tree", &written, "-p", &parent, "-m", &message],
-        )
-        .await
-        .map_err(git_error)?;
+    let commit = top;
 
     let current = git
         .run(tree, &["symbolic-ref", "--quiet", "--short", "HEAD"])
@@ -622,9 +778,11 @@ async fn commit_saved(
     let run_made = last
         .run_branch
         .contains(&format!("-run-{}-", short_id(&last.run_id)));
-    if run_made && current == last.run_branch {
+    // A new run that reuses the branch (the same run started again) puts it back at its start:
+    // the save then goes to a saved ref, so moving the branch cannot drop it.
+    if run_made && current == last.run_branch && current != request.run_branch {
         let name = format!("refs/heads/{current}");
-        git.run(tree, &["update-ref", &name, &commit, &parent])
+        git.run(tree, &no_hooks(&["update-ref", &name, &commit, &parent]))
             .await
             .map_err(git_error)?;
         return Ok(Some((commit, SaveTarget::Branch(current))));
@@ -643,7 +801,7 @@ async fn commit_saved(
             .is_ok();
         if !taken {
             // An empty old value: the ref must not exist yet.
-            git.run(tree, &["update-ref", &name, &commit, ""])
+            git.run(tree, &no_hooks(&["update-ref", &name, &commit, ""]))
                 .await
                 .map_err(git_error)?;
             return Ok(Some((commit, SaveTarget::Ref(name))));

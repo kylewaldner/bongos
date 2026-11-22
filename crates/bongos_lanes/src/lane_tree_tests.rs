@@ -842,3 +842,157 @@ async fn first_use_adds_the_tree_detached_through_the_tree_maker(cx: &mut TestAp
     assert_eq!(current_branch(&tip), job.run_branch);
     assert_eq!(current_branch(&fixture.app), "main");
 }
+
+#[gpui::test]
+async fn a_restart_on_the_same_run_branch_keeps_the_failed_runs_work(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::new();
+    let tip = fixture.tip();
+    let first = fixture.reset(&fixture.task_job(RUN_1, None)).await.unwrap();
+    std::fs::write(tip.join("README.md"), "half done\n").unwrap();
+    std::fs::write(tip.join("new.txt"), "new work\n").unwrap();
+
+    // The same run starts again after it failed: its run branch is the one the tree is on.
+    let job = fixture.task_job(RUN_1, Some(last(RUN_1, LastEnd::Failed)));
+    assert_eq!(job.run_branch, last(RUN_1, LastEnd::Failed).run_branch);
+    let outcome = fixture.reset(&job).await.unwrap();
+    let saved = outcome.saved.unwrap();
+    let Some((commit, SaveTarget::Ref(name))) = saved.commit else {
+        panic!("expected a saved ref: {saved:?}");
+    };
+    assert_eq!(name, format!("refs/bongos/saved/build-1/{RUN_1}"));
+    assert_eq!(git(&fixture.app, &["rev-parse", &name]), commit);
+    assert_eq!(
+        git(&fixture.app, &["show", &format!("{commit}:README.md")]),
+        "half done"
+    );
+    assert_eq!(
+        git(&fixture.app, &["show", &format!("{commit}:new.txt")]),
+        "new work"
+    );
+    assert_eq!(
+        git(&fixture.app, &["rev-parse", &format!("{commit}^")]),
+        first.head
+    );
+    // The run branch is back at its start, and the tree is clean on it.
+    assert_eq!(git(&fixture.app, &["rev-parse", &job.run_branch]), first.head);
+    assert_eq!(current_branch(&tip), job.run_branch);
+    assert_eq!(git(&tip, &["status", "--porcelain"]), "");
+}
+
+#[gpui::test]
+async fn staged_work_and_added_then_deleted_files_are_saved(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::new();
+    let tip = fixture.tip();
+    let start = fixture
+        .reset(&fixture.task_job(RUN_1, None))
+        .await
+        .unwrap()
+        .head;
+    // Added, then deleted from the disk.
+    std::fs::write(tip.join("gone.txt"), "briefly\n").unwrap();
+    git(&tip, &["add", "gone.txt"]);
+    std::fs::remove_file(tip.join("gone.txt")).unwrap();
+    // Staged, then the file on disk put back as it was.
+    std::fs::write(tip.join("README.md"), "staged\n").unwrap();
+    git(&tip, &["add", "README.md"]);
+    std::fs::write(tip.join("README.md"), "readme\n").unwrap();
+    std::fs::write(tip.join("new.txt"), "on disk\n").unwrap();
+
+    let job = fixture.task_job(RUN_2, Some(last(RUN_1, LastEnd::Failed)));
+    let saved = fixture.reset(&job).await.unwrap().saved.unwrap();
+    let Some((commit, SaveTarget::Branch(branch))) = saved.commit else {
+        panic!("expected a save on the run branch: {saved:?}");
+    };
+    assert_eq!(branch, run_branch_name(TASK_BRANCH, RUN_1, 1));
+    assert_eq!(git(&fixture.app, &["rev-parse", &branch]), commit);
+    let staged = git(&fixture.app, &["rev-parse", &format!("{commit}^")]);
+    assert_eq!(
+        git(&fixture.app, &["rev-parse", &format!("{staged}^")]),
+        start
+    );
+    assert_eq!(
+        git(&fixture.app, &["log", "-1", "--format=%s", &staged]),
+        format!("staged work left by failed run {RUN_1}")
+    );
+    assert_eq!(
+        git(&fixture.app, &["show", &format!("{staged}:README.md")]),
+        "staged"
+    );
+    assert_eq!(
+        git(&fixture.app, &["show", &format!("{staged}:gone.txt")]),
+        "briefly"
+    );
+    assert_eq!(
+        git(&fixture.app, &["ls-tree", "-r", "--name-only", &commit]),
+        ".gitignore\nREADME.md\nnew.txt"
+    );
+    assert_eq!(
+        git(&fixture.app, &["show", &format!("{commit}:README.md")]),
+        "readme"
+    );
+    assert_eq!(current_branch(&tip), job.run_branch);
+    assert_eq!(git(&tip, &["status", "--porcelain"]), "");
+}
+
+#[gpui::test]
+async fn a_file_name_that_is_not_utf8_is_saved(cx: &mut TestAppContext) {
+    use std::os::unix::ffi::OsStrExt;
+    cx.executor().allow_parking();
+    let fixture = Fixture::new();
+    let tip = fixture.tip();
+    fixture.reset(&fixture.task_job(RUN_1, None)).await.unwrap();
+    let name = std::ffi::OsStr::from_bytes(b"caf\xe9.txt");
+    if std::fs::write(tip.join(name), "bytes\n").is_err() {
+        // The filesystem refuses the name; nothing to check here.
+        return;
+    }
+    let job = fixture.task_job(RUN_2, Some(last(RUN_1, LastEnd::Failed)));
+    let saved = fixture.reset(&job).await.unwrap().saved.unwrap();
+    let Some((commit, _)) = saved.commit else {
+        panic!("expected a save: {saved:?}");
+    };
+    // `core.quotePath` prints the byte as octal.
+    let files = git(&fixture.app, &["ls-tree", "-r", "--name-only", &commit]);
+    assert!(files.contains("\"caf\\351.txt\""), "{files}");
+    assert!(!tip.join(name).exists());
+}
+
+#[gpui::test]
+async fn hooks_and_signing_config_never_stop_a_save(cx: &mut TestAppContext) {
+    use std::os::unix::fs::PermissionsExt;
+    cx.executor().allow_parking();
+    let fixture = Fixture::new();
+    let tip = fixture.tip();
+    fixture.reset(&fixture.task_job(RUN_1, None)).await.unwrap();
+    // A hook that rejects every saved ref, and signing that cannot work.
+    let hooks = fixture.base.join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let hook = hooks.join("reference-transaction");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\nif grep -q refs/bongos/; then exit 1; fi\nexit 0\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        &fixture.app,
+        &["config", "core.hooksPath", &hooks.to_string_lossy()],
+    );
+    git(&fixture.app, &["config", "commit.gpgSign", "true"]);
+    git(&fixture.app, &["config", "gpg.program", "false"]);
+
+    git(&tip, &["checkout", "-q", "--detach"]);
+    std::fs::write(tip.join("README.md"), "detached work\n").unwrap();
+    let job = fixture.task_job(RUN_2, Some(last(RUN_1, LastEnd::Halted)));
+    let saved = fixture.reset(&job).await.unwrap().saved.unwrap();
+    let Some((commit, SaveTarget::Ref(name))) = saved.commit else {
+        panic!("expected a saved ref: {saved:?}");
+    };
+    assert_eq!(git(&fixture.app, &["rev-parse", &name]), commit);
+    assert_eq!(
+        git(&fixture.app, &["show", &format!("{commit}:README.md")]),
+        "detached work"
+    );
+}
