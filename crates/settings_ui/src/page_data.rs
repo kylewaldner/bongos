@@ -987,6 +987,96 @@ fn work_page(token_set: bool) -> SettingsPage {
         ]
     }
 
+    fn lanes_section() -> [SettingsPageItem; 10] {
+        macro_rules! lanes_item {
+            ($title:expr, $description:expr, $key:ident) => {
+                SettingsPageItem::SettingItem(SettingItem {
+                    title: $title,
+                    description: $description,
+                    field: Box::new(SettingField {
+                        organization_override: None,
+                        json_path: Some(concat!("lanes.", stringify!($key))),
+                        pick: |settings_content| settings_content.lanes.as_ref()?.$key.as_ref(),
+                        write: |settings_content, value, _| {
+                            settings_content.lanes.get_or_insert_default().$key = value;
+                        },
+                    }),
+                    metadata: None,
+                    files: USER,
+                })
+            };
+            ($title:expr, $description:expr, $key:ident, unimplemented) => {
+                SettingsPageItem::SettingItem(SettingItem {
+                    title: $title,
+                    description: $description,
+                    field: Box::new(
+                        SettingField {
+                            organization_override: None,
+                            json_path: Some(concat!("lanes.", stringify!($key))),
+                            pick: |settings_content| settings_content.lanes.as_ref()?.$key.as_ref(),
+                            write: |settings_content, value, _| {
+                                settings_content.lanes.get_or_insert_default().$key = value;
+                            },
+                        }
+                        .unimplemented(),
+                    ),
+                    metadata: None,
+                    files: USER,
+                })
+            };
+        }
+        [
+            SettingsPageItem::SectionHeader("Lanes"),
+            lanes_item!(
+                "Enable Lanes",
+                "Whether lanes are on. While they are off, no engine host starts and every lane command only says lanes are off. The kinds, counts, rules and locations of a project live in its lanes.toml, and the Lanes view shows each kind's effective count with the layer that set it.",
+                enabled
+            ),
+            lanes_item!(
+                "Re-evaluate Interval",
+                "Seconds between two looks at the project for work a lane could take.",
+                reevaluate_interval
+            ),
+            lanes_item!(
+                "Exit When Idle",
+                "Whether the engine host exits once every lane is idle and nothing is left to take.",
+                exit_when_idle
+            ),
+            lanes_item!(
+                "On Interruption",
+                "What happens to a lane run that an interruption stopped: ask first, or resume it once. A project's lanes.toml may override it. Edit in settings.json.",
+                on_interruption,
+                unimplemented
+            ),
+            lanes_item!(
+                "On Last Window Close",
+                "What closing the last window does while lanes run in it: ask, keep them running in an engine host, or stop them. Edit in settings.json.",
+                on_last_window_close,
+                unimplemented
+            ),
+            lanes_item!(
+                "Desktop Notifications",
+                "Whether a lane run waiting on a person shows one desktop notification while no window is attached.",
+                desktop_notifications
+            ),
+            lanes_item!(
+                "Dry Run Limit",
+                "The most picks `lanes: dry run` lists.",
+                dry_run_limit
+            ),
+            lanes_item!(
+                "Staleness Timeout Seconds",
+                "Seconds a staleness script may run before it counts as failed.",
+                staleness_timeout_seconds
+            ),
+            lanes_item!(
+                "Save Max File Bytes",
+                "The largest file, in bytes, kept when a lane tree is saved before a reset; larger files are skipped and listed.",
+                save_max_file_bytes
+            ),
+        ]
+    }
+
     SettingsPage {
         title: "Work",
         items: concat_sections![
@@ -995,7 +1085,8 @@ fn work_page(token_set: bool) -> SettingsPage {
             task_builder_section(),
             linear_section(token_set),
             workflows_section(),
-            task_checks_section()
+            task_checks_section(),
+            lanes_section()
         ],
     }
 }

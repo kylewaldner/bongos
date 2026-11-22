@@ -30,6 +30,7 @@ const NAMES: &[&str] = &[
     "lanes::Adopt",
     "lanes::AcceptGraph",
     "lanes::Dump",
+    "task::Run",
 ];
 
 fn use_default_settings(cx: &mut TestAppContext) {
@@ -183,13 +184,13 @@ async fn lanes_dispatch_by_name_shows_the_off_toast_while_off(cx: &mut TestAppCo
     assert_eq!(OFF_MESSAGE, "Lanes are off (lanes.enabled)");
     assert_eq!(toasts(&workspace, cx), vec![OFF_MESSAGE; NAMES.len()]);
 
-    // While on, the commands of the engine host say this window does not reach it; accept graph
-    // runs here and needs the one project repository open in it.
+    // While on, the commands of the engine host say this window does not reach it; accept graph,
+    // show and dry run read the project here and need the one project repository open in it.
     cx.update(|_, cx| set_enabled(cx, true));
     let expected: Vec<&str> = NAMES
         .iter()
         .map(|name| match *name {
-            "lanes::AcceptGraph" => ONE_PROJECT_MESSAGE,
+            "lanes::AcceptGraph" | "lanes::Show" | "lanes::DryRun" => ONE_PROJECT_MESSAGE,
             _ => ENGINE_HOST_MESSAGE,
         })
         .collect();
@@ -332,4 +333,24 @@ async fn lanes_adopt_of_an_unreadable_tree_asks_to_confirm_the_drop(cx: &mut Tes
             && last.ends_with("); unreadable old work dropped"),
         "{last}"
     );
+}
+
+#[test]
+fn task_run_goes_to_the_group_the_leaf_or_the_project() {
+    use crate::actions::{RunTarget, run_target};
+    use bongos_work_model::fixtures;
+    let tree = fixtures::tree(vec![fixtures::group(
+        "phase",
+        vec![fixtures::pr_ship("feature")],
+    )]);
+    let phase = fixtures::id_of(&tree, "phase");
+    let feature = fixtures::id_of(&tree, "feature");
+    assert_eq!(
+        run_target(Some(&tree), Some(&phase)),
+        RunTarget::Group(phase.clone())
+    );
+    assert_eq!(run_target(Some(&tree), Some(&feature)), RunTarget::Leaf);
+    assert_eq!(run_target(Some(&tree), None), RunTarget::Project);
+    assert_eq!(run_target(Some(&tree), Some("gone")), RunTarget::Project);
+    assert_eq!(run_target(None, Some(&phase)), RunTarget::Project);
 }

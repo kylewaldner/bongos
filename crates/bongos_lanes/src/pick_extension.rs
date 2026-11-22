@@ -97,6 +97,12 @@ pub trait PickExtension {
     ) -> Option<LaneAfterJob> {
         None
     }
+
+    /// Lines the dry run adds to its buffer for this extension (for example the pool or queue
+    /// that would hold a lane). Reads `state` only and writes nothing.
+    fn explain(&self, _state: &LanesState) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// The registered pick extensions, asked in the order they were registered.

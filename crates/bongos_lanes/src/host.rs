@@ -17,8 +17,8 @@ use std::rc::Rc;
 use anyhow::{Result, anyhow, bail};
 use bongos_engine_host::{EngineHostProcess, HostCommands, HostEvent, LanesVerb, WriterHosts};
 use bongos_lanes_model::{
-    Author, JobRecord, LaneId, LaneTable, LiveFacts, PickGraph, Problem, RunSubject, StampFile,
-    TaskId, from_work_tree, parse, short_run,
+    Author, JobRecord, LaneId, LaneTable, LiveFacts, PickBound, PickGraph, Problem, RunSubject,
+    StampFile, TaskId, from_work_tree, parse, short_run,
 };
 use bongos_project_repo::{
     ChangeFilter, ChangeState, LandingEvent, LandingResult, PeerIdentity, PersonClaim, ProjectRepo,
@@ -62,6 +62,9 @@ pub struct LanesPayload {
     pub reason: Option<String>,
     /// The person agreed to drop a halted job's unreadable work.
     pub confirm_drop: bool,
+    /// A start bounded to this group (`task: run` on a group): the lanes take only leaves under it.
+    #[serde(default)]
+    pub within: Option<String>,
     /// The person at the sending window's keyboard. The writer takes it as the author only from a
     /// window of its own executable; a command-line peer's is ignored.
     pub person: Option<String>,
@@ -185,7 +188,9 @@ fn handle(
         LanesVerb::Start if EngineHostProcess::is_running(cx) => {
             let starting = lanes.start(
                 StartLanes {
-                    bound: None,
+                    bound: payload
+                        .within
+                        .map(|group| PickBound::Within(TaskId::new(group))),
                     max_jobs: None,
                     unattended: None,
                     by,
@@ -240,7 +245,7 @@ fn status_document(status: &LanesStatus, cx: &App) -> serde_json::Value {
         .and_then(|store| store.read(cx).snapshot())
         .and_then(|tree| from_work_tree(&tree, &project, &LiveFacts::default()));
     let engine = cx.try_global::<WorkflowEngine>().cloned();
-    crate::status_doc::status_doc(
+    crate::status_doc::status_doc_with(
         status,
         &crate::status_doc::StatusFacts {
             project: &project,
@@ -261,6 +266,7 @@ fn status_document(status: &LanesStatus, cx: &App) -> serde_json::Value {
             // landing's own wait event is not tracked per lane here.
             waits_on_landing: &|_| true,
         },
+        &crate::wait_text::WaitTextFormatters::global(cx),
     )
 }
 

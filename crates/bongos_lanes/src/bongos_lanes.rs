@@ -26,16 +26,21 @@ mod definitions;
 mod dispatch_job;
 mod dispatcher;
 mod done_owners;
+mod dry_run;
 mod env;
 mod exporter;
+mod gate_notify;
 mod hooks;
 mod host;
 mod job_trees;
 mod lane_control;
 mod lane_tree;
 mod lane_waits;
+mod lanes_rows;
+mod lanes_view;
 mod last_window;
 mod locations;
+pub mod notify;
 mod pick_extension;
 mod prepare;
 mod profile;
@@ -48,7 +53,10 @@ mod settings;
 mod staleness;
 mod status_doc;
 mod store;
+mod summary;
+mod surfaces;
 mod task_trees;
+mod wait_text;
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -64,7 +72,7 @@ pub use actions::{
     AdoptArgs, AdoptPrompt, DROP_CHOICES, ENGINE_HOST_MESSAGE, LanesToast,
     NOTHING_TO_ADOPT_MESSAGE, OFF_MESSAGE, ONE_PROJECT_MESSAGE, WindowLanes, accepted_message,
     action_types, adopt_as_person, adopt_prompt, adoptable_tasks, adopted_message, init_palette,
-    lanes, register,
+    lanes, register, task,
 };
 pub use adopt::{AdoptRequest, Adopted, LeftWork};
 /// The writers' participants live in the engine host, which drains them at a handover; lanes
@@ -82,8 +90,12 @@ pub use dispatcher::{
     put_dispatcher,
 };
 pub use done_owners::CLEARED_NO_CHECKS;
+pub use dry_run::{
+    DryRunInputs, dry_run_buffer, dry_run_buffer_in, dry_run_text, idle_reasons, nothing_reason,
+};
 pub use env::{apply_env, second_tree_env, tip_env};
 pub use exporter::{EXPORT_NAMESPACE, LanesExporter, STATE_FILE};
+pub use gate_notify::{notify_open_gates, observe_gates};
 pub use hooks::{AFTER_TREE_CREATED, BEFORE_JOB, BeforeJob, JobEnd, JobHook, JobHookCx, JobHooks};
 pub use host::{
     HOST_PREFIX, HostDispatcher, LanesPayload, ProjectLanesHost, WINDOW_PREFIX, dispatcher_running,
@@ -105,6 +117,11 @@ pub use lane_tree::{
 pub use lane_waits::{
     ASK_PREFIX, LaneAsk, LaneWaitAction, LaneWaitHandler, LaneWaitHandlers, NEEDS_YOU_SOURCE,
     read_asks, register_needs_you,
+};
+pub use lanes_rows::{LaneRow, LanesViewRows, NeedsYouRow, RowFacts, lanes_view_rows};
+pub use lanes_view::{
+    LanesSource, LanesView, LanesViewSection, LanesViewSections, PointRow, StoreLanes,
+    show_lanes_view,
 };
 pub use last_window::{
     CloseFirst, CloseOutcome, LAST_WINDOW_CHOICES, LAST_WINDOW_DETAIL, LAST_WINDOW_QUESTION,
@@ -135,15 +152,24 @@ pub use staleness::{
     PinnedTree, Staleness, StalenessCheck, run_staleness_script, staleness_answer,
     staleness_program,
 };
-pub use status_doc::{STATUS_SCHEMA, StatusFacts, status_doc};
+pub use status_doc::{STATUS_SCHEMA, StatusFacts, status_doc, status_doc_with};
 pub use store::{
     LANE_PREFIX, LANES_NAMESPACE, OWNER_PREFIX, delete_lane, delete_owner, put_lane, put_owner,
     read_state, read_state_in, write_state,
+};
+pub use summary::{
+    HandoverNote, KindCount, SummaryInputs, SummarySection, SummarySections, UnattendedChoice,
+    WorkflowSummary, summary_text,
+};
+pub use surfaces::{
+    DRY_RUN_TITLE, START_CHOICES, SUMMARY_TITLE, SummaryContext, open_text_buffer,
+    summarize_then_start, summary_inputs, ungated_steps,
 };
 pub use task_trees::{
     LaneLease, LaneTaskTrees, LaneTreeSetup, OwedTasks, ProcessEnv, SecondTreeLeases, TopLevelOf,
     TreeHold, no_top_level, open_projects_owed, process_env,
 };
+pub use wait_text::{WaitTextFn, WaitTextFormatters};
 
 /// Registers the settings, the `lanes` definition folder and the prompt check, the `lanes` state
 /// exporter, the live and activity sources, and the `lane-run-scope` approval hook, all over one
@@ -162,6 +188,7 @@ pub fn init(cx: &mut App) {
     LaneRunScope::register(runs.clone(), cx);
     cx.set_global(runs.clone());
     bongos_work::WorktreeRootResolvers::register(Arc::new(LaneRootResolver), cx);
+    bongos_work::RootLayers::register(roots::open_project_root_layer, cx);
     let trees = LaneTaskTrees::new(
         runs,
         CurrentJobTrees::global(cx),
@@ -175,6 +202,7 @@ pub fn init(cx: &mut App) {
     register_needs_you(cx);
     register_host(cx);
     read_modes::register(cx);
+    observe_gates(notify::GateNotifier::system(), cx);
     WriterParticipants::register(Rc::new(recovery::LanesRecovery), cx);
 }
 
@@ -200,6 +228,10 @@ mod host_tests;
 mod job_trees_tests;
 #[cfg(test)]
 mod lane_tree_tests;
+#[cfg(test)]
+mod lanes_view_surface_tests;
+#[cfg(test)]
+mod lanes_view_tests;
 #[cfg(test)]
 mod last_window_tests;
 #[cfg(test)]

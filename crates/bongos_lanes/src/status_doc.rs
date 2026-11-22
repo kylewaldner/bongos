@@ -8,6 +8,7 @@ use bongos_project_repo::{SplitMaster, WAITING_MASTER_SPLIT};
 use serde_json::{Value, json};
 
 use crate::lane_control::{DispatcherPhase, LanesStatus};
+use crate::wait_text::WaitTextFormatters;
 
 /// The `schema` field of the document.
 pub const STATUS_SCHEMA: &str = "lanes-status 1";
@@ -47,6 +48,15 @@ fn phase_name(phase: Option<DispatcherPhase>) -> &'static str {
 
 /// The document for `status`.
 pub fn status_doc(status: &LanesStatus, facts: &StatusFacts) -> Value {
+    status_doc_with(status, facts, &WaitTextFormatters::default())
+}
+
+/// [`status_doc`] with the registered `wait_text` formatters giving each reason's text.
+pub fn status_doc_with(
+    status: &LanesStatus,
+    facts: &StatusFacts,
+    wait_text: &WaitTextFormatters,
+) -> Value {
     let count = |state: LaneState| {
         status
             .lanes
@@ -64,7 +74,7 @@ pub fn status_doc(status: &LanesStatus, facts: &StatusFacts) -> Value {
             let reason = if split_wait {
                 Some(WAITING_MASTER_SPLIT.to_string())
             } else {
-                lane.reason.as_ref().map(|reason| reason.to_string())
+                lane.reason.as_ref().map(|reason| wait_text.text(reason))
             };
             json!({
                 "id": lane.id.to_string(),
