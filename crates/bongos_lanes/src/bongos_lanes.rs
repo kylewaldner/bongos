@@ -10,6 +10,7 @@
 //! dispatcher (`dispatcher`, `dispatch_job`) picks, starts and ends the lanes' jobs in one loop,
 //! with the pick extensions of other features (`pick_extension`) taking part in its picks;
 //! `adopt` gives a stopped or halted task to a free lane, and `accept_graph` lands the graph stamp.
+//! A prepared task's first job runs its rule's staleness script first (`staleness`).
 
 mod accept_graph;
 mod actions;
@@ -33,6 +34,7 @@ mod roots;
 mod runs;
 mod scope;
 mod settings;
+mod staleness;
 mod store;
 mod task_trees;
 
@@ -95,6 +97,7 @@ pub use roots::{LaneRootResolver, LaneTables};
 pub use runs::{LaneActivity, LaneLiveSource, LaneRuns, OwnedScope, SOURCE_NAME};
 pub use scope::LaneRunScope;
 pub use settings::{LanesHostSettings, LanesOnInterruption, LanesOnLastWindowClose, LanesSettings};
+pub use staleness::{Staleness, StalenessCheck, run_staleness_script, staleness_answer};
 pub use store::{
     LANE_PREFIX, LANES_NAMESPACE, OWNER_PREFIX, delete_lane, delete_owner, put_lane, put_owner,
     read_state, read_state_in, write_state,
@@ -162,6 +165,8 @@ mod roots_tests;
 mod runs_tests;
 #[cfg(test)]
 mod scope_tests;
+#[cfg(test)]
+mod staleness_tests;
 #[cfg(test)]
 mod task_trees_tests;
 #[cfg(test)]

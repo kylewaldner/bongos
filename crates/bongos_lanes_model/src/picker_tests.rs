@@ -1779,6 +1779,14 @@ fn a_prepared_unrefreshed_owner_with_staleness_refreshes_first() {
         let outcome = pick_on(&graph, state, table, &lane("build", 1));
         assert_eq!(picked(&outcome), pair("F.s", "implement"));
         assert_eq!(assignment(&outcome).refresh_first, expected);
+        let refresh = assignment(&outcome).refresh.clone();
+        assert_eq!(
+            refresh,
+            expected.then(|| crate::Refresh {
+                staleness: "lanes/scripts/stale".to_string(),
+                workflow: "refresh".to_string(),
+            })
+        );
     }
 }
 
