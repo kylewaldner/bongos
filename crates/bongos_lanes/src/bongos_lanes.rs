@@ -7,7 +7,8 @@
 //! trees (`job_trees`), the reset and save of a lane's persistent tree and the merge in it
 //! (`lane_tree`), the worktree roots lanes give a hand start (`roots`), and a task's trees with
 //! the exclusive leases of a lane's second tree that the checks ask for (`task_trees`). The
-//! dispatcher (`dispatcher`, `dispatch_job`) picks, starts and ends the lanes' jobs in one loop;
+//! dispatcher (`dispatcher`, `dispatch_job`) picks, starts and ends the lanes' jobs in one loop,
+//! with the pick extensions of other features (`pick_extension`) taking part in its picks;
 //! `adopt` gives a stopped or halted task to a free lane, and `accept_graph` lands the graph stamp.
 
 mod accept_graph;
@@ -26,6 +27,7 @@ mod job_trees;
 mod lane_control;
 mod lane_tree;
 mod locations;
+mod pick_extension;
 mod prepare;
 mod profile;
 mod roots;
@@ -51,15 +53,15 @@ pub use actions::{
     lanes, register,
 };
 pub use adopt::{AdoptRequest, Adopted, LeftWork};
-pub use bongos_lanes_model::{EnvEdit, Problem};
+pub use bongos_lanes_model::{AssignedWork, Assignment, EnvEdit, Problem, StopCause};
 pub use create::{CreateError, check_root, create_below_existing, lexical};
 pub use definitions::{LANES_FILE, LANES_FOLDER, prompt_lane_diagnostics, validate_folder};
-pub use dispatch_job::HISTORY_BY;
+pub use dispatch_job::{DROPPED_BEFORE_START, HISTORY_BY};
 pub use dispatcher::{
     DEFAULT_DISPATCHER, DISPATCHER_KEY, Dispatcher, DispatcherConfig, DispatcherRecord, JobCommit,
     JobDefinitionPolicy, JobEngine, JobSetup, Lanes, LanesHost, LanesParts, LanesStarted,
-    NOTHING_READY, PROJECT_UNATTENDED, RecordedBound, StartLanes, StartRefusal,
-    VerifiedCommitPolicy, dispatcher_record, put_dispatcher,
+    NOT_STARTED_BEFORE_A_CRASH, NOTHING_READY, PROJECT_UNATTENDED, RecordedBound, StartLanes,
+    StartRefusal, VerifiedCommitPolicy, dispatcher_record, put_dispatcher,
 };
 pub use done_owners::CLEARED_NO_CHECKS;
 pub use env::{apply_env, second_tree_env, tip_env};
@@ -82,6 +84,9 @@ pub use lane_tree::{
 pub use locations::{
     Fallback, LaneLocation, LaneLocations, Layer, LocationInputs, Place, RepositoryPlace,
     binding_of, check_lanes, check_overlap, resolve_lane, table_lane_ids, tree_name, tree_slug,
+};
+pub use pick_extension::{
+    ExtensionPick, JobChange, LaneAfterJob, PickExtension, PickExtensions, instance_room,
 };
 pub use prepare::{
     FreeSpace, MakeTree, PrepareRequest, PreparedLane, TreeRequest, check_floors, prepare_lane,

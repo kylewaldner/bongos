@@ -16,7 +16,7 @@ use crate::{Dispatcher, LanesStarted};
 
 /// A project profile that says only the lane counts, which a test changes.
 #[derive(Default)]
-struct CountProfile {
+pub(super) struct CountProfile {
     counts: Mutex<HashMap<String, u32>>,
 }
 
@@ -26,7 +26,7 @@ impl LaneProfileSource for CountProfile {
     }
 }
 
-fn profile(counts: &[(&str, u32)], cx: &mut TestAppContext) -> Arc<CountProfile> {
+pub(super) fn profile(counts: &[(&str, u32)], cx: &mut TestAppContext) -> Arc<CountProfile> {
     let profile = Arc::new(CountProfile::default());
     for (kind, count) in counts {
         profile
@@ -41,7 +41,7 @@ fn profile(counts: &[(&str, u32)], cx: &mut TestAppContext) -> Arc<CountProfile>
 }
 
 /// The profile's count of `kind` becomes `count`, delivered as the profile's change.
-fn set_count(profile: &CountProfile, kind: &str, count: u32, cx: &mut TestAppContext) {
+pub(super) fn set_count(profile: &CountProfile, kind: &str, count: u32, cx: &mut TestAppContext) {
     profile
         .counts
         .lock()

@@ -46,6 +46,7 @@ pub(crate) fn lanes_state() -> LanesState {
         workflow: "build".to_string(),
         started: SINCE.to_string(),
         definition_commit: Some("c1".to_string()),
+        extension: None,
     });
     running.jobs_done = 2;
     let docs = LaneId::new("docs", 1);
