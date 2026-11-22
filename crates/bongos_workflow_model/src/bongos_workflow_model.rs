@@ -30,8 +30,8 @@ pub use inputs::{InputValue, resolve};
 pub use layers::{Layer, LayerDirs, Resolution, Resolved};
 pub use layout::{GraphLayout, LayoutArc, LayoutEdge, LayoutNode, layout};
 pub use record::{
-    Event, LaneRef, NodeKey, ParsedLog, RunState, RunSubject, RunToml, UnattendedChoice,
-    UnattendedSource, append, parse_log, repair, replay,
+    Event, LaneRef, NodeKey, ParsedLog, RunState, RunSubject, RunToml, RunTreeRecord,
+    UnattendedChoice, UnattendedSource, append, parse_log, repair, replay,
 };
 pub use scheduler::{
     Command, FreshRetryRefusal, Limits, Plan, check_fresh_retry, plan, resume_set, retry_set, step,

@@ -84,6 +84,7 @@ fn doc() -> StateDoc {
         Paths {
             worktree: PathBuf::from("/worktrees/run-1"),
             scratch: PathBuf::from("/scratch/node"),
+            trees: Default::default(),
         },
     )
 }
@@ -114,7 +115,7 @@ fn the_state_document_has_every_field() {
                 "cost_usd": 2.0
             },
             "settings": { "command": "cargo test", "retries": 2 },
-            "paths": { "worktree": "/worktrees/run-1", "scratch": "/scratch/node" }
+            "paths": { "worktree": "/worktrees/run-1", "scratch": "/scratch/node", "trees": {} }
         })
     );
 }
@@ -141,6 +142,7 @@ fn doc_of(events: &[Event]) -> Value {
         Paths {
             worktree: PathBuf::from("/worktrees/run-1"),
             scratch: PathBuf::from("/scratch/node"),
+            trees: Default::default(),
         },
     );
     serde_json::from_str(&doc.to_json()).unwrap()

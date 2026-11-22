@@ -45,12 +45,13 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use bongos_work_model::store::Project;
 use bongos_workflow_model::inputs::Input;
 use bongos_workflow_model::record::{RunningNode, StartedBy};
 use bongos_workflow_model::scheduler::Branch;
 use bongos_workflow_model::{
-    Command, Definition, Event, Failure, FailureReason, Limits, NodeKey, RunState, record, replay,
-    scheduler,
+    Command, Definition, EnvEdit, Event, Failure, FailureReason, LaneRef, Limits, NodeKey,
+    RunState, record, replay, scheduler,
 };
 use futures::channel::oneshot;
 use serde_json::Value;
@@ -141,6 +142,90 @@ pub struct RunBinding {
     pub checkout: TaskCheckout,
     /// The run's resolved inputs.
     pub inputs: Vec<Input>,
+    /// What the run was started with besides its task; the default is a task run's.
+    pub setup: RunSetup,
+}
+
+/// What a run was started with besides its task: its lane, its edits to the environment, whether
+/// its tree is a read-only snapshot, and for a run with no task where its agents' context comes
+/// from. The default is a task run's as it always was: no lane, no edit, a writable run worktree.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RunSetup {
+    pub lane: Option<LaneRef>,
+    /// The lane's named directories, by name.
+    pub lane_dirs: BTreeMap<String, PathBuf>,
+    /// The run's edits to its nodes' environment, applied in order.
+    pub env: Vec<EnvEdit>,
+    /// The run works on a snapshot: its worktree is read and never written, and it has no
+    /// repository, run branch or fan-out branch worktrees.
+    pub snapshot: bool,
+    /// For a project subject: the project, its files folder and the definitions its agents are
+    /// pointed at.
+    pub project: Option<ProjectSource>,
+}
+
+/// Where the agents of a project-subject run take their context from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectSource {
+    pub project: Project,
+    pub files_dir: PathBuf,
+    pub definitions: PathBuf,
+}
+
+/// `BONGOS_LANE_DIR_<NAME>`: the name upper-cased, every character that is not an ASCII letter or
+/// digit replaced with `_`.
+pub fn lane_dir_variable(name: &str) -> String {
+    let name: String = name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("BONGOS_LANE_DIR_{name}")
+}
+
+impl RunSetup {
+    /// The edits every node of the run gets, in order: the run's own, less any that names one of
+    /// bongos's own `BONGOS_*` variables, then for a lane run `BONGOS_LANE`, `BONGOS_LANE_KIND`
+    /// and one `BONGOS_LANE_DIR_<NAME>` per named directory. So no edit changes a `BONGOS_*`
+    /// variable and a run with no lane has none of the lane's. Empty for a run with no lane and
+    /// no edit.
+    pub fn env_edits(&self) -> Vec<EnvEdit> {
+        let mut edits: Vec<EnvEdit> = self
+            .env
+            .iter()
+            .filter(|edit| match edit {
+                EnvEdit::Set { name, .. } | EnvEdit::Unset { name } => !name.starts_with("BONGOS_"),
+                EnvEdit::PrependPath { .. } => true,
+            })
+            .cloned()
+            .collect();
+        if let Some(lane) = &self.lane {
+            let set = |name: String, value: String| EnvEdit::Set { name, value };
+            edits.push(set("BONGOS_LANE".to_string(), lane.id.clone()));
+            edits.push(set("BONGOS_LANE_KIND".to_string(), lane.kind.clone()));
+            for (name, dir) in &self.lane_dirs {
+                edits.push(set(
+                    lane_dir_variable(name),
+                    dir.to_string_lossy().into_owned(),
+                ));
+            }
+        }
+        edits
+    }
+
+    /// The directories a program of the run may write besides its worktree and scratch: the
+    /// lane's named directories, none for a run with no lane.
+    pub fn writable_dirs(&self) -> Vec<PathBuf> {
+        if self.lane.is_none() {
+            return Vec::new();
+        }
+        self.lane_dirs.values().cloned().collect()
+    }
 }
 
 /// One try a runner is asked to start, with the context of its run.

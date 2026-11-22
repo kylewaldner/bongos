@@ -10,7 +10,7 @@
 //! queued as a [`WorkflowEvent`] for the app to hand on.
 //!
 //! The work model stays free of runs: the lifecycle reads the tree and writes only under the
-//! task's `runs/` directory.
+//! task's `runs/` directory, or for a run with no task under its project's.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -30,15 +30,20 @@ use bongos_workflow_model::record::{
 };
 use bongos_workflow_model::{
     Definition, EnvEdit, InputValue, LaneRef, Layer, LayerDirs, NodeKey, RunState, RunSubject,
-    RunToml, UnattendedChoice, ValidationContext, check_fresh_retry, parse,
+    RunToml, RunTreeRecord, UnattendedChoice, ValidationContext, check_fresh_retry, parse,
     project_subject_problems, retry_set, schema,
 };
 use serde_json::Value;
 
 use crate::WorkflowsSettings;
+use crate::builtin_merge::{
+    ProjectMergeRefusal, ProjectMergeRequest, ProjectMerged, merge_project_run,
+};
 use crate::definitions::{self, DefinitionError};
 use crate::mcp;
-use crate::runtime::{RunBinding, RunSpec, Runner, Runtime, RuntimeError, Settlement};
+use crate::runtime::{
+    ProjectSource, RunBinding, RunSetup, RunSpec, Runner, Runtime, RuntimeError, Settlement,
+};
 use crate::worktrees::{self, Git, RunWorktree, TaskCheckout, WorktreeError, branch_worktree_path};
 
 /// A run's id: a UUID v7, the same for every attempt.
@@ -80,7 +85,9 @@ impl StartSubject {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunTree {
     /// A new run worktree. For a task run every field is `None`: the worktree is made from the
-    /// task's own repository and branch, as it always was.
+    /// task's own repository and branch, as it always was. For a project run, a worktree of the
+    /// repository `repo` on a new run branch from `base` (by default the branch its main
+    /// checkout has out); the success end merges the run branch into `merge_into` when set.
     Fresh {
         repo: Option<PathBuf>,
         base: Option<String>,
@@ -94,7 +101,9 @@ pub enum RunTree {
         start: Option<String>,
         merge_into: Option<String>,
     },
-    /// A tree materialized at `path` that the run reads and never writes.
+    /// A tree materialized at `path` that the run reads and never writes: `BONGOS_WORKTREE` is
+    /// `path`, its programs may write only their scratch, and there is no run branch or merge.
+    /// Only a project run may have one.
     Snapshot { path: PathBuf },
 }
 
@@ -122,9 +131,14 @@ pub struct StartRequest {
     pub run_id: Option<RunId>,
     /// The run that starts this one.
     pub parent: Option<String>,
+    /// The lane running it: its nodes get `BONGOS_LANE`, `BONGOS_LANE_KIND` and
+    /// `BONGOS_LANE_DIR_<NAME>`.
     pub lane: Option<LaneRef>,
+    /// The lane's named directories, by name: in its nodes' environment and writable by its
+    /// programs. Only a lane run may name any.
+    pub lane_dirs: BTreeMap<String, PathBuf>,
     pub tree: RunTree,
-    /// Edits to the environment of the run's nodes, applied in order (carried, not applied yet).
+    /// Edits to the environment of the run's nodes, applied in order.
     pub env: Vec<EnvEdit>,
     pub unattended: Option<UnattendedChoice>,
     /// The commit of the project repository whose definitions the first attempt reads, instead of
@@ -162,6 +176,7 @@ impl StartRequest {
             run_id: None,
             parent: None,
             lane: None,
+            lane_dirs: BTreeMap::new(),
             tree: RunTree::default(),
             env: Vec::new(),
             unattended: None,
@@ -389,6 +404,12 @@ pub trait RunWorktrees: Send {
         attempt: u32,
         settings: &WorkflowsSettings,
     ) -> Result<RunWorktree, WorktreeError>;
+
+    /// The branch checked out in the repository `repo`'s main checkout, which a run on the
+    /// repository with no base named starts from; `None` when it cannot tell.
+    fn base_branch(&mut self, _repo: &Path) -> Option<String> {
+        None
+    }
 }
 
 /// The free bytes on the disk holding a path ([`worktrees::disk_free_bytes`] in the app).
@@ -429,6 +450,10 @@ impl RunWorktrees for GitWorktrees {
             &move |path: &Path| free_space(path),
         ))
     }
+
+    fn base_branch(&mut self, repo: &Path) -> Option<String> {
+        futures::executor::block_on(worktrees::checked_out_branch(&self.git, repo))
+    }
 }
 
 /// What the app knows at a start, read before the lifecycle is locked.
@@ -440,6 +465,67 @@ pub struct StartContext<'a> {
     /// The commit of the project repository the project layer of the dirs was read from, which
     /// the first attempt records; `None` when the layer is not a repository's.
     pub definition_commit: Option<String>,
+    /// The definitions tree the agents of a run with no task are pointed at when the run is on no
+    /// snapshot: the project repository's checkout of them. `None` points them at the project's
+    /// own folder.
+    pub definitions: Option<PathBuf>,
+}
+
+/// What the success end of a run with no task does ([`Lifecycle::project_end`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectEnd {
+    /// The merge of its run branch, when its start named a branch to merge into.
+    pub merge: Option<ProjectMergeRequest>,
+    /// The merge is recorded already.
+    pub merged: bool,
+}
+
+/// How the success end of a run with no task settles ([`project_settlement`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectSettled {
+    pub settlement: Settlement,
+    /// The new head of the branch merged into, to record before settling.
+    pub merged_head: Option<String>,
+}
+
+/// The success end of a run with no task: with a branch to merge into, the run branch is merged
+/// into it in the run tree ([`merge_project_run`]); when another worktree (a person's checkout
+/// included) has that branch out, the run waits on a person at the merge gate with the run
+/// branch and every checkout as they were, and once the person approves the merge is tried
+/// again (nothing is merged when the branch already holds the run's commits). A conflict or any
+/// other refusal fails the run, the run branch intact. With no branch to merge into, or a merge
+/// already recorded, the run succeeds and nothing is merged.
+pub async fn project_settlement(git: &Git, end: &ProjectEnd) -> ProjectSettled {
+    let succeed = |merged_head| ProjectSettled {
+        settlement: Settlement::Succeed,
+        merged_head,
+    };
+    let Some(request) = end.merge.as_ref().filter(|_| !end.merged) else {
+        return succeed(None);
+    };
+    let fail = |reason, detail: String| ProjectSettled {
+        settlement: Settlement::Fail(bongos_workflow_model::Failure::new(reason, None, detail)),
+        merged_head: None,
+    };
+    match merge_project_run(git, request).await {
+        Ok(ProjectMerged::Merged { head }) => succeed(Some(head)),
+        Ok(ProjectMerged::AlreadyIn) => succeed(None),
+        Err(refusal @ ProjectMergeRefusal::CheckedOut { .. }) => ProjectSettled {
+            settlement: Settlement::Wait {
+                key: crate::task_link::gate_key(crate::task_link::MERGE_GATE),
+                question: refusal.to_string(),
+            },
+            merged_head: None,
+        },
+        Err(refusal @ ProjectMergeRefusal::Conflict(_)) => fail(
+            bongos_workflow_model::FailureReason::MergeConflict,
+            refusal.to_string(),
+        ),
+        Err(refusal) => fail(
+            bongos_workflow_model::FailureReason::WorktreeUnavailable,
+            refusal.to_string(),
+        ),
+    }
 }
 
 /// Where a halted run can be edited: its worktree and its fan-out branch worktrees.
@@ -522,6 +608,11 @@ fn read_cleared(dir: &Path, checkout: &TaskCheckout) -> Result<Option<ClearedRun
     let text =
         fs::read_to_string(dir.join(RUN_FILE)).map_err(|error| format!("{RUN_FILE}: {error}"))?;
     let record = RunToml::parse(&text).map_err(|error| error.to_string())?;
+    if record.tree.is_some() {
+        // A snapshot or a project's repository tree is not a task run worktree: never offered
+        // for removal here.
+        return Ok(None);
+    }
     let attempt = record
         .current_attempt()
         .ok_or_else(|| format!("{RUN_FILE} has no attempt"))?;
@@ -597,6 +688,8 @@ struct RunEntry {
     worktree: RunWorktree,
     /// The definition revision in use within the current attempt.
     rev: u32,
+    /// What the run was started with besides its task.
+    setup: RunSetup,
 }
 
 impl RunEntry {
@@ -635,9 +728,86 @@ impl RunEntry {
                     missing: false,
                 })
                 .collect(),
+            setup: self.setup.clone(),
         }
     }
 }
+
+/// The setup of a run as its record and the work tree have it: the lane, its directories and the
+/// environment edits from the record, whether the tree is a snapshot, and for a project subject
+/// the project of `tree` with its files folder (`project_dir`) and the definitions to point its
+/// agents at.
+fn setup_of(record: &RunToml, tree: &WorkTree, project_dir: &Path) -> RunSetup {
+    let snapshot = match &record.tree {
+        Some(RunTreeRecord::Snapshot { path }) => Some(path.clone()),
+        _ => None,
+    };
+    let project = match &record.subject {
+        RunSubject::Project { id } => tree
+            .projects
+            .iter()
+            .find(|project| project.task.id() == Some(id.as_str()))
+            .map(|project| ProjectSource {
+                project: project.clone(),
+                files_dir: project_dir.to_path_buf(),
+                definitions: snapshot
+                    .clone()
+                    .or_else(|| record.definitions.clone())
+                    .unwrap_or_else(|| project_dir.to_path_buf()),
+            }),
+        RunSubject::Task { .. } => None,
+    };
+    RunSetup {
+        lane: record.lane.clone(),
+        lane_dirs: record.lane_dirs.clone(),
+        env: record.env.clone(),
+        snapshot: snapshot.is_some(),
+        project,
+    }
+}
+
+/// `<project dir>/work/<run id>`: where a run with no task keeps what it writes besides its tree
+/// (the scratch directories of its programs), beside its records and never inside them.
+pub fn project_work_dir(project_dir: &Path, run_id: &str) -> PathBuf {
+    project_dir.join(PROJECT_WORK_DIR).join(run_id)
+}
+
+/// The first of `writable` that `snapshot` contains or lies inside, symlinks resolved, so a
+/// read-only snapshot never shares files with a directory its run may write.
+fn snapshot_overlap<'a>(
+    snapshot: &Path,
+    writable: impl IntoIterator<Item = &'a Path>,
+) -> Option<&'a Path> {
+    let snapshot = resolved(snapshot);
+    writable.into_iter().find(|dir| {
+        let dir = resolved(dir);
+        dir.starts_with(&snapshot) || snapshot.starts_with(&dir)
+    })
+}
+
+/// `path` with symlinks resolved as far as it exists; the rest is appended as written.
+fn resolved(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut existing = path;
+    loop {
+        if let Ok(canonical) = existing.canonicalize() {
+            return rest
+                .into_iter()
+                .rev()
+                .fold(canonical, |path, part| path.join(part));
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                existing = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
+/// The directory of a project's files folder holding the per-run work directories.
+pub const PROJECT_WORK_DIR: &str = "work";
 
 /// `<run dir>/attempts/<n>`.
 pub fn attempt_dir(run_dir: &Path, attempt: u32) -> PathBuf {
@@ -793,6 +963,37 @@ impl<R: Runner> Lifecycle<R> {
         self.entry(run).ok().map(RunEntry::attempt_dir)
     }
 
+    /// What the runner is given for `run`'s current attempt.
+    pub fn binding(&self, run: &str) -> Option<RunBinding> {
+        self.entry(run).ok().map(RunEntry::binding)
+    }
+
+    /// What the success end of `run` does when it is a run with no task; `None` for a task run.
+    pub fn project_end(&self, run: &str) -> Option<ProjectEnd> {
+        let entry = self.entry(run).ok()?;
+        if !matches!(entry.record.subject, RunSubject::Project { .. }) {
+            return None;
+        }
+        let merge_into = match &entry.record.tree {
+            Some(RunTreeRecord::Repository { merge_into, .. }) => merge_into.clone(),
+            _ => None,
+        };
+        let state = self.runtime.state(run)?;
+        Some(ProjectEnd {
+            merge: merge_into.map(|merge_into| ProjectMergeRequest {
+                run_tree: entry.worktree.path.clone(),
+                run_branch: entry.worktree.branch.clone(),
+                merge_into,
+                run_id: entry.id.clone(),
+                workflow: entry.record.workflow.clone(),
+            }),
+            merged: state
+                .merged
+                .iter()
+                .any(|merged| merged.join == crate::task_link::MERGE_GATE),
+        })
+    }
+
     /// The runs held at a succeeded end for the engine since the last call
     /// ([`Runtime::take_settling`]).
     pub fn take_settling(&mut self) -> Vec<RunId> {
@@ -817,8 +1018,25 @@ impl<R: Runner> Lifecycle<R> {
             .map_err(Refusal::runtime)
     }
 
+    /// Settles a run with no task as [`project_settlement`] decided: its merge is recorded first,
+    /// so a later settlement never merges again; a merge that cannot be recorded fails the run.
+    pub fn settle_project(&mut self, run: &str, settled: ProjectSettled) -> Result<(), Refusal> {
+        let mut settlement = settled.settlement;
+        if let Some(head) = settled.merged_head
+            && let Err(refusal) = self.record_merge(run, crate::task_link::MERGE_GATE, head)
+        {
+            settlement = Settlement::Fail(bongos_workflow_model::Failure::new(
+                bongos_workflow_model::FailureReason::WorktreeUnavailable,
+                None,
+                refusal.to_string(),
+            ));
+        }
+        self.settle(run, settlement)
+    }
+
     /// Starts a run on the task and todo of `request`. A request whose own fields cannot be
-    /// honored (a lane or snapshot tree, a taken or malformed run id, a definition commit the
+    /// honored (a lane tree, a snapshot or repository tree for a task, lane directories with no
+    /// lane, a taken or malformed run id, a definition commit the
     /// layers were not read from) is refused first, and a project subject goes to
     /// [`Self::start_project`]. Then refused, in this order: a group, no open
     /// todo, an active run, an unknown workflow, a definition with errors, a missing required
@@ -923,6 +1141,10 @@ impl<R: Runner> Lifecycle<R> {
             parent: request.parent.clone(),
             lane: request.lane.clone(),
             unattended: request.unattended,
+            tree: None,
+            definitions: None,
+            env: request.env.clone(),
+            lane_dirs: request.lane_dirs,
             todo: Some(TodoRef {
                 index: todo_index,
                 name: todo.name.clone(),
@@ -937,6 +1159,7 @@ impl<R: Runner> Lifecycle<R> {
                 .collect(),
             attempts: Vec::new(),
         };
+        let setup = setup_of(&record, tree, &task.dir);
         let mut entry = RunEntry {
             id: id.clone(),
             task_id,
@@ -946,6 +1169,7 @@ impl<R: Runner> Lifecycle<R> {
             record,
             worktree,
             rev: 0,
+            setup,
         };
         let commit = context
             .definition_commit
@@ -1054,7 +1278,9 @@ impl<R: Runner> Lifecycle<R> {
     }
 
     /// The checks of a request's own fields, before anything is read: a tree this version cannot
-    /// make yet, a reserved run id that is not a UUID v7 or is taken, and a definition commit the
+    /// make yet (a lane's tree; a snapshot or a named repository for a task run, whose tree is
+    /// always its task's), a base or merge target with no repository, lane directories with no
+    /// lane, a reserved run id that is not a UUID v7 or is taken, and a definition commit the
     /// caller did not read the layers from. A request that sets none of these passes.
     fn check_request(
         &self,
@@ -1070,7 +1296,15 @@ impl<R: Runner> Lifecycle<R> {
                 },
                 _,
             )
-            | (RunTree::Fresh { .. }, StartSubject::Project { .. }) => {}
+            | (RunTree::Fresh { repo: Some(_), .. }, StartSubject::Project { .. })
+            | (RunTree::Snapshot { .. }, StartSubject::Project { .. }) => {}
+            (RunTree::Fresh { repo: None, .. }, StartSubject::Project { .. }) => {
+                return Err(Refusal::new(
+                    RefusalKind::BadRequest,
+                    "The run names a base or a branch to merge into, but no repository.",
+                    "Name the repository too, or neither.",
+                ));
+            }
             (RunTree::Fresh { .. }, StartSubject::Task { .. }) => {
                 return Err(unsupported(
                     "A task run makes its worktree from the task's own repository and branch.",
@@ -1079,11 +1313,18 @@ impl<R: Runner> Lifecycle<R> {
             (RunTree::Lane { .. }, _) => {
                 return Err(unsupported("A run in a lane's tree is not supported yet."));
             }
-            (RunTree::Snapshot { .. }, _) => {
+            (RunTree::Snapshot { .. }, StartSubject::Task { .. }) => {
                 return Err(unsupported(
-                    "A run on a snapshot tree is not supported yet.",
+                    "A task run works in its own run worktree, not on a snapshot.",
                 ));
             }
+        }
+        if !request.lane_dirs.is_empty() && request.lane.is_none() {
+            return Err(Refusal::new(
+                RefusalKind::BadRequest,
+                "The run names lane directories but no lane.",
+                "Name the lane, or no directories.",
+            ));
         }
         if let Some(id) = &request.run_id {
             if !is_uuid_v7(id) {
@@ -1118,7 +1359,17 @@ impl<R: Runner> Lifecycle<R> {
 
     /// A start with a project subject: the project must be loaded, the workflow named, and every
     /// input given in `overrides` or `literal:`; a workflow with a `task.*` or `todo.*` input is
-    /// refused naming it. The run itself cannot start yet: its tree is a later addition.
+    /// refused naming it. Then the workflow's `instances`, and the tree:
+    /// - `RunTree::Fresh` with a repository: a run worktree of that repository on a new run branch
+    ///   ([`worktrees::run_branch_name`]) from `base`, by default the branch its main checkout has
+    ///   out. The success end merges the run branch into `merge_into` when it is set
+    ///   ([`crate::builtin_merge::merge_project_run`]), never before.
+    /// - `RunTree::Snapshot`: the nodes run in the snapshot, which no program may write; there is
+    ///   no run branch and nothing is merged.
+    ///
+    /// A run with no repository and no snapshot cannot start yet. The record is written under the
+    /// project's own folder, `runs/<id>`; the agents are pointed at the snapshot, else at
+    /// [`StartContext::definitions`].
     fn start_project(
         &mut self,
         request: StartRequest,
@@ -1127,13 +1378,17 @@ impl<R: Runner> Lifecycle<R> {
         context: &StartContext<'_>,
     ) -> Result<RunId, Refusal> {
         let tree = context.tree;
-        if project_task(tree, project_id).is_none() {
+        let Some(project) = tree
+            .projects
+            .iter()
+            .find(|project| project.task.id() == Some(project_id))
+        else {
             return Err(Refusal::new(
                 RefusalKind::UnknownProject,
                 format!("No project {project_id} is loaded."),
                 "Pick a project in the Work view.",
             ));
-        }
+        };
         let name = request.workflow.clone().ok_or_else(|| {
             Refusal::new(
                 RefusalKind::UnknownWorkflow,
@@ -1141,7 +1396,7 @@ impl<R: Runner> Lifecycle<R> {
                 "Name the workflow when starting.",
             )
         })?;
-        let (_, definition) = load_definition(
+        let (resolved, definition) = load_definition(
             dirs,
             &name,
             context.checks.validation(),
@@ -1155,9 +1410,178 @@ impl<R: Runner> Lifecycle<R> {
                 "Start it on a task, or pick a workflow that does not read one.",
             ));
         }
-        start_inputs(&name, &definition, None, tree, None, &request.overrides)?;
+        let inputs = start_inputs(&name, &definition, None, tree, None, &request.overrides)?;
         check_machine(&definition, context.checks)?;
-        Err(unsupported("A run with no task cannot start yet."))
+        let slug = project.slug.clone();
+        let held_back = self.check_instances(&name, &definition, Some(&slug), &request)?;
+
+        let project_dir = project.task.dir.clone();
+        let id = request.run_id.clone().unwrap_or_else(new_id);
+        let (checkout, worktree, record_tree) = match &request.tree {
+            RunTree::Snapshot { path } => {
+                if !path.is_dir() {
+                    return Err(Refusal::new(
+                        RefusalKind::BadRequest,
+                        format!("The snapshot {} is not a directory.", path.display()),
+                        "Materialize the snapshot first.",
+                    ));
+                }
+                let scratch = project_work_dir(&project_dir, &id);
+                let writable = [project_dir.as_path(), scratch.as_path()]
+                    .into_iter()
+                    .chain(request.lane_dirs.values().map(PathBuf::as_path));
+                if let Some(shared) = snapshot_overlap(path, writable) {
+                    return Err(Refusal::new(
+                        RefusalKind::BadRequest,
+                        format!(
+                            "The snapshot {} overlaps {}, which the run may write.",
+                            path.display(),
+                            shared.display()
+                        ),
+                        "Materialize the snapshot outside the project folder and the lane directories.",
+                    ));
+                }
+                let checkout = TaskCheckout {
+                    slug: slug.clone(),
+                    worktree: None,
+                    branch: None,
+                };
+                let worktree = RunWorktree {
+                    run_dir: scratch,
+                    path: path.clone(),
+                    branch: String::new(),
+                };
+                let record = RunTreeRecord::Snapshot { path: path.clone() };
+                (checkout, worktree, record)
+            }
+            RunTree::Fresh {
+                repo: Some(repo),
+                base,
+                merge_into,
+            } => {
+                let base = match base.clone().or_else(|| self.worktrees.base_branch(repo)) {
+                    Some(base) => base,
+                    None => {
+                        return Err(Refusal::new(
+                            RefusalKind::BadRequest,
+                            format!(
+                                "The repository {} has no branch checked out to start from.",
+                                repo.display()
+                            ),
+                            "Name the base branch.",
+                        ));
+                    }
+                };
+                let checkout = TaskCheckout {
+                    slug: slug.clone(),
+                    worktree: Some(repo.clone()),
+                    branch: Some(base.clone()),
+                };
+                let worktree = self.create_project_worktree(&checkout, &id)?;
+                let record = RunTreeRecord::Repository {
+                    repo: repo.clone(),
+                    base,
+                    merge_into: merge_into.clone(),
+                };
+                (checkout, worktree, record)
+            }
+            RunTree::Fresh { repo: None, .. } | RunTree::Lane { .. } => {
+                return Err(unsupported(
+                    "A run with no task and no repository cannot start yet.",
+                ));
+            }
+        };
+        let definitions = match &record_tree {
+            RunTreeRecord::Snapshot { path } => path.clone(),
+            RunTreeRecord::Repository { .. } => context
+                .definitions
+                .clone()
+                .unwrap_or_else(|| project_dir.clone()),
+        };
+        let dir = project_dir.join(RUNS_DIR).join(&id);
+        let created = now().to_string();
+        let subject = RunSubject::Project {
+            id: project_id.to_string(),
+        };
+        let record = RunToml {
+            schema: RUN_SCHEMA,
+            id: id.clone(),
+            workflow: name,
+            layer: resolved.layer.label().to_string(),
+            task_id: subject.task_id_mirror(),
+            subject,
+            created: created.clone(),
+            started_by: request.started_by,
+            parent: request.parent.clone(),
+            lane: request.lane.clone(),
+            unattended: request.unattended,
+            tree: Some(record_tree),
+            definitions: Some(definitions),
+            env: request.env.clone(),
+            lane_dirs: request.lane_dirs,
+            todo: None,
+            inputs: inputs
+                .into_iter()
+                .map(|input| RecordedInput {
+                    name: input.name,
+                    source: input.source,
+                    value: input.value,
+                })
+                .collect(),
+            attempts: Vec::new(),
+        };
+        let setup = setup_of(&record, tree, &project_dir);
+        let mut entry = RunEntry {
+            id: id.clone(),
+            task_id: String::new(),
+            project: Some(slug),
+            task: checkout,
+            dir,
+            record,
+            worktree,
+            rev: 0,
+            setup,
+        };
+        let commit = context
+            .definition_commit
+            .clone()
+            .filter(|_| resolved.layer == Layer::Project);
+        self.begin_attempt(&mut entry, 1, &resolved.dir, definition, created, commit)?;
+        if held_back {
+            self.runtime.hold_back(&id);
+        }
+        self.runs.push(entry);
+        self.note(&id);
+        Ok(id)
+    }
+
+    /// The run worktree of a project run on a repository, with the refusals named for a
+    /// repository rather than a task.
+    fn create_project_worktree(
+        &mut self,
+        checkout: &TaskCheckout,
+        run: &str,
+    ) -> Result<RunWorktree, Refusal> {
+        let repo = checkout
+            .worktree
+            .as_deref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        self.worktrees
+            .create(checkout, run, 1, &self.settings)
+            .map_err(|error| match error {
+                WorktreeError::NotStarted => Refusal::new(
+                    RefusalKind::BadRequest,
+                    format!("{repo} is not a repository directory."),
+                    "Name a repository this machine has.",
+                ),
+                WorktreeError::LowDiskSpace { .. } => Refusal::new(
+                    RefusalKind::LowDiskSpace,
+                    format!("Not enough free space: {error}."),
+                    "Free some space, or lower workflows.min_free_disk_mb.",
+                ),
+                other => Refusal::io(other),
+            })
     }
 
     /// Loads the runs a relaunch finds: `runs/<id>/run.toml` under every task directory of `tree`.
@@ -1202,7 +1626,7 @@ impl<R: Runner> Lifecycle<R> {
             dirs.sort();
             let project = task.id().and_then(|id| project_of(tree, id));
             for dir in dirs {
-                match self.read_run(task, project.clone(), &dir) {
+                match self.read_run(tree, task, project.clone(), &dir) {
                     Ok(Some((entry, _))) if seen.contains(&entry.id) => skip(
                         &mut report,
                         &dir,
@@ -1253,6 +1677,7 @@ impl<R: Runner> Lifecycle<R> {
     /// One run directory: `Ok(None)` for a cleared run.
     fn read_run(
         &self,
+        tree: &WorkTree,
         task: &Task,
         project: Option<String>,
         dir: &Path,
@@ -1295,15 +1720,26 @@ impl<R: Runner> Lifecycle<R> {
             .definition_rev
             .unwrap_or(0);
         let definition = read_definition(&definition_copy_dir(&attempt_dir, rev))?;
-        let worktree = attempt_worktree(attempt);
-        let checkout = match &task.file {
-            Some(file) => TaskCheckout::from_task(task.slug.clone(), file),
-            None => TaskCheckout {
+        let mut worktree = attempt_worktree(attempt);
+        let checkout = match (&record.tree, &task.file) {
+            (Some(RunTreeRecord::Repository { repo, base, .. }), _) => TaskCheckout {
+                slug: task.slug.clone(),
+                worktree: Some(repo.clone()),
+                branch: Some(base.clone()),
+            },
+            (Some(RunTreeRecord::Snapshot { .. }), _) | (None, None) => TaskCheckout {
                 slug: task.slug.clone(),
                 worktree: None,
                 branch: None,
             },
+            (None, Some(file)) => TaskCheckout::from_task(task.slug.clone(), file),
         };
+        if matches!(record.tree, Some(RunTreeRecord::Snapshot { .. })) {
+            // The snapshot is no run directory: the run's own directory is its work directory.
+            worktree.run_dir = project_work_dir(&task.dir, &record.id);
+        }
+        let setup = setup_of(&record, tree, &task.dir);
+        let task_id = record.task_id.clone();
         let spec = RunSpec {
             id: record.id.clone(),
             definition,
@@ -1314,13 +1750,14 @@ impl<R: Runner> Lifecycle<R> {
         };
         let entry = RunEntry {
             id: record.id.clone(),
-            task_id: record.task_id.clone(),
+            task_id,
             project,
             task: checkout,
             dir: dir.to_path_buf(),
             record,
             worktree,
             rev,
+            setup,
         };
         Ok(Some((entry, spec)))
     }
@@ -1514,9 +1951,13 @@ impl<R: Runner> Lifecycle<R> {
     }
 
     /// The run worktree of `run` and its fan-out branch worktrees (`b-*` in the attempt's
-    /// directory), for editing a halted run by hand.
+    /// directory), for editing a halted run by hand; none for a run on a snapshot.
     pub fn halt_worktrees(&self, run: &str) -> Option<HaltWorktrees> {
         let entry = self.entry(run).ok()?;
+        // A snapshot is read-only to its run: there is nothing to edit by hand.
+        if entry.setup.snapshot {
+            return None;
+        }
         let mut branches: Vec<PathBuf> = fs::read_dir(&entry.worktree.run_dir)
             .into_iter()
             .flatten()
@@ -1655,7 +2096,8 @@ impl<R: Runner> Lifecycle<R> {
         }
         if !status.is_active() {
             let task = self.runs[index].task_id.clone();
-            if self.active_run_id(&task).is_some() {
+            // A run with no task holds no task, so no other run refuses it.
+            if !task.is_empty() && self.active_run_id(&task).is_some() {
                 if let Some(refusal) = self.active_refusal(&task, None) {
                     return Err(refusal);
                 }
@@ -1666,7 +2108,12 @@ impl<R: Runner> Lifecycle<R> {
         let (resolved, definition) = load_definition(dirs, &name, validation, None)?;
         let attempt = self.runs[index].attempt() + 1;
         let checkout = self.runs[index].task.clone();
-        let worktree = self.create_worktree(&checkout, run, attempt)?;
+        // A snapshot is read, never made: the new attempt runs on the same one.
+        let worktree = if self.runs[index].setup.snapshot {
+            self.runs[index].worktree.clone()
+        } else {
+            self.create_worktree(&checkout, run, attempt)?
+        };
         let old_definition = self.runtime.definition(run).cloned();
         let old_loop_bound = self.runtime.run_limits(run).loop_bound;
         let old_attempt_dir = self.runs[index].attempt_dir();
@@ -1788,9 +2235,12 @@ impl<R: Runner> Lifecycle<R> {
             .node(&finished.key.node)
             .map(|node| agent_of(definition, node))
             .unwrap_or(AgentKind::Claude);
+        // Every key of a run on a snapshot ran in the snapshot.
         let directory = match finished.key.branch.last() {
-            Some((fan, index)) => branch_worktree_path(&entry.worktree.run_dir, fan, *index),
-            None => entry.worktree.path.clone(),
+            Some((fan, index)) if !entry.setup.snapshot => {
+                branch_worktree_path(&entry.worktree.run_dir, fan, *index)
+            }
+            _ => entry.worktree.path.clone(),
         };
         let resume = match kind {
             AgentKind::Claude => format!("claude --resume {}", shell_quote(session)),
@@ -2084,14 +2534,6 @@ pub(crate) fn open_todo(
 
 fn unsupported(message: &str) -> Refusal {
     Refusal::new(RefusalKind::Unsupported, message, "")
-}
-
-/// The top group of the project `id` in `tree`.
-fn project_task<'a>(tree: &'a WorkTree, id: &str) -> Option<&'a Task> {
-    tree.projects
-        .iter()
-        .map(|project| &project.task)
-        .find(|task| task.id() == Some(id))
 }
 
 /// The slug of the project whose tree holds task `task_id`; `None` for a one-off or an unknown

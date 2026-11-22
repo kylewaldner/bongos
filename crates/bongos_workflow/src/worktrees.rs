@@ -434,6 +434,39 @@ pub async fn repository_root(git: &Git, worktree: &Path) -> Result<PathBuf, GitE
     })
 }
 
+/// The branch checked out in `dir`; `None` for a detached HEAD or when git cannot tell.
+pub async fn checked_out_branch(git: &Git, dir: &Path) -> Option<String> {
+    git.run(dir, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .await
+        .ok()
+        .filter(|branch| !branch.is_empty())
+}
+
+/// The worktree of the repository holding `dir`, other than `own`, that has `branch` checked
+/// out (a person's checkout or the main checkout included), from `git worktree list`.
+pub async fn worktree_holding(
+    git: &Git,
+    dir: &Path,
+    branch: &str,
+    own: &Path,
+) -> Result<Option<PathBuf>, GitError> {
+    let listing = git.run(dir, &["worktree", "list", "--porcelain"]).await?;
+    let wanted = format!("refs/heads/{branch}");
+    let own = canonical_or_same(own);
+    let mut path: Option<PathBuf> = None;
+    for line in listing.lines() {
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            path = Some(PathBuf::from(rest));
+        } else if line.strip_prefix("branch ") == Some(wanted.as_str())
+            && let Some(path) = &path
+            && canonical_or_same(path) != own
+        {
+            return Ok(Some(path.clone()));
+        }
+    }
+    Ok(None)
+}
+
 /// Creates the run worktree of attempt `attempt` of run `run_id`: a new branch
 /// ([`run_branch_name`]) from the head of the task branch, checked out at
 /// `<runs dir>/<task slug>-<short>-<attempt>/run`. Refuses a task with no worktree, and a disk

@@ -11,10 +11,12 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::env::EnvEdit;
 use crate::failure::Failure;
 use crate::inputs::InputValue;
 
@@ -447,6 +449,20 @@ pub struct RunToml {
     pub lane: Option<LaneRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unattended: Option<UnattendedChoice>,
+    /// The tree the run works in when it is not the task's own run worktree; `None` for a task
+    /// run, as records older than the field read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<RunTreeRecord>,
+    /// The definitions an agent of a project-subject run is pointed at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definitions: Option<PathBuf>,
+    /// Edits to the environment of the run's nodes, applied in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<EnvEdit>,
+    /// The named directories of the run's lane, by name: in the nodes' environment and writable
+    /// by its programs.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub lane_dirs: BTreeMap<String, PathBuf>,
     /// The todo the run completes; `None` for a project subject.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub todo: Option<TodoRef>,
@@ -454,6 +470,22 @@ pub struct RunToml {
     pub inputs: Vec<RecordedInput>,
     #[serde(default)]
     pub attempts: Vec<Attempt>,
+}
+
+/// The tree a run works in, as `run.toml` keeps it when it is not the task's own run worktree.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RunTreeRecord {
+    /// A run worktree of the repository `repo`, on a run branch made from `base`; the success end
+    /// merges the run branch into `merge_into` when it is set.
+    Repository {
+        repo: PathBuf,
+        base: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        merge_into: Option<String>,
+    },
+    /// A materialized tree at `path` the run reads and never writes.
+    Snapshot { path: PathBuf },
 }
 
 /// `run.toml` as written, where `subject` may be missing (records older than the field).
@@ -475,6 +507,14 @@ struct RunTomlFile {
     lane: Option<LaneRef>,
     #[serde(default)]
     unattended: Option<UnattendedChoice>,
+    #[serde(default)]
+    tree: Option<RunTreeRecord>,
+    #[serde(default)]
+    definitions: Option<PathBuf>,
+    #[serde(default)]
+    env: Vec<EnvEdit>,
+    #[serde(default)]
+    lane_dirs: BTreeMap<String, PathBuf>,
     #[serde(default)]
     todo: Option<TodoRef>,
     #[serde(default)]
@@ -500,6 +540,10 @@ impl From<RunTomlFile> for RunToml {
             parent: file.parent,
             lane: file.lane,
             unattended: file.unattended,
+            tree: file.tree,
+            definitions: file.definitions,
+            env: file.env,
+            lane_dirs: file.lane_dirs,
             todo: file.todo,
             inputs: file.inputs,
             attempts: file.attempts,

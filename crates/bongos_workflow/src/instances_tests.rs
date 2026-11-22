@@ -206,6 +206,7 @@ impl World {
             active_run: None,
             checks: &Checks,
             definition_commit: None,
+            definitions: None,
         };
         lifecycle.start(request, &self.dirs, &context)
     }

@@ -784,6 +784,7 @@ fn an_attempt_records_the_commit_of_the_project_layer_it_read() {
         active_run: None,
         checks: &world.checks,
         definition_commit: Some(commit('1')),
+        definitions: None,
     };
     let run = lifecycle
         .start(with_workflow("two"), &world.dirs, &context)
@@ -844,6 +845,7 @@ fn a_definition_of_another_layer_records_no_commit() {
         checks: &world.checks,
         // The caller read a project layer, but `single` comes from the profile layer.
         definition_commit: Some(commit('1')),
+        definitions: None,
     };
     let run = lifecycle
         .start(with_workflow("single"), &world.dirs, &context)

@@ -24,7 +24,10 @@ pub mod store;
 mod types;
 pub mod worktree_path;
 
-pub use artifacts::{SessionContext, SharedArtifact, session_context, shared_artifacts};
+pub use artifacts::{
+    ProjectSessionContext, SessionContext, SharedArtifact, project_session_context,
+    session_context, shared_artifacts,
+};
 pub use author::{Author, AuthorKind, PersonAtKeyboard};
 pub use error::{Error, ErrorKind, Result};
 pub use io::{

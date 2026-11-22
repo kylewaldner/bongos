@@ -437,6 +437,7 @@ impl World {
             active_run,
             checks: &self.checks,
             definition_commit: None,
+            definitions: None,
         };
         lifecycle.start(request, &self.dirs, &context)
     }
@@ -1977,6 +1978,7 @@ fn an_edited_gate_field_is_what_the_next_node_state_holds() {
         bongos_workflow_model::state_doc::Paths {
             worktree: world.root.clone(),
             scratch: world.root.clone(),
+            trees: Default::default(),
         },
     );
     let value: serde_json::Value = serde_json::from_str(&doc.to_json()).unwrap();
@@ -1988,6 +1990,9 @@ fn an_edited_gate_field_is_what_the_next_node_state_holds() {
 
 #[path = "landing_tests.rs"]
 mod landing_tests;
+
+#[path = "project_run_tests.rs"]
+mod project_run_tests;
 
 /// `SINGLE` with the inputs `inputs` (lines of the `[inputs]` table), named `name`.
 fn with_inputs(name: &str, inputs: &str) -> String {
@@ -2049,7 +2054,8 @@ mode = { type = "text", from = "literal:fast" }"#,
     );
     let mut lifecycle = world.lifecycle();
     // Every input resolves from the override or its literal, with no task: the start gets past
-    // the inputs and the machine checks, and only the run's tree is not supported yet.
+    // the inputs and the machine checks, and only a run with no repository or snapshot is not
+    // supported yet.
     let mut request = project_request("briefed");
     request
         .overrides
@@ -2088,7 +2094,7 @@ fn a_dispatcher_is_never_started_as_a_run() {
 }
 
 #[test]
-fn a_lane_or_snapshot_tree_is_refused_until_it_is_supported() {
+fn a_lane_tree_or_a_task_run_on_a_snapshot_or_named_repository_is_refused() {
     let world = World::new();
     let mut lifecycle = world.lifecycle();
     for tree in [
