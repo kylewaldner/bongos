@@ -307,6 +307,25 @@ async fn typed_then_join(
 }
 
 #[gpui::test]
+async fn typing_past_the_group_interval_starts_a_new_undo_step(cx: &mut TestAppContext) {
+    let (editor, cx) = open_editor(cx, true, "prompts.txt", THREE).await;
+    focus(&editor, cx);
+    set_group_interval(&editor, cx);
+    put(&editor, Point::new(5, 6), cx);
+    type_text(&editor, "x", cx);
+    cx.executor().advance_clock(Duration::from_millis(600));
+    type_text(&editor, "y", cx);
+    act(Undo, cx);
+    let after_undo = text(&editor, cx);
+    assert_ne!(
+        after_undo, THREE,
+        "the first keystroke is its own undo step"
+    );
+    act(Undo, cx);
+    assert_eq!(text(&editor, cx), THREE);
+}
+
+#[gpui::test]
 async fn typing_then_c_d_at_once_reverts_only_the_join(cx: &mut TestAppContext) {
     typed_then_join(cx, Point::new(5, 6), Point::new(5, 9), Box::new(Delete)).await;
 }
