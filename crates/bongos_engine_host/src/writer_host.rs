@@ -10,7 +10,7 @@ use bongos_project_repo::ProjectRepo;
 use chrono::Utc;
 use gpui::App;
 
-use crate::host_file::{HostInfo, read_host_file, write_host_file};
+use crate::host_file::{HostInfo, Moving, read_host_file, write_host_file};
 use crate::protocol::HostMode;
 use crate::server::EngineServer;
 use crate::socket::{bind_socket, default_hosts_dir, socket_path};
@@ -46,6 +46,9 @@ pub struct WriterHost {
     options: WriterOptions,
     info: HostInfo,
     server: Option<EngineServer>,
+    /// Set once a handover began: `host.json` then belongs to the move and to the next writer,
+    /// so dropping this host leaves it alone.
+    moved: bool,
 }
 
 impl WriterHost {
@@ -60,6 +63,7 @@ impl WriterHost {
             repo,
             options,
             server: None,
+            moved: false,
         };
         let serve = host.options.serve_socket;
         host.announce(serve, cx)?;
@@ -78,10 +82,42 @@ impl WriterHost {
         self.server.is_some()
     }
 
+    pub fn repo(&self) -> &ProjectRepo {
+        &self.repo
+    }
+
+    /// Records in `host.json` that the writer moves to another process (`Some`), or that it
+    /// stays here after all (`None`, a take-back). Written atomically, before anything of the
+    /// move happens.
+    pub fn set_moving(&mut self, moving: Option<Moving>) -> Result<()> {
+        if moving.is_some() {
+            self.moved = true;
+        }
+        self.info.moving = moving;
+        write_host_file(self.repo.location(), &self.info)
+    }
+
+    /// Stops taking new clients and removes the socket, for the next writer to bind; the
+    /// clients already connected stay until this host is dropped.
+    pub fn stop_accepting(&self) {
+        if let Some(server) = &self.server {
+            server.stop_accepting();
+        }
+    }
+
+    /// Serves again after a handover the other process never finished: `host.json` names this
+    /// process with no move, and the socket is bound again when it was served.
+    pub fn take_back(&mut self, cx: &mut App) -> Result<()> {
+        self.info.moving = None;
+        self.moved = false;
+        let serve = self.options.serve_socket;
+        self.announce(serve, cx)
+    }
+
     /// Starts or stops serving the socket, as `lanes.enabled` turns on or off, and rewrites
     /// `host.json` to match.
     pub fn set_serving(&mut self, serve: bool, cx: &mut App) -> Result<()> {
-        if serve == self.is_serving() {
+        if self.moved || serve == self.is_serving() {
             return Ok(());
         }
         self.options.serve_socket = serve;
@@ -115,6 +151,9 @@ impl WriterHost {
 impl Drop for WriterHost {
     fn drop(&mut self) {
         self.server = None;
+        if self.moved {
+            return;
+        }
         let location = self.repo.location();
         if read_host_file(location).is_some_and(|info| {
             info.pid == self.info.pid && info.start_time == self.info.start_time

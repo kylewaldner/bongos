@@ -222,6 +222,18 @@ impl EngineServer {
         self.shared.connections.lock().len()
     }
 
+    /// Stops taking new connections and removes the socket file, so the next writer can bind
+    /// the same path; the connections already made go on (a reply in flight still reaches its
+    /// client) until the server is dropped. Dropping it afterwards leaves the path alone.
+    pub fn stop_accepting(&self) {
+        if self.shared.stopping.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        // Wakes the accepting thread, which sees `stopping` and ends.
+        UnixStream::connect(&self.shared.socket).ok();
+        std::fs::remove_file(&self.shared.socket).ok();
+    }
+
     /// A message each time a client connects or goes, from now on.
     pub fn watch_connections(&self) -> mpsc::UnboundedReceiver<()> {
         let (sender, receiver) = mpsc::unbounded();
@@ -232,13 +244,18 @@ impl EngineServer {
 
 impl Drop for EngineServer {
     fn drop(&mut self) {
-        self.shared.stopping.store(true, Ordering::SeqCst);
-        // Wakes the accepting thread, which sees `stopping` and ends.
-        UnixStream::connect(&self.shared.socket).ok();
+        // After `stop_accepting` the path may be another writer's socket already.
+        let accepting = !self.shared.stopping.swap(true, Ordering::SeqCst);
+        if accepting {
+            // Wakes the accepting thread, which sees `stopping` and ends.
+            UnixStream::connect(&self.shared.socket).ok();
+        }
         for connection in self.shared.connections.lock().drain(..) {
             connection.close();
         }
-        std::fs::remove_file(&self.shared.socket).ok();
+        if accepting {
+            std::fs::remove_file(&self.shared.socket).ok();
+        }
     }
 }
 

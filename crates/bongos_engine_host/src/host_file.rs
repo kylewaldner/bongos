@@ -19,6 +19,33 @@ pub const HOST_FILE: &str = "host.json";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Moving {
     pub to_pid: u32,
+    /// The start time of `to_pid` as the system reports it, so a reused pid is not taken for
+    /// the process the writer moves to; `None` where the system reports none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_start_time: Option<u64>,
+}
+
+impl Moving {
+    /// A move to the running process `pid`.
+    pub fn to(pid: u32) -> Self {
+        Self {
+            to_pid: pid,
+            to_start_time: bongos_workflow::process::start_time(pid),
+        }
+    }
+
+    /// Whether the process the writer moves to runs now.
+    pub fn is_live(&self) -> bool {
+        process_is(self.to_pid, self.to_start_time)
+    }
+}
+
+/// The move in progress `host.json` records, `None` when it records none or a stale one: both
+/// the writer it names and the process it moves to are dead (pid and start time checked), so
+/// nobody finishes it and an opener goes to the lock as usual.
+pub fn move_in_progress(info: &HostInfo) -> Option<&Moving> {
+    let moving = info.moving.as_ref()?;
+    (moving.is_live() || info.is_live()).then_some(moving)
 }
 
 /// The contents of `host.json`.

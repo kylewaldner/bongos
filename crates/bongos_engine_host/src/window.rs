@@ -20,6 +20,7 @@ use settings::SettingsStore;
 use crate::access::{EngineAccess, EngineAccesses};
 use crate::attach::{OpenedState, open_state};
 use crate::client::{ClientOptions, HostClient};
+use crate::handover::{EngineRuns, HandoverTimes, install_handovers};
 use crate::protocol::{HostEvent, HostMode, HostTopic};
 use crate::writer_host::{WriterHost, WriterOptions};
 
@@ -33,6 +34,8 @@ pub struct WindowHosting {
     pub hosts_dir: PathBuf,
     /// Whether `lanes.enabled` is on: while it is, the writer serves its socket.
     pub lanes_enabled: Rc<dyn Fn(&App) -> bool>,
+    /// The handover's timeouts from the lanes settings.
+    pub handover_times: Rc<dyn Fn(&App) -> HandoverTimes>,
 }
 
 /// The projects this window holds the writer of, announced in `host.json` and served on their
@@ -65,10 +68,18 @@ impl WriterHosts {
 pub fn install_window(hosting: WindowHosting, cx: &mut App) {
     let clients: Arc<Mutex<HashMap<String, HostClient>>> = Arc::default();
     let executor = cx.background_executor().clone();
-    let options = ClientOptions::new(
+    let mut options = ClientOptions::new(
         ClientKind::Window,
         hosting.bongos_version.clone(),
         hosting.log.clone(),
+    );
+    options.moving_timeout = (hosting.handover_times)(cx).start_timeout;
+    // An engine host that asks for this window's writer gets it (the handover).
+    install_handovers(
+        Rc::new(EngineRuns),
+        hosting.handover_times.clone(),
+        options.clone(),
+        cx,
     );
     let opener_clients = clients.clone();
     let opener = Arc::new(

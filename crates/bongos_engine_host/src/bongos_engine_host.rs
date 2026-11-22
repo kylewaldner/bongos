@@ -10,6 +10,7 @@ mod checks;
 mod client;
 mod commands;
 mod ensure;
+mod handover;
 mod host_file;
 mod host_process;
 pub mod protocol;
@@ -22,26 +23,36 @@ mod writer_host;
 pub use access::{EngineAccess, EngineAccesses};
 pub use attach::{OpenedState, open_state, open_state_with_hooks};
 pub use checks::{checks_handler, register_checks};
-pub use client::{ANSWER_TIMEOUT, ClientOptions, HostClient, Welcomed, not_answering};
+pub use client::{
+    ANSWER_TIMEOUT, ClientOptions, HostClient, MOVING_RETRY, MOVING_TIMEOUT, Welcomed,
+    not_answering,
+};
 pub use commands::{HostCommands, HostHandler, VerbHandler, local_identity};
 pub use ensure::{
     Attach, ENGINE_HOST_FLAG, EnsureHost, HostSpawner, POLL_INTERVAL, ProgramSpawner, SpawnedHost,
     ensure_host,
 };
+pub use handover::{
+    CANCELLED, DrainChoice, DrainPrompt, EngineRuns, HandoverRequest, HandoverRuns, HandoverTimes,
+    HandoverWatch, MOVING_REFUSAL, QueueSink, did_not_start, expect_handover, install_handovers,
+    is_moving, start_handover, take_writer_checked, take_writer_from_window,
+};
 pub use host_file::{
-    HOST_FILE, HostInfo, Moving, host_file_path, live_host, process_is, read_host_file,
-    write_host_file,
+    HOST_FILE, HostInfo, Moving, host_file_path, live_host, move_in_progress, process_is,
+    read_host_file, write_host_file,
 };
 pub use host_process::{
     BUSY_RECHECK, EngineHostProcess, HostBusy, HostProcessOptions, held_by_message, host_is_busy,
-    open_host_writer, stop_serving, wait_until_idle,
+    open_host_writer, stop_serving, take_host_writer, wait_until_idle,
 };
 pub use protocol::{
     ClientMessage, HostCommand, HostCtl, HostEvent, HostMode, HostResult, HostTopic, LanesVerb,
     PROTOCOL_VERSION, ServerMessage, WorkflowVerb, version_refusal,
 };
 pub use server::EngineServer;
-pub use socket::{bind_socket, default_hosts_dir, host_log_path, project_hex, socket_path};
+pub use socket::{
+    bind_socket, default_host_log_path, default_hosts_dir, host_log_path, project_hex, socket_path,
+};
 pub use window::{WindowHosting, WriterHosts, install_window};
 pub use workflow::{install_workflow_remote, register_workflow};
 pub use writer_host::{WriterHost, WriterOptions};
@@ -56,3 +67,5 @@ pub fn init(cx: &mut gpui::App) {
 
 #[cfg(test)]
 mod engine_host_tests;
+#[cfg(test)]
+mod handover_tests;

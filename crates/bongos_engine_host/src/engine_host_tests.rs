@@ -31,27 +31,27 @@ use crate::{
     write_host_file,
 };
 
-const VERSION: &str = "1.2.3";
+pub(crate) const VERSION: &str = "1.2.3";
 
-struct Fixture {
-    root: TempDir,
-    repo: ProjectRepo,
+pub(crate) struct Fixture {
+    pub(crate) root: TempDir,
+    pub(crate) repo: ProjectRepo,
 }
 
 impl Fixture {
-    fn location(&self) -> &Location {
+    pub(crate) fn location(&self) -> &Location {
         self.repo.location()
     }
 
-    fn hosts_dir(&self) -> PathBuf {
+    pub(crate) fn hosts_dir(&self) -> PathBuf {
         self.root.path().join("hosts")
     }
 
-    fn log(&self) -> PathBuf {
+    pub(crate) fn log(&self) -> PathBuf {
         self.root.path().join("host.log")
     }
 
-    fn writer_options(&self, serve: bool) -> WriterOptions {
+    pub(crate) fn writer_options(&self, serve: bool) -> WriterOptions {
         WriterOptions {
             mode: HostMode::Window,
             bongos_version: VERSION.to_string(),
@@ -60,7 +60,7 @@ impl Fixture {
         }
     }
 
-    fn client_options(&self, client: ClientKind) -> ClientOptions {
+    pub(crate) fn client_options(&self, client: ClientKind) -> ClientOptions {
         ClientOptions::new(client, VERSION, self.log())
     }
 
@@ -84,7 +84,7 @@ fn definition(id: &str, goal: &str) -> String {
 
 /// A project in a real git repository inside a new temporary folder, its writer open in this
 /// process with hooks of its own.
-fn fixture() -> Fixture {
+pub(crate) fn fixture() -> Fixture {
     let root = TempDir::new().unwrap();
     let folder = root.path().join("project");
     let location = Location {
@@ -127,7 +127,7 @@ fn fixture() -> Fixture {
     Fixture { root, repo }
 }
 
-fn set_branch(task: &str, branch: &str) -> StateOp {
+pub(crate) fn set_branch(task: &str, branch: &str) -> StateOp {
     StateOp::Set {
         task: task.to_string(),
         field: "branch".to_string(),
@@ -136,7 +136,7 @@ fn set_branch(task: &str, branch: &str) -> StateOp {
     }
 }
 
-fn branch_of(handle: &StateHandle, task: &str) -> Option<String> {
+pub(crate) fn branch_of(handle: &StateHandle, task: &str) -> Option<String> {
     handle
         .read(|read| read.task(task))
         .unwrap()
@@ -817,7 +817,7 @@ fn host_connections(cx: &mut TestAppContext) -> usize {
 }
 
 /// Waits for `condition`, letting the app run, with a generous guard against a hang.
-fn wait_for(cx: &mut TestAppContext, mut condition: impl FnMut(&mut TestAppContext) -> bool) {
+pub(crate) fn wait_for(cx: &mut TestAppContext, mut condition: impl FnMut(&mut TestAppContext) -> bool) {
     let guard = std::time::Instant::now() + Duration::from_secs(30);
     loop {
         cx.run_until_parked();
