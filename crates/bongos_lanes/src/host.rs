@@ -5,8 +5,10 @@
 //! as the system's.
 //!
 //! Starting the dispatcher and the commands that need it (`start`, `pick`) belong to the engine
-//! host process, not to a window: a window answers that they run there. The engine host keeps the
-//! dispatcher it started in [`HostDispatcher`] until its run ends.
+//! host process, not to a window: a window that holds the writer hands it over to an engine host
+//! on `lanes: start` (see `actions.rs`), and answers another process's `start` that they run
+//! there. The engine host keeps the dispatcher it started in [`HostDispatcher`] until its run
+//! ends.
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};

@@ -572,6 +572,14 @@ fn main() {
                 lanes_enabled: std::rc::Rc::new(|cx| {
                     <bongos_lanes::LanesSettings as settings::Settings>::get_global(cx).enabled
                 }),
+                handover_times: std::rc::Rc::new(|cx| {
+                    let host =
+                        &<bongos_lanes::LanesSettings as settings::Settings>::get_global(cx).host;
+                    bongos_engine_host::HandoverTimes {
+                        start_timeout: host.start_timeout,
+                        handover_timeout: host.handover_timeout,
+                    }
+                }),
             },
             cx,
         );

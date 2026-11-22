@@ -582,6 +582,16 @@ impl<R: Runner> Runtime<R> {
         }
     }
 
+    /// [`Self::hand_over`] for the runs `ids` only: `HandedOver { to_pid }` once to each of
+    /// them that is loaded and not over.
+    pub fn hand_over_runs(&mut self, to_pid: u32, ids: &[String]) {
+        for run in &mut self.runs {
+            if ids.contains(&run.id) && !run.state().is_over() {
+                run.append(Event::HandedOver { to_pid });
+            }
+        }
+    }
+
     /// Drops run `id` from the runtime without appending any event or stopping anything (a run
     /// handed over belongs to the other process now). Whether it was loaded.
     pub fn unload(&mut self, id: &str) -> bool {
@@ -1244,9 +1254,20 @@ impl<R: Runner> Runtime<R> {
     /// any run was interrupted.
     pub fn interrupt_all(&mut self) -> bool {
         let indices: Vec<usize> = (0..self.runs.len()).collect();
+        self.interrupt_indices(indices)
+    }
+
+    /// [`Self::interrupt_all`] for the runs `ids` only: their processes stop and each with a
+    /// key in flight gets `Interrupted` and is held. The others keep running.
+    pub fn interrupt_runs(&mut self, ids: &[String]) -> bool {
+        let indices: Vec<usize> = ids.iter().filter_map(|id| self.find(id)).collect();
+        self.interrupt_indices(indices)
+    }
+
+    fn interrupt_indices(&mut self, indices: Vec<usize>) -> bool {
         self.stop_in_flight(&indices);
         let mut changed = false;
-        for index in 0..self.runs.len() {
+        for index in indices {
             let state = self.runs[index].state();
             if state.running.is_empty() || state.halted || state.is_over() {
                 continue;

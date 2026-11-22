@@ -28,6 +28,11 @@ pub fn project_hex(project_id: &str) -> String {
     hex[..12].to_string()
 }
 
+/// The engine host's log of project `project_id` in this machine's logs folder.
+pub fn default_host_log_path(project_id: &str) -> PathBuf {
+    host_log_path(paths::logs_dir(), project_id)
+}
+
 /// The engine host's log of project `project_id`: `<logs_dir>/engine-host-<12 hex>.log`.
 pub fn host_log_path(logs_dir: &Path, project_id: &str) -> PathBuf {
     logs_dir.join(format!("engine-host-{}.log", project_hex(project_id)))

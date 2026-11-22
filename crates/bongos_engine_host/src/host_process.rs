@@ -16,6 +16,8 @@ use futures::{FutureExt as _, StreamExt as _};
 use gpui::{App, AppContext as _, AsyncApp, Global, Task};
 
 use crate::access::{EngineAccess, EngineAccesses};
+use crate::client::ClientOptions;
+use crate::handover::{take_writer_checked, take_writer_from_window};
 use crate::host_file::live_host;
 use crate::protocol::{HostEvent, HostMode};
 use crate::window::WriterHosts;
@@ -54,6 +56,41 @@ pub fn open_host_writer(
     match StateStore::open_writer_with_hooks(location, hooks) {
         Ok(writer) => Ok(writer),
         Err(OpenError::HeldBy { pid }) => Err(held_by_message(location, pid)),
+        Err(OpenError::Store(error)) => {
+            Err(format!("opening the state of {}: {error:#}", location.id))
+        }
+    }
+}
+
+/// [`open_host_writer`] for an engine host that takes the writer over from a window: when a live
+/// window holds it (`host.json` mode window, no move in progress), the host asks that window for
+/// it and waits on the lock until the window lets go ([`take_writer_from_window`]). When the lock
+/// was free but `host.json` records a move to another live process, the lock is let go again and
+/// the host does not start. Blocks while the window drains.
+pub fn take_host_writer(
+    location: &Location,
+    hooks: &'static StateApplyHooks,
+    options: ClientOptions,
+    start_timeout: std::time::Duration,
+    executor: gpui::BackgroundExecutor,
+) -> Result<StateWriter, String> {
+    match take_writer_checked(location, hooks, options.own_pid) {
+        Ok(Some(writer)) => Ok(writer),
+        Ok(None) => Err(format!(
+            "the writer of {} is moving to another process; this engine host does not start",
+            location.id
+        )),
+        Err(OpenError::HeldBy { pid }) => match live_host(location) {
+            Some(window) if window.mode == HostMode::Window && window.moving.is_none() => {
+                log::info!(
+                    "{} is held by a window (pid {}); asking it for the writer",
+                    location.id,
+                    window.pid
+                );
+                take_writer_from_window(location, hooks, &window, options, start_timeout, executor)
+            }
+            _ => Err(held_by_message(location, pid)),
+        },
         Err(OpenError::Store(error)) => {
             Err(format!("opening the state of {}: {error:#}", location.id))
         }

@@ -88,6 +88,13 @@ pub(crate) fn dispatch(
     status: serde_json::Value,
     cx: &mut App,
 ) -> Task<Result<serde_json::Value>> {
+    // While the writer moves to another process, nothing more is served here: the client tries
+    // again and reaches the next writer.
+    if crate::handover::is_moving(&repo.location().id, cx)
+        && !matches!(command, HostCommand::Host(HostCtl::Status))
+    {
+        return Task::ready(Err(anyhow!(crate::handover::MOVING_REFUSAL)));
+    }
     match command {
         HostCommand::WorkWrite { state_ops, origin } => {
             let boundary = HostBoundary::new(repo.clone());
@@ -118,6 +125,7 @@ pub(crate) fn dispatch(
             None => Task::ready(Err(anyhow!("this engine host serves no lanes commands"))),
         },
         HostCommand::Host(HostCtl::Status) => Task::ready(Ok(status)),
+        HostCommand::Host(HostCtl::Handover) => crate::handover::serve_handover(repo, peer, cx),
         HostCommand::Host(control) => {
             Task::ready(Err(anyhow!("this engine host does not take {control:?}")))
         }

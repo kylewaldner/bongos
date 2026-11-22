@@ -1174,6 +1174,89 @@ impl WorkflowEngine {
         self.lifecycle().active_runs()
     }
 
+    /// Loads the runs on disk now when they are still to be loaded, before a handover reads
+    /// them. False when they cannot be loaded yet (no work tree), so a handover would miss runs
+    /// this engine loads later.
+    pub fn runs_loaded(&self, cx: &mut App) -> bool {
+        self.load_runs_once(cx);
+        !self.ticker.load_pending.load(Ordering::SeqCst)
+    }
+
+    /// The runs not over whose records are under `files` (a project's files), in start order:
+    /// the runs a handover of that project moves.
+    pub fn live_runs_under(&self, files: &Path) -> Vec<RunId> {
+        let lifecycle = self.lifecycle();
+        lifecycle
+            .runs_under(files)
+            .into_iter()
+            .filter(|run| lifecycle.state(run).is_some_and(|state| !state.is_over()))
+            .collect()
+    }
+
+    /// How many of `runs` have a node process in flight.
+    pub fn runs_in_flight(&self, runs: &[RunId]) -> usize {
+        let lifecycle = self.lifecycle();
+        runs.iter()
+            .filter(|run| !lifecycle.runtime().in_flight(run).is_empty())
+            .count()
+    }
+
+    /// Starts no new node in any run until [`Self::undrain`]; resolves once no node process runs
+    /// ([`crate::runtime::Runtime::drain`]).
+    pub fn drain(&self) -> futures::channel::oneshot::Receiver<()> {
+        self.lifecycle().runtime_mut().drain()
+    }
+
+    /// Lets nodes start again after [`Self::drain`].
+    pub fn undrain(&self) {
+        self.lifecycle().runtime_mut().undrain();
+    }
+
+    /// "Interrupt them now" at a handover: the processes of `runs` stop and the runs with a node
+    /// in flight are recorded interrupted, as at quit.
+    pub fn interrupt_runs(&self, runs: &[RunId], cx: &mut App) {
+        if self.lifecycle().interrupt_runs(runs) {
+            self.publish(cx);
+        }
+    }
+
+    /// Hands `runs` over to the process `to_pid`: `HandedOver` to each, then they leave this
+    /// engine, which appends nothing to them again.
+    pub fn hand_over_runs(&self, to_pid: u32, runs: &[RunId], cx: &mut App) {
+        self.lifecycle().hand_over_runs(to_pid, runs);
+        self.publish(cx);
+    }
+
+    /// While `on`, no run starts or restarts under `files` (a project's files): its writer moves
+    /// to another process ([`Lifecycle::refuse_starts_under`]).
+    pub fn refuse_starts_under(&self, files: &Path, on: bool) {
+        self.lifecycle().refuse_starts_under(files, on);
+    }
+
+    /// Loads again `runs`, those on disk this engine does not hold: after a handover the other
+    /// process never took, the runs it handed over come back and continue. Runs another handover
+    /// moved away stay away. The runs loaded.
+    pub fn reload_runs(&self, runs: &[RunId], cx: &mut App) -> Vec<RunId> {
+        let Some(tree) = self.writes.tree(cx) else {
+            log::error!("workflows: no work tree to load the runs again from");
+            return Vec::new();
+        };
+        let loaded = match self.lifecycle().load_new_runs(&tree, runs) {
+            Ok(report) => {
+                for (path, reason) in &report.skipped {
+                    log::warn!("workflows: did not load {}: {reason}", path.display());
+                }
+                report.loaded
+            }
+            Err(error) => {
+                log::error!("workflows: could not load the runs again: {error}");
+                Vec::new()
+            }
+        };
+        self.publish(cx);
+        loaded
+    }
+
     /// Runs `command` on the lifecycle, then ticks once so what it set going begins at once, then
     /// publishes. The runs on disk are loaded first when they are not yet.
     fn act<T>(

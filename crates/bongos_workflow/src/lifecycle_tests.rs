@@ -2199,3 +2199,53 @@ fn a_definition_commit_the_layers_were_not_read_from_is_refused() {
     assert_eq!(refusal.kind, RefusalKind::BadRequest, "{refusal}");
     assert!(lifecycle.all_runs().is_empty());
 }
+
+// A take-back loads again only the runs its handover moved: a run another handover moved to
+// another process stays there, and a run loaded already is not loaded twice.
+#[test]
+fn load_new_runs_loads_only_the_named_runs_not_loaded_yet() {
+    let world = World::new();
+    let ours = seed(&world, "single", mid_node);
+    let moved_elsewhere = seed(&world, "single", mid_node);
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle
+        .load_new_runs(&world.tree, std::slice::from_ref(&ours))
+        .unwrap();
+    assert_eq!(report.loaded, vec![ours.clone()]);
+    assert_eq!(lifecycle.all_runs(), vec![ours.clone()]);
+
+    let report = lifecycle
+        .load_new_runs(&world.tree, std::slice::from_ref(&ours))
+        .unwrap();
+    assert!(report.loaded.is_empty(), "{report:?}");
+    assert!(lifecycle.state(&moved_elsewhere).is_none());
+}
+
+// While a project's writer moves, no run starts or restarts under its files; elsewhere, and once
+// the move ends, they do.
+#[test]
+fn no_run_starts_or_restarts_under_a_project_whose_writer_moves() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    let run = world
+        .start(&mut lifecycle, with_workflow("single"))
+        .unwrap();
+    finish_all(&mut lifecycle);
+    let files = world.root.join("work");
+
+    lifecycle.refuse_starts_under(&world.root.join("elsewhere"), true);
+    lifecycle.refuse_starts_under(&files, true);
+    let refusal = lifecycle.restart(&run, &world.dirs, None).unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::Held);
+    let refusal = world
+        .start(&mut lifecycle, with_workflow("single"))
+        .unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::Held);
+    assert_eq!(lifecycle.all_runs(), vec![run.clone()]);
+
+    lifecycle.refuse_starts_under(&files, false);
+    let started = world
+        .start(&mut lifecycle, with_workflow("single"))
+        .unwrap();
+    assert_ne!(started, run);
+}

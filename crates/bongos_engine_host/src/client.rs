@@ -2,6 +2,12 @@
 //! become requests on the project's socket, and it hears of changes through the events. A writer
 //! that does not answer a request in time leaves the client read-only, every write refused with
 //! "the engine host is not answering; see <log>", until the writer is heard from again.
+//!
+//! While the writer moves to another process (a handover), the old writer refuses requests with
+//! [`MOVING_REFUSAL`] and then stops serving; the client tries the request again, connecting to
+//! the project's socket again once the old writer has gone (the next writer binds the same
+//! path), for up to [`ClientOptions::moving_timeout`]. Subscriptions carry over to the new
+//! connection.
 
 use std::collections::HashMap;
 use std::io::{BufReader, Write as _};
@@ -28,9 +34,26 @@ use crate::server::read_line;
 /// How long a request waits for the writer's answer.
 pub const ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a request is tried again while the writer moves (`lanes.host.start_timeout_seconds`
+/// by default).
+pub const MOVING_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How long a client waits between two tries while the writer moves.
+pub const MOVING_RETRY: Duration = Duration::from_millis(50);
+
+/// What the writer answers every request with while it hands itself over to another process.
+pub const MOVING_REFUSAL: &str = "the writer is moving; retry";
+
 /// What a client says when the writer does not answer in time.
 pub fn not_answering(log: &Path) -> String {
     format!("the engine host is not answering; see {}", log.display())
+}
+
+fn closed_message(log: &Path) -> String {
+    format!(
+        "the engine host closed the connection; see {}",
+        log.display()
+    )
 }
 
 /// How a client connects.
@@ -40,8 +63,13 @@ pub struct ClientOptions {
     /// The version this process runs; the server refuses any other.
     pub bongos_version: String,
     pub answer_timeout: Duration,
+    /// How long a request is tried again while the writer moves, and how long an opener waits
+    /// for a move to end before it attaches.
+    pub moving_timeout: Duration,
     /// The writer's log, named when it does not answer.
     pub log: PathBuf,
+    /// This process's pid as the move rules compare it with `host.json` (tests set another).
+    pub own_pid: u32,
 }
 
 impl ClientOptions {
@@ -50,7 +78,9 @@ impl ClientOptions {
             client,
             bongos_version: bongos_version.into(),
             answer_timeout: ANSWER_TIMEOUT,
+            moving_timeout: MOVING_TIMEOUT,
             log,
+            own_pid: std::process::id(),
         }
     }
 }
@@ -64,31 +94,82 @@ pub struct Welcomed {
     pub generation: u64,
 }
 
-/// What the reading thread shares with the client.
+type Subscribers = Mutex<Vec<(Option<Vec<HostTopic>>, mpsc::UnboundedSender<HostEvent>)>>;
+
+/// What every connection of one client shares.
 #[derive(Default)]
-struct Shared {
+struct ClientShared {
+    subscribers: Subscribers,
+    /// Set when the writer announced that it moves to another process (`WriterMoving`): it
+    /// stops serving then, so this holds until the next connection.
+    moving: AtomicBool,
+}
+
+/// What one connection's reading thread shares with the client.
+#[derive(Default)]
+struct ConnectionState {
     pending: Mutex<HashMap<u64, oneshot::Sender<HostResult>>>,
-    subscribers: Mutex<Vec<(Option<Vec<HostTopic>>, mpsc::UnboundedSender<HostEvent>)>>,
     /// Set when a request timed out; cleared when the writer is heard from.
     not_answering: AtomicBool,
     closed: AtomicBool,
+    /// What the answers on this connection said about a move.
+    refusals: Mutex<MovingRefusals>,
 }
 
-struct Inner {
+/// The answers of one connection as they bear on a move: a writer that drains refuses every
+/// request as moving, and answers again once the move is cancelled. Requests are numbered in
+/// the order they are sent, so the latest of each says which came last.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct MovingRefusals {
+    last_refused: Option<u64>,
+    last_answered: Option<u64>,
+}
+
+impl MovingRefusals {
+    /// Records the answer to request `id`: refused as moving, or anything else.
+    pub(crate) fn heard(&mut self, id: u64, refused_as_moving: bool) {
+        let last = if refused_as_moving {
+            &mut self.last_refused
+        } else {
+            &mut self.last_answered
+        };
+        *last = Some(last.map_or(id, |last| last.max(id)));
+    }
+
+    /// Whether the writer says it moves now: its latest answer by request order refused a
+    /// request as moving (an answer to a later request ends that, as the move was cancelled).
+    pub(crate) fn moving(&self) -> bool {
+        self.last_refused
+            .is_some_and(|refused| self.last_answered.is_none_or(|answered| refused > answered))
+    }
+}
+
+/// Whether the writer told this client, on `connection`, that it moves.
+fn says_moving(connection: &ConnectionState, shared: &ClientShared) -> bool {
+    shared.moving.load(Ordering::SeqCst) || connection.refusals.lock().moving()
+}
+
+struct Connection {
     stream: UnixStream,
     writer: Mutex<UnixStream>,
     next_id: AtomicU64,
-    shared: Arc<Shared>,
+    state: Arc<ConnectionState>,
     subscribed: AtomicBool,
-    options: ClientOptions,
     welcomed: Welcomed,
 }
 
-impl Drop for Inner {
+impl Drop for Connection {
     fn drop(&mut self) {
         // Ends the reading thread.
         self.stream.shutdown(std::net::Shutdown::Both).ok();
     }
+}
+
+struct Inner {
+    socket: PathBuf,
+    options: ClientOptions,
+    shared: Arc<ClientShared>,
+    connection: Mutex<Arc<Connection>>,
 }
 
 /// A connection to the process that holds a project's writer. Cloning shares the connection.
@@ -107,85 +188,55 @@ impl HostClient {
         options: ClientOptions,
         executor: BackgroundExecutor,
     ) -> Result<Self> {
-        let stream = UnixStream::connect(socket)
-            .with_context(|| format!("connecting to {}", socket.display()))?;
-        stream.set_read_timeout(Some(options.answer_timeout))?;
-        stream.set_write_timeout(Some(options.answer_timeout))?;
-        let mut writer = stream.try_clone()?;
-        writer.write_all(&encode_line(&ClientMessage::Hello {
-            protocol: PROTOCOL_VERSION,
-            bongos_version: options.bongos_version.clone(),
-            client: options.client,
-        })?)?;
-        let mut reader = BufReader::new(stream.try_clone()?);
-        let line = match read_line(&mut reader) {
-            Ok(Some(line)) => line,
-            Ok(None) => bail!(
-                "the engine host closed the connection; see {}",
-                options.log.display()
-            ),
-            Err(error) if is_timeout(&error) => bail!(not_answering(&options.log)),
-            Err(error) => return Err(error),
-        };
-        let welcomed = match serde_json::from_str::<ServerMessage>(&line)
-            .context("reading the engine host's answer")?
-        {
-            ServerMessage::Welcome {
-                protocol: _,
-                bongos_version,
-                writer_pid,
-                mode,
-                generation,
-            } => Welcomed {
-                bongos_version,
-                writer_pid,
-                mode,
-                generation,
-            },
-            ServerMessage::Refused { text } => bail!(text),
-            other => bail!("the engine host answered {other:?} to hello"),
-        };
-        stream.set_read_timeout(None)?;
-        let shared = Arc::new(Shared::default());
-        let thread_shared = shared.clone();
-        std::thread::Builder::new()
-            .name("engine-host-client".to_string())
-            .spawn(move || read_messages(reader, thread_shared))
-            .context("starting the client's thread")?;
+        let shared = Arc::new(ClientShared::default());
+        let connection = open_connection(socket, &options, &shared)?;
         Ok(Self {
             inner: Arc::new(Inner {
-                stream,
-                writer: Mutex::new(writer),
-                next_id: AtomicU64::new(1),
-                shared,
-                subscribed: AtomicBool::new(false),
+                socket: socket.to_path_buf(),
                 options,
-                welcomed,
+                shared,
+                connection: Mutex::new(Arc::new(connection)),
             }),
             executor,
         })
     }
 
-    pub fn welcomed(&self) -> &Welcomed {
-        &self.inner.welcomed
+    pub fn welcomed(&self) -> Welcomed {
+        self.inner.connection.lock().welcomed.clone()
     }
 
     pub fn options(&self) -> &ClientOptions {
         &self.inner.options
     }
 
+    pub fn socket(&self) -> &Path {
+        &self.inner.socket
+    }
+
     /// Whether writes are refused because the writer did not answer in time.
     pub fn is_read_only(&self) -> bool {
-        self.inner.shared.not_answering.load(Ordering::SeqCst)
+        self.inner
+            .connection
+            .lock()
+            .state
+            .not_answering
+            .load(Ordering::SeqCst)
     }
 
     /// Whether the writer ended the connection.
     pub fn is_closed(&self) -> bool {
-        self.inner.shared.closed.load(Ordering::SeqCst)
+        self.inner
+            .connection
+            .lock()
+            .state
+            .closed
+            .load(Ordering::SeqCst)
     }
 
     /// Sends `command` and resolves with the writer's answer. The socket is written when the
-    /// future is first polled, never on the caller's thread.
+    /// future is first polled, never on the caller's thread. While the writer moves, the request
+    /// is tried again (on a new connection once the old writer has gone) until it is answered
+    /// or [`ClientOptions::moving_timeout`] passes.
     pub fn request(
         &self,
         command: HostCommand,
@@ -193,75 +244,48 @@ impl HostClient {
         let inner = self.inner.clone();
         let executor = self.executor.clone();
         async move {
-            let (id, answer) = Self::send_request(&inner, command)?;
-            let timeout = executor.timer(inner.options.answer_timeout).fuse();
-            futures::pin_mut!(timeout);
-            let mut answer = answer.fuse();
-            futures::select! {
-                result = answer => match result {
-                    Ok(HostResult::Ok(value)) => Ok(value),
-                    Ok(HostResult::Refused(text)) => Err(anyhow!(text)),
-                    Err(_) => Err(anyhow!(
-                        "the engine host closed the connection; see {}",
-                        inner.options.log.display()
-                    )),
-                },
-                _ = timeout => {
-                    inner.shared.pending.lock().remove(&id);
-                    inner.shared.not_answering.store(true, Ordering::SeqCst);
-                    Err(anyhow!(not_answering(&inner.options.log)))
+            let deadline = executor.now() + inner.options.moving_timeout;
+            loop {
+                let answer = match current_connection(&inner) {
+                    Ok(connection) => {
+                        ask(&connection, &inner, command.clone(), &executor, true).await
+                    }
+                    Err(error) => Err(anyhow::Error::new(NotApplied(format!("{error:#}")))),
+                };
+                let moving = says_moving(&inner.connection.lock().state, &inner.shared);
+                match answer {
+                    Err(error) if is_moving(&error, moving) && executor.now() < deadline => {
+                        executor.timer(MOVING_RETRY).await;
+                    }
+                    answer => return answer,
                 }
             }
         }
     }
 
-    fn send_request(
-        inner: &Inner,
+    /// Sends `command` once and waits for its answer however long it takes, with no retry: the
+    /// handover, which a drain may hold for a long time. Resolves with an error when the
+    /// connection closes first.
+    pub fn request_unbounded(
+        &self,
         command: HostCommand,
-    ) -> Result<(u64, oneshot::Receiver<HostResult>)> {
-        if inner.shared.not_answering.load(Ordering::SeqCst) {
-            bail!(not_answering(&inner.options.log));
-        }
-        if inner.shared.closed.load(Ordering::SeqCst) {
-            bail!(
-                "the engine host closed the connection; see {}",
-                inner.options.log.display()
-            );
-        }
-        let id = inner.next_id.fetch_add(1, Ordering::SeqCst);
-        let (sender, receiver) = oneshot::channel();
-        inner.shared.pending.lock().insert(id, sender);
-        let line = encode_line(&ClientMessage::Request { id, command })?;
-        let written = {
-            let mut writer = inner.writer.lock();
-            writer.write_all(&line).and_then(|()| writer.flush())
-        };
-        if let Err(error) = written {
-            inner.shared.pending.lock().remove(&id);
-            if error.kind() == std::io::ErrorKind::WouldBlock
-                || error.kind() == std::io::ErrorKind::TimedOut
-            {
-                inner.shared.not_answering.store(true, Ordering::SeqCst);
-                bail!(not_answering(&inner.options.log));
-            }
-            return Err(anyhow!(error).context("sending a request to the engine host"));
-        }
-        Ok((id, receiver))
+    ) -> impl std::future::Future<Output = Result<serde_json::Value>> + Send + 'static {
+        let inner = self.inner.clone();
+        let executor = self.executor.clone();
+        let connection = self.inner.connection.lock().clone();
+        async move { ask(&connection, &inner, command, &executor, false).await }
     }
 
-    /// The writer's events of `topics` (every topic when `None`) from now on.
+    /// The writer's events of `topics` (every topic when `None`) from now on, on this
+    /// connection and on the ones made after the writer moved.
     pub fn subscribe(
         &self,
         topics: Option<Vec<HostTopic>>,
     ) -> Result<mpsc::UnboundedReceiver<HostEvent>> {
         let (sender, receiver) = mpsc::unbounded();
         self.inner.shared.subscribers.lock().push((topics, sender));
-        if !self.inner.subscribed.swap(true, Ordering::SeqCst) {
-            let line = encode_line(&ClientMessage::Subscribe { topics: Vec::new() })?;
-            let mut writer = self.inner.writer.lock();
-            writer.write_all(&line)?;
-            writer.flush()?;
-        }
+        let connection = self.inner.connection.lock().clone();
+        subscribe_once(&connection)?;
         Ok(receiver)
     }
 
@@ -277,6 +301,197 @@ impl HostClient {
         });
         self.executor.spawn(request)
     }
+}
+
+/// The connection to use now: the current one, or, once it closed after the writer said it
+/// moves, a new one to the same socket (subscriptions carried over).
+fn current_connection(inner: &Inner) -> Result<Arc<Connection>> {
+    let mut current = inner.connection.lock();
+    let closed = current.state.closed.load(Ordering::SeqCst);
+    if !closed || !says_moving(&current.state, &inner.shared) {
+        return Ok(current.clone());
+    }
+    let connection = Arc::new(open_connection(
+        &inner.socket,
+        &inner.options,
+        &inner.shared,
+    )?);
+    if !inner.shared.subscribers.lock().is_empty() {
+        subscribe_once(&connection)?;
+    }
+    inner.shared.moving.store(false, Ordering::SeqCst);
+    *current = connection.clone();
+    Ok(connection)
+}
+
+/// An error for a request the writer cannot have applied, so trying it again cannot apply it
+/// twice: it never reached the writer, or it was sent after the writer said it moves (a moving
+/// writer refuses every request) and the connection closed before the refusal came.
+#[derive(Debug)]
+pub(crate) struct NotApplied(pub(crate) String);
+
+impl std::fmt::Display for NotApplied {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NotApplied {}
+
+/// Whether `error` means the writer is moving, so the request is worth trying again: the writer
+/// refused it as moving, or, while the writer moves, the writer cannot have applied it
+/// ([`NotApplied`]). A request the old writer may have applied before its connection closed is
+/// not tried again.
+/// `moving` says whether the writer told this client it moves.
+pub(crate) fn is_moving(error: &anyhow::Error, moving: bool) -> bool {
+    error.to_string() == MOVING_REFUSAL || (moving && error.downcast_ref::<NotApplied>().is_some())
+}
+
+async fn ask(
+    connection: &Connection,
+    inner: &Inner,
+    command: HostCommand,
+    executor: &BackgroundExecutor,
+    timed: bool,
+) -> Result<serde_json::Value> {
+    let log = &inner.options.log;
+    // Sent after the writer said it moves: it refuses the request, never applies it.
+    let sent_while_moving = says_moving(&connection.state, &inner.shared);
+    let (id, answer) = send_request(connection, command, log)?;
+    let mut answer = answer.fuse();
+    let answered = if timed {
+        let timeout = executor.timer(inner.options.answer_timeout).fuse();
+        futures::pin_mut!(timeout);
+        futures::select! {
+            result = answer => result,
+            _ = timeout => {
+                connection.state.pending.lock().remove(&id);
+                connection.state.not_answering.store(true, Ordering::SeqCst);
+                return Err(anyhow!(not_answering(log)));
+            }
+        }
+    } else {
+        answer.await
+    };
+    match answered {
+        Ok(HostResult::Ok(value)) => {
+            connection.state.refusals.lock().heard(id, false);
+            Ok(value)
+        }
+        Ok(HostResult::Refused(text)) => {
+            // A client that subscribed to nothing hears of the move only here, and of a
+            // cancelled move only from a later answer.
+            connection
+                .state
+                .refusals
+                .lock()
+                .heard(id, text == MOVING_REFUSAL);
+            Err(anyhow!(text))
+        }
+        Err(_) if sent_while_moving => Err(anyhow::Error::new(NotApplied(closed_message(log)))),
+        Err(_) => Err(anyhow!(closed_message(log))),
+    }
+}
+
+fn send_request(
+    connection: &Connection,
+    command: HostCommand,
+    log: &Path,
+) -> Result<(u64, oneshot::Receiver<HostResult>)> {
+    let state = &connection.state;
+    if state.not_answering.load(Ordering::SeqCst) {
+        bail!(not_answering(log));
+    }
+    if state.closed.load(Ordering::SeqCst) {
+        return Err(anyhow::Error::new(NotApplied(closed_message(log))));
+    }
+    let id = connection.next_id.fetch_add(1, Ordering::SeqCst);
+    let (sender, receiver) = oneshot::channel();
+    state.pending.lock().insert(id, sender);
+    let line = encode_line(&ClientMessage::Request { id, command })?;
+    let written = {
+        let mut writer = connection.writer.lock();
+        writer.write_all(&line).and_then(|()| writer.flush())
+    };
+    if let Err(error) = written {
+        state.pending.lock().remove(&id);
+        if error.kind() == std::io::ErrorKind::WouldBlock
+            || error.kind() == std::io::ErrorKind::TimedOut
+        {
+            state.not_answering.store(true, Ordering::SeqCst);
+            bail!(not_answering(log));
+        }
+        return Err(anyhow!(error).context("sending a request to the engine host"));
+    }
+    Ok((id, receiver))
+}
+
+fn subscribe_once(connection: &Connection) -> Result<()> {
+    if !connection.subscribed.swap(true, Ordering::SeqCst) {
+        let line = encode_line(&ClientMessage::Subscribe { topics: Vec::new() })?;
+        let mut writer = connection.writer.lock();
+        writer.write_all(&line)?;
+        writer.flush()?;
+    }
+    Ok(())
+}
+
+fn open_connection(
+    socket: &Path,
+    options: &ClientOptions,
+    shared: &Arc<ClientShared>,
+) -> Result<Connection> {
+    let stream = UnixStream::connect(socket)
+        .with_context(|| format!("connecting to {}", socket.display()))?;
+    stream.set_read_timeout(Some(options.answer_timeout))?;
+    stream.set_write_timeout(Some(options.answer_timeout))?;
+    let mut writer = stream.try_clone()?;
+    writer.write_all(&encode_line(&ClientMessage::Hello {
+        protocol: PROTOCOL_VERSION,
+        bongos_version: options.bongos_version.clone(),
+        client: options.client,
+    })?)?;
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let line = match read_line(&mut reader) {
+        Ok(Some(line)) => line,
+        Ok(None) => bail!(closed_message(&options.log)),
+        Err(error) if is_timeout(&error) => bail!(not_answering(&options.log)),
+        Err(error) => return Err(error),
+    };
+    let welcomed = match serde_json::from_str::<ServerMessage>(&line)
+        .context("reading the engine host's answer")?
+    {
+        ServerMessage::Welcome {
+            protocol: _,
+            bongos_version,
+            writer_pid,
+            mode,
+            generation,
+        } => Welcomed {
+            bongos_version,
+            writer_pid,
+            mode,
+            generation,
+        },
+        ServerMessage::Refused { text } => bail!(text),
+        other => bail!("the engine host answered {other:?} to hello"),
+    };
+    stream.set_read_timeout(None)?;
+    let state = Arc::new(ConnectionState::default());
+    let thread_state = state.clone();
+    let thread_shared = shared.clone();
+    std::thread::Builder::new()
+        .name("engine-host-client".to_string())
+        .spawn(move || read_messages(reader, thread_state, thread_shared))
+        .context("starting the client's thread")?;
+    Ok(Connection {
+        stream,
+        writer: Mutex::new(writer),
+        next_id: AtomicU64::new(1),
+        state,
+        subscribed: AtomicBool::new(false),
+        welcomed,
+    })
 }
 
 impl StateSink for HostClient {
@@ -308,7 +523,11 @@ fn is_timeout(error: &anyhow::Error) -> bool {
     })
 }
 
-fn read_messages(mut reader: BufReader<UnixStream>, shared: Arc<Shared>) {
+fn read_messages(
+    mut reader: BufReader<UnixStream>,
+    state: Arc<ConnectionState>,
+    shared: Arc<ClientShared>,
+) {
     loop {
         let line = match read_line(&mut reader) {
             Ok(Some(line)) => line,
@@ -319,14 +538,17 @@ fn read_messages(mut reader: BufReader<UnixStream>, shared: Arc<Shared>) {
             }
         };
         // The writer is heard from: it answers again.
-        shared.not_answering.store(false, Ordering::SeqCst);
+        state.not_answering.store(false, Ordering::SeqCst);
         match serde_json::from_str::<ServerMessage>(&line) {
             Ok(ServerMessage::Reply { id, result }) => {
-                if let Some(sender) = shared.pending.lock().remove(&id) {
+                if let Some(sender) = state.pending.lock().remove(&id) {
                     sender.send(result).ok();
                 }
             }
             Ok(ServerMessage::Event { event }) => {
+                if matches!(event, HostEvent::WriterMoving { .. }) {
+                    shared.moving.store(true, Ordering::SeqCst);
+                }
                 shared.subscribers.lock().retain(|(topics, sender)| {
                     let wanted = topics
                         .as_ref()
@@ -338,8 +560,11 @@ fn read_messages(mut reader: BufReader<UnixStream>, shared: Arc<Shared>) {
             Err(error) => log::warn!("unreadable message from the engine host: {error}"),
         }
     }
-    shared.closed.store(true, Ordering::SeqCst);
+    state.closed.store(true, Ordering::SeqCst);
     // Every waiting request hears that the connection is gone.
-    shared.pending.lock().clear();
-    shared.subscribers.lock().clear();
+    state.pending.lock().clear();
+    if !says_moving(&state, &shared) {
+        // The writer is gone for good: the subscriptions end. Across a move they carry over.
+        shared.subscribers.lock().clear();
+    }
 }

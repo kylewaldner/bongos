@@ -1,16 +1,21 @@
 //! `bongos --engine-host <project id>`: a process with no window that hosts the workflow engine
 //! of one project. It starts only the parts the engine needs, so it runs without a display. It
-//! takes the project's writer (or exits at once when another live process holds it), serves the
-//! project's socket in host mode, runs the lanes' dispatcher, logs to
-//! `<logs>/engine-host-<12 hex>.log`, and exits once idle for `lanes.host.idle_exit_seconds`.
+//! takes the project's writer (from a window that holds it, by a handover; it exits at once when
+//! another engine host holds it), serves the project's socket in host mode, runs the lanes'
+//! dispatcher, logs to `<logs>/engine-host-<12 hex>.log`, and exits once idle for
+//! `lanes.host.idle_exit_seconds`.
 
 use std::io::Write as _;
 use std::{process, rc::Rc, sync::Arc};
 
 use anyhow::anyhow;
-use bongos_engine_host::{EngineHostProcess, HostProcessOptions, host_log_path, open_host_writer};
+use bongos_engine_host::{
+    ClientOptions, EngineHostProcess, HostProcessOptions, host_log_path, take_host_writer,
+};
 use bongos_lanes::LanesSettings;
-use bongos_project_repo::{Location, RepositoryLocations, StateApplyHooks, StateWriter};
+use bongos_project_repo::{
+    ClientKind, Location, RepositoryLocations, StateApplyHooks, StateWriter,
+};
 use bongos_work::{OpenedProject, ProjectOpening};
 use fs::{Fs, RealFs};
 use gpui::{App, UpdateGlobal as _};
@@ -156,8 +161,22 @@ fn host(project_id: &str, locations: Option<std::path::PathBuf>, cx: &mut App) {
         process::id()
     );
     let location = find_location(project_id, locations);
-    // After every feature registered its state hooks: opening the writer seals them.
-    let writer = match open_host_writer(&location, StateApplyHooks::global()) {
+    // After every feature registered its state hooks: opening the writer seals them. A window
+    // that holds the writer is asked to hand it over; this waits (blocking) until it lets go.
+    let start_timeout = LanesSettings::get_global(cx).host.start_timeout;
+    let mut options = ClientOptions::new(
+        ClientKind::Cli,
+        AppVersion::global(cx).to_string(),
+        host_log_path(paths::logs_dir(), project_id),
+    );
+    options.moving_timeout = start_timeout;
+    let writer = match take_host_writer(
+        &location,
+        StateApplyHooks::global(),
+        options,
+        start_timeout,
+        cx.background_executor().clone(),
+    ) {
         Ok(writer) => Arc::new(writer),
         Err(message) => {
             log::info!("refused: {message}");

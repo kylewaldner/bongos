@@ -579,6 +579,11 @@ async fn run_backups(repo: ProjectRepo, cx: &AsyncApp) {
     loop {
         background.timer(BACKUP_TICK).await;
         if repo.backups_stopped() {
+            // A writer released to an engine host may come back (a take-back): the timer waits
+            // for it rather than ending.
+            if repo.backups_released() {
+                continue;
+            }
             return;
         }
         cx.update(|cx| {
