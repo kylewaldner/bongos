@@ -201,6 +201,17 @@ pub enum Event {
         failure: Option<Failure>,
     },
     Cancelled,
+    /// The app handed the run to the app process `to_pid` after a drain. Informational: replay
+    /// judges an interruption over the events before it exactly as it would without it, so a run
+    /// with a started key and no finish still comes back interrupted.
+    HandedOver {
+        to_pid: u32,
+    },
+    /// A drain stopped the check of the checks key `key`. The key no longer runs and is not
+    /// interrupted: the run continues from its checkpoint by starting the key again.
+    ChecksDrained {
+        key: NodeKey,
+    },
 }
 
 impl Event {
@@ -321,6 +332,14 @@ pub enum StartedBy {
     Lane,
     /// It was started from the shell.
     Host,
+}
+
+impl StartedBy {
+    /// Whether the run counts toward `workflows.max_concurrent_runs`: every run but a lane's or a
+    /// landing check's, which start whatever the hand-started runs hold.
+    pub fn counts_toward_run_limit(self) -> bool {
+        !matches!(self, Self::Lane | Self::Landing)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -886,5 +905,9 @@ fn apply(state: &mut RunState, event: &Event) {
             state.ended = Some((*end, failure.clone()));
         }
         Event::Cancelled => state.cancelled = true,
+        Event::HandedOver { .. } => {}
+        Event::ChecksDrained { key } => {
+            state.running.remove(key);
+        }
     }
 }
