@@ -27,6 +27,8 @@ impl ProjectRepo {
             .and_then(|state| state.opened_writer())
             .cloned()
             .context("this process does not hold the project's writer")?;
+        // Released before stopped, so the timer never reads a stop for good here.
+        self.engine.backup.released.store(true, Ordering::SeqCst);
         self.stop_backups();
         drop(self.engine.backup.branch_lock.lock().await);
         drop(self.engine.backup.push_lock.lock().await);
@@ -71,6 +73,7 @@ impl ProjectRepo {
             .context("this process never opened the project's writer")?;
         writer.retake()?;
         self.engine.backup.stopped.store(false, Ordering::SeqCst);
+        self.engine.backup.released.store(false, Ordering::SeqCst);
         Ok(())
     }
 

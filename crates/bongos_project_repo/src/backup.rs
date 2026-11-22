@@ -348,6 +348,9 @@ pub(crate) struct BackupEngine {
     /// One push at a time; never held by a snapshot.
     pub(crate) push_lock: futures::lock::Mutex<()>,
     pub(crate) stopped: AtomicBool,
+    /// Set while the writer is released to another process ([`ProjectRepo::release_writer`]):
+    /// the timer is stopped then only until a take-back.
+    pub(crate) released: AtomicBool,
     push_timeout: Mutex<Option<PushTimeout>>,
     /// `None` reads the activity sources registered in the app.
     activity: Mutex<Option<Vec<Arc<dyn ActivitySource>>>>,
@@ -362,6 +365,7 @@ impl Default for BackupEngine {
             branch_lock: futures::lock::Mutex::new(()),
             push_lock: futures::lock::Mutex::new(()),
             stopped: AtomicBool::new(false),
+            released: AtomicBool::new(false),
             push_timeout: Mutex::new(None),
             activity: Mutex::new(None),
         }
@@ -450,6 +454,13 @@ impl ProjectRepo {
 
     pub fn backups_stopped(&self) -> bool {
         self.engine.backup.stopped.load(Ordering::SeqCst)
+    }
+
+    /// Whether the backups are stopped only because the writer is released to another process:
+    /// a take-back ([`ProjectRepo::retake_writer`]) starts them again, so the timer waits
+    /// instead of ending.
+    pub fn backups_released(&self) -> bool {
+        self.engine.backup.released.load(Ordering::SeqCst)
     }
 
     /// Whether the timer's snapshots are held after `project: add existing` (see

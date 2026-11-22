@@ -42,6 +42,8 @@ fn a_released_writer_lets_another_open_take_the_lock_and_refuses_writes() {
     assert!(first.is_released());
     assert!(repo.state().unwrap().writer().is_none());
     assert!(repo.backups_stopped());
+    // Stopped only while released: the backup timer waits for a take-back instead of ending.
+    assert!(repo.backups_released());
     let refused = set_task(&first, "b").unwrap_err();
     assert!(format!("{refused:#}").contains(RELEASED_MESSAGE));
 
@@ -118,6 +120,7 @@ fn a_released_writer_relays_the_next_writers_events_and_can_be_taken_back() {
     repo.retake_writer().unwrap();
     assert!(!writer.is_released());
     assert!(!repo.backups_stopped());
+    assert!(!repo.backups_released());
     assert!(Arc::ptr_eq(
         repo.state().unwrap().writer().unwrap(),
         &writer
@@ -148,4 +151,20 @@ fn a_waiting_open_takes_the_lock_once_it_is_released() {
         .expect("the waiting open took the lock");
     let next = opener.join().unwrap().unwrap();
     set_task(&next, "host").unwrap();
+}
+
+#[test]
+fn a_shutdown_stops_the_backups_for_good_and_a_release_only_until_a_take_back() {
+    let root = TempDir::new().unwrap();
+    let released = repo(&root);
+    block_on(released.release_writer(Duration::from_secs(1))).unwrap();
+    assert!(released.backups_stopped() && released.backups_released());
+    released.retake_writer().unwrap();
+    assert!(!released.backups_stopped() && !released.backups_released());
+
+    let other = TempDir::new().unwrap();
+    let shut_down = repo(&other);
+    shut_down.stop_backups();
+    assert!(shut_down.backups_stopped());
+    assert!(!shut_down.backups_released(), "a shutdown ends the timer");
 }
