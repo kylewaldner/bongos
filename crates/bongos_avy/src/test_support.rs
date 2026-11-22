@@ -9,11 +9,12 @@ use editor::{Editor, MultiBuffer, SelectionEffects};
 use gpui::{
     Action as _, AnyEntity, App, AppContext as _, Context, Entity, EntityId, EventEmitter,
     FocusHandle, Focusable, IntoElement, NoAction, ParentElement as _, Pixels, Render,
-    SharedString, Size, Styled as _, TestAppContext, VisualTestContext, Window, div, px,
+    SharedString, Size, Styled as _, TestAppContext, VisualTestContext, Window, WindowHandle, div,
+    px,
 };
 use project::Project;
 use workspace::{
-    AppState, Pane, Workspace,
+    AppState, MultiWorkspace, Pane, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
     item::Item,
 };
@@ -37,6 +38,31 @@ pub async fn setup(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTe
     let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
     cx.simulate_resize(WINDOW_SIZE);
     paint(cx);
+    (workspace, cx)
+}
+
+/// `setup` in a multi-workspace window, as the application has, running `before` after the editor
+/// is initialized and before the window opens, so what registers on every new workspace takes
+/// part and its actions are dispatchable.
+pub async fn setup_with(
+    cx: &mut TestAppContext,
+    before: impl FnOnce(&mut App),
+) -> (Entity<Workspace>, VisualTestContext) {
+    let params = cx.update(AppState::test);
+    cx.update(|cx| {
+        theme_settings::init(theme::LoadThemes::JustBase, cx);
+        editor::init(cx);
+        before(cx);
+    });
+    let project = Project::test(params.fs.clone(), [], cx).await;
+    let window: WindowHandle<MultiWorkspace> =
+        cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace = window
+        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+        .unwrap();
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    cx.simulate_resize(WINDOW_SIZE);
+    paint(&mut cx);
     (workspace, cx)
 }
 

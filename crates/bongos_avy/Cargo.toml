@@ -31,7 +31,6 @@ bongos_avy_model.workspace = true
 bongos_emacs.workspace = true
 bongos_minibuffer.workspace = true
 bongos_window.workspace = true
-command_palette_hooks.workspace = true
 editor.workspace = true
 gpui.workspace = true
 settings.workspace = true

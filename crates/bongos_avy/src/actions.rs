@@ -1,7 +1,5 @@
-//! Every `avy::` action. No handler is registered yet and no key is bound; the actions exist so
-//! the prefix argument table and the command palette filter can name them.
-
-use std::any::TypeId;
+//! Every `avy::` action. `init` registers their handlers in every workspace; no key is bound
+//! here.
 
 use gpui::actions;
 
@@ -21,12 +19,3 @@ actions!(
 
 /// The actions that have no use for a prefix argument: C-u never repeats them.
 pub const IGNORED: [&str; 3] = ["avy::GotoCharTimer", "avy::GotoWord1", "avy::GotoLine"];
-
-/// Every `avy` action, for hiding them from the command palette while they have no handler.
-pub fn action_types() -> [TypeId; 3] {
-    [
-        TypeId::of::<GotoCharTimer>(),
-        TypeId::of::<GotoWord1>(),
-        TypeId::of::<GotoLine>(),
-    ]
-}
