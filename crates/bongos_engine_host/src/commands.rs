@@ -40,6 +40,15 @@ impl HostCommands {
             .insert(namespace.into(), handler);
     }
 
+    /// Serves the extension commands of `namespace` with `handler` unless one is registered
+    /// already, so a stand-in never replaces the real handler whichever registers first.
+    pub fn register_default(namespace: impl Into<String>, handler: HostHandler, cx: &mut App) {
+        cx.default_global::<Self>()
+            .extensions
+            .entry(namespace.into())
+            .or_insert(handler);
+    }
+
     /// Serves the workflow engine's commands with `handler`.
     pub fn serve_workflow(handler: VerbHandler<WorkflowVerb>, cx: &mut App) {
         cx.default_global::<Self>().workflow = Some(handler);
@@ -63,6 +72,35 @@ impl HostCommands {
     fn lanes(cx: &App) -> Option<VerbHandler<LanesVerb>> {
         cx.try_global::<Self>()
             .and_then(|commands| commands.lanes.clone())
+    }
+}
+
+/// The namespaces of the command line words whose real commands later features define (`bongos
+/// trigger`, `bongos queue`, `bongos pool`).
+pub const STUB_NAMESPACES: [&str; 3] = ["trigger", "queue", "pool"];
+
+/// Stands in for the commands of [`STUB_NAMESPACES`] until the feature that owns a namespace
+/// registers its own handler with [`HostCommands::register`]; that is the seam a later feature
+/// replaces. The stand-in does nothing but answer, so the command line's dispatch and its
+/// handling of a writer, a window and a host start can be used and tested already.
+pub fn register_stub_commands(cx: &mut App) {
+    for namespace in STUB_NAMESPACES {
+        HostCommands::register_default(
+            namespace,
+            Rc::new(move |payload, _peer, _cx| {
+                let verb = payload
+                    .get("verb")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("?")
+                    .to_string();
+                Task::ready(Ok(serde_json::json!({
+                    "message": format!("{namespace} {verb}: not implemented yet"),
+                    "stub": true,
+                    "echo": payload,
+                })))
+            }),
+            cx,
+        );
     }
 }
 

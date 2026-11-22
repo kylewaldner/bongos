@@ -3617,6 +3617,7 @@ dependencies = [
  "anyhow",
  "askpass",
  "bongos_version",
+ "chrono",
  "clap",
  "clap_complete",
  "clap_complete_nushell",

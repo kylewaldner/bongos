@@ -35,7 +35,7 @@ use bongos_lanes_model::{
     PickOutcome, Problem, Refresh, RunSubject, StampFile, StopCause, TaskId, WaitReason,
     owner_after_stop, pick, reconcile_counts, stop_at_job_boundary,
 };
-use bongos_project_repo::{CommitId, RepoEvent, StateTx, StateWriter};
+use bongos_project_repo::{CommitId, RepoEvent, StateRead, StateTx, StateWriter};
 use bongos_workflow::lifecycle::RefusalKind;
 use bongos_workflow::{
     Refusal, RunId, RunStatus, RunTree, StartRequest, WorkflowEngine, WorkflowEvent,
@@ -128,6 +128,14 @@ pub struct DispatcherRecord {
 /// Reads the dispatcher record in `tx`.
 pub fn dispatcher_record(tx: &mut StateTx) -> Result<Option<DispatcherRecord>> {
     tx.kv(LANES_NAMESPACE)
+        .get(DISPATCHER_KEY)?
+        .map(|value| value.try_into().context("reading the dispatcher record"))
+        .transpose()
+}
+
+/// Reads the dispatcher record in a read of the store.
+pub fn read_dispatcher_record(read: &StateRead) -> Result<Option<DispatcherRecord>> {
+    read.kv(LANES_NAMESPACE)
         .get(DISPATCHER_KEY)?
         .map(|value| value.try_into().context("reading the dispatcher record"))
         .transpose()
