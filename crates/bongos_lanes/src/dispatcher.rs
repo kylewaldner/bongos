@@ -364,6 +364,8 @@ pub struct LanesStarted {
 pub struct Lanes {
     pub parts: LanesParts,
     pub(crate) events: LaneEvents,
+    /// The dispatcher this handle last started, while it lives.
+    pub(crate) started: Rc<RefCell<Weak<Inner>>>,
 }
 
 impl Lanes {
@@ -371,13 +373,20 @@ impl Lanes {
         Self {
             parts,
             events: LaneEvents::default(),
+            started: Rc::default(),
         }
+    }
+
+    /// The live dispatcher this handle started, if any.
+    pub(crate) fn dispatcher(&self) -> Option<Dispatcher> {
+        self.started.borrow().upgrade().map(Dispatcher)
     }
 
     /// Starts the lanes, or attaches to the dispatcher a live host runs.
     pub fn start(&self, request: StartLanes, cx: &mut App) -> Task<Result<LanesStarted>> {
         let parts = self.parts.clone();
         let events = self.events.clone();
+        let started = self.started.clone();
         let host = parts.host.clone();
         if !host.is_repository_project() {
             return Task::ready(Err(StartRefusal::NotRepositoryProject.into()));
@@ -391,8 +400,15 @@ impl Lanes {
             if let Some(verify) = verify {
                 verify.await.map_err(StartRefusal::Profile)?;
             }
-            cx.update(|cx| start_verified(parts, events, project, request, cx))
-                .map_err(Into::into)
+            let result = cx.update(|cx| start_verified(parts, events, project, request, cx));
+            if let Ok(LanesStarted {
+                dispatcher: Some(dispatcher),
+                ..
+            }) = &result
+            {
+                *started.borrow_mut() = dispatcher.downgrade();
+            }
+            result.map_err(Into::into)
         })
     }
 }
@@ -586,7 +602,11 @@ pub(crate) struct Inner {
     baseline: RefCell<BTreeMap<LaneId, u32>>,
     triggers: RefCell<Vec<Task<()>>>,
     /// The jobs that passed the job hooks, by lane, until their `after_job` resolved. A lane
-    /// listed here is not evaluated.
+    /// listed here is not evaluated, and the dispatcher's run does not end while any is listed.
+    ///
+    /// Dropping the dispatcher drops these as they are: a pending `before_job` future is dropped
+    /// and no hook gets its `after_job`. Whoever holds the dispatcher keeps it until its run
+    /// ended, which is after every job here was settled.
     pub(crate) hooked: RefCell<BTreeMap<LaneId, HookedJob>>,
 }
 
@@ -750,8 +770,7 @@ impl Dispatcher {
             }
         }
         inner.passing.set(false);
-        // The run does not end while a lane's `after_job` is still to resolve.
-        if !self.settling() && self.end_if_at_rest(cx) {
+        if self.end_if_at_rest(cx) {
             inner.ended.set(true);
         } else if self.run_ended() {
             inner.ended.set(true);

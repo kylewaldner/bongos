@@ -1,20 +1,23 @@
 //! The job hooks around a lane job's start, over the fake host and engine of the dispatcher
 //! tests, with gated fake hooks.
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
-use bongos_lanes_model::{Author, LaneState, OwnerState, TaskId, WaitReason};
+use bongos_lanes_model::{
+    Author, JobRecord, LaneId, LaneState, OwnerState, StopCause, TaskId, WaitReason,
+};
+use bongos_project_repo::StateWriter;
 use bongos_workflow::Refusal;
 use bongos_workflow::RunStatus;
 use bongos_workflow::lifecycle::RefusalKind;
 use bongos_workflow_model::record::{EndState, Lifecycle};
-use gpui::TestAppContext;
+use gpui::{App, Task, TestAppContext};
 
 use super::{Harness, builds, finish, graph, harness, leaf, start, start_request};
-use crate::hooks::{BEFORE_JOB, BeforeJob, JobEnd, JobHooks};
-use crate::lane_control::LaneTarget;
-use crate::store::put_lane;
+use crate::hooks::{BEFORE_JOB, BeforeJob, JobEnd, JobHook, JobHookCx, JobHooks};
+use crate::lane_control::{LaneTarget, RunEnd};
+use crate::store::{put_lane, read_state_in};
 use crate::test_support::{GatedHook, HookCall};
 
 fn hook_wait(message: &str) -> WaitReason {
@@ -403,4 +406,151 @@ async fn after_job_waits_for_the_end_of_a_halted_job(cx: &mut TestAppContext) {
             HookCall::After(run, JobEnd::Lifecycle(Lifecycle::Cancelled))
         ]
     );
+}
+
+fn dispatcher_ends(harness: &Harness) -> Vec<RunEnd> {
+    harness
+        .engine
+        .ends
+        .borrow()
+        .iter()
+        .map(|(_, end, _)| *end)
+        .collect()
+}
+
+// A stop of every lane while a halted lane holds a hooked job: the dispatcher's run waits for that
+// job, whose cancel tells the hook once and then ends the run.
+#[gpui::test]
+async fn a_stop_with_a_halted_hooked_job_ends_after_its_cancel(cx: &mut TestAppContext) {
+    let harness = harness(&builds(1), graph(vec![leaf("a")]), &[]);
+    let hook = Arc::new(GatedHook::default());
+    register(cx, &hook);
+    let started = start(&harness, start_request(), cx).await;
+    let run = run_of_lane(&harness);
+    harness.set_run("a", RunStatus::Failed, cx);
+    assert_eq!(harness.lane("build", 1).state, LaneState::Halted);
+
+    stop_all(&started, cx);
+
+    assert!(dispatcher_ends(&harness).is_empty());
+    assert_eq!(hook.calls(), [HookCall::Before(run.clone())]);
+
+    harness.set_run("a", RunStatus::Cancelled, cx);
+
+    assert_eq!(
+        hook.calls(),
+        [
+            HookCall::Before(run.clone()),
+            HookCall::After(run, JobEnd::Lifecycle(Lifecycle::Cancelled))
+        ]
+    );
+    assert_eq!(harness.lane("build", 1).job, None);
+    assert_eq!(dispatcher_ends(&harness), [RunEnd::Cancelled]);
+}
+
+// A stop through the lanes handle while a lane's `after_job` is pending ends the dispatcher's run
+// only once `after_job` resolved.
+#[gpui::test]
+async fn a_stop_waits_for_a_pending_after_job_to_end_the_run(cx: &mut TestAppContext) {
+    let harness = harness(&builds(1), graph(vec![leaf("a")]), &[]);
+    let hook = gated_after();
+    register(cx, &hook);
+    let _started = start(&harness, start_request(), cx).await;
+    let run = run_of_lane(&harness);
+    harness.update_graph(|tasks| finish(tasks, "a"));
+    harness.set_run("a", RunStatus::Succeeded, cx);
+    assert_eq!(hook.calls().len(), 2);
+
+    cx.update(|cx| {
+        harness
+            .lanes
+            .stop(LaneTarget::All, Author::Person("kim".to_string()), cx)
+            .unwrap()
+    });
+    cx.run_until_parked();
+
+    assert_eq!(harness.lane("build", 1).state, LaneState::Stopped);
+    assert!(dispatcher_ends(&harness).is_empty());
+
+    hook.release_after();
+    cx.run_until_parked();
+
+    assert_eq!(dispatcher_ends(&harness), [RunEnd::Cancelled]);
+    assert_eq!(
+        hook.calls(),
+        [
+            HookCall::Before(run.clone()),
+            HookCall::After(
+                run,
+                JobEnd::Lifecycle(Lifecycle::Ended(EndState::Succeeded))
+            )
+        ]
+    );
+}
+
+/// A hook that asks for a stop of its lane, then refuses the job.
+struct StopThenRefuse {
+    writer: Arc<StateWriter>,
+    calls: Mutex<Vec<HookCall>>,
+}
+
+impl JobHook for StopThenRefuse {
+    fn before_job(
+        &self,
+        lane: &LaneId,
+        job: &JobRecord,
+        _hcx: JobHookCx,
+        _cx: &mut App,
+    ) -> Task<BeforeJob> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(HookCall::Before(job.run_id.clone()));
+        // The stop is committed before the refusal is answered; the dispatcher may hear either
+        // first.
+        self.writer
+            .transact(|tx| {
+                let mut record = read_state_in(tx)?.lanes[lane].clone();
+                record.stop_requested = Some(StopCause::Stop);
+                put_lane(tx, &record)
+            })
+            .unwrap();
+        Task::ready(BeforeJob::Refuse {
+            reason: hook_wait("no slot"),
+        })
+    }
+
+    fn after_job(&self, _lane: &LaneId, job: &JobRecord, end: &JobEnd, _cx: &mut App) -> Task<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(HookCall::After(job.run_id.clone(), end.clone()));
+        Task::ready(())
+    }
+}
+
+// A refusal that arrives after a stop of its lane drops the job like the stop does: the lane
+// stops with its task, and the hook that refused is not told an end.
+#[gpui::test]
+async fn a_refusal_after_a_stop_drops_the_job(cx: &mut TestAppContext) {
+    let harness = harness(&builds(1), graph(vec![leaf("a")]), &[]);
+    let hook = Arc::new(StopThenRefuse {
+        writer: harness.writer.clone(),
+        calls: Mutex::default(),
+    });
+    cx.update(|cx| JobHooks::register(hook.clone(), cx));
+
+    let _started = start(&harness, start_request(), cx).await;
+
+    let calls = hook.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(matches!(calls[0], HookCall::Before(_)), "{calls:?}");
+    let lane = harness.lane("build", 1);
+    assert_eq!(lane.state, LaneState::Stopped);
+    assert_eq!(lane.job, None);
+    assert_eq!(
+        harness.state().owners[&TaskId::new("a")].state,
+        OwnerState::Stopped
+    );
+    assert!(harness.engine.job_tasks().is_empty());
 }

@@ -5,10 +5,11 @@
 //! task. The end of a job comes from its run's status changes.
 //!
 //! A job that went through the job hooks is kept in [`Dispatcher`]'s `hooked` list until every
-//! hook owed an `after_job` got it; its lane is not evaluated meanwhile. A pass drops a job whose
-//! hooks are still pending when its lane no longer holds it, was asked to stop or left the lane
-//! count: the pending `before_job` future is dropped, `after_job` hears
-//! [`HookEnd::StoppedBeforeStart`], and then the job is cleared.
+//! hook owed an `after_job` got it; its lane is not evaluated meanwhile, and the dispatcher's run
+//! does not end. A pass, or the hooks' answer, drops a job whose run has not started when its lane
+//! no longer holds it, was asked to stop or left the lane count: the pending `before_job` future
+//! is dropped, `after_job` hears [`HookEnd::StoppedBeforeStart`], and then the job is cleared. A
+//! started job is settled as soon as a status change of its run leaves its lane without it.
 
 use anyhow::Result;
 use bongos_lanes_model::{
@@ -191,6 +192,16 @@ impl Dispatcher {
             task.detach();
         }
 
+        let state = self.parts().writer.read(read_state);
+        // A job dropped meanwhile is dropped whatever the hooks decided; a hook that refused is
+        // not owed an `after_job` either way.
+        if let Ok(state) = &state
+            && self.drops(state, &pending.lane, &pending.job.run_id)
+        {
+            self.drop_hooked(&pending.lane, cx);
+            return;
+        }
+
         if let BeforeJob::Refuse { reason } = decision {
             let cleared = Cleared::Wait(reason);
             if self.owes_after_job(&pending.lane) {
@@ -203,19 +214,12 @@ impl Dispatcher {
             return;
         }
 
-        let state = match self.parts().writer.read(read_state) {
-            Ok(state) => state,
-            Err(error) => {
-                log::error!("lanes: reading the state before a start: {error:#}");
-                let cleared = Cleared::Wait(WaitReason::Other(format!(
-                    "reading the state before a start: {error:#}"
-                )));
-                self.settle_then_clear(pending, HookEnd::StoppedBeforeStart, cleared, cx);
-                return;
-            }
-        };
-        if self.drops(&state, &pending.lane, &pending.job.run_id) {
-            self.drop_hooked(&pending.lane, cx);
+        if let Err(error) = state {
+            log::error!("lanes: reading the state before a start: {error:#}");
+            let cleared = Cleared::Wait(WaitReason::Other(format!(
+                "reading the state before a start: {error:#}"
+            )));
+            self.settle_then_clear(pending, HookEnd::StoppedBeforeStart, cleared, cx);
             return;
         }
         if let Err(error) = self
@@ -369,13 +373,31 @@ impl Dispatcher {
         }
     }
 
-    /// Whether a lane's `after_job` is still to resolve.
-    pub(crate) fn settling(&self) -> bool {
-        self.0
+    /// Settles the hooked job of `run` once its lane no longer holds it. It does not wait for a
+    /// pass, since none runs once the dispatcher's run ended.
+    fn settle_if_ended(&self, run: &str, cx: &mut App) {
+        let started = self
+            .0
             .hooked
             .borrow()
-            .values()
-            .any(|entry| matches!(entry.phase, HookPhase::After))
+            .iter()
+            .find_map(|(lane, entry)| match entry.phase {
+                HookPhase::Started(lifecycle) if entry.job.run_id == run => {
+                    Some((lane.clone(), lifecycle))
+                }
+                _ => None,
+            });
+        let Some((lane, lifecycle)) = started else {
+            return;
+        };
+        match self.parts().writer.read(read_state) {
+            Ok(state) if !lane_holds(&state, &lane, run) => {
+                self.settle(&lane, HookEnd::Lifecycle(lifecycle), None, cx);
+            }
+            Ok(_) => {}
+            // The next pass's sweep settles it.
+            Err(error) => log::error!("lanes: reading the state after run {run}: {error:#}"),
+        }
     }
 
     /// Records the state a hooked job's run reported.
@@ -472,6 +494,7 @@ impl Dispatcher {
             Ok(_) => {}
             Err(error) => log::error!("lanes: the change of run {run}: {error:#}"),
         }
+        self.settle_if_ended(run, cx);
         self.schedule(false, cx);
     }
 }
