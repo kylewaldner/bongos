@@ -9,6 +9,7 @@ pub mod graph;
 pub mod picker;
 pub mod problem;
 pub mod rank;
+pub mod stamp;
 pub mod state;
 pub mod table;
 
@@ -23,6 +24,7 @@ pub use picker::{
 };
 pub use problem::Problem;
 pub use rank::{Chains, RankKey, RankLevel, critical_path};
+pub use stamp::{GraphStamp, STAMP_SCHEMA, StampDiff, StampError, StampFile, StampTask};
 pub use state::{
     AdoptOutcome, AdoptRefusal, AdoptRequest, Author, Bound, CountPlan, JobEnd, JobEndInput,
     JobRecord, LaneId, LaneRecord, LaneState, LanesState, OwnerRecord, OwnerState, PinTarget,
@@ -43,6 +45,8 @@ mod graph_tests;
 mod picker_tests;
 #[cfg(test)]
 mod problem_tests;
+#[cfg(test)]
+mod stamp_tests;
 #[cfg(test)]
 mod state_tests;
 #[cfg(test)]

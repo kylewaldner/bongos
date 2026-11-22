@@ -2593,6 +2593,7 @@ dependencies = [
  "bongos_workflow_model",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.17",
  "toml 0.8.23",
  "toml_edit 0.22.27",
