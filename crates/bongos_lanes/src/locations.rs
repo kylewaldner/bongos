@@ -603,6 +603,15 @@ impl Resolver<'_> {
                         path.display()
                     ),
                 );
+            } else if checkout.starts_with(&path) {
+                self.problem(
+                    &item.name,
+                    format!(
+                        "{} resolves to {}, which holds the checkout of {name}",
+                        item.name,
+                        path.display()
+                    ),
+                );
             }
         }
     }

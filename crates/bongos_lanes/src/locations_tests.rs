@@ -375,6 +375,29 @@ fn a_relative_profile_location_or_one_in_a_checkout_is_a_problem() {
 }
 
 #[test]
+fn a_location_that_holds_a_checkout_is_a_problem() {
+    let base = Path::new("/w");
+    let table = table(BUILD_TABLE);
+    let profile = FakeProfile::default().at("build-1", "scratch", "/w/src/");
+    let problems = resolve_lane(
+        &inputs(base),
+        &table.locations,
+        binding_of(&table, &build(1)),
+        &build(1),
+        Some(&profile),
+    )
+    .unwrap_err();
+    let messages: Vec<&str> = problems
+        .iter()
+        .map(|problem| problem.message.as_str())
+        .collect();
+    assert_eq!(
+        messages,
+        ["scratch resolves to /w/src, which holds the checkout of app"]
+    );
+}
+
+#[test]
 fn two_lanes_on_one_directory_refuse_naming_the_pair() {
     let base = Path::new("/w");
     let table = table(BUILD_TABLE);
