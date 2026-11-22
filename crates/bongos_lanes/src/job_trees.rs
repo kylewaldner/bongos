@@ -4,7 +4,7 @@
 //! fresh tree, as a hand start does. The trees of a lane's current job are kept in
 //! [`CurrentJobTrees`] for the features that read them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -226,6 +226,20 @@ pub struct StartedTrees {
     /// The repositories whose second tree was leased at the start, so not reset now; the next
     /// job start resets it.
     pub second_leased: Vec<String>,
+    /// The repositories whose second tree this start reset, with its checks.
+    pub second_reset: Vec<String>,
+}
+
+impl StartedTrees {
+    /// The repositories whose second tree the lane may lend after this start: those it reset,
+    /// and those leased at that moment, which passed the same checks when they were lent.
+    pub fn second_checked(&self) -> BTreeSet<String> {
+        self.second_reset
+            .iter()
+            .chain(&self.second_leased)
+            .cloned()
+            .collect()
+    }
 }
 
 /// What a lane must never reset or clean, from the app's inputs: every primary checkout and the
@@ -283,6 +297,7 @@ where
     let mut trees: Option<JobTrees> = None;
     let mut saved = Vec::new();
     let mut second_leased = Vec::new();
+    let mut second_reset = Vec::new();
     for repository in std::iter::once(&start.primary).chain(&start.extra) {
         let request = |second: bool| ResetRequest {
             locations: start.locations.clone(),
@@ -325,6 +340,7 @@ where
                     reset_tree(git, &request(true))
                         .await
                         .map_err(|message| WaitReason::Environment(format!("{lane}: {message}")))?;
+                    second_reset.push(repository.name.clone());
                 }
             }
         }
@@ -338,5 +354,6 @@ where
         trees,
         saved,
         second_leased,
+        second_reset,
     })
 }

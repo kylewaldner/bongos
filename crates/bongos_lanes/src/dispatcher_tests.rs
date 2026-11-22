@@ -24,11 +24,13 @@ use crate::dispatcher::{
 };
 use crate::lane_control::RunEnd;
 use crate::store::{put_lane, put_owner, read_state};
+use crate::task_trees::LaneTreeSetup;
 use crate::test_support::{SINCE, tree, writer};
 
 const DISPATCHER_RUN: &str = "0190dispatcher";
 
-struct TestHost {
+pub(crate) struct TestHost {
+    project: String,
     writer: Arc<StateWriter>,
     table: String,
     graph: RefCell<PickGraph>,
@@ -40,6 +42,8 @@ struct TestHost {
     gates: RefCell<Vec<oneshot::Sender<Result<JobSetup, WaitReason>>>>,
     /// Job preparations fail with this.
     setup_error: RefCell<Option<WaitReason>>,
+    /// What every job's preparation offers of the lane's trees outside the job.
+    pub(crate) lane_trees: RefCell<Option<LaneTreeSetup>>,
 }
 
 /// A policy that answers every job with one commit decision.
@@ -53,7 +57,7 @@ impl JobDefinitionPolicy for FixedPolicy {
 
 impl LanesHost for TestHost {
     fn project_id(&self) -> String {
-        "project-1".to_string()
+        self.project.clone()
     }
 
     fn is_repository_project(&self) -> bool {
@@ -113,7 +117,10 @@ impl LanesHost for TestHost {
             return gpui::Task::ready(Err(reason));
         }
         if !self.gated.get() {
-            return gpui::Task::ready(Ok(JobSetup::default()));
+            return gpui::Task::ready(Ok(JobSetup {
+                lane_trees: self.lane_trees.borrow().clone(),
+                ..JobSetup::default()
+            }));
         }
         let (sender, receiver) = oneshot::channel();
         self.gates.borrow_mut().push(sender);
@@ -137,7 +144,7 @@ type Observer = Box<dyn Fn(&WorkflowEvent, &mut App)>;
 
 /// The run engine of the tests: it records every start with the lanes state at that moment and
 /// keeps each run's status, which the test changes.
-struct FakeEngine {
+pub(crate) struct FakeEngine {
     writer: Arc<StateWriter>,
     /// Every job start, in order, with the lanes state the store held when it was asked.
     jobs: RefCell<Vec<(StartRequest, LanesState)>>,
@@ -215,7 +222,7 @@ impl FakeEngine {
     }
 
     /// The task of each job start, in order.
-    fn job_tasks(&self) -> Vec<String> {
+    pub(crate) fn job_tasks(&self) -> Vec<String> {
         self.jobs
             .borrow()
             .iter()
@@ -224,19 +231,34 @@ impl FakeEngine {
     }
 }
 
-struct Harness {
+pub(crate) struct Harness {
     _root: TempDir,
-    writer: Arc<StateWriter>,
-    host: Rc<TestHost>,
-    engine: Rc<FakeEngine>,
+    pub(crate) writer: Arc<StateWriter>,
+    pub(crate) host: Rc<TestHost>,
+    pub(crate) engine: Rc<FakeEngine>,
     lanes: Lanes,
 }
 
-fn harness(table: &str, graph: PickGraph, limits: &[(&str, u32)]) -> Harness {
+pub(crate) fn harness(table: &str, graph: PickGraph, limits: &[(&str, u32)]) -> Harness {
     harness_with(table, graph, limits, Rc::new(VerifiedCommitPolicy))
 }
 
+/// A harness of the project `project`, with its own store.
+pub(crate) fn harness_in(project: &str, table: &str, graph: PickGraph) -> Harness {
+    harness_of(project, table, graph, &[], Rc::new(VerifiedCommitPolicy))
+}
+
 fn harness_with(
+    table: &str,
+    graph: PickGraph,
+    limits: &[(&str, u32)],
+    policy: Rc<dyn JobDefinitionPolicy>,
+) -> Harness {
+    harness_of("project-1", table, graph, limits, policy)
+}
+
+fn harness_of(
+    project: &str,
     table: &str,
     graph: PickGraph,
     limits: &[(&str, u32)],
@@ -248,6 +270,7 @@ fn harness_with(
         .transact(|tx| tx.set_verified_commit("c1", Arc::new(tree(&[]))))
         .unwrap();
     let host = Rc::new(TestHost {
+        project: project.to_string(),
         writer: writer.clone(),
         table: format!("schema = 1\n{table}"),
         graph: RefCell::new(graph),
@@ -256,6 +279,7 @@ fn harness_with(
         gated: Cell::new(false),
         gates: RefCell::new(Vec::new()),
         setup_error: RefCell::new(None),
+        lane_trees: RefCell::new(None),
     });
     let engine = Rc::new(FakeEngine {
         writer: writer.clone(),
@@ -285,7 +309,7 @@ fn harness_with(
     }
 }
 
-fn start_request() -> StartLanes {
+pub(crate) fn start_request() -> StartLanes {
     StartLanes {
         bound: None,
         max_jobs: None,
@@ -294,7 +318,11 @@ fn start_request() -> StartLanes {
     }
 }
 
-async fn start(harness: &Harness, request: StartLanes, cx: &mut TestAppContext) -> LanesStarted {
+pub(crate) async fn start(
+    harness: &Harness,
+    request: StartLanes,
+    cx: &mut TestAppContext,
+) -> LanesStarted {
     let task = cx.update(|cx| harness.lanes.start(request, cx));
     let started = task.await.unwrap();
     cx.run_until_parked();
@@ -302,11 +330,11 @@ async fn start(harness: &Harness, request: StartLanes, cx: &mut TestAppContext) 
 }
 
 impl Harness {
-    fn state(&self) -> LanesState {
+    pub(crate) fn state(&self) -> LanesState {
         self.writer.read(read_state).unwrap()
     }
 
-    fn lane(&self, kind: &str, index: u32) -> bongos_lanes_model::LaneRecord {
+    pub(crate) fn lane(&self, kind: &str, index: u32) -> bongos_lanes_model::LaneRecord {
         self.state().lanes[&LaneId::new(kind, index)].clone()
     }
 
@@ -337,7 +365,7 @@ impl Harness {
 }
 
 /// A ready leaf whose open todo runs workflow `w`.
-fn leaf(id: &str) -> PickTask {
+pub(crate) fn leaf(id: &str) -> PickTask {
     let mut task = PickTask::leaf(id);
     task.open_todo = Some(OpenTodo {
         index: 0,
@@ -369,7 +397,7 @@ fn graph(tasks: Vec<PickTask>) -> PickGraph {
     PickGraph::new(top, tasks)
 }
 
-fn finish(tasks: &mut [PickTask], id: &str) {
+pub(crate) fn finish(tasks: &mut [PickTask], id: &str) {
     for task in tasks.iter_mut() {
         if task.id.0 == id {
             task.state = TaskState::Done;
@@ -383,7 +411,7 @@ fn finish(tasks: &mut [PickTask], id: &str) {
     }
 }
 
-fn builds(count: u32) -> String {
+pub(crate) fn builds(count: u32) -> String {
     format!("[[kind]]\nname = \"build\"\ncount = {count}\n")
 }
 
@@ -619,8 +647,11 @@ async fn two_lanes_freeing_at_once_take_one_of_two_tasks_sharing_a_tag(cx: &mut 
 
     assert_eq!(harness.engine.job_tasks(), ["p", "q", "t1"]);
     let state = harness.state();
-    assert_eq!(state.owners[&TaskId::new("p")].state, OwnerState::Done);
-    assert_eq!(state.owners[&TaskId::new("q")].state, OwnerState::Done);
+    // Both owners turned done and, with no checks owed under them, were cleared.
+    for task in ["p", "q"] {
+        assert!(!state.owners.contains_key(&TaskId::new(task)), "{task}");
+        assert_eq!(history_of(&harness, task), [crate::CLEARED_NO_CHECKS]);
+    }
     let running: Vec<_> = state
         .lanes
         .values()
@@ -905,7 +936,7 @@ async fn waiting_on_you_keeps_the_lane_and_a_cancel_pauses_it(cx: &mut TestAppCo
     assert_eq!(harness.engine.job_tasks(), ["a"]);
 }
 
-fn history_of(harness: &Harness, task: &str) -> Vec<String> {
+pub(crate) fn history_of(harness: &Harness, task: &str) -> Vec<String> {
     harness
         .writer
         .read(|read| read.task(task))
