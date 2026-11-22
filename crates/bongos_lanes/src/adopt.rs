@@ -205,8 +205,10 @@ fn finish(
     let state = parts.writer.read(read_state)?;
     let outcome = match bongos_lanes_model::adopt(&state, &model, checked.pin.as_ref()) {
         Ok(outcome) => outcome,
+        // The refusal stays in the chain, so the action can offer to confirm the drop.
         Err(refusal @ AdoptRefusal::UnreadableTree(_)) => {
-            bail!("{refusal} ({})", unreadable.unwrap_or_default())
+            let message = format!("{refusal} ({})", unreadable.unwrap_or_default());
+            return Err(anyhow::Error::new(refusal).context(message));
         }
         Err(refusal) => return Err(refusal.into()),
     };

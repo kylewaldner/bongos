@@ -237,17 +237,28 @@ impl LanesHost for TreeHost {
     }
 }
 
-struct TreeHarness {
+/// Lanes over a [`TreeHost`]; the action tests drive `lanes: adopt` over it too.
+pub(crate) struct TreeHarness {
     _root: TempDir,
     writer: Arc<StateWriter>,
     host: Rc<TreeHost>,
     engine: Rc<FakeEngine>,
-    lanes: Lanes,
+    pub(crate) lanes: Lanes,
     started: Option<LanesStarted>,
 }
 
 impl TreeHarness {
-    fn new() -> Self {
+    /// The working tree of `build-<index>`.
+    pub(crate) fn lane_tip(&self, index: u32) -> PathBuf {
+        self.host.tip(index)
+    }
+
+    /// The runs the engine cancelled.
+    pub(crate) fn cancelled(&self) -> Vec<String> {
+        self.engine.cancelled.borrow().clone()
+    }
+
+    pub(crate) fn new() -> Self {
         let root = TempDir::new().unwrap();
         let writer = writer(&root);
         writer
@@ -286,11 +297,11 @@ impl TreeHarness {
             .unwrap()
     }
 
-    fn state(&self) -> bongos_lanes_model::LanesState {
+    pub(crate) fn state(&self) -> bongos_lanes_model::LanesState {
         self.writer.read(read_state).unwrap()
     }
 
-    fn history(&self, task: &str) -> Vec<String> {
+    pub(crate) fn history(&self, task: &str) -> Vec<String> {
         self.writer
             .read(|read| read.task(task))
             .unwrap()
@@ -327,7 +338,7 @@ impl TreeHarness {
     }
 
     /// `build-1` ran `a` in its tree, left work there and failed; returns the run.
-    async fn halted(&mut self, cx: &mut TestAppContext, leave_work: bool) -> String {
+    pub(crate) async fn halted(&mut self, cx: &mut TestAppContext, leave_work: bool) -> String {
         self.start(cx).await;
         let run = self.job_run(1);
         let tip = self.host.tip(1);

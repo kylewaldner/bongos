@@ -1230,7 +1230,7 @@ async fn a_start_is_skipped_when_the_lane_no_longer_holds_the_run(cx: &mut TestA
 mod lane_control_tests;
 
 #[path = "adopt_tests.rs"]
-mod adopt_tests;
+pub(crate) mod adopt_tests;
 
 #[path = "counts_tests.rs"]
 mod counts_tests;

@@ -36,6 +36,7 @@ workspace.workspace = true
 
 [dev-dependencies]
 bongos_work_model = { workspace = true, features = ["gpui", "test-support"] }
+editor.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 project = { workspace = true, features = ["test-support"] }
 release_channel.workspace = true

@@ -43,8 +43,10 @@ pub use accept_graph::{
     stamp_path,
 };
 pub use actions::{
-    AdoptArgs, AdoptPrompt, ENGINE_HOST_MESSAGE, LanesToast, OFF_MESSAGE, ONE_PROJECT_MESSAGE,
-    accepted_message, action_types, adopt_as_person, adopt_prompt, init_palette, lanes, register,
+    AdoptArgs, AdoptPrompt, DROP_CHOICES, ENGINE_HOST_MESSAGE, LanesToast,
+    NOTHING_TO_ADOPT_MESSAGE, OFF_MESSAGE, ONE_PROJECT_MESSAGE, WindowLanes, accepted_message,
+    action_types, adopt_as_person, adopt_prompt, adoptable_tasks, adopted_message, init_palette,
+    lanes, register,
 };
 pub use adopt::{AdoptRequest, Adopted, LeftWork};
 pub use bongos_lanes_model::{EnvEdit, Problem};

@@ -4,20 +4,20 @@
 //!
 //! `lanes: accept graph` runs here, in the writer process: it records the person who pressed the
 //! key from the action and lands the graph stamp as that person. `lanes: adopt` records its
-//! author the same way; [`adopt_as_person`] takes the arguments the minibuffer collected
-//! ([`adopt_prompt`] says what it offers) and runs the adopt.
+//! author the same way: it asks for a stopped or halted task, one of the free lanes
+//! ([`adopt_prompt`]) and the reason, then runs [`adopt_as_person`] on the lanes this window
+//! reaches ([`WindowLanes`]).
 
 use std::any::TypeId;
+use std::rc::Rc;
 
 use anyhow::Result;
-use bongos_lanes_model::{Author, LaneId, LaneState, LanesState, TaskId};
+use bongos_lanes_model::{AdoptRefusal, Author, LaneId, LaneState, LanesState, OwnerState, TaskId};
 use bongos_project_repo::ProjectRepositorySettings;
 use bongos_work_model::PersonAtKeyboard;
 use bongos_work_model::commands::Context as WorkContext;
 use command_palette_hooks::CommandPaletteFilter;
-#[cfg(test)]
-use gpui::Global;
-use gpui::{App, Context, Task, Window};
+use gpui::{App, Context, Global, Task, Window};
 use settings::{Settings as _, SettingsStore};
 use workspace::notifications::NotificationId;
 use workspace::{Toast, Workspace};
@@ -26,6 +26,7 @@ use crate::LanesSettings;
 use crate::accept_graph::{Accepted, accept_graph};
 use crate::adopt::{AdoptRequest, Adopted};
 use crate::dispatcher::Lanes;
+use crate::store::read_state;
 
 pub mod lanes {
     use gpui::actions;
@@ -236,6 +237,252 @@ pub fn adopt_as_person(
     lanes.adopt(request, cx)
 }
 
+/// The lanes this window reaches, when it reaches them. Without them, `lanes: adopt` says the
+/// lanes run in the engine host.
+#[derive(Default)]
+pub struct WindowLanes(pub Option<Rc<Lanes>>);
+
+impl Global for WindowLanes {}
+
+/// The choices of the last list `lanes: adopt` opened, for tests.
+#[cfg(test)]
+pub(crate) struct LastChoices(pub Vec<String>);
+
+#[cfg(test)]
+impl Global for LastChoices {}
+
+/// The last adopt `lanes: adopt` started, until its result is shown, for tests to wait on.
+#[cfg(test)]
+pub(crate) struct PendingAdopt(pub Option<Task<()>>);
+
+#[cfg(test)]
+impl Global for PendingAdopt {}
+
+/// The toast of `lanes: adopt` with no stopped or halted task.
+pub const NOTHING_TO_ADOPT_MESSAGE: &str = "No stopped or halted task to adopt";
+
+/// The choices of the drop confirmation of `lanes: adopt`; the second confirms.
+pub const DROP_CHOICES: [&str; 2] = ["Keep the work: do not adopt", "Drop the work and adopt"];
+
+/// The tasks `lanes: adopt` offers: the stopped and halted ones, in task order.
+pub fn adoptable_tasks(state: &LanesState) -> Vec<TaskId> {
+    state
+        .owners
+        .iter()
+        .filter(|(_, owner)| matches!(owner.state, OwnerState::Stopped | OwnerState::Halted))
+        .map(|(task, _)| task.clone())
+        .collect()
+}
+
+/// The toast of an adopt: what moved, or the refusal.
+pub fn adopted_message(result: &Result<Adopted>) -> String {
+    match result {
+        Ok(adopted) => {
+            let mut message = match &adopted.from {
+                Some(from) => format!("{} adopted by {} from {from}", adopted.task, adopted.lane),
+                None => format!("{} adopted by {}", adopted.task, adopted.lane),
+            };
+            if adopted.dropped_work {
+                message.push_str("; the unreadable old work was dropped");
+            }
+            message
+        }
+        Err(error) => format!("{error:#}"),
+    }
+}
+
+fn pick(
+    workspace: &mut Workspace,
+    placeholder: String,
+    choices: Vec<String>,
+    then: bongos_work::Then<usize>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    #[cfg(test)]
+    cx.set_global(LastChoices(choices.clone()));
+    bongos_work::pick(workspace, placeholder, choices, 0, then, window, cx);
+}
+
+fn read_lanes_state(
+    lanes: &Lanes,
+    workspace: &mut Workspace,
+    cx: &mut Context<Workspace>,
+) -> Option<LanesState> {
+    match lanes.parts.writer.read(read_state) {
+        Ok(state) => Some(state),
+        Err(error) => {
+            show_toast(
+                workspace,
+                &format!("The lanes cannot be read: {error:#}"),
+                cx,
+            );
+            None
+        }
+    }
+}
+
+/// `lanes: adopt`: asks for the task, one of its free lanes and the reason, then adopts as the
+/// person who pressed the key.
+fn adopt_action(
+    workspace: &mut Workspace,
+    _: &lanes::Adopt,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if !LanesSettings::get_global(cx).enabled {
+        show_toast(workspace, OFF_MESSAGE, cx);
+        return;
+    }
+    let Some(lanes) = cx
+        .try_global::<WindowLanes>()
+        .and_then(|window_lanes| window_lanes.0.clone())
+    else {
+        show_toast(workspace, ENGINE_HOST_MESSAGE, cx);
+        return;
+    };
+    let Some(state) = read_lanes_state(&lanes, workspace, cx) else {
+        return;
+    };
+    let tasks = adoptable_tasks(&state);
+    if tasks.is_empty() {
+        show_toast(workspace, NOTHING_TO_ADOPT_MESSAGE, cx);
+        return;
+    }
+    let labels = tasks.iter().map(ToString::to_string).collect();
+    let then = Box::new(
+        move |index: usize,
+              workspace: &mut Workspace,
+              window: &mut Window,
+              cx: &mut Context<Workspace>| {
+            if let Some(task) = tasks.get(index) {
+                ask_lane(lanes, task.clone(), workspace, window, cx);
+            }
+        },
+    );
+    pick(
+        workspace,
+        "Adopt task".to_string(),
+        labels,
+        then,
+        window,
+        cx,
+    );
+}
+
+fn ask_lane(
+    lanes: Rc<Lanes>,
+    task: TaskId,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(state) = read_lanes_state(&lanes, workspace, cx) else {
+        return;
+    };
+    let prompt = adopt_prompt(&state, task);
+    if prompt.lanes.is_empty() {
+        let message = format!("No lane is free to adopt {}", prompt.task);
+        show_toast(workspace, &message, cx);
+        return;
+    }
+    let labels = prompt.lanes.iter().map(ToString::to_string).collect();
+    let placeholder = prompt
+        .lane_prompt
+        .trim_end()
+        .trim_end_matches(':')
+        .to_string();
+    let then = Box::new(
+        move |index: usize,
+              workspace: &mut Workspace,
+              window: &mut Window,
+              cx: &mut Context<Workspace>| {
+            let Some(lane) = prompt.lanes.get(index).cloned() else {
+                return;
+            };
+            let title = prompt
+                .reason_prompt
+                .trim_end()
+                .trim_end_matches(':')
+                .to_string();
+            let task = prompt.task.clone();
+            let then = Box::new(
+                move |reason: String,
+                      workspace: &mut Workspace,
+                      window: &mut Window,
+                      cx: &mut Context<Workspace>| {
+                    let args = AdoptArgs {
+                        task,
+                        lane,
+                        reason,
+                        confirm_drop: false,
+                    };
+                    run_adopt(lanes, args, workspace, window, cx);
+                },
+            );
+            bongos_work::ask(workspace, title, "", false, then, window, cx);
+        },
+    );
+    pick(workspace, placeholder, labels, then, window, cx);
+}
+
+/// Runs the adopt as the person at the keyboard and shows its result. A tree that cannot be read
+/// asks whether to drop its work, and a confirmed drop runs the adopt again with `confirm_drop`.
+fn run_adopt(
+    lanes: Rc<Lanes>,
+    args: AdoptArgs,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if args.reason.trim().is_empty() {
+        show_toast(workspace, &AdoptRefusal::BlankReason.to_string(), cx);
+        return;
+    }
+    let ctx = WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx));
+    let adopting = adopt_as_person(&lanes, args.clone(), &ctx, cx);
+    let showing = cx.spawn_in(window, async move |workspace, cx| {
+        let result = adopting.await;
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                let unreadable = !args.confirm_drop
+                    && result.as_ref().err().is_some_and(|error| {
+                        matches!(
+                            error.downcast_ref::<AdoptRefusal>(),
+                            Some(AdoptRefusal::UnreadableTree(_))
+                        )
+                    });
+                if !unreadable {
+                    show_toast(workspace, &adopted_message(&result), cx);
+                    return;
+                }
+                let placeholder = adopted_message(&result);
+                let choices = DROP_CHOICES.iter().map(ToString::to_string).collect();
+                let then = Box::new(
+                    move |index: usize,
+                          workspace: &mut Workspace,
+                          window: &mut Window,
+                          cx: &mut Context<Workspace>| {
+                        if index == 1 {
+                            let args = AdoptArgs {
+                                confirm_drop: true,
+                                ..args
+                            };
+                            run_adopt(lanes, args, workspace, window, cx);
+                        }
+                    },
+                );
+                pick(workspace, placeholder, choices, then, window, cx);
+            })
+            .ok();
+    });
+    // The adopt runs git, which a test waits on outside the executor.
+    #[cfg(test)]
+    cx.set_global(PendingAdopt(Some(showing)));
+    #[cfg(not(test))]
+    showing.detach();
+}
+
 /// Registers the handlers of the actions of lanes on `workspace`. None is bound to a key.
 pub fn register(workspace: &mut Workspace) {
     register_action::<lanes::Show>(workspace);
@@ -245,9 +492,7 @@ pub fn register(workspace: &mut Workspace) {
     register_action::<lanes::Resume>(workspace);
     register_action::<lanes::DryRun>(workspace);
     register_action::<lanes::Pick>(workspace);
-    // The adopt runs where the lanes run, in the engine host, which this window does not reach
-    // yet; [`adopt_as_person`] is what it runs there.
-    register_action::<lanes::Adopt>(workspace);
+    workspace.register_action(adopt_action);
     workspace.register_action(accept_graph_action);
     register_action::<lanes::Dump>(workspace);
 }
