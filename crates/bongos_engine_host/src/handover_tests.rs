@@ -1026,6 +1026,84 @@ async fn a_stale_move_with_both_processes_dead_is_ignored(cx: &mut TestAppContex
     drop(host);
 }
 
+// The window and the host both killed mid-handover: the next opener clears the stale move,
+// takes the writer and starts its writer participants, where the startup recovery runs (the
+// lanes register theirs). A second opener after the same crash attaches to it as a client and
+// recovers nothing itself.
+#[gpui::test]
+async fn after_both_die_mid_handover_one_opener_clears_the_move_and_recovers(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let location = fixture.location().clone();
+    let id = location.id.clone();
+    futures::executor::block_on(fixture.repo.release_writer(LONG)).unwrap();
+    write_host_file(
+        &location,
+        &HostInfo {
+            pid: dead_pid(20),
+            start_time: Some(3),
+            socket: None,
+            bongos_version: VERSION.to_string(),
+            mode: HostMode::Window,
+            started: chrono::Utc::now(),
+            moving: Some(Moving {
+                to_pid: dead_pid(21),
+                to_start_time: Some(4),
+            }),
+        },
+    )
+    .unwrap();
+    let recovered = Rc::new(RefCell::new(Vec::new()));
+    FakeParticipant::register("recovery", &recovered, None, None, cx);
+
+    let hooks = StateApplyHooks::new();
+    let opened =
+        open_state_with_hooks(&location, &hooks, options_as(&fixture, 1), cx.executor()).unwrap();
+    let OpenedState::Writer(writer) = opened else {
+        panic!("a stale move kept the first opener from the writer");
+    };
+    let repo = ProjectRepo::new(location.clone(), fixture.repo.git().clone())
+        .with_state(StateHandle::Writer(writer));
+    let host = cx
+        .update(|cx| WriterHost::start(repo, fixture.writer_options(true), cx))
+        .unwrap();
+    assert_eq!(read_host_file(&location).unwrap().moving, None);
+    assert_eq!(*recovered.borrow(), [format!("recovery started {id}")]);
+
+    let second_location = location;
+    let options = options_as(&fixture, 2);
+    let executor = cx.executor();
+    let (sender, opened) = mpsc::channel();
+    std::thread::spawn(move || {
+        let hooks = StateApplyHooks::new();
+        sender
+            .send(open_state_with_hooks(
+                &second_location,
+                &hooks,
+                options,
+                executor,
+            ))
+            .ok();
+    });
+    let mut result = None;
+    wait_for(cx, |_| {
+        if let Ok(opened) = opened.try_recv() {
+            result = Some(opened);
+        }
+        result.is_some()
+    });
+    match result.unwrap().unwrap() {
+        OpenedState::Client { host: info, .. } => {
+            assert_eq!((info.pid, info.moving), (std::process::id(), None))
+        }
+        OpenedState::Writer(_) => panic!("two openers after the crash both took the writer"),
+    }
+    assert_eq!(recovered.borrow().len(), 1, "only the writer recovered");
+    drop(host);
+}
+
 /// A writer participant that records what it is told in `log`, with how many nodes ran when it
 /// was drained. With a gate, its drain resolves only once the gate is opened.
 struct FakeParticipant {
