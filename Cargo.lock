@@ -2046,6 +2046,7 @@ dependencies = [
  "assets",
  "audio",
  "bongos_app",
+ "bongos_avy",
  "bongos_builder",
  "bongos_chat",
  "bongos_chat_model",
@@ -2224,6 +2225,25 @@ dependencies = [
  "settings",
  "settings_json",
  "tempfile",
+]
+
+[[package]]
+name = "bongos_avy"
+version = "0.1.0"
+dependencies = [
+ "bongos_avy_model",
+ "bongos_emacs",
+ "bongos_window",
+ "command_palette_hooks",
+ "editor",
+ "gpui",
+ "language",
+ "multi_buffer",
+ "project",
+ "theme",
+ "theme_settings",
+ "ui",
+ "workspace",
 ]
 
 [[package]]
