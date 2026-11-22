@@ -80,8 +80,9 @@ pub fn init(cx: &mut App) {
 /// Starts a jump of `mode` from the primary cursor of `origin` over the editors visible in
 /// `workspace`'s window, replacing a jump already running there. Does nothing when no editor
 /// is visible. `on_done` runs once, after the labels are gone and the keys are released, when a
-/// label is typed or when the query has no candidate (in line mode that can happen at once,
-/// inside this call); it never runs for a cancel.
+/// label is typed or when the query has no candidate; it never runs for a cancel. It always runs
+/// after this call returns, even when the outcome is immediate (line mode with no line to jump
+/// to), so it is never called while `workspace` is being updated.
 ///
 /// Call it outside any update of `origin` or of the other visible editors: it reads their
 /// layout.
@@ -124,15 +125,7 @@ pub fn start(
     }));
     let editors: Vec<WeakEntity<Editor>> = panes.iter().map(|pane| pane.editor.clone()).collect();
     for editor in editors.iter().filter_map(WeakEntity::upgrade) {
-        let app: &mut App = cx;
-        subscriptions.push(app.subscribe(&editor, move |_, event: &EditorEvent, cx| {
-            if matches!(
-                event,
-                EditorEvent::ScrollPositionChanged { .. } | EditorEvent::BufferEdited
-            ) {
-                cancel_if(id, generation, cx);
-            }
-        }));
+        subscriptions.push(watch(&editor, id, generation, cx));
     }
 
     let key_mode = match mode {
@@ -157,7 +150,19 @@ pub fn start(
         fresh = visible::collect(mode, query, &panes, running.origin);
         fresh.len()
     });
-    apply(id, running, effect, fresh, window, cx);
+    apply(id, running, effect, fresh, true, window, cx);
+}
+
+/// Cancels the jump numbered `generation` of window `id` when `editor` scrolls or is edited.
+fn watch(editor: &Entity<Editor>, id: WindowId, generation: u64, cx: &mut App) -> Subscription {
+    cx.subscribe(editor, move |_, event: &EditorEvent, cx| {
+        if matches!(
+            event,
+            EditorEvent::ScrollPositionChanged { .. } | EditorEvent::BufferEdited
+        ) {
+            cancel_if(id, generation, cx);
+        }
+    })
 }
 
 /// Whether a jump runs in `window`.
@@ -252,7 +257,7 @@ fn feed(id: WindowId, mut running: Running, input: Input, window: &mut Window, c
         fresh = candidates(mode, query, origin, &workspace, window, cx);
         fresh.len()
     });
-    apply(id, running, effect, fresh, window, cx);
+    apply(id, running, effect, fresh, false, window, cx);
 }
 
 /// The candidates on screen now.
@@ -272,12 +277,14 @@ fn candidates(
 }
 
 /// Carries out `effect` for a jump taken out of the registry: puts it back while it runs, or ends
-/// it. `fresh` holds the candidates computed for the step, if any were.
+/// it. `fresh` holds the candidates computed for the step, if any were. `immediate` is set when
+/// the caller is `start`, which still holds the workspace: an outcome is then reported deferred.
 fn apply(
     id: WindowId,
     mut running: Running,
     effect: Effect,
     fresh: Vec<Candidate>,
+    immediate: bool,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -295,6 +302,11 @@ fn apply(
                     .any(|editor| editor.entity_id() == candidate.editor.entity_id())
                 {
                     running.editors.push(candidate.editor.clone());
+                    if let Some(editor) = candidate.editor.upgrade() {
+                        running
+                            .subscriptions
+                            .push(watch(&editor, id, running.generation, cx));
+                    }
                 }
             }
             running.labelled = fresh
@@ -326,7 +338,13 @@ fn apply(
         }
         Effect::NoMatches(query) => {
             let on_done = finish(running, cx);
-            on_done(Outcome::NoMatches(query), window, cx);
+            if immediate {
+                window.defer(cx, move |window, cx| {
+                    on_done(Outcome::NoMatches(query), window, cx)
+                });
+            } else {
+                on_done(Outcome::NoMatches(query), window, cx);
+            }
             return;
         }
         Effect::Cancel => {

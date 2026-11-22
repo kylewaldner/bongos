@@ -2,7 +2,9 @@ use std::{cell::RefCell, ops::Range, rc::Rc, time::Duration};
 
 use bongos_window::test_support::split_center;
 use editor::{Editor, EditorSettings, MultiBufferOffset, ToOffset as _};
-use gpui::{AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext};
+use gpui::{
+    AppContext as _, Entity, Focusable as _, KeyBinding, TestAppContext, VisualTestContext,
+};
 use settings::Settings as _;
 use workspace::Workspace;
 
@@ -216,6 +218,14 @@ async fn typing_a_label_jumps_to_its_candidate(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn ctrl_g_escape_and_other_keys_cancel_and_change_nothing(cx: &mut TestAppContext) {
     let mut f = fixture(cx).await;
+    // Bindings that change the buffer or the cursor, so a key replayed after a cancel would show.
+    f.cx.update(|_, cx| {
+        cx.bind_keys([
+            KeyBinding::new("ctrl-f", editor::actions::MoveRight, Some("Editor")),
+            KeyBinding::new("ctrl-d", editor::actions::Delete, Some("Editor")),
+            KeyBinding::new("escape", editor::actions::Cancel, Some("Editor")),
+        ]);
+    });
     // Scroll and select first, so a cancel that reset them would show.
     let (left, right) = (f.left.clone(), f.right.clone());
     f.cx.update(|window, cx| {
@@ -228,7 +238,7 @@ async fn ctrl_g_escape_and_other_keys_cancel_and_change_nothing(cx: &mut TestApp
     paint(f.cx);
     let before = f.state();
 
-    for key in ["ctrl-g", "escape", "ctrl-f"] {
+    for key in ["ctrl-g", "escape", "ctrl-f", "ctrl-d"] {
         // While reading.
         let log = f.start(Mode::CharTimer);
         f.keys("a");
@@ -268,12 +278,17 @@ async fn ctrl_g_escape_and_other_keys_cancel_and_change_nothing(cx: &mut TestApp
     assert!(!f.cx.update(|window, cx| cancel(window, cx)));
     assert_eq!(f.state(), before);
 
-    // Nothing is left listening: the next key reaches the focused buffer as usual.
+    // Nothing is left listening: the next keys reach the focused buffer as usual, and the
+    // bindings do change the state, so the checks above would have caught a replayed key.
     f.keys("z");
     assert_eq!(
         f.state()[0].0,
         format!("alpha zbeta\nxy{}", "\n".repeat(80))
     );
+    f.keys("ctrl-f");
+    assert_eq!(f.state()[0].1, vec![8..8]);
+    f.keys("ctrl-d");
+    assert_eq!(f.state()[0].0, format!("alpha zbta\nxy{}", "\n".repeat(80)));
 }
 
 #[gpui::test]
@@ -396,4 +411,123 @@ async fn no_candidates_reports_the_query(cx: &mut TestAppContext) {
     assert_eq!(f.label_count(), 0);
     assert!(matches!(&log.borrow()[..], [Outcome::NoMatches(query)] if query == "q"));
     assert_eq!(f.state(), before);
+}
+
+#[gpui::test]
+async fn line_mode_jumps_by_label_and_reports_no_lines_after_start_returns(
+    cx: &mut TestAppContext,
+) {
+    let mut f = fixture(cx).await;
+    let log = f.start(Mode::Line);
+    assert!(f.running());
+    assert!(f.label_count() > 0);
+    f.keys("a");
+    assert!(!f.running());
+    assert!(matches!(&log.borrow()[..], [Outcome::Jump(_)]));
+    drop(f);
+
+    // One line, and the cursor is on it: no candidate. The outcome is reported once `start`
+    // has returned, never inside the workspace update.
+    let (workspace, cx) = setup(cx).await;
+    let editor = cx.update(|window, cx| {
+        let center = split_center(&workspace, 1, window, cx);
+        let editor = add_text_editor(&workspace, &center[0], "only", window, cx);
+        move_cursor(&editor, 0, window, cx);
+        window.focus(&editor.focus_handle(cx), cx);
+        editor
+    });
+    paint(cx);
+    let log = Log::default();
+    let recorded = log.clone();
+    let seen_in_start = Rc::new(RefCell::new(None));
+    let seen = seen_in_start.clone();
+    cx.update(|window, cx| {
+        let handle = workspace.clone();
+        workspace.update(cx, |workspace, cx| {
+            start(
+                Mode::Line,
+                editor,
+                workspace,
+                window,
+                cx,
+                move |outcome, _, cx| {
+                    // Reading the workspace panics while it is being updated.
+                    handle.read(cx);
+                    recorded.borrow_mut().push(outcome);
+                },
+            );
+            *seen.borrow_mut() = Some(log.borrow().len());
+        })
+    });
+    cx.run_until_parked();
+    assert_eq!(*seen_in_start.borrow(), Some(0));
+    assert!(matches!(&log.borrow()[..], [Outcome::NoMatches(query)] if query.is_empty()));
+    assert!(!cx.update(|window, cx| is_running(window, cx)));
+}
+
+#[gpui::test]
+async fn the_query_is_echoed(cx: &mut TestAppContext) {
+    let echoed = Rc::new(RefCell::new(Vec::<String>::new()));
+    let mut f = fixture(cx).await;
+    let messages = echoed.clone();
+    f.cx.update(|_, cx| {
+        cx.default_global::<workspace::MinibufferRouting>()
+            .set_message_hook(Some(Rc::new(move |_, _, text, _| {
+                messages.borrow_mut().push(text.to_string());
+                true
+            })));
+    });
+    let _log = f.start(Mode::CharTimer);
+    f.keys("a");
+    f.keys("l");
+    assert_eq!(echoed.borrow().last().map(String::as_str), Some("char: al"));
+    f.keys("backspace");
+    assert_eq!(echoed.borrow().last().map(String::as_str), Some("char: a"));
+}
+
+#[gpui::test]
+async fn a_jump_in_another_window_is_independent(cx: &mut TestAppContext) {
+    let mut other_app = cx.clone();
+    let mut f = fixture(cx).await;
+    let (other, other_cx) = setup(&mut other_app).await;
+    let other_editor = other_cx.update(|window, cx| {
+        let center = split_center(&other, 1, window, cx);
+        let editor = add_text_editor(&other, &center[0], "alpha beta", window, cx);
+        window.focus(&editor.focus_handle(cx), cx);
+        editor
+    });
+    paint(other_cx);
+    // Both windows exist before either jump starts: a new window deactivates the first.
+    let log = f.start(Mode::CharTimer);
+    f.keys("a enter");
+    // The first window's jump is not the other's.
+    assert!(!other_cx.update(|window, cx| is_running(window, cx)));
+    assert!(!other_cx.update(|window, cx| cancel(window, cx)));
+    assert!(f.running());
+
+    let other_log = Log::default();
+    let recorded = other_log.clone();
+    other_cx.update(|window, cx| {
+        other.update(cx, |workspace, cx| {
+            start(
+                Mode::CharTimer,
+                other_editor,
+                workspace,
+                window,
+                cx,
+                move |outcome, _, _| recorded.borrow_mut().push(outcome),
+            );
+        })
+    });
+    other_cx.simulate_keystrokes("a");
+    assert!(f.running());
+    assert!(other_cx.update(|window, cx| is_running(window, cx)));
+    // Cancelling one leaves the other, and the first keeps its labels.
+    assert!(other_cx.update(|window, cx| cancel(window, cx)));
+    assert!(f.running());
+    assert_eq!(f.label_count(), 4);
+    f.keys("a");
+    assert!(!f.running());
+    assert_eq!(log.borrow().len(), 1);
+    assert!(other_log.borrow().is_empty());
 }
