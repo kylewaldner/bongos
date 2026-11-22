@@ -349,3 +349,62 @@ fn a_file_never_gets_the_implicit_kind() {
     assert_eq!(table.kind_names(), ["build"]);
     assert_eq!(table.kinds[0].count, 1);
 }
+
+#[test]
+fn locations_parse_shared_and_per_repository_roots() {
+    let shared = parse(
+        "schema = 1\n[locations]\nworktree_root = \"/mnt/fast/trees\"\ndirs_root = \"/mnt/fast/dirs\"\n",
+    )
+    .unwrap();
+    assert!(shared.diagnostics.is_empty(), "{:?}", shared.diagnostics);
+    assert_eq!(
+        shared.locations.worktree_root_of("app").unwrap().value,
+        "/mnt/fast/trees"
+    );
+    assert_eq!(shared.locations.worktree_root_of("app").unwrap().line, 3);
+    assert_eq!(
+        shared.locations.dirs_root.as_ref().unwrap().value,
+        "/mnt/fast/dirs"
+    );
+    assert_eq!(shared.locations.dirs_root.as_ref().unwrap().line, 4);
+
+    let per_repo = parse(
+        "schema = 1\n[locations]\nworktree_root.app = \"/mnt/app\"\nworktree_root.lib = \"/mnt/lib\"\n",
+    )
+    .unwrap();
+    assert!(
+        per_repo.diagnostics.is_empty(),
+        "{:?}",
+        per_repo.diagnostics
+    );
+    assert_eq!(
+        per_repo.locations.worktree_root_of("lib").unwrap().value,
+        "/mnt/lib"
+    );
+    assert_eq!(
+        per_repo.locations.worktree_root_of("app").unwrap().value,
+        "/mnt/app"
+    );
+    assert_eq!(per_repo.locations.worktree_root_of("web"), None);
+    assert_eq!(per_repo.locations.worktree_root_of("app").unwrap().line, 3);
+    assert_eq!(per_repo.locations.worktree_root_of("lib").unwrap().line, 4);
+
+    let none = parse("schema = 1\n").unwrap();
+    assert_eq!(none.locations, Default::default());
+    assert_eq!(LaneTable::implicit().locations, Default::default());
+}
+
+#[test]
+fn an_unknown_or_wrongly_typed_location_is_an_error() {
+    let table = parse("schema = 1\n[locations]\nbuild_root = \"/x\"\n").unwrap();
+    let messages: Vec<&str> = table
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect();
+    assert_eq!(messages, ["unknown key \"build_root\" in [locations]"]);
+    assert_eq!(table.diagnostics[0].line, 3);
+
+    let error = parse("schema = 1\n[locations]\nworktree_root = 3\n").unwrap_err();
+    assert_eq!(error.line, 3, "{error}");
+}

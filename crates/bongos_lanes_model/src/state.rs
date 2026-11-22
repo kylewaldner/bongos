@@ -164,6 +164,11 @@ pub enum WaitReason {
     /// The task is already done.
     Finished,
     Environment(String),
+    /// A job hook at `point` (such as `after_tree_created`) failed or holds the lane.
+    Hook {
+        point: String,
+        message: String,
+    },
     Failed(String),
     Other(String),
 }
@@ -209,6 +214,7 @@ impl fmt::Display for WaitReason {
             WaitReason::Held { reason } => write!(f, "held: {reason}"),
             WaitReason::Bound => f.write_str("outside the bound"),
             WaitReason::Finished => f.write_str("finished"),
+            WaitReason::Hook { point, message } => write!(f, "{point}: {message}"),
             WaitReason::Environment(text) | WaitReason::Failed(text) | WaitReason::Other(text) => {
                 f.write_str(text)
             }

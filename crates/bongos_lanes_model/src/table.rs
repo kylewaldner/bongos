@@ -24,7 +24,9 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "rules",
     "pin",
     "exempt",
+    "locations",
 ];
+const LOCATIONS_KEYS: &[&str] = &["worktree_root", "dirs_root"];
 const KIND_KEYS: &[&str] = &[
     "name",
     "count",
@@ -105,9 +107,35 @@ pub struct LaneTable {
     pub rules: Vec<DispatchRule>,
     pub pins: Vec<Pin>,
     pub exemptions: Vec<Exemption>,
+    /// The project's own default locations (`[locations]`); empty when the table has none.
+    pub locations: Locations,
     /// Problems found while parsing that still produced a table: unknown keys, bad counts.
     /// [`validate_lane_table`] reports them with its own.
     pub diagnostics: Vec<Diagnostic>,
+}
+
+/// The project's own default locations, `[locations]` in the lane table. They sit above the
+/// user's worktree settings and below the project profile.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Locations {
+    /// `worktree_root = "<template>"`: the root of every repository's lane trees, a worktree root
+    /// template with `{repo}` and `{slug}` as in the repository settings.
+    pub worktree_root: Option<Located<String>>,
+    /// `worktree_root = { <repo> = "<template>" }`: a root per repository.
+    pub repository_roots: Vec<(String, Located<String>)>,
+    /// `dirs_root = "<path>"`: named directories go to `<dirs_root>/<lane>/<name>`.
+    pub dirs_root: Option<Located<String>>,
+}
+
+impl Locations {
+    /// The worktree root template of `repo`: its own entry, else the shared one.
+    pub fn worktree_root_of(&self, repo: &str) -> Option<&Located<String>> {
+        self.repository_roots
+            .iter()
+            .find(|(name, _)| name == repo)
+            .map(|(_, root)| root)
+            .or(self.worktree_root.as_ref())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +233,7 @@ impl LaneTable {
             rules: Vec::new(),
             pins: Vec::new(),
             exemptions: Vec::new(),
+            locations: Locations::default(),
             diagnostics: Vec::new(),
         }
     }
@@ -237,6 +266,21 @@ struct RawTable {
     pin: Vec<Spanned<RawPin>>,
     #[serde(default)]
     exempt: Vec<Spanned<RawExempt>>,
+    locations: Option<RawLocations>,
+}
+
+#[derive(Deserialize)]
+struct RawLocations {
+    worktree_root: Option<RawRoot>,
+    dirs_root: Option<Spanned<String>>,
+}
+
+/// `worktree_root`: one template for every repository, or one per repository.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawRoot {
+    Shared(String),
+    PerRepository(std::collections::BTreeMap<String, String>),
 }
 
 #[derive(Deserialize)]
@@ -430,6 +474,11 @@ pub fn parse(text: &str) -> Result<LaneTable, ParseError> {
         })
         .collect();
 
+    let locations = raw
+        .locations
+        .map(|locations| convert_locations(locations, text, &lines))
+        .unwrap_or_default();
+
     Ok(LaneTable {
         schema: *raw.schema.get_ref(),
         owner,
@@ -439,8 +488,49 @@ pub fn parse(text: &str) -> Result<LaneTable, ParseError> {
         rules: rules.into_iter().map(|(_, rule)| rule).collect(),
         pins,
         exemptions,
+        locations,
         diagnostics,
     })
+}
+
+fn convert_locations(raw: RawLocations, text: &str, lines: &LineIndex) -> Locations {
+    let mut locations = Locations {
+        dirs_root: raw.dirs_root.map(|root| lines.located(root)),
+        ..Locations::default()
+    };
+    // The line of a key under `locations.worktree_root`, read with toml_edit: serde's spans do
+    // not reach into a value that is either a string or a table.
+    let document = toml_edit::ImDocument::parse(text).ok();
+    let root_item = document
+        .as_ref()
+        .and_then(|document| document.as_table().get("locations"))
+        .and_then(toml_edit::Item::as_table_like)
+        .and_then(|table| table.get_key_value("worktree_root"));
+    let line_of = |key: Option<&toml_edit::Key>| {
+        key.and_then(toml_edit::Key::span)
+            .map_or(1, |span| lines.line(span.start))
+    };
+    match raw.worktree_root {
+        None => {}
+        Some(RawRoot::Shared(value)) => {
+            let line = line_of(root_item.map(|(key, _)| key));
+            locations.worktree_root = Some(Located { line, value });
+        }
+        Some(RawRoot::PerRepository(roots)) => {
+            let table = root_item.and_then(|(_, item)| item.as_table_like());
+            locations.repository_roots = roots
+                .into_iter()
+                .map(|(repo, value)| {
+                    let key = table
+                        .and_then(|table| table.get_key_value(&repo))
+                        .map(|(key, _)| key);
+                    let line = line_of(key);
+                    (repo, Located { line, value })
+                })
+                .collect();
+        }
+    }
+    locations
 }
 
 fn non_negative(
@@ -672,6 +762,9 @@ fn collect_unknown_keys(
     }
     for exempt in children(root, "exempt") {
         check_keys(exempt, EXEMPT_KEYS, "[[exempt]]", false, lines, out);
+    }
+    for locations in children(root, "locations") {
+        check_keys(locations, LOCATIONS_KEYS, "[locations]", false, lines, out);
     }
     Ok(())
 }
