@@ -246,6 +246,12 @@ pub(crate) struct FakeEngine {
     cancelled: RefCell<Vec<String>>,
     /// Called at each cancel, before the run's status changes.
     on_cancel: RefCell<Option<Box<dyn Fn(&str)>>>,
+    /// The runs an interruption stopped, which wait for a resume.
+    pub(crate) interrupted: RefCell<BTreeSet<String>>,
+    /// Every resume, in order, with the run's interruption record the store held at that moment.
+    pub(crate) resumes: RefCell<Vec<(String, Option<crate::recovery::InterruptionRecord>)>>,
+    /// Every call that closes a run: `interrupt <run>`, `end <run> <note>`, in order.
+    pub(crate) closes: RefCell<Vec<String>>,
 }
 
 impl JobEngine for FakeEngine {
@@ -296,9 +302,31 @@ impl JobEngine for FakeEngine {
     }
 
     fn end_dispatcher(&self, run: &str, end: RunEnd, note: &str, _cx: &mut App) {
+        self.closes.borrow_mut().push(format!("end {run} {note}"));
         self.ends
             .borrow_mut()
             .push((run.to_string(), end, note.to_string()));
+    }
+
+    fn interrupted(&self, run: &str) -> bool {
+        self.interrupted.borrow().contains(run)
+    }
+
+    fn resume_run(&self, run: &str, cx: &mut App) -> Result<(), String> {
+        if !self.interrupted.borrow_mut().remove(run) {
+            return Err(format!("run {run} is not interrupted"));
+        }
+        let record = self
+            .writer
+            .read(|read| crate::recovery::read_interruption(read, run))
+            .unwrap();
+        self.resumes.borrow_mut().push((run.to_string(), record));
+        self.set(run, RunStatus::Running, cx);
+        Ok(())
+    }
+
+    fn interrupt_run(&self, run: &str, _cx: &mut App) {
+        self.closes.borrow_mut().push(format!("interrupt {run}"));
     }
 
     fn cancel_run(&self, run: &str, cx: &mut App) -> Result<(), String> {
@@ -367,6 +395,9 @@ fn fake_engine(writer: &Arc<StateWriter>, limits: &[(&str, u32)]) -> Rc<FakeEngi
         ends: RefCell::new(Vec::new()),
         cancelled: RefCell::new(Vec::new()),
         on_cancel: RefCell::new(None),
+        interrupted: RefCell::new(BTreeSet::new()),
+        resumes: RefCell::new(Vec::new()),
+        closes: RefCell::new(Vec::new()),
     })
 }
 
@@ -1370,3 +1401,6 @@ mod definition_policy_tests;
 
 #[path = "lane_waits_tests.rs"]
 mod lane_waits_tests;
+
+#[path = "recovery_tests.rs"]
+mod recovery_tests;
