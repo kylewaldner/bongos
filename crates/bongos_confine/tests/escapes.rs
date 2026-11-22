@@ -16,6 +16,14 @@
 //! host path, so each row's control runs exactly that (or plants the blocked file itself) to prove
 //! its markers really fire, and a neutered marker cannot pass a row.
 //!
+//! Besides the linked-tree rows, the import rows hand a private directory the job filled with
+//! hostile refs and object files to [`private_git::PrivateGit::import`] (they need no sandbox: a job may write
+//! its private directory anyway, so without `bwrap` the job runs unconfined); the crashed-pass row
+//! kills the process that prepared the tree and replays a lane's recovery and `reset --hard`; and
+//! the main-worktree rows confine a job in the primary checkout itself, then kill the process
+//! that owns its job root entry. The owner of a crash row is this test binary run again as a
+//! helper ([`owner_process_helper`]), so killing it is a real crash, never a sleep.
+//!
 //! Adding a row (step by step): write the job script, a `host_check` with the row's own
 //! assertions and a `control`, then add one line to the `escapes!` table at the bottom. The
 //! runner, [`run_row`], does the rest.
@@ -36,10 +44,10 @@ use std::{
 
 use bongos_confine::{
     ConfineError, Confinement, HostGit, JobDeclaration, JobKind, JobTree, TreeAccess, TreeGit,
-    private_git::{self, RecoverOutcome},
+    private_git::{self, ImportReport, RecoverOutcome},
     safe_git::{SafeGit, check_git_dir, linked_git_dir_from_record},
 };
-use futures::{FutureExt as _, future::LocalBoxFuture};
+use futures::{AsyncBufReadExt as _, FutureExt as _, StreamExt as _, future::LocalBoxFuture};
 use git::repository::{DiffType, GitRepository as _, RealGitRepository, RepoPath};
 use gpui::{BackgroundExecutor, TestAppContext};
 use sandbox::{CommandAndArgs, Sandbox, SandboxNetPolicy};
@@ -88,17 +96,37 @@ struct Escape {
 enum Setup {
     /// A job in the linked worktree `tree` with private git, run under the sandbox, then handed
     /// back.
-    LinkedTree { hand_back: HandBack },
+    LinkedTree {
+        hand_back: HandBack,
+        sandbox: SandboxUse,
+    },
     /// The build must refuse each declaration naming one of these declared directories; no job
     /// runs.
     Refused {
         declared_dirs: fn(&Fixture) -> Vec<PathBuf>,
     },
+    /// A job in `tree` with private git, prepared by an owner process that is killed while the
+    /// job runs; the job is killed too. Then a lane's job-start sequence: recovery, then status,
+    /// `reset --hard` and `clean -fd` through `SafeGit`.
+    CrashedPass,
+    /// A job in the primary checkout `main` (read-only git), with `prepare` run on the fixture
+    /// first. After the job ends and its root is retired, an owner process confines `main` again
+    /// and is killed, and the next registry start retires its root.
+    MainWorktree { prepare: fn(&Fixture) },
+}
+
+#[derive(Clone, Copy)]
+enum SandboxUse {
+    /// The row is skipped without `bwrap`.
+    Required,
+    /// Without `bwrap` the job runs unconfined: it attacks only what it may write anyway.
+    IfPresent,
 }
 
 #[derive(Clone, Copy)]
 enum HandBack {
-    Import,
+    /// Imports the job's work; the function checks the result.
+    Import(fn(&Fixture, &anyhow::Result<ImportReport>)),
     Abandon,
 }
 
@@ -106,12 +134,26 @@ enum HandBack {
 enum Phase {
     /// The job is blocked in the handshake.
     During,
-    /// The job exited and its confinement finished.
+    /// The job exited and its confinement finished (or, in a crash row, the owner and the job
+    /// were killed).
     AfterJob,
     /// The tree was imported or abandoned.
     AfterHandBack,
+    /// A crashed pass was recovered and the lane sequence ran.
+    AfterRecovery,
+    /// An owner confining the primary checkout was killed and the registry restarted.
+    AfterOwnerCrash,
     /// The build refused; no job ran.
     NoJob,
+}
+
+/// Where the row's job works.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Site {
+    /// The linked worktree `tree`.
+    Linked,
+    /// The primary checkout `main`.
+    Main,
 }
 
 /// What a row's `host_check` sees.
@@ -136,12 +178,16 @@ impl Outcome {
 /// What the shared host checks found besides the markers (which they assert themselves).
 #[derive(Debug)]
 struct HostReport {
-    /// [`linked_git_dir_from_record`] for the job tree.
+    /// [`linked_git_dir_from_record`] for the linked worktree `tree`.
     tree_record: Result<PathBuf, String>,
     /// `SafeGit` status, diff and blame in the job tree: run, or the refusal.
     safe_git_tree: Vec<Result<(), String>>,
     /// The editor's fresh open of the job tree's `.git`.
     editor_tree_open: Result<(), String>,
+    /// The paths the editor's repository for `tree`, opened before the job, reported in status.
+    open_tree_status: Result<Vec<String>, String>,
+    /// That repository's worktree diff.
+    open_tree_diff: Result<String, String>,
 }
 
 /// The repositories the editor opened before the job started, as a user has them open.
@@ -168,6 +214,11 @@ struct Fixture {
     tree_git_dir: PathBuf,
     scratch: PathBuf,
     markers: PathBuf,
+    /// The row's job roots registry file.
+    registry: PathBuf,
+    /// The commit every branch starts on.
+    initial: String,
+    site: Site,
     executor: BackgroundExecutor,
     editors: Editors,
 }
@@ -187,13 +238,18 @@ impl Fixture {
             fs::create_dir_all(dir).unwrap();
         }
         isolate_environment(&home);
-        util::job_roots::init(&base.join("registry").join("roots.json")).unwrap();
+        let registry = base.join("registry").join("roots.json");
+        util::job_roots::init(&registry).unwrap();
 
         git(&main, &["init", "-q", "-b", "main"]);
         fs::write(main.join(".gitattributes"), "a.txt filter=evil diff=evil\n").unwrap();
         fs::write(main.join("a.txt"), "initial\n").unwrap();
         git(&main, &["add", ".gitattributes", "a.txt"]);
         git(&main, &["commit", "-q", "-m", "initial"]);
+        let initial = String::from_utf8(git(&main, &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
         let tree = base.join("tree");
         let other = base.join("other");
         git_os(
@@ -241,9 +297,69 @@ impl Fixture {
             tree_git_dir,
             scratch,
             markers,
+            registry,
+            initial,
+            site: Site::Linked,
             executor,
             editors,
         }
+    }
+
+    /// The job's tree.
+    fn job_tree(&self) -> &Path {
+        match self.site {
+            Site::Linked => &self.tree,
+            Site::Main => &self.main,
+        }
+    }
+
+    /// The git directory bongos records for the job's tree.
+    fn job_git_dir(&self) -> &Path {
+        match self.site {
+            Site::Linked => &self.tree_git_dir,
+            Site::Main => &self.common,
+        }
+    }
+
+    /// The trusted git directories, as [`Fixture::host_git`] lists them.
+    fn host_git_dirs(&self) -> Vec<PathBuf> {
+        self.host_git().git_dirs
+    }
+
+    /// The shared repository's refs, each with its object id.
+    fn shared_refs(&self) -> BTreeMap<String, String> {
+        let output = git(
+            &self.main,
+            &["for-each-ref", "--format=%(refname) %(objectname)"],
+        );
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let (name, oid) = line.split_once(' ').unwrap();
+                (name.to_string(), oid.to_string())
+            })
+            .collect()
+    }
+
+    /// Asserts the shared repository still has exactly its three branches on the initial commit.
+    #[track_caller]
+    fn assert_shared_refs_unchanged(&self) {
+        let expected: BTreeMap<String, String> = ["feature", "main", "side"]
+            .into_iter()
+            .map(|branch| (format!("refs/heads/{branch}"), self.initial.clone()))
+            .collect();
+        assert_eq!(self.shared_refs(), expected);
+    }
+
+    /// Writes the hostile configuration (see [`PREAMBLE`]) into `config`.
+    fn write_hostile_config(&self, config: &Path) {
+        let mut command = util::command::new_command("sh");
+        command
+            .args(["-c", &format!("{PREAMBLE}\nhostile_config \"$1\""), "sh"])
+            .arg(config)
+            .env("MARKERS", &self.markers);
+        assert!(smol::block_on(command.status()).unwrap().success());
     }
 
     /// The trusted git directories, as bongos reads them before the job starts.
@@ -276,7 +392,7 @@ impl Fixture {
 
     /// Host git as bongos runs it in the job tree: the git directory from its own record.
     fn safe_git_in_tree(&self) -> SafeGit {
-        self.isolated(SafeGit::new(&self.tree_git_dir, &self.tree))
+        self.isolated(SafeGit::new(self.job_git_dir(), self.job_tree()))
     }
 
     fn isolated(&self, git: SafeGit) -> SafeGit {
@@ -325,6 +441,22 @@ impl Fixture {
         for name in found {
             fs::remove_file(self.markers.join(name)).unwrap();
         }
+    }
+}
+
+/// A program job in the primary checkout `main`, whose git is masked read-only.
+fn main_declaration(main: &Path, scratch: &Path) -> JobDeclaration {
+    JobDeclaration {
+        kind: JobKind::Program,
+        trees: vec![JobTree {
+            path: main.to_path_buf(),
+            access: TreeAccess::Writable,
+            git: TreeGit::ReadOnly,
+        }],
+        scratch: scratch.to_path_buf(),
+        declared_dirs: Vec::new(),
+        extra_writable: Vec::new(),
+        network: SandboxNetPolicy::Blocked,
     }
 }
 
@@ -521,6 +653,23 @@ async fn host_checks(fixture: &Fixture, phase: Phase) -> HostReport {
         }
     }
     let _ = editor_status_diff_blame(&editors.tree).await;
+    let open_tree_status = editors
+        .tree
+        .status(&[])
+        .await
+        .map(|status| {
+            status
+                .entries
+                .iter()
+                .map(|(path, _)| path.as_unix_str().to_string())
+                .collect()
+        })
+        .map_err(|error| format!("{error:#}"));
+    let open_tree_diff = editors
+        .tree
+        .diff(DiffType::HeadToWorktree)
+        .await
+        .map_err(|error| format!("{error:#}"));
     for checkout in [&fixture.main, &fixture.other] {
         let repository =
             open_editor(&checkout.join(".git"), &fixture.executor).unwrap_or_else(|error| {
@@ -533,7 +682,7 @@ async fn host_checks(fixture: &Fixture, phase: Phase) -> HostReport {
             result.unwrap();
         }
     }
-    let editor_tree_open = match open_editor(&fixture.tree.join(".git"), &fixture.executor) {
+    let editor_tree_open = match open_editor(&fixture.job_tree().join(".git"), &fixture.executor) {
         Ok(repository) => {
             assert!(
                 !util::job_roots::contains(&repository.git_dir)
@@ -552,6 +701,8 @@ async fn host_checks(fixture: &Fixture, phase: Phase) -> HostReport {
         tree_record,
         safe_git_tree,
         editor_tree_open,
+        open_tree_status,
+        open_tree_diff,
     }
 }
 
@@ -598,11 +749,12 @@ struct Job {
     log: PathBuf,
     reader: Option<JoinHandle<()>>,
     reaped: Arc<Mutex<bool>>,
-    _sandbox: Sandbox,
+    _sandbox: Option<Sandbox>,
 }
 
 impl Job {
-    fn start(fixture: &Fixture, mut sandbox: Sandbox, body: &str) -> Self {
+    /// Starts the job in the fixture's job tree, under `sandbox`, or unconfined without one.
+    fn start(fixture: &Fixture, mut sandbox: Option<Sandbox>, body: &str) -> Self {
         let handshake = fixture.base.join("handshake");
         fs::create_dir_all(&handshake).unwrap();
         let ready = handshake.join("ready");
@@ -627,6 +779,7 @@ impl Job {
             ("GIT_COMMITTER_NAME", "job".into()),
             ("GIT_COMMITTER_EMAIL", "job@localhost".into()),
             ("TREE", fixture.tree.display().to_string()),
+            ("MAIN", fixture.main.display().to_string()),
             ("SCRATCH", fixture.scratch.display().to_string()),
             ("COMMON", fixture.common.display().to_string()),
             ("OTHER_GIT_DIR", fixture.other_git_dir.display().to_string()),
@@ -641,18 +794,24 @@ impl Job {
                 .into_iter()
                 .map(|(key, value)| (key.to_string(), value))
                 .collect(),
-            cwd: Some(fixture.tree.clone()),
+            cwd: Some(fixture.job_tree().to_path_buf()),
         };
-        let wrapped = smol::block_on(sandbox.wrap(&command)).unwrap();
+        let (program, args, env) = match &mut sandbox {
+            Some(sandbox) => {
+                let wrapped = smol::block_on(sandbox.wrap(&command)).unwrap();
+                (wrapped.program, wrapped.args, wrapped.env)
+            }
+            None => (command.program, command.args, command.env),
+        };
         // The job's output goes to a file outside every job root, through inherited descriptors.
         let log = fixture.base.join("job.log");
         let log_file = fs::File::create(&log).unwrap();
-        let mut process = util::command::new_command(&wrapped.program);
+        let mut process = util::command::new_command(&program);
         process
-            .args(&wrapped.args)
+            .args(&args)
             .env_clear()
-            .envs(&wrapped.env)
-            .current_dir(&fixture.tree)
+            .envs(&env)
+            .current_dir(fixture.job_tree())
             .stdin(util::command::Stdio::null())
             .stdout(log_file.try_clone().unwrap())
             .stderr(log_file);
@@ -758,6 +917,16 @@ impl Job {
         }
     }
 
+    /// Kills the job, as a crash of everything running it would, and waits for it to exit.
+    fn kill_and_wait(mut self) {
+        self.kill();
+        match self.events.recv_timeout(HANG_GUARD) {
+            Ok(Event::Exited(_)) => {}
+            Ok(Event::Ready(_)) => self.fail("the job signaled twice"),
+            Err(error) => self.fail(&format!("the killed job did not exit: {error}")),
+        }
+    }
+
     /// Joins the reader thread, which has already sent its event.
     fn join_reader(&mut self) {
         if let Some(reader) = self.reader.take() {
@@ -820,19 +989,44 @@ async fn run_row(row: &Escape, cx: &mut TestAppContext) {
         return;
     }
     cx.executor().allow_parking();
+    let needs_bwrap = match &row.setup {
+        Setup::LinkedTree { sandbox, .. } => matches!(sandbox, SandboxUse::Required),
+        Setup::Refused { .. } => false,
+        Setup::CrashedPass | Setup::MainWorktree { .. } => true,
+    };
+    let bwrap = on_path("bwrap");
+    if needs_bwrap && !bwrap {
+        println!("skipped: bwrap not found ({})", row.name);
+        return;
+    }
     match &row.setup {
-        Setup::LinkedTree { hand_back } => {
-            if !on_path("bwrap") {
-                println!("skipped: bwrap not found ({})", row.name);
-                return;
+        Setup::LinkedTree { hand_back, .. } => {
+            if !bwrap {
+                println!("bwrap not found: the job runs unconfined ({})", row.name);
             }
-            run_linked_tree(row, *hand_back, cx).await;
+            run_linked_tree(row, *hand_back, bwrap, cx).await;
         }
         Setup::Refused { declared_dirs } => run_refused(row, *declared_dirs, cx).await,
+        Setup::CrashedPass => run_crashed_pass(row, cx).await,
+        Setup::MainWorktree { prepare } => run_main_worktree(row, *prepare, cx).await,
     }
 }
 
-async fn run_linked_tree(row: &Escape, hand_back: HandBack, cx: &mut TestAppContext) {
+/// The sandbox enforcing `confinement`, failing the row when `bwrap` is installed but cannot
+/// create it.
+fn sandbox_for(confinement: &Confinement, fixture: &Fixture) -> Sandbox {
+    let policy = confinement.sandbox_policy();
+    Sandbox::can_create(&policy, Some(fixture.job_tree()))
+        .unwrap_or_else(|error| panic!("bwrap is installed but cannot sandbox: {error}"));
+    Sandbox::new(policy).unwrap()
+}
+
+async fn run_linked_tree(
+    row: &Escape,
+    hand_back: HandBack,
+    sandboxed: bool,
+    cx: &mut TestAppContext,
+) {
     let fixture = Fixture::new(cx.executor());
     let original_dot_git = fs::read(fixture.tree.join(".git")).unwrap();
     let private = smol::block_on(private_git::prepare(
@@ -843,11 +1037,9 @@ async fn run_linked_tree(row: &Escape, hand_back: HandBack, cx: &mut TestAppCont
     .unwrap();
     let confinement =
         Confinement::build(&fixture.declaration(Vec::new()), &fixture.host_git()).unwrap();
-    let policy = confinement.sandbox_policy();
-    Sandbox::can_create(&policy, Some(&fixture.tree))
-        .unwrap_or_else(|error| panic!("bwrap is installed but cannot sandbox: {error}"));
+    let sandbox = sandboxed.then(|| sandbox_for(&confinement, &fixture));
 
-    let mut job = Job::start(&fixture, Sandbox::new(policy).unwrap(), row.job);
+    let mut job = Job::start(&fixture, sandbox, row.job);
     let attempts = job.wait_ready();
     println!("{}: the job reported {attempts:?}", row.name);
     check_phase(row, &fixture, &attempts, Phase::During).await;
@@ -860,10 +1052,12 @@ async fn run_linked_tree(row: &Escape, hand_back: HandBack, cx: &mut TestAppCont
 
     let linked_git_dir = private.linked_git_dir().to_path_buf();
     match hand_back {
-        HandBack::Import => {
+        HandBack::Import(check) => {
             let git = fixture.isolated(SafeGit::without_work_tree(&linked_git_dir));
-            let report = smol::block_on(private.import(&git)).unwrap();
-            assert!(report.refused.is_empty(), "{report:?}");
+            let result = smol::block_on(private.import(&git));
+            println!("{}: the import returned {result:?}", row.name);
+            fixture.assert_no_markers("the import");
+            check(&fixture, &result);
         }
         HandBack::Abandon => private.abandon().unwrap(),
     }
@@ -903,6 +1097,226 @@ async fn run_refused(
     check_phase(row, &fixture, &BTreeMap::new(), Phase::NoJob).await;
     (row.control)(&fixture).await;
     fixture.assert_no_markers("after the control");
+}
+
+async fn run_crashed_pass(row: &Escape, cx: &mut TestAppContext) {
+    let fixture = Fixture::new(cx.executor());
+    let original_dot_git = fs::read(fixture.tree.join(".git")).unwrap();
+    let owner = Owner::start(
+        &fixture,
+        OWNER_PREPARES,
+        &[
+            ("ESCAPE_TREE", &fixture.tree),
+            ("ESCAPE_LINKED_GIT_DIR", &fixture.tree_git_dir),
+            ("ESCAPE_SCRATCH", &fixture.scratch),
+        ],
+    );
+    assert!(fixture.tree_git_dir.join(private_git::MARKER).is_file());
+    let confinement =
+        Confinement::build(&fixture.declaration(Vec::new()), &fixture.host_git()).unwrap();
+    let mut job = Job::start(&fixture, Some(sandbox_for(&confinement, &fixture)), row.job);
+    let attempts = job.wait_ready();
+    println!("{}: the job reported {attempts:?}", row.name);
+    check_phase(row, &fixture, &attempts, Phase::During).await;
+
+    // The app dies mid-pass: its process, then the job it ran. The owner only prepares, so after
+    // the crash only private-git recovery is verified; the test process finishes the confinement
+    // itself, normally.
+    owner.crash();
+    job.kill_and_wait();
+    confinement.finish().unwrap();
+    check_phase(row, &fixture, &attempts, Phase::AfterJob).await;
+    (row.control)(&fixture).await;
+    fixture.assert_no_markers("after the control");
+
+    // A lane's job-start sequence in the tree: recovery, then git through `SafeGit` from the
+    // recorded git directory.
+    assert_eq!(
+        private_git::recover(&fixture.tree_git_dir).unwrap(),
+        RecoverOutcome::Recovered
+    );
+    assert_eq!(
+        private_git::recover(&fixture.tree_git_dir).unwrap(),
+        RecoverOutcome::NoMarker
+    );
+    assert_eq!(
+        fs::read(fixture.tree.join(".git")).unwrap(),
+        original_dot_git
+    );
+    let git = fixture.safe_git_in_tree();
+    let mut outputs = Vec::new();
+    for args in [
+        &["status", "--porcelain"][..],
+        &["reset", "-q", "--hard"][..],
+        &["clean", "-q", "-fd"][..],
+    ] {
+        let mut command = smol::block_on(git.command(args))
+            .unwrap_or_else(|error| panic!("SafeGit refused {args:?}: {error:#}"));
+        let output = smol::block_on(command.output()).unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        outputs.push(String::from_utf8_lossy(&output.stdout).into_owned());
+    }
+    // The status a lane saves sees the uncommitted work.
+    assert!(outputs[0].contains("a.txt"), "{}", outputs[0]);
+    assert!(outputs[0].contains("untracked.txt"), "{}", outputs[0]);
+    fixture.assert_no_markers("the lane sequence after recovery");
+    check_phase(row, &fixture, &attempts, Phase::AfterRecovery).await;
+}
+
+async fn run_main_worktree(row: &Escape, prepare: fn(&Fixture), cx: &mut TestAppContext) {
+    let mut fixture = Fixture::new(cx.executor());
+    fixture.site = Site::Main;
+    prepare(&fixture);
+    let declaration = main_declaration(&fixture.main, &fixture.scratch);
+    let confinement = Confinement::build(&declaration, &fixture.host_git()).unwrap();
+    assert!(confinement.requires_sandbox());
+    let mut job = Job::start(&fixture, Some(sandbox_for(&confinement, &fixture)), row.job);
+    let attempts = job.wait_ready();
+    println!("{}: the job reported {attempts:?}", row.name);
+    check_phase(row, &fixture, &attempts, Phase::During).await;
+    job.release_and_wait();
+    confinement.finish().unwrap();
+    check_phase(row, &fixture, &attempts, Phase::AfterJob).await;
+    (row.control)(&fixture).await;
+    fixture.assert_no_markers("after the control");
+
+    // Another process confines the checkout for a job and dies before finishing it; the next
+    // registry start (any process's) retires the root of the dead owner.
+    let git_dirs = std::env::join_paths(fixture.host_git_dirs()).unwrap();
+    let owner = Owner::start(
+        &fixture,
+        OWNER_CONFINES_MAIN,
+        &[
+            ("ESCAPE_REGISTRY", &fixture.registry),
+            ("ESCAPE_MAIN", &fixture.main),
+            ("ESCAPE_SCRATCH", &fixture.scratch),
+            ("ESCAPE_GIT_DIRS", Path::new(&git_dirs)),
+        ],
+    );
+    assert!(util::job_roots::contains(&fixture.main));
+    assert!(!util::job_roots::contains(&fixture.common));
+    owner.crash();
+    assert!(util::job_roots::contains(&fixture.main));
+    util::job_roots::init(&fixture.registry).unwrap();
+    assert!(!util::job_roots::contains(&fixture.main));
+    check_phase(row, &fixture, &attempts, Phase::AfterOwnerCrash).await;
+}
+
+/// The environment variable naming the role of [`owner_process_helper`].
+const OWNER_ROLE: &str = "BONGOS_ESCAPE_OWNER_ROLE";
+/// The helper prepares private git for `ESCAPE_TREE`.
+const OWNER_PREPARES: &str = "prepare";
+/// The helper confines a job in `ESCAPE_MAIN`, recording its root in `ESCAPE_REGISTRY`.
+const OWNER_CONFINES_MAIN: &str = "confine-main";
+/// The line the helper prints once it owns what it took.
+const OWNER_READY: &str = "escape owner ready";
+
+/// An owner process: this test binary run again as [`owner_process_helper`]. It takes a tree
+/// (private git) or a job root (a confinement) as its own, then blocks until it is killed.
+struct Owner {
+    child: util::command::Child,
+    pid: u32,
+}
+
+impl Owner {
+    fn start(fixture: &Fixture, role: &str, env: &[(&str, &Path)]) -> Self {
+        let log = fixture.base.join(format!("owner-{role}.log"));
+        let mut command = util::command::new_command(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "owner_process_helper",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(OWNER_ROLE, role)
+            .env("ESCAPE_HOME", &fixture.home)
+            .stdin(util::command::Stdio::piped())
+            .stdout(util::command::Stdio::piped())
+            .stderr(fs::File::create(&log).unwrap())
+            .kill_on_drop(true);
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let mut child = command.spawn().unwrap();
+        let pid = child.id();
+        let stdout = child.stdout.take().unwrap();
+        let (sender, ready) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut lines = futures::io::BufReader::new(stdout).lines();
+            let found = smol::block_on(async {
+                while let Some(Ok(line)) = lines.next().await {
+                    if line.contains(OWNER_READY) {
+                        return true;
+                    }
+                }
+                false
+            });
+            sender.send(found).ok();
+        });
+        match ready.recv_timeout(HANG_GUARD) {
+            Ok(true) => Self { child, pid },
+            outcome => {
+                child.kill().ok();
+                panic!(
+                    "the owner process ({role}) did not get ready ({outcome:?}):\n{}",
+                    fs::read_to_string(&log).unwrap_or_default()
+                );
+            }
+        }
+    }
+
+    /// Kills the owner and reaps it, so its pid is no longer a live owner.
+    fn crash(mut self) {
+        let start_time = util::job_roots::process_start_time(self.pid).unwrap();
+        self.child.kill().unwrap();
+        let status = smol::block_on(self.child.status()).unwrap();
+        assert!(!status.success(), "{status:?}");
+        assert!(!util::job_roots::process_alive(self.pid, start_time));
+    }
+}
+
+/// Not a row: the owner process of the crash rows (see [`Owner`]). Does nothing unless
+/// [`OWNER_ROLE`] is set.
+#[test]
+fn owner_process_helper() {
+    let Some(role) = std::env::var_os(OWNER_ROLE) else {
+        return;
+    };
+    let path = |name: &str| PathBuf::from(std::env::var_os(name).unwrap());
+    isolate_environment(&path("ESCAPE_HOME"));
+    match role.to_str() {
+        Some(OWNER_PREPARES) => {
+            let private = smol::block_on(private_git::prepare(
+                &path("ESCAPE_TREE"),
+                &path("ESCAPE_LINKED_GIT_DIR"),
+                &path("ESCAPE_SCRATCH"),
+            ))
+            .unwrap();
+            std::mem::forget(private);
+        }
+        Some(OWNER_CONFINES_MAIN) => {
+            util::job_roots::init(&path("ESCAPE_REGISTRY")).unwrap();
+            let host = HostGit {
+                git_dirs: std::env::split_paths(&path("ESCAPE_GIT_DIRS")).collect(),
+                records_dir: None,
+            };
+            let declaration = main_declaration(&path("ESCAPE_MAIN"), &path("ESCAPE_SCRATCH"));
+            let confinement = Confinement::build(&declaration, &host).unwrap();
+            std::mem::forget(confinement);
+        }
+        _ => panic!("unknown owner role {role:?}"),
+    }
+    println!("{OWNER_READY}");
+    io::stdout().flush().unwrap();
+    // Blocks until the test kills this process (or, should the test die first, its pipe closes).
+    let mut line = String::new();
+    io::stdin().read_line(&mut line).ok();
+    std::process::exit(1);
 }
 
 async fn check_phase(
@@ -1019,6 +1433,506 @@ fn private_config_control(fixture: &Fixture) -> LocalBoxFuture<'_, ()> {
     async move { fixture.assert_plain_git_fires(&fixture.tree, &[]) }.boxed_local()
 }
 
+/// The hand-back of a job that imports nothing it may not.
+fn imported_cleanly(_: &Fixture, result: &anyhow::Result<ImportReport>) {
+    let report = result.as_ref().unwrap();
+    assert!(report.refused.is_empty(), "{report:?}");
+}
+
+/// Asserts the import failed on the private object directory, naming one of `names`, and that
+/// no ref moved.
+#[track_caller]
+fn assert_objects_refused(
+    fixture: &Fixture,
+    result: &anyhow::Result<ImportReport>,
+    names: &[&str],
+) {
+    let error = match result {
+        Ok(report) => panic!("the import accepted the private objects: {report:?}"),
+        Err(error) => format!("{error:#}"),
+    };
+    assert!(
+        error.contains("refusing the private object directory")
+            && names.iter().any(|name| error.contains(name)),
+        "{error}"
+    );
+    assert!(error.contains("nothing was imported"), "{error}");
+    fixture.assert_shared_refs_unchanged();
+    assert!(fixture.scratch.join(private_git::PRIVATE_DIR).is_dir());
+}
+
+// Alternates and symlinks planted in the private directory: the job adds an object directory of
+// its own to the private alternates and links entries at host files. The import refuses
+// the object directory (nothing moves), and the private directory is later removed without
+// following any link.
+
+// The import rows write the hostile private configuration last: without a sandbox the job's own
+// git would run its commands and create the markers itself.
+
+const PRIVATE_LINKS_JOB: &str = r#"
+PRIVATE=$(git rev-parse --absolute-git-dir)
+attempt "commit" 'git commit -q --allow-empty -m "job work"'
+attempt "alternates" 'mkdir "$SCRATCH/evil-objects" && printf "%s\n" "$SCRATCH/evil-objects" >> "$PRIVATE/objects/info/alternates"'
+attempt "symlinked checkout" 'ln -s "$MAIN" "$PRIVATE/checkout"'
+attempt "symlinked shared objects" 'ln -s "$COMMON/objects" "$PRIVATE/shared-objects"'
+attempt "private config" 'hostile_config "$PRIVATE/config"'
+"#;
+
+fn private_links_check(fixture: &Fixture, outcome: &Outcome, phase: Phase) {
+    for attempt in [
+        "private config",
+        "commit",
+        "alternates",
+        "symlinked checkout",
+        "symlinked shared objects",
+    ] {
+        outcome.expect(attempt, "written");
+    }
+    fixture.assert_shared_refs_unchanged();
+    for result in &outcome.report.safe_git_tree {
+        assert!(
+            result.is_ok(),
+            "SafeGit in the job tree ({phase:?}): {result:?}"
+        );
+    }
+    let alternates = fs::read_to_string(fixture.common.join("objects/info/alternates"));
+    assert!(alternates.is_err(), "the shared alternates: {alternates:?}");
+}
+
+fn private_links_import(fixture: &Fixture, result: &anyhow::Result<ImportReport>) {
+    assert_objects_refused(fixture, result, &["alternates"]);
+    let private = fixture.scratch.join(private_git::PRIVATE_DIR);
+    assert!(
+        fs::symlink_metadata(private.join("checkout"))
+            .unwrap()
+            .is_symlink()
+    );
+
+    // The next preparation replaces the kept directory, and abandoning it removes it; neither
+    // follows a link into the host's files.
+    let again = smol::block_on(private_git::prepare(
+        &fixture.tree,
+        &fixture.tree_git_dir,
+        &fixture.scratch,
+    ))
+    .unwrap();
+    assert!(fs::symlink_metadata(private.join("checkout")).is_err());
+    assert_eq!(
+        fs::read_to_string(private.join("objects/info/alternates")).unwrap(),
+        format!("{}\n", fixture.common.join("objects").display())
+    );
+    again.abandon().unwrap();
+    assert!(!private.exists());
+    assert_eq!(
+        fs::read_to_string(fixture.main.join(".gitattributes")).unwrap(),
+        "a.txt filter=evil diff=evil\n"
+    );
+    assert!(fixture.common.join("refs/heads/main").is_file());
+    git(&fixture.main, &["fsck", "--no-progress", "--strict"]);
+    fixture.assert_shared_refs_unchanged();
+}
+
+// A tag and a moved foreign branch at import: the job tags its commit, moves `main` and `side`
+// (which the other worktree has checked out) and makes a branch of its own. Only its own branch
+// and the new branch come back.
+
+const FOREIGN_REFS_JOB: &str = r#"
+attempt "commit" 'git commit -q --allow-empty -m "job work"'
+attempt "new branch" 'git branch new-work'
+attempt "tag" 'git tag job-tag'
+attempt "annotated tag" 'git tag -a -m "job tag" job-annotated'
+attempt "move side" 'git branch -f side HEAD'
+attempt "move main" 'git update-ref refs/heads/main HEAD'
+attempt "private config" 'hostile_config "$(git rev-parse --absolute-git-dir)/config"'
+"#;
+
+fn foreign_refs_check(fixture: &Fixture, outcome: &Outcome, phase: Phase) {
+    for attempt in [
+        "private config",
+        "commit",
+        "new branch",
+        "tag",
+        "annotated tag",
+        "move side",
+        "move main",
+    ] {
+        outcome.expect(attempt, "written");
+    }
+    if phase != Phase::AfterHandBack {
+        fixture.assert_shared_refs_unchanged();
+    }
+}
+
+fn foreign_refs_import(fixture: &Fixture, result: &anyhow::Result<ImportReport>) {
+    let report = result.as_ref().unwrap();
+    assert_eq!(
+        report.imported,
+        vec![
+            "refs/heads/feature".to_string(),
+            "refs/heads/new-work".to_string()
+        ]
+    );
+    for name in [
+        "refs/tags/job-tag",
+        "refs/tags/job-annotated",
+        "refs/heads/side",
+        "refs/heads/main",
+    ] {
+        assert!(
+            report.refused.iter().any(|line| line.contains(name)),
+            "{name} is not reported refused: {report:?}"
+        );
+    }
+    assert_eq!(
+        report.kept_private_dir.as_deref(),
+        Some(fixture.scratch.join(private_git::PRIVATE_DIR).as_path())
+    );
+    let refs = fixture.shared_refs();
+    let feature = refs["refs/heads/feature"].clone();
+    assert_ne!(feature, fixture.initial);
+    let expected: BTreeMap<String, String> = [
+        ("refs/heads/feature", &feature),
+        ("refs/heads/main", &fixture.initial),
+        ("refs/heads/new-work", &feature),
+        ("refs/heads/side", &fixture.initial),
+    ]
+    .into_iter()
+    .map(|(name, oid)| (name.to_string(), oid.clone()))
+    .collect();
+    assert_eq!(refs, expected);
+    let subject = git(
+        &fixture.main,
+        &["log", "-1", "--format=%s", "refs/heads/feature"],
+    )
+    .stdout;
+    assert_eq!(String::from_utf8(subject).unwrap(), "job work\n");
+    let other_head = git(&fixture.other, &["rev-parse", "HEAD"]).stdout;
+    assert_eq!(
+        String::from_utf8(other_head).unwrap().trim(),
+        fixture.initial
+    );
+    git(&fixture.main, &["fsck", "--no-progress", "--strict"]);
+}
+
+// E-open: the editor opened the job's tree before the pass. While the job's private
+// configuration names a fsmonitor, filter, textconv and external diff (and its private
+// attributes select them for every file), status and diff through that open repository still run
+// and run none of them.
+
+const OPEN_EDITOR_JOB: &str = r#"
+PRIVATE=$(git rev-parse --absolute-git-dir)
+attempt "private config" 'hostile_config "$PRIVATE/config"'
+attempt "private attributes" 'printf "* filter=evil diff=evil\n" > "$PRIVATE/info/attributes"'
+"#;
+
+fn open_editor_check(fixture: &Fixture, outcome: &Outcome, phase: Phase) {
+    outcome.expect("private config", "written");
+    outcome.expect("private attributes", "written");
+    let report = &outcome.report;
+    assert_eq!(
+        fs::canonicalize(&fixture.editors.tree.git_dir).unwrap(),
+        fixture.tree_git_dir,
+        "the open repository is pinned to the tree's own git directory"
+    );
+    let status = report
+        .open_tree_status
+        .as_ref()
+        .unwrap_or_else(|error| panic!("status through the open repository ({phase:?}): {error}"));
+    assert!(status.iter().any(|path| path == "a.txt"), "{status:?}");
+    let diff = report
+        .open_tree_diff
+        .as_ref()
+        .unwrap_or_else(|error| panic!("diff through the open repository ({phase:?}): {error}"));
+    assert!(diff.contains("+changed"), "{diff}");
+    if phase != Phase::AfterHandBack {
+        let error = report.editor_tree_open.as_ref().unwrap_err();
+        assert!(error.contains("written by a bongos job"), "{error}");
+    }
+}
+
+// A commit graph, and separately a multi-pack index, planted in the private `objects/`: git would
+// read either as trusted, so the import refuses the object directory and nothing moves. The
+// refusal stops at the first entry it dislikes, so each file gets a row of its own.
+
+const COMMIT_GRAPH_JOB: &str = r#"
+PRIVATE=$(git rev-parse --absolute-git-dir)
+attempt "commit" 'git commit -q --allow-empty -m "job work"'
+attempt "pack" 'git -c pack.writeReverseIndex=false repack -q -d -l && rm -f "$PRIVATE/objects/info/packs"'
+attempt "commit graph" 'git commit-graph write --reachable --no-progress && test -f "$PRIVATE/objects/info/commit-graph"'
+attempt "private config" 'hostile_config "$PRIVATE/config"'
+"#;
+
+const MULTI_PACK_INDEX_JOB: &str = r#"
+PRIVATE=$(git rev-parse --absolute-git-dir)
+attempt "commit" 'git commit -q --allow-empty -m "job work"'
+attempt "pack" 'git -c pack.writeReverseIndex=false repack -q -d -l && rm -f "$PRIVATE/objects/info/packs"'
+attempt "multi-pack index" 'git multi-pack-index write --no-progress && test -f "$PRIVATE/objects/pack/multi-pack-index"'
+attempt "private config" 'hostile_config "$PRIVATE/config"'
+"#;
+
+fn commit_graph_check(fixture: &Fixture, outcome: &Outcome, _: Phase) {
+    for attempt in ["private config", "commit", "pack", "commit graph"] {
+        outcome.expect(attempt, "written");
+    }
+    fixture.assert_shared_refs_unchanged();
+}
+
+fn multi_pack_index_check(fixture: &Fixture, outcome: &Outcome, _: Phase) {
+    for attempt in ["private config", "commit", "pack", "multi-pack index"] {
+        outcome.expect(attempt, "written");
+    }
+    fixture.assert_shared_refs_unchanged();
+}
+
+fn commit_graph_import(fixture: &Fixture, result: &anyhow::Result<ImportReport>) {
+    assert_objects_refused(fixture, result, &["commit-graph"]);
+    git(&fixture.main, &["fsck", "--no-progress", "--strict"]);
+}
+
+fn multi_pack_index_import(fixture: &Fixture, result: &anyhow::Result<ImportReport>) {
+    assert_objects_refused(fixture, result, &["multi-pack-index"]);
+    git(&fixture.main, &["fsck", "--no-progress", "--strict"]);
+}
+
+fn commit_graph_control(fixture: &Fixture) -> LocalBoxFuture<'_, ()> {
+    async move {
+        let objects = fixture.scratch.join("git/objects");
+        assert!(objects.join("info/commit-graph").is_file());
+        fixture.assert_plain_git_fires(&fixture.tree, &[]);
+    }
+    .boxed_local()
+}
+
+fn multi_pack_index_control(fixture: &Fixture) -> LocalBoxFuture<'_, ()> {
+    async move {
+        let objects = fixture.scratch.join("git/objects");
+        assert!(objects.join("pack/multi-pack-index").is_file());
+        fixture.assert_plain_git_fires(&fixture.tree, &[]);
+    }
+    .boxed_local()
+}
+
+// A crashed pass: the process that prepared the tree dies while the job runs, and the job with
+// it. A lane's next job start recovers the tree and resets it: nothing from the private directory
+// runs, nothing is imported and the shared repository is intact.
+
+const CRASHED_PASS_JOB: &str = r#"
+attempt "private config" 'hostile_config "$(git rev-parse --absolute-git-dir)/config"'
+attempt "commit" 'git commit -q --allow-empty -m "crashed work"'
+attempt "untracked file" 'printf "job\n" > "$TREE/untracked.txt"'
+"#;
+
+fn crashed_pass_check(fixture: &Fixture, outcome: &Outcome, phase: Phase) {
+    for attempt in ["private config", "commit", "untracked file"] {
+        outcome.expect(attempt, "written");
+    }
+    fixture.assert_shared_refs_unchanged();
+    let report = &outcome.report;
+    for result in &report.safe_git_tree {
+        assert!(
+            result.is_ok(),
+            "SafeGit in the job tree ({phase:?}): {result:?}"
+        );
+    }
+    let marker = fixture.tree_git_dir.join(private_git::MARKER);
+    let private = fixture.scratch.join(private_git::PRIVATE_DIR);
+    match phase {
+        Phase::During => {
+            // The owner is alive: neither recovery nor another preparation touches the tree.
+            assert_eq!(
+                private_git::recover(&fixture.tree_git_dir).unwrap(),
+                RecoverOutcome::InUse
+            );
+            let busy = smol::block_on(private_git::prepare(
+                &fixture.tree,
+                &fixture.tree_git_dir,
+                &fixture.scratch,
+            ))
+            .unwrap_err();
+            assert!(format!("{busy:#}").contains(private_git::BUSY), "{busy:#}");
+            assert!(marker.is_file());
+        }
+        Phase::AfterJob => {
+            // The dead owner's marker and the redirected `.git` are still there.
+            assert!(marker.is_file());
+            assert!(private.is_dir());
+            assert!(report.tree_record.is_err(), "{report:?}");
+            let error = report.editor_tree_open.as_ref().unwrap_err();
+            assert!(error.contains("written by a bongos job"), "{error}");
+        }
+        Phase::AfterRecovery => {
+            assert!(!marker.exists());
+            assert!(!private.exists());
+            assert_eq!(report.tree_record, Ok(fixture.tree_git_dir.clone()));
+            assert!(report.editor_tree_open.is_ok(), "{report:?}");
+            assert_eq!(
+                fs::read_to_string(fixture.tree.join("a.txt")).unwrap(),
+                "initial\n"
+            );
+            assert!(!fixture.tree.join("untracked.txt").exists());
+            let head = git(&fixture.tree, &["rev-parse", "HEAD"]).stdout;
+            assert_eq!(String::from_utf8(head).unwrap().trim(), fixture.initial);
+            git(&fixture.main, &["fsck", "--no-progress", "--strict"]);
+        }
+        phase => panic!("unexpected phase {phase:?}"),
+    }
+}
+
+// A main-worktree job: the primary checkout is the job tree and its `.git` is masked read-only.
+// Every write to the git directory fails, the work tree is writable, and the editor and `SafeGit`
+// open the checkout throughout, during the job too.
+
+const MASKED_MAIN_GIT_JOB: &str = r##"
+attempt "work tree file" 'printf "job\n" > "$MAIN/job.txt"'
+attempt "main config" 'hostile_config "$MAIN/.git/config"'
+attempt "main hook" 'printf "#!/bin/sh\ntouch \"$MARKERS/hook\"\n" > "$MAIN/.git/hooks/post-index-change" && chmod +x "$MAIN/.git/hooks/post-index-change"'
+attempt "commit in main" 'git -C "$MAIN" commit -q --allow-empty -m job'
+attempt "rename .git" 'mv "$MAIN/.git" "$MAIN/.git-moved"'
+attempt "remove .git" 'rm -rf "$MAIN/.git"'
+"##;
+
+fn masked_main_git_check(fixture: &Fixture, outcome: &Outcome, phase: Phase) {
+    outcome.expect("work tree file", "written");
+    for attempt in [
+        "main config",
+        "main hook",
+        "commit in main",
+        "rename .git",
+        "remove .git",
+    ] {
+        outcome.expect(attempt, "blocked");
+    }
+    let config = fs::read_to_string(fixture.common.join("config")).unwrap();
+    assert!(!config.contains("fsmonitor"), "{config}");
+    assert!(!fixture.common.join("hooks/post-index-change").exists());
+    assert!(!fixture.main.join(".git-moved").exists());
+    fixture.assert_shared_refs_unchanged();
+    let report = &outcome.report;
+    for result in &report.safe_git_tree {
+        assert!(
+            result.is_ok(),
+            "SafeGit in the checkout ({phase:?}): {result:?}"
+        );
+    }
+    assert!(report.editor_tree_open.is_ok(), "{phase:?}: {report:?}");
+    assert!(!util::job_roots::contains(&fixture.common));
+    assert_eq!(
+        util::job_roots::contains(&fixture.main),
+        phase == Phase::During,
+        "{phase:?}"
+    );
+}
+
+fn masked_main_git_control(fixture: &Fixture) -> LocalBoxFuture<'_, ()> {
+    async move {
+        // Had the configuration write landed, the user's git in the checkout would run it.
+        let config = fixture.common.join("config");
+        let original = fs::read(&config).unwrap();
+        fixture.write_hostile_config(&config);
+        fixture.assert_plain_git_fires(&fixture.main, &[]);
+        fs::write(&config, original).unwrap();
+    }
+    .boxed_local()
+}
+
+/// A clone of the repository nested in the primary checkout, at `vendor/clone`, with `a.txt`
+/// changed the same way.
+fn plant_nested_clone(fixture: &Fixture) {
+    let clone = fixture.main.join("vendor/clone");
+    fs::create_dir_all(clone.parent().unwrap()).unwrap();
+    git_os(
+        &fixture.main,
+        &[
+            OsStr::new("clone"),
+            OsStr::new("-q"),
+            fixture.main.as_os_str(),
+            clone.as_os_str(),
+        ],
+    );
+    change_keeping_size(&clone.join("a.txt"), "changed\n");
+}
+
+// A main-worktree job and nested repositories: it tries to rewrite a nested clone's
+// configuration (masked, refused) and makes a new nested repository naming the commands. The new
+// repository stays refused by the editor and `SafeGit` after the job ends and after its owner
+// crashed, while the checkout itself opens normally again.
+
+const MAIN_NESTED_JOB: &str = r#"
+attempt "nested clone config" 'hostile_config "$MAIN/vendor/clone/.git/config"'
+attempt "new nested repository" 'git init -q "$MAIN/newrepo" && cd "$MAIN/newrepo" &&
+    printf "a.txt filter=evil diff=evil\n" > .gitattributes && printf "initial\n" > a.txt &&
+    git add .gitattributes a.txt && git commit -q -m nested &&
+    printf "changed\n" > a.txt && touch -d @1000000000 a.txt && hostile_config .git/config'
+"#;
+
+fn main_nested_check(fixture: &Fixture, outcome: &Outcome, phase: Phase) {
+    outcome.expect("nested clone config", "blocked");
+    outcome.expect("new nested repository", "written");
+    let clone_config = fs::read_to_string(fixture.main.join("vendor/clone/.git/config")).unwrap();
+    assert!(!clone_config.contains("fsmonitor"), "{clone_config}");
+
+    let nested = fixture.main.join("newrepo");
+    let error = open_editor(&nested.join(".git"), &fixture.executor)
+        .err()
+        .unwrap_or_else(|| panic!("the editor opened the new nested repository ({phase:?})"));
+    assert!(
+        format!("{error:#}").contains("written by a bongos job"),
+        "{error:#}"
+    );
+    for args in [&["status"][..], &["diff"][..]] {
+        let refused = smol::block_on(
+            fixture
+                .isolated(SafeGit::new(nested.join(".git"), &nested))
+                .command(args),
+        );
+        let error = refused.err().unwrap_or_else(|| {
+            panic!("SafeGit ran {args:?} in the new nested repository ({phase:?})")
+        });
+        assert!(
+            format!("{error:#}").contains("job-written git directory"),
+            "{error:#}"
+        );
+    }
+    assert!(util::job_roots::contains(&nested));
+    fixture.assert_no_markers("the new nested repository");
+
+    let report = &outcome.report;
+    assert!(report.editor_tree_open.is_ok(), "{phase:?}: {report:?}");
+    match phase {
+        Phase::During => {
+            assert!(util::job_roots::contains(&fixture.main));
+            for result in &report.safe_git_tree {
+                let error = result.as_ref().unwrap_err();
+                assert!(error.contains("nested repository"), "{error}");
+            }
+        }
+        Phase::AfterJob | Phase::AfterOwnerCrash => {
+            assert!(!util::job_roots::contains(&fixture.main));
+            for result in &report.safe_git_tree {
+                assert!(
+                    result.is_ok(),
+                    "SafeGit in the checkout ({phase:?}): {result:?}"
+                );
+            }
+        }
+        phase => panic!("unexpected phase {phase:?}"),
+    }
+}
+
+fn main_nested_control(fixture: &Fixture) -> LocalBoxFuture<'_, ()> {
+    async move {
+        fixture.assert_plain_git_fires(&fixture.main.join("newrepo"), &[]);
+        // Had the write to the clone's configuration landed, git in the clone would run it.
+        let clone = fixture.main.join("vendor/clone");
+        let config = clone.join(".git/config");
+        let original = fs::read(&config).unwrap();
+        fixture.write_hostile_config(&config);
+        fixture.assert_plain_git_fires(&clone, &[]);
+        fs::write(&config, original).unwrap();
+    }
+    .boxed_local()
+}
+
 // The job rewrites the tree's `.git` to point git at a directory with its configuration.
 
 const REWRITTEN_DOT_GIT_JOB: &str = r#"
@@ -1131,12 +2045,7 @@ fn declared_repository_control(fixture: &Fixture) -> LocalBoxFuture<'_, ()> {
     async move {
         // The same commands as global configuration fire in the primary checkout.
         let config = fixture.base.join("hostile.config");
-        let mut command = util::command::new_command("sh");
-        command
-            .args(["-c", &format!("{PREAMBLE}\nhostile_config \"$1\""), "sh"])
-            .arg(&config)
-            .env("MARKERS", &fixture.markers);
-        assert!(smol::block_on(command.status()).unwrap().success());
+        fixture.write_hostile_config(&config);
         fixture.assert_plain_git_fires(&fixture.main, &[("GIT_CONFIG_GLOBAL", &config)]);
     }
     .boxed_local()
@@ -1159,35 +2068,50 @@ macro_rules! escapes {
 escapes! {
     known_escape_e1_planted_commondir: Escape {
         name: "E1: planted <common>/commondir",
-        setup: Setup::LinkedTree { hand_back: HandBack::Abandon },
+        setup: Setup::LinkedTree {
+            hand_back: HandBack::Abandon,
+            sandbox: SandboxUse::Required,
+        },
         job: E1_JOB,
         host_check: e1_check,
         control: e1_control,
     },
     known_escape_e2_other_worktree_commondir_and_config_worktree: Escape {
         name: "E2: rewritten <common>/worktrees/<other>/commondir and config.worktree",
-        setup: Setup::LinkedTree { hand_back: HandBack::Abandon },
+        setup: Setup::LinkedTree {
+            hand_back: HandBack::Abandon,
+            sandbox: SandboxUse::Required,
+        },
         job: E2_JOB,
         host_check: e2_check,
         control: e2_control,
     },
     known_escape_private_git_config: Escape {
         name: "the private git config",
-        setup: Setup::LinkedTree { hand_back: HandBack::Import },
+        setup: Setup::LinkedTree {
+            hand_back: HandBack::Import(imported_cleanly),
+            sandbox: SandboxUse::Required,
+        },
         job: PRIVATE_CONFIG_JOB,
         host_check: private_config_check,
         control: private_config_control,
     },
     known_escape_rewritten_dot_git: Escape {
         name: "a rewritten .git",
-        setup: Setup::LinkedTree { hand_back: HandBack::Abandon },
+        setup: Setup::LinkedTree {
+            hand_back: HandBack::Abandon,
+            sandbox: SandboxUse::Required,
+        },
         job: REWRITTEN_DOT_GIT_JOB,
         host_check: rewritten_dot_git_check,
         control: rewritten_dot_git_control,
     },
     known_escape_nested_repository: Escape {
         name: "a nested repository",
-        setup: Setup::LinkedTree { hand_back: HandBack::Import },
+        setup: Setup::LinkedTree {
+            hand_back: HandBack::Import(imported_cleanly),
+            sandbox: SandboxUse::Required,
+        },
         job: NESTED_REPOSITORY_JOB,
         host_check: nested_repository_check,
         control: nested_repository_control,
@@ -1198,5 +2122,76 @@ escapes! {
         job: "",
         host_check: declared_repository_check,
         control: declared_repository_control,
+    },
+    known_escape_alternates_and_symlinks_in_the_private_directory: Escape {
+        name: "alternates and symlinks in the private directory",
+        setup: Setup::LinkedTree {
+            hand_back: HandBack::Import(private_links_import),
+            sandbox: SandboxUse::IfPresent,
+        },
+        job: PRIVATE_LINKS_JOB,
+        host_check: private_links_check,
+        control: private_config_control,
+    },
+    known_escape_tag_and_moved_foreign_branch_at_import: Escape {
+        name: "a tag and a moved foreign branch at import",
+        setup: Setup::LinkedTree {
+            hand_back: HandBack::Import(foreign_refs_import),
+            sandbox: SandboxUse::IfPresent,
+        },
+        job: FOREIGN_REFS_JOB,
+        host_check: foreign_refs_check,
+        control: private_config_control,
+    },
+    known_escape_e_open_repository_opened_before_the_pass: Escape {
+        name: "E-open: a repository the editor opened before the pass",
+        setup: Setup::LinkedTree {
+            hand_back: HandBack::Import(imported_cleanly),
+            sandbox: SandboxUse::Required,
+        },
+        job: OPEN_EDITOR_JOB,
+        host_check: open_editor_check,
+        control: private_config_control,
+    },
+    known_escape_commit_graph_in_private_objects: Escape {
+        name: "a commit graph in the private objects",
+        setup: Setup::LinkedTree {
+            hand_back: HandBack::Import(commit_graph_import),
+            sandbox: SandboxUse::IfPresent,
+        },
+        job: COMMIT_GRAPH_JOB,
+        host_check: commit_graph_check,
+        control: commit_graph_control,
+    },
+    known_escape_multi_pack_index_in_private_objects: Escape {
+        name: "a multi-pack index in the private objects",
+        setup: Setup::LinkedTree {
+            hand_back: HandBack::Import(multi_pack_index_import),
+            sandbox: SandboxUse::IfPresent,
+        },
+        job: MULTI_PACK_INDEX_JOB,
+        host_check: multi_pack_index_check,
+        control: multi_pack_index_control,
+    },
+    known_escape_crashed_pass_then_lane_reset: Escape {
+        name: "a crashed pass followed by a lane's reset --hard",
+        setup: Setup::CrashedPass,
+        job: CRASHED_PASS_JOB,
+        host_check: crashed_pass_check,
+        control: private_config_control,
+    },
+    known_escape_main_worktree_masked_git_stays_openable: Escape {
+        name: "a main-worktree job whose masked .git stays openable",
+        setup: Setup::MainWorktree { prepare: |_| {} },
+        job: MASKED_MAIN_GIT_JOB,
+        host_check: masked_main_git_check,
+        control: masked_main_git_control,
+    },
+    known_escape_main_worktree_nested_clone_and_new_nested_repository: Escape {
+        name: "a main-worktree job, a nested clone and a new nested repository",
+        setup: Setup::MainWorktree { prepare: plant_nested_clone },
+        job: MAIN_NESTED_JOB,
+        host_check: main_nested_check,
+        control: main_nested_control,
     },
 }
