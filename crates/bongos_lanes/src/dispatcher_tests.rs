@@ -207,6 +207,16 @@ impl TestHost {
             .collect()
     }
 
+    /// The runs whose landing wait is still listening, in order.
+    pub(crate) fn listening_landings(&self) -> Vec<String> {
+        self.landing_gates
+            .borrow()
+            .iter()
+            .filter(|(_, gate)| !gate.is_canceled())
+            .map(|(run, _)| run.clone())
+            .collect()
+    }
+
     fn release(&self) {
         for gate in self.gates.borrow_mut().drain(..) {
             gate.send(Ok(JobSetup::default())).ok();
@@ -262,6 +272,10 @@ impl JobEngine for FakeEngine {
 
     fn has_record(&self, run: &str, _cx: &App) -> bool {
         self.knows(run) || self.unloaded.borrow().contains(run)
+    }
+
+    fn run_status(&self, run: &str) -> Option<RunStatus> {
+        self.status.borrow().get(run).map(|(_, status)| *status)
     }
 
     fn active_runs_of(&self, workflow: &str) -> Vec<RunId> {

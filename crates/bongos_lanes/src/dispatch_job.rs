@@ -609,41 +609,70 @@ impl Dispatcher {
     /// Whether `run` is the job of a running ahead lane that no pick extension assigned: its
     /// success waits for the landings it asked for.
     fn is_ahead_job(&self, run: &str) -> bool {
+        // On an error the change is applied at once, which reads the state again and logs it.
+        self.ahead_job_runs()
+            .is_ok_and(|runs| runs.iter().any(|ahead| ahead == run))
+    }
+
+    /// The runs of the running ahead lanes' jobs that no pick extension assigned.
+    fn ahead_job_runs(&self) -> Result<Vec<String>> {
         let table = self.table();
-        let Ok(state) = self.parts().writer.read(read_state) else {
-            // The change is applied at once, which reads the state again and logs its error.
-            return false;
+        let state = self.parts().writer.read(read_state)?;
+        Ok(state
+            .lanes
+            .values()
+            .filter(|lane| {
+                lane.state == LaneState::Running && lane_kind_is_ahead(&table, &lane.id())
+            })
+            .filter_map(|lane| lane.job.as_ref())
+            .filter(|job| job.extension.is_none())
+            .map(|job| job.run_id.clone())
+            .collect())
+    }
+
+    /// Waits again for the landings of every ahead job whose run already succeeded. A dispatcher
+    /// that starts (the app restarted, or the lanes were started again) hears no event of a
+    /// success that came before it, and the earlier dispatcher's wait went with it.
+    pub(crate) fn resume_ahead_landings(&self, cx: &mut App) {
+        let runs = match self.ahead_job_runs() {
+            Ok(runs) => runs,
+            Err(error) => {
+                log::error!("lanes: reading the ahead jobs to wait on: {error:#}");
+                return;
+            }
         };
-        state.lanes.values().any(|lane| {
-            lane.state == LaneState::Running
-                && lane
-                    .job
-                    .as_ref()
-                    .is_some_and(|job| job.run_id == run && job.extension.is_none())
-                && lane_kind_is_ahead(&table, &lane.id())
-        })
+        for run in runs {
+            if self.parts().engine.run_status(&run) == Some(RunStatus::Succeeded) {
+                self.await_ahead_landing(&run, cx);
+            }
+        }
     }
 
     /// An ahead job's run succeeded: its lane keeps the job and its owner stays `Ahead` until
     /// every landing the run asked for resolved; then the end is applied with what they came to.
+    /// One wait per run; the dispatcher holds it, so dropping the dispatcher ends it.
     fn await_ahead_landing(&self, run: &str, cx: &mut App) {
+        if self.0.ahead_landings.borrow().contains_key(run) {
+            return;
+        }
         let landing = self.parts().host.ahead_landing(run, cx);
         let weak = self.downgrade();
-        let run = run.to_string();
-        cx.spawn(async move |cx| {
+        let key = run.to_string();
+        let run = key.clone();
+        let wait = cx.spawn(async move |cx| {
             let landing = landing.await;
-            if let Some(inner) = weak.upgrade() {
-                cx.update(|cx| {
-                    Dispatcher(inner).apply_job_change(
-                        &run,
-                        RunStatus::Succeeded,
-                        Some(landing),
-                        cx,
-                    )
-                });
+            let Some(inner) = weak.upgrade() else {
+                return;
+            };
+            // This task is running: detached, not dropped.
+            if let Some(wait) = inner.ahead_landings.borrow_mut().remove(&run) {
+                wait.detach();
             }
-        })
-        .detach();
+            cx.update(|cx| {
+                Dispatcher(inner).apply_job_change(&run, RunStatus::Succeeded, Some(landing), cx)
+            });
+        });
+        self.0.ahead_landings.borrow_mut().insert(key, wait);
     }
 
     /// Applies `run`'s status change to its lane and owner, then evaluates. `landing` is what an

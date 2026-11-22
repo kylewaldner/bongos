@@ -318,6 +318,8 @@ pub trait JobEngine {
     /// its record. When it cannot be told this is `true`, so a job is never taken for unstarted
     /// on doubt.
     fn has_record(&self, run: &str, cx: &App) -> bool;
+    /// The status of a run the engine loaded; `None` for one it did not.
+    fn run_status(&self, run: &str) -> Option<RunStatus>;
     /// The active runs of the workflow definition `workflow`.
     fn active_runs_of(&self, workflow: &str) -> Vec<RunId>;
     /// The definition's `instances`; `None` is unlimited.
@@ -342,6 +344,10 @@ impl JobEngine for WorkflowEngine {
 
     fn has_record(&self, run: &str, cx: &App) -> bool {
         self.run_recorded(run, cx).unwrap_or(true)
+    }
+
+    fn run_status(&self, run: &str) -> Option<RunStatus> {
+        self.lifecycle().status(run)
     }
 
     fn active_runs_of(&self, workflow: &str) -> Vec<RunId> {
@@ -629,6 +635,7 @@ fn start_verified(
         events,
     });
     dispatcher.run(cx);
+    dispatcher.resume_ahead_landings(cx);
     dispatcher.evaluate(true, cx);
     Ok(LanesStarted {
         run_id,
@@ -839,6 +846,9 @@ pub(crate) struct Inner {
     /// and no hook gets its `after_job`. Whoever holds the dispatcher keeps it until its run
     /// ended, which is after every job here was settled.
     pub(crate) hooked: RefCell<BTreeMap<LaneId, HookedJob>>,
+    /// The ahead jobs whose run succeeded, by run, waiting for the landings it asked for.
+    /// Dropping the dispatcher drops the waits; the next one waits again on its start.
+    pub(crate) ahead_landings: RefCell<BTreeMap<String, Task<()>>>,
 }
 
 /// What one lane's transaction decided.
@@ -889,6 +899,7 @@ impl Dispatcher {
             triggers: RefCell::new(Vec::new()),
             subscriptions: RefCell::new(Vec::new()),
             hooked: RefCell::new(BTreeMap::new()),
+            ahead_landings: RefCell::new(BTreeMap::new()),
         }))
     }
 

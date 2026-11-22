@@ -439,13 +439,23 @@ impl LanesHost for ProjectLanesHost {
     fn ahead_landing(&self, run: &str, cx: &mut App) -> Task<AheadLanding> {
         // Subscribed before the changes are read, so no landing that ends meanwhile is missed.
         let events = self.repo.landing_events();
+        // The open and requested changes. An open one counts while this process lands it, or
+        // is about to: a quick edit's row is open until its landing, which runs on after the
+        // run heard that it started, takes it.
         let filter = ChangeFilter {
             run: Some(run.to_string()),
-            state: Some(ChangeState::Requested),
+            state: None,
             ..ChangeFilter::default()
         };
         let pending = match self.repo.changes(&filter) {
-            Ok(rows) => rows.into_iter().map(|row| row.change_id).collect(),
+            Ok(rows) => rows
+                .into_iter()
+                .filter(|row| {
+                    row.state == ChangeState::Requested
+                        || self.repo.landing_in_process(&row.change_id)
+                })
+                .map(|row| row.change_id)
+                .collect(),
             Err(error) => {
                 return Task::ready(AheadLanding::Refused(format!(
                     "reading the changes of run {}: {error:#}",
@@ -485,8 +495,14 @@ fn landing_end(event: LandingEvent) -> Option<Result<String, String>> {
     }
 }
 
-/// Waits until every change in `pending` landed (the last landed commit, or nothing when there
-/// was none to wait for) or one did not (refused, in conflict, or ended with no verdict).
+/// The reason an ahead job halts when a change it asked to land was left requested by an earlier
+/// process: nothing in this one lands it, so no landing would ever report its end.
+pub(crate) const LANDING_INTERRUPTED: &str =
+    "its landing was interrupted by a restart; land it again, then adopt the lane";
+
+/// Waits until every change in `pending` landed (the verified commit after them, or nothing when
+/// there was none to wait for) or one did not (refused, in conflict, ended with no verdict,
+/// abandoned, or left requested by an earlier process).
 pub(crate) async fn await_landings(
     repo: &ProjectRepo,
     mut pending: BTreeSet<String>,
@@ -495,9 +511,19 @@ pub(crate) async fn await_landings(
     let mut last = None;
     // A landing that ended before the subscription: its row, or the last event it announced.
     for change in pending.clone() {
+        // Asked first: a landing that ends after this shows in the row or its last event.
+        let in_process = repo.landing_in_process(&change);
         let ended = match repo.landing_result(&change) {
             Ok(Some(LandingResult::Landed { commit })) => Some(Ok(commit)),
-            Ok(_) => repo.landing_status(&change).and_then(landing_end),
+            Ok(Some(LandingResult::Abandoned)) => {
+                Some(Err(format!("change {change} was abandoned")))
+            }
+            Ok(_) => repo
+                .landing_status(&change)
+                .and_then(landing_end)
+                .or_else(|| {
+                    (!in_process).then(|| Err(format!("change {change}: {LANDING_INTERRUPTED}")))
+                }),
             Err(error) => Some(Err(format!("{error:#}"))),
         };
         match ended {
@@ -525,9 +551,16 @@ pub(crate) async fn await_landings(
             None => {}
         }
     }
-    match last {
-        Some(commit) => AheadLanding::Landed { commit },
-        None => AheadLanding::Nothing,
+    // Prepared at master as it is now, which holds every landed change, whatever order they
+    // landed in; the last landed commit only when the state cannot say.
+    let Some(last) = last else {
+        return AheadLanding::Nothing;
+    };
+    let verified = repo
+        .state()
+        .and_then(|state| state.read(|read| read.verified_commit()).ok().flatten());
+    AheadLanding::Landed {
+        commit: verified.unwrap_or(last),
     }
 }
 

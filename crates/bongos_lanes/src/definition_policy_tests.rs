@@ -265,6 +265,83 @@ async fn a_refused_landing_halts_the_ahead_lane(cx: &mut TestAppContext) {
     assert_eq!(harness.host.snapshots.borrow().len(), 1);
 }
 
+// A preparation whose landings were still resolving when its dispatcher went away: the wait goes
+// with the dispatcher, and the next dispatcher waits again on its start, so the task is prepared.
+#[gpui::test]
+async fn a_restarted_dispatcher_waits_again_for_ahead_landings(cx: &mut TestAppContext) {
+    let (harness, dispatcher) = preparing_with_gated_landings(cx).await;
+    let run = harness.run_of("F.d");
+    harness.set_run("F.d", RunStatus::Succeeded, cx);
+    assert_eq!(
+        harness.host.listening_landings(),
+        std::slice::from_ref(&run)
+    );
+
+    drop(dispatcher);
+    cx.run_until_parked();
+    assert!(harness.host.listening_landings().is_empty());
+    assert_eq!(
+        harness.state().owners[&TaskId::new("F")].state,
+        OwnerState::Ahead
+    );
+
+    let again = start(&harness, start_request(), cx).await;
+    let _dispatcher = again.dispatcher.unwrap();
+    assert_eq!(
+        harness.host.listening_landings(),
+        std::slice::from_ref(&run)
+    );
+    assert_eq!(harness.engine.job_tasks(), ["F.d"]);
+    harness.host.resolve_landings(AheadLanding::Landed {
+        commit: "c7".to_string(),
+    });
+    cx.run_until_parked();
+
+    let owner = harness.state().owners[&TaskId::new("F")].clone();
+    assert_eq!(owner.state, OwnerState::Prepared);
+    assert_eq!(owner.prepared_commit.as_deref(), Some("c7"));
+    let design = harness.lane("design", 1);
+    assert_eq!(design.state, LaneState::Idle);
+    assert_eq!(design.job, None);
+}
+
+// A preparation that succeeded while no dispatcher listened (the app was closed): the next
+// dispatcher finds the succeeded run of the running ahead lane and waits for its landings.
+#[gpui::test]
+async fn an_ahead_run_that_succeeded_unheard_is_waited_on_at_start(cx: &mut TestAppContext) {
+    let (harness, dispatcher) = preparing_with_gated_landings(cx).await;
+    let run = harness.run_of("F.d");
+    drop(dispatcher);
+    cx.run_until_parked();
+    harness.set_run("F.d", RunStatus::Succeeded, cx);
+    assert!(harness.host.listening_landings().is_empty());
+    assert_eq!(harness.lane("design", 1).state, LaneState::Running);
+
+    let again = start(&harness, start_request(), cx).await;
+    let _dispatcher = again.dispatcher.unwrap();
+    assert_eq!(
+        harness.host.listening_landings(),
+        std::slice::from_ref(&run)
+    );
+    harness
+        .host
+        .resolve_landings(AheadLanding::Refused("interrupted".to_string()));
+    cx.run_until_parked();
+
+    let design = harness.lane("design", 1);
+    assert_eq!(design.state, LaneState::Halted);
+    assert_eq!(
+        design.reason,
+        Some(WaitReason::Failed(
+            "landing refused: interrupted".to_string()
+        ))
+    );
+    assert_eq!(
+        harness.state().owners[&TaskId::new("F")].state,
+        OwnerState::Halted
+    );
+}
+
 // Each job starts on the commit the policy names for its lane; `Wait` leaves the lane idle.
 #[gpui::test]
 async fn each_job_starts_on_the_commit_its_lane_is_given(cx: &mut TestAppContext) {

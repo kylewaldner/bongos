@@ -200,6 +200,21 @@ impl PersonGrant {
     }
 }
 
+/// Takes a quick edit off the list of those whose landing follows, when its landing returns.
+struct QuickEditToLand {
+    engine: std::sync::Arc<crate::landing_queue::Engine>,
+    change_id: String,
+}
+
+impl Drop for QuickEditToLand {
+    fn drop(&mut self) {
+        self.engine
+            .quick_edits_to_land
+            .lock()
+            .remove(&self.change_id);
+    }
+}
+
 impl ProjectRepo {
     /// Makes the branch, the row and the staged state of `edit`, and its `PersonEdit` approval
     /// when `attestation` is the marker of the person who wrote it. Does not land it; see
@@ -316,6 +331,12 @@ impl ProjectRepo {
                 .map(Some),
             None => Ok(None),
         };
+        // Listed before its row exists, so nothing sees the row without knowing its landing
+        // follows (`landing_in_process`); `land_quick_edit` takes it off.
+        self.engine
+            .quick_edits_to_land
+            .lock()
+            .insert(change_id.clone());
         let written = prepared.and_then(|approval| {
             writer.transact(|tx| {
                 tx.set_change(&row)?;
@@ -335,6 +356,7 @@ impl ProjectRepo {
             Ok(Some((_, approval))) => self.approval_recorded(&approval, &row),
             Ok(None) => {}
             Err(error) => {
+                self.engine.quick_edits_to_land.lock().remove(&change_id);
                 self.git.branch_delete(&repository, &branch).await.ok();
                 return Err(error);
             }
@@ -470,6 +492,10 @@ impl ProjectRepo {
         change_id: &str,
         now: DateTime<Utc>,
     ) -> Result<LandingResult> {
+        let _to_land = QuickEditToLand {
+            engine: self.engine.clone(),
+            change_id: change_id.to_string(),
+        };
         let request = (|| {
             let row = self
                 .change(change_id)?
