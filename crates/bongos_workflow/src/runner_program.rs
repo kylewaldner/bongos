@@ -84,8 +84,8 @@
 //!   runner reruns it after the interval, until a result other than the value or until the
 //!   give-up time passes ("wait timed out").
 //!
-//! The environment is the agent runners' (`PATH`, `HOME`, `LANG`, the node's `BONGOS_*` names)
-//! plus `BONGOS_STATE` and `BONGOS_RESULT`; `TMPDIR` points at `tmp/` in the node's scratch
+//! The environment is the agent runners' (`PATH`, `HOME`, `LANG`, the run's own edits, the node's
+//! `BONGOS_*` names) plus `BONGOS_STATE` and `BONGOS_RESULT`; `TMPDIR` points at `tmp/` in the node's scratch
 //! directory, the one temporary directory both layers let it write. A program costs nothing.
 
 use std::collections::{BTreeMap, HashMap};
@@ -319,8 +319,15 @@ pub struct ProgramNode {
     pub polls: Option<PollPlan>,
     /// The state document; its `paths` are `worktree` and `scratch`.
     pub state: StateDoc,
-    /// The node's worktree: the working directory, writable.
+    /// The node's worktree: the working directory, writable unless `read_only_worktree`.
     pub worktree: PathBuf,
+    /// The worktree is a snapshot the run reads and never writes: it is left out of the writable
+    /// paths, so only the scratch directory (and `extra_writable`) can be written.
+    pub read_only_worktree: bool,
+    /// More writable directories: the named directories of a lane run.
+    pub extra_writable: Vec<PathBuf>,
+    /// The run's edits to the environment.
+    pub env: Vec<bongos_workflow_model::EnvEdit>,
     /// The node's scratch directory, writable; holds `$BONGOS_RESULT` and `TMPDIR`.
     pub scratch: PathBuf,
     /// The repository's common git directory, writable so the script can commit.
@@ -371,12 +378,18 @@ impl ProgramNode {
         }
     }
 
-    /// The paths the script may write, an allowlist: the worktree, the scratch directory and, in
-    /// a linked worktree, the common git directory's `objects/`, `refs/` and `logs/` and the
-    /// worktree's own git directory. The rest of the common git directory (`config`, `hooks/`,
-    /// `commondir`, `packed-refs`, other worktrees' git directories) is never writable.
+    /// The paths the script may write, an allowlist: the worktree (unless it is a read-only
+    /// snapshot), the scratch directory, the extra directories of a lane run and, in a linked
+    /// worktree, the common git directory's `objects/`, `refs/` and `logs/` and the worktree's own
+    /// git directory. The rest of the common git directory (`config`, `hooks/`, `commondir`,
+    /// `packed-refs`, other worktrees' git directories) is never writable.
     pub fn writable_paths(&self) -> Vec<PathBuf> {
-        let mut paths = vec![self.worktree.clone(), self.scratch.clone()];
+        let mut paths = Vec::new();
+        if !self.read_only_worktree {
+            paths.push(self.worktree.clone());
+        }
+        paths.push(self.scratch.clone());
+        paths.extend(self.extra_writable.iter().cloned());
         paths.extend(self.git_writable_paths());
         if cfg!(target_os = "linux") {
             paths.extend(self.git_mount_points());
@@ -1017,6 +1030,7 @@ pub fn launch_env(
             task_dir: &node.task_dir,
             worktree: &node.worktree,
             node_result: &node.node_result,
+            edits: &node.env,
         },
     );
     let path = |path: &Path| path.to_string_lossy().into_owned();

@@ -180,6 +180,7 @@ impl Repo {
                 source: "task.goal".to_string(),
                 missing: false,
             }],
+            setup: Default::default(),
         }
     }
 

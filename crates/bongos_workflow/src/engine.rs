@@ -877,6 +877,12 @@ impl WorkflowEngine {
                 active_run,
                 checks: &checks,
                 definition_commit: task_dirs.commit.clone(),
+                // The project repository's own checkout of its definitions, which stays.
+                definitions: task_dirs.repo.as_ref().map(|repo| {
+                    repo.location()
+                        .repository
+                        .join(bongos_project_repo_model::layout::DEFINITIONS_DIR)
+                }),
             };
             lifecycle.start(request, &task_dirs.dirs, &context)
         };
@@ -1446,6 +1452,27 @@ impl WorkflowEngine {
     /// confirmation, outcomes and todo ([`task_link::next`]), then ends it or waits on Kyle.
     fn settle_run(&self, run: RunId, cx: &mut App) {
         let engine = self.clone();
+        let project_end = self.lifecycle().project_end(&run);
+        if let Some(end) = project_end {
+            // A run with no task: its merge, if it names one, and nothing of a task's.
+            cx.spawn(async move |cx| {
+                let settled = cx
+                    .background_spawn(async move {
+                        crate::lifecycle::project_settlement(&Git::new("git"), &end).await
+                    })
+                    .await;
+                let result = cx.update(|cx| {
+                    let result = engine.lifecycle().settle_project(&run, settled);
+                    engine.publish(cx);
+                    result
+                });
+                if let Err(error) = result {
+                    log::warn!("workflows: could not settle run {run}: {error}");
+                }
+            })
+            .detach();
+            return;
+        }
         cx.spawn(async move |cx| {
             let settlement = engine.settlement(&run, cx).await;
             let result = cx.update(|cx| {

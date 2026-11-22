@@ -171,6 +171,7 @@ impl Fixture {
             Paths {
                 worktree: worktree.clone(),
                 scratch: scratch.clone(),
+                trees: Default::default(),
             },
         );
         let settings = ProgramSettings::default();
@@ -186,6 +187,9 @@ impl Fixture {
                 .map(|polls| PollPlan::resolve(polls, &settings)),
             state,
             worktree,
+            read_only_worktree: false,
+            extra_writable: Vec::new(),
+            env: Vec::new(),
             scratch,
             git_common_dir: None,
             try_dir: try_dir.clone(),

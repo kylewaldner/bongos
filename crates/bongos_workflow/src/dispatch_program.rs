@@ -133,7 +133,7 @@ impl NodeKind for ProgramNodes {
             RunIdentity {
                 id: node.run.to_string(),
                 workflow: binding.workflow.clone(),
-                todo: Some(todo_of(binding)),
+                todo: binding.setup.project.is_none().then(|| todo_of(binding)),
                 task_id: binding.task_id.clone(),
                 task_dir: binding.task_dir.clone(),
                 branch: binding.checkout.branch.clone().unwrap_or_default(),
@@ -143,9 +143,11 @@ impl NodeKind for ProgramNodes {
             Paths {
                 worktree: worktree.clone(),
                 scratch: scratch.clone(),
+                trees: Default::default(),
             },
         );
         let try_dir = try_dir(&binding.attempt_dir, key, node.try_number);
+        let snapshot = binding.setup.snapshot;
         let program_node = ProgramNode {
             script,
             output: definition_node.output.clone(),
@@ -156,8 +158,17 @@ impl NodeKind for ProgramNodes {
                 .as_ref()
                 .map(|polls| PollPlan::resolve(polls, &inputs.programs)),
             state,
-            git_common_dir: common_git_dir(&worktree),
+            // A snapshot is no repository of the run's: none of its git metadata is writable,
+            // even when it sits inside one.
+            git_common_dir: if snapshot {
+                None
+            } else {
+                common_git_dir(&worktree)
+            },
             worktree,
+            read_only_worktree: snapshot,
+            extra_writable: binding.setup.writable_dirs(),
+            env: binding.setup.env_edits(),
             scratch,
             node_result: try_dir.join("node-result.json"),
             try_dir,

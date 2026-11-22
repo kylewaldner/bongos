@@ -752,6 +752,10 @@ fn run_toml() -> RunToml {
         parent: None,
         lane: None,
         unattended: None,
+        tree: None,
+        definitions: None,
+        env: Vec::new(),
+        lane_dirs: Default::default(),
         todo: Some(TodoRef {
             index: 0,
             name: "implement".to_string(),
@@ -942,8 +946,29 @@ fn a_project_subject_run_toml_round_trips_with_no_todo_and_an_empty_task_id() {
         value: true,
         source: UnattendedSource::Lane,
     });
+    run.tree = Some(RunTreeRecord::Repository {
+        repo: "/repos/app".into(),
+        base: "main".to_string(),
+        merge_into: Some("integration".to_string()),
+    });
+    run.definitions = Some("/projects/app/repository/definitions".into());
+    run.env = vec![
+        crate::EnvEdit::Set {
+            name: "CARGO_TARGET_DIR".to_string(),
+            value: "/lanes/1/target".to_string(),
+        },
+        crate::EnvEdit::Unset {
+            name: "RUSTC_WRAPPER".to_string(),
+        },
+    ];
+    run.lane_dirs = [("target".to_string(), "/lanes/1/target".into())].into();
     let text = run.to_toml();
     assert!(!text.contains("[todo]"), "{text}");
+    assert_eq!(RunToml::parse(&text).unwrap(), run);
+    run.tree = Some(RunTreeRecord::Snapshot {
+        path: "/snapshots/abc".into(),
+    });
+    let text = run.to_toml();
     assert!(text.contains("task_id = \"\""), "{text}");
     assert!(text.contains("kind = \"project\""), "{text}");
     assert_eq!(RunToml::parse(&text).unwrap(), run);

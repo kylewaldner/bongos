@@ -696,6 +696,7 @@ fn task_link_a_human_only_artifact_never_reaches_a_node() {
         Paths {
             worktree: root.join("wt"),
             scratch: root.join("scratch"),
+            trees: Default::default(),
         },
     )
     .to_json();

@@ -64,6 +64,9 @@ pub struct RunInfo {
 pub struct Paths {
     pub worktree: PathBuf,
     pub scratch: PathBuf,
+    /// The repository trees of the run besides `worktree`, by repository. A run on a snapshot
+    /// has no repository tree, so it is always empty there.
+    pub trees: BTreeMap<String, PathBuf>,
 }
 
 /// What [`build`] needs about the run besides its state.
