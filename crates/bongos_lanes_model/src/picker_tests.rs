@@ -1348,7 +1348,7 @@ fn area_pair() -> PickGraph {
     )
 }
 
-// PRD 9, first rule: a lane takes a new task only when no conflicting task is in flight on
+// First area rule: a lane takes a new task only when no conflicting task is in flight on
 // another lane, and the reason names the tag, the task and where it is.
 #[test]
 fn a_new_task_waits_for_a_conflicting_task_in_flight_on_another_lane() {
@@ -1388,7 +1388,7 @@ fn a_new_task_waits_for_a_conflicting_task_in_flight_on_another_lane() {
     );
 }
 
-// PRD 9: halted and stopped tasks count as in flight, and so does an unowned task started past
+// Halted and stopped tasks count as in flight, and so does an unowned task started past
 // its first job.
 #[test]
 fn halted_and_stopped_tasks_count_as_in_flight() {
@@ -1454,7 +1454,7 @@ fn two_owned() -> PickGraph {
     )
 }
 
-// PRD 9, second rule: a job of an owned task waits while a conflicting in-flight task on another
+// Second area rule: a job of an owned task waits while a conflicting in-flight task on another
 // lane is earlier in order, or has a live job.
 #[test]
 fn an_owned_job_waits_for_an_earlier_conflicting_task_or_a_live_job() {
@@ -1497,7 +1497,7 @@ fn table_with_exemption(exempt: &str) -> LaneTable {
     ))
 }
 
-// PRD 9: a kind with `areas = false` ignores the area rule; an exemption by tags lets the
+// A kind with `areas = false` ignores the area rule; an exemption by tags lets the
 // listed tags run together, one by tasks lets the two tasks run together.
 #[test]
 fn areas_off_and_exemptions_let_conflicting_tasks_run() {
@@ -1539,7 +1539,7 @@ fn areas_off_and_exemptions_let_conflicting_tasks_run() {
     }
 }
 
-// PRD 13: pins to a lane and to a kind; a pin to a lane that is not running waits, and no other
+// Pins to a lane and to a kind; a pin to a lane that is not running waits, and no other
 // lane takes the task.
 #[test]
 fn a_pin_to_a_lane_that_is_not_running_never_goes_elsewhere() {
@@ -1654,7 +1654,7 @@ fn feature_graph(tasks: Vec<PickTask>) -> PickGraph {
     graph(&["F1", "F2", "F3", "F4"], tasks)
 }
 
-// PRD 16: the cap counts prepared tasks not yet started plus preparations running.
+// The cap counts prepared tasks not yet started plus preparations running.
 #[test]
 fn the_ahead_cap_counts_prepared_unstarted_and_running_preparations() {
     let table = ahead_table(2, 3);
@@ -1709,7 +1709,7 @@ fn the_ahead_cap_counts_prepared_unstarted_and_running_preparations() {
     assert!(reasons(&dry.per_lane[3].1).contains(&("F4.d".to_string(), cap)));
 }
 
-// PRD 16: an ahead lane needs every edge target of the top-level task finished, not merely
+// An ahead lane needs every edge target of the top-level task finished, not merely
 // reached; and area rules do not apply to it.
 #[test]
 fn an_ahead_lane_needs_finished_targets_and_ignores_areas() {
@@ -1782,7 +1782,7 @@ fn a_prepared_unrefreshed_owner_with_staleness_refreshes_first() {
     }
 }
 
-// PRD 18: a stale stamp stops every lane with the diff; a matching stamp or none changes nothing;
+// A stale stamp stops every lane with the diff; a matching stamp or none changes nothing;
 // a status change does not make the stamp stale.
 #[test]
 fn a_stale_stamp_stops_every_lane() {
@@ -1875,7 +1875,7 @@ fn dry_run_reasons(dry: &DryRun) -> BTreeSet<&'static str> {
     found
 }
 
-// PRD 19: the dry run surfaces every reason the picker gives. Environment and Failed are lane
+// The dry run surfaces every reason the picker gives. Environment and Failed are lane
 // record reasons the dispatcher sets; the picker never gives them.
 #[test]
 fn the_dry_run_surfaces_every_wait_reason() {

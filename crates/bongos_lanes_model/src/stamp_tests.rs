@@ -79,7 +79,7 @@ fn the_stamp_does_not_depend_on_input_order() {
     assert_eq!(expected.per_task.len(), 5);
 }
 
-// PRD 18: nothing that changes with status changes the stamp.
+// Nothing that changes with status changes the stamp.
 #[test]
 fn a_status_change_does_not_change_the_stamp() {
     let table = table();
@@ -112,7 +112,7 @@ fn a_status_change_does_not_change_the_stamp() {
     assert_eq!(compute(&graph_of(sized), &table).digest, before.digest);
 }
 
-// PRD 18: a structure change names the task.
+// A structure change names the task.
 #[test]
 fn a_structure_change_names_the_task() {
     let table = table();
