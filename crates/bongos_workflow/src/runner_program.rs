@@ -889,10 +889,7 @@ impl ProgramRunner {
             "commands": node.permissions.commands,
             "network": node.permissions.network,
             "writable": confinement.writable_roots(),
-            "protected": confinement.masks(),
-            // Carried for a later step; the shim ignores it and refuses through `protected`.
             "masks": confinement.masks(),
-            "git": Vec::<PathBuf>::new(),
             "denials_fd": DENIALS_FD,
         });
         fs::write(
