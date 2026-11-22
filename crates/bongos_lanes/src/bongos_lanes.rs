@@ -7,9 +7,12 @@
 //! trees (`job_trees`), the reset and save of a lane's persistent tree and the merge in it
 //! (`lane_tree`), the worktree roots lanes give a hand start (`roots`), and a task's trees with
 //! the exclusive leases of a lane's second tree that the checks ask for (`task_trees`). The
-//! dispatcher (`dispatcher`, `dispatch_job`) picks, starts and ends the lanes' jobs in one loop.
+//! dispatcher (`dispatcher`, `dispatch_job`) picks, starts and ends the lanes' jobs in one loop;
+//! `adopt` gives a stopped or halted task to a free lane, and `accept_graph` lands the graph stamp.
 
+mod accept_graph;
 mod actions;
+mod adopt;
 mod create;
 mod definitions;
 mod dispatch_job;
@@ -36,9 +39,17 @@ use std::sync::Arc;
 use bongos_project_repo::{ActivitySources, LiveSources};
 use gpui::App;
 
-pub use actions::{
-    ENGINE_HOST_MESSAGE, LanesToast, OFF_MESSAGE, action_types, init_palette, lanes, register,
+pub use accept_graph::{
+    ACCEPT_SUBJECT, Accepted, STAMP_FILE, accept_graph, accept_graph_now, read_stamp, stamp_at,
+    stamp_path,
 };
+pub use actions::{
+    AdoptArgs, AdoptPrompt, DROP_CHOICES, ENGINE_HOST_MESSAGE, LanesToast,
+    NOTHING_TO_ADOPT_MESSAGE, OFF_MESSAGE, ONE_PROJECT_MESSAGE, WindowLanes, accepted_message,
+    action_types, adopt_as_person, adopt_prompt, adoptable_tasks, adopted_message, init_palette,
+    lanes, register,
+};
+pub use adopt::{AdoptRequest, Adopted, LeftWork};
 pub use bongos_lanes_model::{EnvEdit, Problem};
 pub use create::{CreateError, check_root, create_below_existing, lexical};
 pub use definitions::{LANES_FILE, LANES_FOLDER, prompt_lane_diagnostics, validate_folder};
@@ -63,8 +74,8 @@ pub use lane_control::{
 };
 pub use lane_tree::{
     Forbidden, LaneMerge, LaneMergeError, LaneMerged, LastEnd, LastRun, MergeTarget, ResetOutcome,
-    ResetRequest, SAVE_EMAIL, SAVE_NAME, SAVED_REFS, SaveTarget, Saved, add_tree, check_own_tree,
-    git_tree_maker, lane_tree, merge_in_lane_tree, reset_tree,
+    ResetRequest, SAVE_EMAIL, SAVE_NAME, SAVED_REFS, SaveError, SaveTarget, Saved, add_tree,
+    check_own_tree, git_tree_maker, lane_tree, merge_in_lane_tree, reset_tree, save_left_work,
 };
 pub use locations::{
     Fallback, LaneLocation, LaneLocations, Layer, LocationInputs, Place, RepositoryPlace,
@@ -116,6 +127,8 @@ pub fn init(cx: &mut App) {
     trees.register(cx);
 }
 
+#[cfg(test)]
+mod accept_graph_tests;
 #[cfg(test)]
 mod actions_tests;
 #[cfg(test)]

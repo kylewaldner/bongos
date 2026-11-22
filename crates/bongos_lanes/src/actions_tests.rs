@@ -1,7 +1,9 @@
 //! Tests of the `lanes` settings and actions: off by default, hidden and toasting while off.
 
+use std::rc::Rc;
 use std::time::Duration;
 
+use bongos_lanes_model::{Author, LaneId, TaskId};
 use command_palette_hooks::CommandPaletteFilter;
 use gpui::{BorrowAppContext as _, TestAppContext, VisualTestContext};
 use project::Project;
@@ -9,10 +11,12 @@ use settings::{Settings as _, SettingsStore};
 use workspace::notifications::NotificationId;
 use workspace::{AppState, MultiWorkspace, Workspace};
 
-use crate::actions::LastToast;
+use crate::actions::{LastChoices, LastToast, PendingAdopt};
+use crate::dispatcher_tests::adopt_tests::TreeHarness;
 use crate::{
-    ENGINE_HOST_MESSAGE, LanesHostSettings, LanesOnInterruption, LanesOnLastWindowClose,
-    LanesSettings, LanesToast, OFF_MESSAGE, action_types,
+    DROP_CHOICES, ENGINE_HOST_MESSAGE, Lanes, LanesHostSettings, LanesOnInterruption,
+    LanesOnLastWindowClose, LanesSettings, LanesToast, OFF_MESSAGE, ONE_PROJECT_MESSAGE,
+    WindowLanes, action_types,
 };
 
 const NAMES: &[&str] = &[
@@ -179,9 +183,153 @@ async fn lanes_dispatch_by_name_shows_the_off_toast_while_off(cx: &mut TestAppCo
     assert_eq!(OFF_MESSAGE, "Lanes are off (lanes.enabled)");
     assert_eq!(toasts(&workspace, cx), vec![OFF_MESSAGE; NAMES.len()]);
 
+    // While on, the commands of the engine host say this window does not reach it; accept graph
+    // runs here and needs the one project repository open in it.
     cx.update(|_, cx| set_enabled(cx, true));
+    let expected: Vec<&str> = NAMES
+        .iter()
+        .map(|name| match *name {
+            "lanes::AcceptGraph" => ONE_PROJECT_MESSAGE,
+            _ => ENGINE_HOST_MESSAGE,
+        })
+        .collect();
+    assert_eq!(toasts(&workspace, cx), expected);
+}
+
+/// A window whose `lanes: adopt` reaches the lanes of `harness`, with lanes on.
+async fn adopt_window<'a>(
+    harness: &TreeHarness,
+    cx: &'a mut TestAppContext,
+) -> (gpui::Entity<Workspace>, &'a mut VisualTestContext) {
+    let (workspace, cx) = workspace_with_actions(cx).await;
+    let lanes = Lanes::new(harness.lanes.parts.clone());
+    cx.update(|_, cx| {
+        editor::init(cx);
+        set_enabled(cx, true);
+        cx.set_global(WindowLanes(Some(Rc::new(lanes))));
+    });
+    (workspace, cx)
+}
+
+fn dispatch(name: &str, cx: &mut VisualTestContext) {
+    let action = cx.update(|_, cx| cx.build_action(name, None).unwrap());
+    cx.update(|window, cx| window.dispatch_action(action, cx));
+    cx.run_until_parked();
+}
+
+/// The choices of the list `lanes: adopt` opened last.
+fn choices(cx: &mut VisualTestContext) -> Vec<String> {
+    cx.update(|_, cx| cx.global::<LastChoices>().0.clone())
+}
+
+fn last_toast(cx: &mut VisualTestContext) -> Option<String> {
+    cx.update(|_, cx| cx.try_global::<LastToast>().map(|toast| toast.0.clone()))
+}
+
+/// Types `text` into the open prompt and confirms it.
+fn answer(text: &str, cx: &mut VisualTestContext) {
+    if !text.is_empty() {
+        cx.simulate_input(text);
+        cx.run_until_parked();
+    }
+    dispatch("menu::Confirm", cx);
+}
+
+/// Waits for the adopt the action started and the toast or prompt it shows.
+async fn adopt_done(cx: &mut VisualTestContext) {
+    let pending = cx.update(|_, cx| {
+        cx.try_global::<PendingAdopt>()
+            .is_some()
+            .then(|| cx.global_mut::<PendingAdopt>().0.take())
+            .flatten()
+    });
+    pending.expect("an adopt started").await;
+    cx.run_until_parked();
+}
+
+// `lanes: adopt` asks for a stopped or halted task, then offers only the free lanes, refuses an
+// empty reason at its prompt and adopts as the person at the keyboard.
+#[gpui::test]
+async fn lanes_adopt_asks_task_free_lane_and_reason_then_adopts(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let mut harness = TreeHarness::new();
+    let failed = harness.halted(cx, true).await;
+    let (_workspace, cx) = adopt_window(&harness, cx).await;
+
+    dispatch("lanes::Adopt", cx);
+    assert_eq!(choices(cx), ["a"]);
+    answer("", cx);
+    // build-1 is halted and holds a: only build-2 is free.
+    assert_eq!(choices(cx), ["build-2"]);
+    answer("", cx);
+
+    let before = harness.state();
+    answer("", cx);
+    assert_eq!(last_toast(cx), None, "an empty reason is not confirmed");
+    assert!(cx.update(|_, cx| cx.try_global::<PendingAdopt>().is_none()));
+    assert_eq!(harness.state(), before);
+
+    answer("build-1's drive is slow", cx);
+    adopt_done(cx).await;
     assert_eq!(
-        toasts(&workspace, cx),
-        vec![ENGINE_HOST_MESSAGE; NAMES.len()]
+        last_toast(cx).as_deref(),
+        Some("a adopted by build-2 from build-1")
+    );
+    assert_eq!(harness.cancelled(), [failed]);
+    let state = harness.state();
+    let owner = &state.owners[&TaskId::new("a")];
+    assert_eq!(owner.lane, Some(LaneId::new("build", 2)));
+    assert!(matches!(owner.by, Author::Person(_)), "{:?}", owner.by);
+    let history = harness.history("a");
+    let last = history.last().unwrap();
+    assert!(
+        last.starts_with("adopted by build-2 from build-1: build-1's drive is slow ("),
+        "{last}"
+    );
+}
+
+// With the halted job's tree gone, the adopt shows the refusal and asks to confirm dropping the
+// work; keeping it changes nothing, and confirming adopts with the drop recorded.
+#[gpui::test]
+async fn lanes_adopt_of_an_unreadable_tree_asks_to_confirm_the_drop(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let mut harness = TreeHarness::new();
+    let failed = harness.halted(cx, true).await;
+    std::fs::remove_dir_all(harness.lane_tip(1)).unwrap();
+    let (_workspace, cx) = adopt_window(&harness, cx).await;
+    let before = harness.state();
+
+    let ask_drop = |cx: &mut VisualTestContext| {
+        dispatch("lanes::Adopt", cx);
+        answer("", cx);
+        answer("", cx);
+        answer("drive gone", cx);
+    };
+    ask_drop(cx);
+    adopt_done(cx).await;
+    assert_eq!(choices(cx), DROP_CHOICES);
+    assert_eq!(last_toast(cx), None);
+    // The first choice keeps the work: nothing is cancelled or moved.
+    answer("", cx);
+    assert!(cx.update(|_, cx| cx.global::<PendingAdopt>().0.is_none()));
+    assert!(harness.cancelled().is_empty());
+    assert_eq!(harness.state(), before);
+
+    ask_drop(cx);
+    adopt_done(cx).await;
+    assert_eq!(choices(cx), DROP_CHOICES);
+    answer("Drop", cx);
+    adopt_done(cx).await;
+    assert_eq!(
+        last_toast(cx).as_deref(),
+        Some("a adopted by build-2 from build-1; the unreadable old work was dropped")
+    );
+    assert_eq!(harness.cancelled(), [failed]);
+    let history = harness.history("a");
+    let last = history.last().unwrap();
+    assert!(
+        last.starts_with("adopted by build-2 from build-1: drive gone (")
+            && last.ends_with("); unreadable old work dropped"),
+        "{last}"
     );
 }
