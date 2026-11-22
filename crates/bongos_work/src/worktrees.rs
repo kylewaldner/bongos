@@ -148,6 +148,13 @@ impl Request {
     pub(crate) fn worktree(&self) -> &Path {
         &self.worktree
     }
+
+    /// The request with its root set by `source` instead.
+    #[cfg(test)]
+    pub(crate) fn with_source(mut self, source: Source) -> Self {
+        self.location.source = source;
+        self
+    }
 }
 
 /// What the task should be started with, or the message of the toast that refuses or reports
@@ -700,7 +707,7 @@ pub(crate) fn prepare_parent(worktree: &Path) -> Result<()> {
 
 /// Checks that files can be made in `directory` by making one with a unique name (`create_new`)
 /// and removing it at once.
-pub(crate) fn probe_writable(directory: &Path) -> Result<()> {
+pub fn probe_writable(directory: &Path) -> Result<()> {
     static PROBES: AtomicU64 = AtomicU64::new(0);
     let probe = directory.join(format!(
         ".bongos-probe-{}-{}",
@@ -1021,7 +1028,7 @@ async fn make_worktree(fs: Arc<dyn Fs>, request: &Request) -> Result<StartedWork
 /// The path to make the worktree at: the planned one when its parent can be made and written,
 /// else the central one, with the planned parent as the fallback to report. Refuses when the
 /// planned path is already central, there is no central path, or its parent fails too.
-fn writable_spot(
+pub(crate) fn writable_spot(
     request: &Request,
     planned_parent: impl Fn() -> String,
 ) -> Result<(PathBuf, Option<String>)> {
@@ -1031,6 +1038,18 @@ fn writable_spot(
     };
     if request.location.source == Source::Central {
         return Err(error.context("nothing was created"));
+    }
+    if !request.location.source.falls_back() {
+        bail!(
+            "{error:#}; the worktree root {} is set {}, so it does not fall back to the central \
+             directory; nothing was created",
+            planned_parent(),
+            match &request.location.source {
+                Source::Profile { name } => format!("by project profile {name}"),
+                Source::Lane => "by the lane binding".to_string(),
+                _ => "by the project".to_string(),
+            }
+        );
     }
     let central = match &request.location.central {
         Some(Ok(central)) => central.clone(),
