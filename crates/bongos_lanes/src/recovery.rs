@@ -119,11 +119,7 @@ fn live_dispatcher(parts: &LanesParts, record: Option<&DispatcherRecord>) -> boo
 /// Recovery when this process became the project's writer, after the run engine loaded the runs:
 /// closes a dead host's dispatcher, clears the lane jobs that never started and applies `policy`
 /// to the interrupted lane runs.
-pub fn recover(
-    parts: &LanesParts,
-    policy: LanesOnInterruption,
-    cx: &mut App,
-) -> Result<Recovered> {
+pub fn recover(parts: &LanesParts, policy: LanesOnInterruption, cx: &mut App) -> Result<Recovered> {
     let closed_dispatcher = close_dead_dispatcher(parts, cx)?;
     let cleared = clear_unstarted_jobs(parts, cx)?;
     let (resumed, waiting) = apply_interruption_policy(parts, policy, cx)?;
@@ -156,7 +152,10 @@ pub(crate) fn close_dead_dispatcher(parts: &LanesParts, cx: &mut App) -> Result<
     };
     log::info!("lanes: the dispatcher host {dead} is gone; closing its run {run}");
     let engine = &parts.engine;
-    if engine.run_status(&run).is_some_and(|status| status.is_active()) {
+    if engine
+        .run_status(&run)
+        .is_some_and(|status| status.is_active())
+    {
         engine.interrupt_run(&run, cx);
         engine.end_dispatcher(&run, RunEnd::Cancelled, HOST_STOPPED, cx);
     }

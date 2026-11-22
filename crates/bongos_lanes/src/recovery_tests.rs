@@ -10,9 +10,7 @@ use bongos_lanes_model::{
 use bongos_workflow::RunStatus;
 use gpui::TestAppContext;
 
-use super::{
-    DISPATCHER_RUN, Harness, builds, graph, harness, leaf, start, start_request,
-};
+use super::{DISPATCHER_RUN, Harness, builds, graph, harness, leaf, start, start_request};
 use crate::dispatcher::{DispatcherRecord, JobEngine as _, dispatcher_record, put_dispatcher};
 use crate::lane_control::RunEnd;
 use crate::recovery::{
@@ -109,10 +107,7 @@ fn killed_mid_job(table: &str, interrupted: bool) -> Harness {
         RunStatus::Running
     };
     status.insert(JOB_RUN.to_string(), ("w".to_string(), job_status));
-    status.insert(
-        HALTED_RUN.to_string(),
-        ("w".to_string(), RunStatus::Halted),
-    );
+    status.insert(HALTED_RUN.to_string(), ("w".to_string(), RunStatus::Halted));
     drop(status);
     if interrupted {
         harness
@@ -124,7 +119,11 @@ fn killed_mid_job(table: &str, interrupted: bool) -> Harness {
     harness
 }
 
-fn recover_now(harness: &Harness, policy: LanesOnInterruption, cx: &mut TestAppContext) -> Recovered {
+fn recover_now(
+    harness: &Harness,
+    policy: LanesOnInterruption,
+    cx: &mut TestAppContext,
+) -> Recovered {
     let recovered = cx.update(|cx| recover(&harness.lanes.parts, policy, cx).unwrap());
     cx.run_until_parked();
     recovered
@@ -268,10 +267,7 @@ async fn on_interruption_resume_resumes_once_and_a_second_interruption_waits(
         [(JOB_RUN.to_string(), Some(InterruptionRecord { resumed: 1 }))],
         "the record is committed before the resume"
     );
-    assert_eq!(
-        harness.engine.run_status(JOB_RUN),
-        Some(RunStatus::Running)
-    );
+    assert_eq!(harness.engine.run_status(JOB_RUN), Some(RunStatus::Running));
     assert!(harness.engine.jobs.borrow().is_empty(), "no job twice");
     assert_eq!(harness.state().lanes, before.lanes);
     assert_eq!(harness.state().owners, before.owners);
@@ -330,10 +326,7 @@ async fn a_crash_right_after_handed_over_continues_the_runs(cx: &mut TestAppCont
 
     assert!(harness.engine.resumes.borrow().is_empty());
     assert_eq!(interruption_of(&harness, JOB_RUN), None);
-    assert_eq!(
-        harness.engine.run_status(JOB_RUN),
-        Some(RunStatus::Running)
-    );
+    assert_eq!(harness.engine.run_status(JOB_RUN), Some(RunStatus::Running));
     assert!(harness.engine.jobs.borrow().is_empty(), "no job twice");
     assert_eq!(harness.state().lanes, before.lanes);
     assert_eq!(harness.state().owners, before.owners);
@@ -367,7 +360,10 @@ async fn a_crash_between_pick_and_run_start_leaves_the_lane_idle_with_its_owner(
         owner(&build(1), OwnerState::Active)
     );
     // The dispatcher's run was never loaded: it is marked ended, the engine is not asked.
-    assert_eq!(recovered.closed_dispatcher, Some(OLD_DISPATCHER.to_string()));
+    assert_eq!(
+        recovered.closed_dispatcher,
+        Some(OLD_DISPATCHER.to_string())
+    );
     assert!(harness.engine.closes.borrow().is_empty());
 
     // The same lane takes its task again at the next start, once.
