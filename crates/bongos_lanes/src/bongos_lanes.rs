@@ -39,6 +39,7 @@ mod runs;
 mod scope;
 mod settings;
 mod staleness;
+mod status_doc;
 mod store;
 mod task_trees;
 
@@ -114,6 +115,7 @@ pub use staleness::{
     PinnedTree, Staleness, StalenessCheck, run_staleness_script, staleness_answer,
     staleness_program,
 };
+pub use status_doc::{STATUS_SCHEMA, StatusFacts, status_doc};
 pub use store::{
     LANE_PREFIX, LANES_NAMESPACE, OWNER_PREFIX, delete_lane, delete_owner, put_lane, put_owner,
     read_state, read_state_in, write_state,
