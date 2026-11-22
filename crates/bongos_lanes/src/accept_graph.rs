@@ -31,9 +31,10 @@ pub enum Accepted {
     Landed { commit: String, digest: String },
     /// Master already records this stamp; nothing was made.
     Unchanged { digest: String },
-    /// The change is made and waits for a person's approval: the request did not come from a
-    /// window that may speak for a person.
-    Waiting { change_id: String, digest: String },
+    /// The change is made and its landing runs on in the writer. It lands as the person's own
+    /// when the request came from a window that may speak for one, and otherwise waits for a
+    /// person's approval (`project: approve`).
+    Landing { change_id: String, digest: String },
 }
 
 /// The path of `stamp.toml` in the repository.
@@ -158,7 +159,8 @@ async fn stage_stamp(
 
 /// `lanes: accept graph` as the writer runs it for `peer`: the stamp lands as a person's own
 /// change only when `peer` may attest a person (a window of this executable) and sent a claim;
-/// from any other peer the change waits for a person's approval ([`Accepted::Waiting`]).
+/// from any other peer the change waits for a person's approval. Resolves once the change is
+/// made ([`Accepted::Landing`]).
 pub async fn accept_graph_for_peer(
     repo: &ProjectRepo,
     claim: Option<PersonClaim>,
@@ -183,20 +185,22 @@ pub async fn accept_graph_for_peer(
         meta: ChangeMeta::new(ACCEPT_SUBJECT, author),
         mode: LandMode::Land,
     };
-    HostBoundary::new(repo.clone())
-        .accept_now(
-            RepoCommand::Land {
-                change_id: change_id.clone(),
-                request,
-                person: claim,
-            },
-            peer,
-            now,
-        )
-        .await?;
-    match repo.landing_result(&change_id)? {
-        Some(LandingResult::Landed { commit }) => Ok(Accepted::Landed { commit, digest }),
-        Some(other) => bail!("the stamp did not land: {other:?}"),
-        None => Ok(Accepted::Waiting { change_id, digest }),
-    }
+    // The landing runs on: it runs the landing checks, and with no person's grant it waits for
+    // one's approval, so the request does not wait for it (a client gives a writer ten seconds
+    // to answer). The caller hears of the end through the repository's landing events.
+    let boundary = HostBoundary::new(repo.clone());
+    let peer = peer.clone();
+    let landing_id = change_id.clone();
+    smol::spawn(async move {
+        let command = RepoCommand::Land {
+            change_id: landing_id.clone(),
+            request,
+            person: claim,
+        };
+        if let Err(error) = boundary.accept_now(command, &peer, Utc::now()).await {
+            log::error!("landing the accepted task graph {landing_id}: {error:#}");
+        }
+    })
+    .detach();
+    Ok(Accepted::Landing { change_id, digest })
 }

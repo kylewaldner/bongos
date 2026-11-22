@@ -147,6 +147,8 @@ mod env_tests;
 #[cfg(test)]
 mod exporter_tests;
 #[cfg(test)]
+mod host_tests;
+#[cfg(test)]
 mod job_trees_tests;
 #[cfg(test)]
 mod lane_tree_tests;

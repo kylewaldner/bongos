@@ -77,7 +77,7 @@ pub fn register_host(cx: &mut App) {
 }
 
 /// The author of a command: the person it names when `peer` may attest one, else the system.
-fn author_of(payload: &LanesPayload, peer: &PeerIdentity) -> Author {
+pub(crate) fn author_of(payload: &LanesPayload, peer: &PeerIdentity) -> Author {
     match (&payload.person, peer.may_attest_person()) {
         (Some(name), true) => Author::Person(name.clone()),
         _ => Author::System,

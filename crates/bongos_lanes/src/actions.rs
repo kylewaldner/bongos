@@ -268,9 +268,10 @@ pub fn accepted_message(result: &Result<Accepted>) -> String {
             &commit[..commit.len().min(12)]
         ),
         Ok(Accepted::Unchanged { .. }) => "The task graph is already accepted".to_string(),
-        Ok(Accepted::Waiting { .. }) => {
-            "The accepted task graph waits for your approval (project: approve)".to_string()
-        }
+        Ok(Accepted::Landing { change_id, .. }) => format!(
+            "Accepting the task graph: its landing runs on (change {change_id}); if it waits, \
+             approve it with project: approve"
+        ),
         Err(error) => format!("Could not accept the task graph: {error:#}"),
     }
 }

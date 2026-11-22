@@ -24,9 +24,9 @@ use tempfile::TempDir;
 
 use crate::{
     ClientMessage, ClientOptions, EngineAccess, HostClient, HostCommand, HostCommands, HostEvent,
-    HostInfo, HostMode, OpenedState, PROTOCOL_VERSION, ServerMessage, WriterHost, WriterOptions,
-    checks_handler, live_host, not_answering, open_state_with_hooks, read_host_file,
-    register_checks, version_refusal, write_host_file,
+    HostInfo, HostMode, LanesVerb, OpenedState, PROTOCOL_VERSION, ServerMessage, WorkflowVerb,
+    WriterHost, WriterOptions, checks_handler, live_host, not_answering, open_state_with_hooks,
+    read_host_file, register_checks, version_refusal, write_host_file,
 };
 
 const VERSION: &str = "1.2.3";
@@ -518,4 +518,123 @@ async fn a_host_file_naming_a_dead_pid_or_another_start_time_is_never_live_and_a
 fn socket_mode(path: &Path) -> u32 {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::metadata(path).unwrap().permissions().mode()
+}
+
+// A rerouted `workflow:` or `lanes:` command from a client reaches the handler the writer
+// registered, with its verb, its payload and whether the peer may speak for a person.
+#[gpui::test]
+async fn rerouted_workflow_and_lanes_commands_from_a_client_reach_the_writers_handlers(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let _host = start_writer(&fixture, true, cx);
+    let workflow = Rc::new(RefCell::new(Vec::<(String, serde_json::Value, bool)>::new()));
+    let lanes = Rc::new(RefCell::new(Vec::<(String, serde_json::Value, bool)>::new()));
+    let (seen_workflow, seen_lanes) = (workflow.clone(), lanes.clone());
+    cx.update(|cx| {
+        HostCommands::serve_workflow(
+            Rc::new(move |verb, payload, peer, _: &mut App| {
+                seen_workflow.borrow_mut().push((
+                    serde_json::to_value(verb).unwrap().to_string(),
+                    payload,
+                    peer.may_attest_person(),
+                ));
+                Task::ready(Ok(json!("Workflow run resumed")))
+            }),
+            cx,
+        );
+        HostCommands::serve_lanes(
+            Rc::new(move |verb, payload, peer, _: &mut App| {
+                seen_lanes.borrow_mut().push((
+                    serde_json::to_value(verb).unwrap().to_string(),
+                    payload,
+                    peer.may_attest_person(),
+                ));
+                Task::ready(Ok(json!({ "message": "done" })))
+            }),
+            cx,
+        );
+    });
+
+    let window = EngineAccess::Remote(fixture.connect(ClientKind::Window, cx));
+    let answer = cx
+        .update(|cx| {
+            window.request(
+                HostCommand::Workflow {
+                    verb: WorkflowVerb::Resume,
+                    payload: json!({ "task_id": "l1", "run": null }),
+                },
+                cx,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(answer, json!("Workflow run resumed"));
+    let adopt = json!({ "task": "l1", "lane": "build-2", "reason": "why", "person": "kim" });
+    let cli = EngineAccess::Remote(fixture.connect(ClientKind::Cli, cx));
+    for access in [&window, &cli] {
+        cx.update(|cx| {
+            access.request(
+                HostCommand::Lanes {
+                    verb: LanesVerb::Adopt,
+                    payload: adopt.clone(),
+                },
+                cx,
+            )
+        })
+        .await
+        .unwrap();
+    }
+
+    assert_eq!(
+        *workflow.borrow(),
+        [(
+            "\"resume\"".to_string(),
+            json!({ "task_id": "l1", "run": null }),
+            true
+        )]
+    );
+    // The same person claim reaches the writer from both peers; only the window's may be
+    // trusted, which the handler reads from the peer, not from the payload.
+    assert_eq!(
+        *lanes.borrow(),
+        [
+            ("\"adopt\"".to_string(), adopt.clone(), true),
+            ("\"adopt\"".to_string(), adopt, false)
+        ]
+    );
+}
+
+// In the writer itself a rerouted command runs the handler in this process, as a window.
+#[gpui::test]
+async fn a_rerouted_command_in_the_writer_runs_the_handler_locally(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let seen = Rc::new(RefCell::new(Vec::<bool>::new()));
+    let log = seen.clone();
+    cx.update(|cx| {
+        HostCommands::serve_workflow(
+            Rc::new(move |_, _, peer, _: &mut App| {
+                log.borrow_mut().push(peer.may_attest_person());
+                Task::ready(Ok(json!("ok")))
+            }),
+            cx,
+        )
+    });
+    let local = EngineAccess::Local(fixture.repo.clone());
+    let answer = cx
+        .update(|cx| {
+            local.request(
+                HostCommand::Workflow {
+                    verb: WorkflowVerb::Pause,
+                    payload: json!({}),
+                },
+                cx,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(answer, json!("ok"));
+    assert_eq!(*seen.borrow(), [true]);
 }
