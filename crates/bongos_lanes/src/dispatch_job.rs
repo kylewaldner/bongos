@@ -104,7 +104,7 @@ impl Dispatcher {
                     CurrentJobTrees::set(pending.lane.clone(), trees, cx);
                 }
                 if let (Some(setup), Some(task_trees)) = (lane_trees, LaneTaskTrees::global(cx)) {
-                    task_trees.set_lane(pending.lane.clone(), setup);
+                    task_trees.set_lane(&self.0.config.project, pending.lane.clone(), setup);
                 }
                 None
             }

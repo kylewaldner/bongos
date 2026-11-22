@@ -19,7 +19,7 @@ use settings::SettingsStore;
 use tempfile::TempDir;
 
 use crate::dispatcher_tests::{
-    Harness, builds, finish, harness, history_of, leaf, start, start_request,
+    Harness, builds, finish, harness, harness_in, history_of, leaf, start, start_request,
 };
 use crate::done_owners::{CLEARED_NO_CHECKS, clear_done_owners_in};
 use crate::job_trees::CurrentJobTrees;
@@ -355,7 +355,7 @@ async fn a_done_owner_lends_while_its_lane_works_elsewhere_until_the_done_record
     assert_eq!(harness.engine.job_tasks(), ["other"]);
     assert_eq!(harness.lane("build", 1).state, LaneState::Running);
     assert_eq!(harness.state().owners[&task("feature")], done);
-    assert_eq!(trees.lanes(), [build(1)], "set at the job start");
+    assert_eq!(trees.lanes("project-1"), [build(1)], "set at the job start");
     let SecondTree::Lease(lease) = trees.second_tree("leaf", "app") else {
         panic!("not lent");
     };
@@ -400,7 +400,7 @@ async fn a_done_owner_of_a_lane_gone_from_the_table_is_cleared_and_the_lane_forg
     let fixture = Fixture::build(TABLE, |_| None);
     let harness = harness(&builds(1), feature_and_other(), &[]);
     let trees = lane_trees(&harness, cx);
-    trees.set_lane(build(2), setup(&fixture, Vec::new()));
+    trees.set_lane("project-1", build(2), setup(&fixture, Vec::new()));
     harness
         .writer
         .transact(|tx| put_owner(tx, &task("feature"), &owner(&build(2), OwnerState::Done)))
@@ -414,8 +414,44 @@ async fn a_done_owner_of_a_lane_gone_from_the_table_is_cleared_and_the_lane_forg
         history_of(&harness, "feature"),
         ["lane owner cleared: lane build-2 no longer exists"]
     );
-    assert!(!trees.lanes().contains(&build(2)));
+    assert!(!trees.lanes("project-1").contains(&build(2)));
     assert_eq!(answer(&trees, "leaf", "app"), "unavailable");
+}
+
+#[gpui::test]
+async fn a_pass_in_another_project_keeps_this_projects_top_level_lookup_and_lanes(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::build(TABLE, |_| None);
+    let first = harness_in("project-1", &builds(1), feature_and_other());
+    let trees = lane_trees(&first, cx);
+    let started = start_job(&fixture, &trees, RUN_1).await;
+    let mut lane_setup = setup(&fixture, Vec::new());
+    lane_setup.second_checked = started.second_checked();
+    *first.host.lane_trees.borrow_mut() = Some(lane_setup);
+    first
+        .writer
+        .transact(|tx| put_owner(tx, &task("feature"), &owner(&build(1), OwnerState::Done)))
+        .unwrap();
+    mark(&first.writer, "leaf");
+    let _first = start(&first, start_request(), cx).await;
+    assert_eq!(trees.lanes("project-1"), [build(1)]);
+    assert_eq!(answer(&trees, "leaf", "app"), "lease");
+
+    // A second project with no `build-1` lane and a graph that does not know `leaf` passes.
+    let docs = "[[kind]]\nname = \"docs\"\ncount = 1\n";
+    let second = harness_in(
+        "project-2",
+        docs,
+        PickGraph::new(vec![task("elsewhere")], [leaf("elsewhere")]),
+    );
+    let _second = start(&second, start_request(), cx).await;
+    assert!(second.state().lanes.contains_key(&LaneId::new("docs", 1)));
+
+    assert_eq!(trees.lanes("project-1"), [build(1)], "not forgotten");
+    assert!(trees.lanes("project-2").is_empty());
+    assert_eq!(answer(&trees, "leaf", "app"), "lease", "still looked up");
 }
 
 #[gpui::test]
@@ -443,10 +479,11 @@ async fn init_registers_the_lane_trees_where_the_checks_find_them(cx: &mut TestA
     let started = start_job(&fixture, &trees, RUN_1).await;
     let mut lane_setup = setup(&fixture, Vec::new());
     lane_setup.second_checked = started.second_checked();
-    trees.set_lane(build(1), lane_setup);
-    trees.set_top_level(Arc::new(|id| {
-        matches!(id, "feature" | "leaf").then(|| TaskId::new("feature"))
-    }));
+    trees.set_lane("project-1", build(1), lane_setup);
+    trees.set_top_level(
+        "project-1",
+        Arc::new(|id| matches!(id, "feature" | "leaf").then(|| TaskId::new("feature"))),
+    );
     let runs = cx.update(|cx| cx.global::<LaneRuns>().clone());
     runs.set(
         "project-1",

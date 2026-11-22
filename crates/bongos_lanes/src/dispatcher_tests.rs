@@ -30,6 +30,7 @@ use crate::test_support::{SINCE, tree, writer};
 const DISPATCHER_RUN: &str = "0190dispatcher";
 
 pub(crate) struct TestHost {
+    project: String,
     writer: Arc<StateWriter>,
     table: String,
     graph: RefCell<PickGraph>,
@@ -56,7 +57,7 @@ impl JobDefinitionPolicy for FixedPolicy {
 
 impl LanesHost for TestHost {
     fn project_id(&self) -> String {
-        "project-1".to_string()
+        self.project.clone()
     }
 
     fn is_repository_project(&self) -> bool {
@@ -242,7 +243,22 @@ pub(crate) fn harness(table: &str, graph: PickGraph, limits: &[(&str, u32)]) -> 
     harness_with(table, graph, limits, Rc::new(VerifiedCommitPolicy))
 }
 
+/// A harness of the project `project`, with its own store.
+pub(crate) fn harness_in(project: &str, table: &str, graph: PickGraph) -> Harness {
+    harness_of(project, table, graph, &[], Rc::new(VerifiedCommitPolicy))
+}
+
 fn harness_with(
+    table: &str,
+    graph: PickGraph,
+    limits: &[(&str, u32)],
+    policy: Rc<dyn JobDefinitionPolicy>,
+) -> Harness {
+    harness_of("project-1", table, graph, limits, policy)
+}
+
+fn harness_of(
+    project: &str,
     table: &str,
     graph: PickGraph,
     limits: &[(&str, u32)],
@@ -254,6 +270,7 @@ fn harness_with(
         .transact(|tx| tx.set_verified_commit("c1", Arc::new(tree(&[]))))
         .unwrap();
     let host = Rc::new(TestHost {
+        project: project.to_string(),
         writer: writer.clone(),
         table: format!("schema = 1\n{table}"),
         graph: RefCell::new(graph),

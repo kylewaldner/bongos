@@ -158,14 +158,23 @@ impl LaneTreeSetup {
     }
 }
 
+/// A lane's setup with the project whose dispatcher set it.
+struct SetBy {
+    project: String,
+    setup: LaneTreeSetup,
+}
+
 struct Inner {
     runs: LaneRuns,
     jobs: CurrentJobTrees,
-    top_level: RwLock<TopLevelOf>,
+    /// Consulted after every project's lookup.
+    fallback_top_level: TopLevelOf,
+    /// Each project's top-level lookup, set by its dispatcher.
+    top_levels: RwLock<BTreeMap<String, TopLevelOf>>,
     /// `None` until set: a `Done` owner then lends nothing.
     owed: RwLock<Option<OwedTasks>>,
     process_env: ProcessEnv,
-    setups: RwLock<BTreeMap<LaneId, LaneTreeSetup>>,
+    setups: RwLock<BTreeMap<LaneId, SetBy>>,
     leases: SecondTreeLeases,
 }
 
@@ -189,7 +198,8 @@ impl LaneTaskTrees {
             inner: Arc::new(Inner {
                 runs,
                 jobs,
-                top_level: RwLock::new(top_level),
+                fallback_top_level: top_level,
+                top_levels: RwLock::default(),
                 owed: RwLock::new(None),
                 process_env,
                 setups: RwLock::default(),
@@ -209,13 +219,14 @@ impl LaneTaskTrees {
         TaskTreesRegistry::set(Rc::new(self.clone()), cx);
     }
 
-    /// Replaces the lookup of a task's top-level task, as the dispatcher's graph moves.
-    pub fn set_top_level(&self, top_level: TopLevelOf) {
-        *self
-            .inner
-            .top_level
+    /// Replaces `project`'s lookup of a task's top-level task, as its dispatcher's graph moves;
+    /// the other projects' lookups stay.
+    pub fn set_top_level(&self, project: &str, top_level: TopLevelOf) {
+        self.inner
+            .top_levels
             .write()
-            .unwrap_or_else(|error| error.into_inner()) = top_level;
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(project.to_string(), top_level);
     }
 
     /// Sets how the tasks that still owe checks are read; until then a `Done` owner lends nothing.
@@ -227,14 +238,21 @@ impl LaneTaskTrees {
             .unwrap_or_else(|error| error.into_inner()) = Some(owed);
     }
 
+    /// The top-level task above `task_id` by the first project lookup that knows it, then by the
+    /// lookup given at creation.
     fn top_level_of(&self, task_id: &str) -> Option<TaskId> {
-        let top_level = self
+        let lookups: Vec<TopLevelOf> = self
             .inner
-            .top_level
+            .top_levels
             .read()
             .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        top_level(task_id)
+            .values()
+            .cloned()
+            .collect();
+        lookups
+            .iter()
+            .find_map(|top_level| top_level(task_id))
+            .or_else(|| (self.inner.fallback_top_level)(task_id))
     }
 
     /// Whether `top` or a task under it still owes checks, from one read of the markers and done
@@ -270,14 +288,15 @@ impl LaneTaskTrees {
         }
     }
 
-    /// The lanes with a setup.
-    pub fn lanes(&self) -> Vec<LaneId> {
+    /// The lanes with a setup that `project`'s dispatcher set.
+    pub fn lanes(&self, project: &str) -> Vec<LaneId> {
         self.inner
             .setups
             .read()
             .unwrap_or_else(|error| error.into_inner())
-            .keys()
-            .cloned()
+            .iter()
+            .filter(|(_, set)| set.project == project)
+            .map(|(lane, _)| lane.clone())
             .collect()
     }
 
@@ -288,23 +307,33 @@ impl LaneTaskTrees {
 
     /// Sets `lane`'s setup at its job start, only after [`crate::start_job_trees`] returned `Ok`
     /// for the same locations and forbidden places, so a lane whose trees were refused lends none.
-    /// The dispatcher calls it when the job's run started.
-    pub fn set_lane(&self, lane: LaneId, setup: LaneTreeSetup) {
+    /// `project`'s dispatcher calls it when the job's run started.
+    pub fn set_lane(&self, project: &str, lane: LaneId, setup: LaneTreeSetup) {
         self.inner
             .setups
             .write()
             .unwrap_or_else(|error| error.into_inner())
-            .insert(lane, setup);
+            .insert(
+                lane,
+                SetBy {
+                    project: project.to_string(),
+                    setup,
+                },
+            );
     }
 
-    /// Forgets `lane`, as when it leaves the lane table; a lease already given stays valid until
-    /// it drops, and no new one is given.
-    pub fn forget_lane(&self, lane: &LaneId) {
-        self.inner
+    /// Forgets `lane` when `project` set it, as when it leaves `project`'s lane table; a lane
+    /// another project set stays. A lease already given stays valid until it drops, and no new
+    /// one is given.
+    pub fn forget_lane(&self, project: &str, lane: &LaneId) {
+        let mut setups = self
+            .inner
             .setups
             .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(lane);
+            .unwrap_or_else(|error| error.into_inner());
+        if setups.get(lane).is_some_and(|set| set.project == project) {
+            setups.remove(lane);
+        }
     }
 
     fn setup(&self, lane: &LaneId) -> Option<LaneTreeSetup> {
@@ -313,7 +342,7 @@ impl LaneTaskTrees {
             .read()
             .unwrap_or_else(|error| error.into_inner())
             .get(lane)
-            .cloned()
+            .map(|set| set.setup.clone())
     }
 
     /// The lane whose current job is on `task_id`, and its tree of `repo`.

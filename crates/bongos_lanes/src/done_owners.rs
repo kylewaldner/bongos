@@ -146,16 +146,19 @@ impl Dispatcher {
                 Err(error) => log::error!("lanes: clearing done owners: {error:#}"),
             }
         }
+        let project = &self.0.config.project;
         if let Some(runs) = cx.try_global::<LaneRuns>() {
-            runs.set(&self.0.config.project, state.clone());
+            runs.set(project, state.clone());
         }
+        // The trees are shared by every open project: this pass replaces only its own project's
+        // lookup and forgets only lanes its own dispatcher set.
         if let Some(trees) = trees {
             if let Some(graph) = graph {
-                trees.set_top_level(top_level_from(graph));
+                trees.set_top_level(project, top_level_from(graph));
             }
-            for lane in trees.lanes() {
+            for lane in trees.lanes(project) {
                 if !state.lanes.contains_key(&lane) || !self.lane_exists(&lane) {
-                    trees.forget_lane(&lane);
+                    trees.forget_lane(project, &lane);
                 }
             }
         }

@@ -155,8 +155,9 @@ fn trees(
     env: ProcessEnv,
 ) -> LaneTaskTrees {
     let trees = LaneTaskTrees::new(runs.clone(), jobs.clone(), top_levels(), env);
-    trees.set_lane(build(1), setup(fixture, profile));
+    trees.set_lane(PROJECT, build(1), setup(fixture, profile));
     trees.set_lane(
+        PROJECT,
         LaneId::new("docs", 1),
         LaneTreeSetup {
             binding: Default::default(),
@@ -332,7 +333,7 @@ async fn the_owning_lane_lends_its_second_tree_to_one_caller_at_a_time(cx: &mut 
     assert_eq!(answer(&trees, "leaf", "app"), "unavailable");
     runs.set(PROJECT, state(OwnerState::Active, "leaf-2"));
     let kept = lease(&trees, "leaf", "app");
-    trees.forget_lane(&build(1));
+    trees.forget_lane(PROJECT, &build(1));
     assert_eq!(answer(&trees, "leaf", "app"), "unavailable");
     assert_eq!(kept.path(), app_base, "a lease given stays valid");
     drop(kept);
@@ -541,14 +542,14 @@ async fn a_second_tree_overlapping_the_tip_is_never_reset_or_lent(cx: &mut TestA
         std::fs::write(second.join("left.txt"), "left\n").unwrap();
         let mut request = fixture.request(&job, true);
         request.locations = setup.locations.clone();
-        trees.set_lane(build(1), setup);
+        trees.set_lane(PROJECT, build(1), setup);
         assert_eq!(answer(&trees, "leaf", "app"), "unavailable");
         let error = reset_tree(&fixture.git, &request).await.unwrap_err();
         assert!(error.contains("overlaps"), "{}: {error}", second.display());
         assert!(second.join("left.txt").exists(), "{}", second.display());
     }
 
-    trees.set_lane(build(1), setup(&fixture, Vec::new()));
+    trees.set_lane(PROJECT, build(1), setup(&fixture, Vec::new()));
     assert_eq!(answer(&trees, "leaf", "app"), "lease");
 }
 
@@ -575,7 +576,7 @@ async fn a_second_tree_at_a_plain_checkout_or_a_forbidden_place_is_not_lent(
     let setup_plain = moved(&fixture, "tree:app:base", &plain);
     let mut request = fixture.request(&fixture.task_job(RUN_2, None), true);
     request.locations = setup_plain.locations.clone();
-    trees.set_lane(build(1), setup_plain);
+    trees.set_lane(PROJECT, build(1), setup_plain);
     assert_eq!(answer(&trees, "leaf", "app"), "unavailable");
     let error = reset_tree(&fixture.git, &request).await.unwrap_err();
     assert!(error.contains("not a worktree of"), "{error}");
@@ -591,7 +592,7 @@ async fn a_second_tree_at_a_plain_checkout_or_a_forbidden_place_is_not_lent(
         fixture.task_worktree.clone(),
         other_lane,
     ] {
-        trees.set_lane(build(1), moved(&fixture, "tree:app:base", &path));
+        trees.set_lane(PROJECT, build(1), moved(&fixture, "tree:app:base", &path));
         assert_eq!(
             answer(&trees, "leaf", "app"),
             "unavailable",
@@ -601,7 +602,7 @@ async fn a_second_tree_at_a_plain_checkout_or_a_forbidden_place_is_not_lent(
     }
     assert_eq!(fixture.untouched(), before);
 
-    trees.set_lane(build(1), setup(&fixture, Vec::new()));
+    trees.set_lane(PROJECT, build(1), setup(&fixture, Vec::new()));
     assert_eq!(answer(&trees, "leaf", "app"), "lease");
 }
 
@@ -649,7 +650,7 @@ async fn a_done_owner_lends_only_while_checks_are_owed_under_its_task(cx: &mut T
     set(Ok(vec!["leaf"]));
     let mut unchecked = setup(&fixture, Vec::new());
     unchecked.second_checked.remove("lib");
-    trees.set_lane(build(1), unchecked);
+    trees.set_lane(PROJECT, build(1), unchecked);
     assert_eq!(answer(&trees, "leaf", "app"), "lease");
     assert_eq!(answer(&trees, "leaf", "lib"), "unavailable");
 
