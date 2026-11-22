@@ -775,8 +775,7 @@ impl Dispatcher {
         self.evaluate(true, cx);
     }
 
-    /// The project profile changed: its lane counts apply now, at each lane's job boundary, and
-    /// the lanes' locations are checked for overlap again.
+    /// The project profile changed: its lane counts apply now, at each lane's job boundary.
     pub fn counts_changed(&self, cx: &mut App) {
         if self.apply_counts(cx) {
             self.evaluate(true, cx);
@@ -787,13 +786,15 @@ impl Dispatcher {
     /// to a raised count are made (held waiting while their locations overlap another lane's),
     /// free lanes above a lowered count are removed with their task stopped, and running ones
     /// stop after their job. A lane removed is never reset; its trees stay on disk as they are.
-    /// The overlap check runs every time, even with the counts unchanged, so a lane held for an
-    /// overlap is released once the locations no longer overlap. Returns whether anything changed.
+    /// Returns whether anything changed.
     fn apply_counts(&self, cx: &mut App) -> bool {
         let parts = self.parts().clone();
         let table = self.table();
         let profile = LaneProfiles::source(cx);
         let counts = effective_counts(&table, &self.0.config.project, profile.as_deref());
+        if counts == *self.0.counts.borrow() {
+            return false;
+        }
         let lanes = table_lane_ids(&table, &self.0.config.project, profile.as_deref());
         let overlap = parts.host.check_locations(&table, &lanes, cx).err();
         let existing = match parts.writer.read(crate::store::read_state) {
@@ -803,17 +804,22 @@ impl Dispatcher {
                 return false;
             }
         };
-        let held = held_for_overlap(
-            &self.0.overlapping.borrow(),
-            &lanes,
-            &existing,
-            overlap.as_deref(),
-        );
-        let overlap_changed = held != *self.0.overlapping.borrow();
-        *self.0.overlapping.borrow_mut() = held.clone();
-        if counts == *self.0.counts.borrow() {
-            return overlap_changed;
+        {
+            let mut overlapping = self.0.overlapping.borrow_mut();
+            match &overlap {
+                None => overlapping.clear(),
+                Some(found) => {
+                    let reason = problems(found);
+                    overlapping.retain(|lane, _| lanes.contains(lane));
+                    for lane in &lanes {
+                        if !existing.contains(lane) || overlapping.contains_key(lane) {
+                            overlapping.insert(lane.clone(), reason.clone());
+                        }
+                    }
+                }
+            }
         }
+        let held = self.0.overlapping.borrow().clone();
         let now = parts.host.now();
         let result = parts
             .writer
@@ -825,7 +831,7 @@ impl Dispatcher {
             }
             Err(error) => {
                 log::error!("lanes: applying a count change: {error:#}");
-                overlap_changed
+                false
             }
         }
     }
@@ -1265,48 +1271,6 @@ fn change_counts(
         }
     }
     Ok(())
-}
-
-/// The lanes held waiting for overlapping locations, with the reason, after the check found
-/// `overlap` (`None` when nothing overlaps, which releases every held lane). A lane is held when a
-/// problem names it; when none names a lane, the lanes not made yet and the ones already held are.
-fn held_for_overlap(
-    previous: &BTreeMap<LaneId, String>,
-    lanes: &[LaneId],
-    existing: &BTreeSet<LaneId>,
-    overlap: Option<&[Problem]>,
-) -> BTreeMap<LaneId, String> {
-    let Some(found) = overlap else {
-        return BTreeMap::new();
-    };
-    let reason = problems(found);
-    let named = lanes
-        .iter()
-        .filter(|lane| {
-            found
-                .iter()
-                .any(|problem| names_lane(&problem.message, lane))
-        })
-        .collect::<BTreeSet<_>>();
-    lanes
-        .iter()
-        .filter(|lane| {
-            if named.is_empty() {
-                !existing.contains(*lane) || previous.contains_key(*lane)
-            } else {
-                named.contains(lane)
-            }
-        })
-        .map(|lane| (lane.clone(), reason.clone()))
-        .collect()
-}
-
-/// Whether `message` names `lane` as a whole word.
-fn names_lane(message: &str, lane: &LaneId) -> bool {
-    let id = lane.to_string();
-    message
-        .split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
-        .any(|word| word == id)
 }
 
 fn write_lane_if_changed(tx: &mut StateTx, before: &LaneRecord, after: &LaneRecord) -> Result<()> {
