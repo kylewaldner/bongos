@@ -240,7 +240,7 @@ fn status_document(status: &LanesStatus, cx: &App) -> serde_json::Value {
         .and_then(|store| store.read(cx).snapshot())
         .and_then(|tree| from_work_tree(&tree, &project, &LiveFacts::default()));
     let engine = cx.try_global::<WorkflowEngine>().cloned();
-    crate::status_doc::status_doc(
+    crate::status_doc::status_doc_with(
         status,
         &crate::status_doc::StatusFacts {
             project: &project,
@@ -261,6 +261,7 @@ fn status_document(status: &LanesStatus, cx: &App) -> serde_json::Value {
             // landing's own wait event is not tracked per lane here.
             waits_on_landing: &|_| true,
         },
+        &crate::wait_text::WaitTextFormatters::global(cx),
     )
 }
 

@@ -22,6 +22,7 @@ mod definitions;
 mod dispatch_job;
 mod dispatcher;
 mod done_owners;
+mod dry_run;
 mod env;
 mod exporter;
 mod hooks;
@@ -30,7 +31,9 @@ mod job_trees;
 mod lane_control;
 mod lane_tree;
 mod lane_waits;
+mod lanes_rows;
 mod locations;
+pub mod notify;
 mod pick_extension;
 mod prepare;
 mod profile;
@@ -42,7 +45,9 @@ mod settings;
 mod staleness;
 mod status_doc;
 mod store;
+mod summary;
 mod task_trees;
+mod wait_text;
 
 use std::sync::Arc;
 
@@ -57,7 +62,7 @@ pub use actions::{
     AdoptArgs, AdoptPrompt, DROP_CHOICES, ENGINE_HOST_MESSAGE, LanesToast,
     NOTHING_TO_ADOPT_MESSAGE, OFF_MESSAGE, ONE_PROJECT_MESSAGE, WindowLanes, accepted_message,
     action_types, adopt_as_person, adopt_prompt, adoptable_tasks, adopted_message, init_palette,
-    lanes, register,
+    lanes, register, task,
 };
 pub use adopt::{AdoptRequest, Adopted, LeftWork};
 /// The writers' participants live in the engine host, which drains them at a handover; lanes
@@ -75,6 +80,9 @@ pub use dispatcher::{
     put_dispatcher,
 };
 pub use done_owners::CLEARED_NO_CHECKS;
+pub use dry_run::{
+    DryRunInputs, dry_run_buffer, dry_run_buffer_in, dry_run_text, idle_reasons, nothing_reason,
+};
 pub use env::{apply_env, second_tree_env, tip_env};
 pub use exporter::{EXPORT_NAMESPACE, LanesExporter, STATE_FILE};
 pub use hooks::{AFTER_TREE_CREATED, BEFORE_JOB, BeforeJob, JobEnd, JobHook, JobHookCx, JobHooks};
@@ -99,6 +107,7 @@ pub use lane_waits::{
     ASK_PREFIX, LaneAsk, LaneWaitAction, LaneWaitHandler, LaneWaitHandlers, NEEDS_YOU_SOURCE,
     read_asks, register_needs_you,
 };
+pub use lanes_rows::{LaneRow, LanesViewRows, NeedsYouRow, RowFacts, lanes_view_rows};
 pub use locations::{
     Fallback, LaneLocation, LaneLocations, Layer, LocationInputs, Place, RepositoryPlace,
     binding_of, check_lanes, check_overlap, resolve_lane, table_lane_ids, tree_name, tree_slug,
@@ -119,15 +128,20 @@ pub use staleness::{
     PinnedTree, Staleness, StalenessCheck, run_staleness_script, staleness_answer,
     staleness_program,
 };
-pub use status_doc::{STATUS_SCHEMA, StatusFacts, status_doc};
+pub use status_doc::{STATUS_SCHEMA, StatusFacts, status_doc, status_doc_with};
 pub use store::{
     LANE_PREFIX, LANES_NAMESPACE, OWNER_PREFIX, delete_lane, delete_owner, put_lane, put_owner,
     read_state, read_state_in, write_state,
+};
+pub use summary::{
+    HandoverNote, KindCount, SummaryInputs, SummarySection, SummarySections, UnattendedChoice,
+    WorkflowSummary, summary_text,
 };
 pub use task_trees::{
     LaneLease, LaneTaskTrees, LaneTreeSetup, OwedTasks, ProcessEnv, SecondTreeLeases, TopLevelOf,
     TreeHold, no_top_level, open_projects_owed, process_env,
 };
+pub use wait_text::{WaitTextFn, WaitTextFormatters};
 
 /// Registers the settings, the `lanes` definition folder and the prompt check, the `lanes` state
 /// exporter, the live and activity sources, and the `lane-run-scope` approval hook, all over one
@@ -183,6 +197,8 @@ mod host_tests;
 mod job_trees_tests;
 #[cfg(test)]
 mod lane_tree_tests;
+#[cfg(test)]
+mod lanes_view_tests;
 #[cfg(test)]
 mod locations_tests;
 #[cfg(test)]

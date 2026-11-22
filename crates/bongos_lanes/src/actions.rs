@@ -67,6 +67,18 @@ pub mod lanes {
     );
 }
 
+pub mod task {
+    use gpui::actions;
+
+    actions!(
+        task,
+        [
+            /// Runs the focused group's tasks on lanes: `lanes: start` bounded to the group.
+            Run,
+        ]
+    );
+}
+
 /// Every action of lanes, for hiding them from the command palette.
 pub fn action_types() -> Vec<TypeId> {
     vec![
@@ -80,6 +92,7 @@ pub fn action_types() -> Vec<TypeId> {
         TypeId::of::<lanes::Adopt>(),
         TypeId::of::<lanes::AcceptGraph>(),
         TypeId::of::<lanes::Dump>(),
+        TypeId::of::<task::Run>(),
     ]
 }
 
@@ -870,6 +883,16 @@ fn hand_over_and_start(
     .detach();
 }
 
+/// `task: run`: an alias of `lanes: start`; the app binds it to the focused group.
+fn run_alias_action(
+    workspace: &mut Workspace,
+    _: &task::Run,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    start_action(workspace, &lanes::Start, window, cx);
+}
+
 /// Registers the handlers of the actions of lanes on `workspace`. None is bound to a key.
 pub fn register(workspace: &mut Workspace) {
     register_host_command::<lanes::Show>(workspace, LanesVerb::Status);
@@ -879,6 +902,7 @@ pub fn register(workspace: &mut Workspace) {
     register_host_command::<lanes::Resume>(workspace, LanesVerb::Resume);
     register_host_command::<lanes::DryRun>(workspace, LanesVerb::DryRun);
     register_host_command::<lanes::Pick>(workspace, LanesVerb::Pick);
+    workspace.register_action(run_alias_action);
     workspace.register_action(adopt_action);
     workspace.register_action(accept_graph_action);
     register_action::<lanes::Dump>(workspace);

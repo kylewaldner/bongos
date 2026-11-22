@@ -25,8 +25,9 @@ use crate::LanesSettings;
 use crate::accept_graph::{file_at, read_stamp};
 use crate::definitions::{LANES_FILE, LANES_FOLDER};
 use crate::lane_control::status_from_read;
-use crate::status_doc::{StatusFacts, status_doc};
+use crate::status_doc::{StatusFacts, status_doc_with};
 use crate::store::read_state;
+use crate::wait_text::WaitTextFormatters;
 
 /// Serves the read modes `status`, `dry-run` and `pick`.
 pub fn register(cx: &mut App) {
@@ -77,7 +78,7 @@ fn status_mode(args: &[String], reader: &StateReader, cx: &mut App) -> Result<St
     let location = location(cx)?;
     let status = reader.read(status_from_read)?;
     let split = read_only_repo(&location)?.split_master()?;
-    let doc = status_doc(
+    let doc = status_doc_with(
         &status,
         &StatusFacts {
             project: &location.id,
@@ -86,6 +87,7 @@ fn status_mode(args: &[String], reader: &StateReader, cx: &mut App) -> Result<St
             run_lifecycle: &|_| None,
             waits_on_landing: &|_| true,
         },
+        &WaitTextFormatters::global(cx),
     );
     if args.json {
         Ok(serde_json::to_string_pretty(&doc)?)

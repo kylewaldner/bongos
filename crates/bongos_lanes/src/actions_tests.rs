@@ -30,6 +30,7 @@ const NAMES: &[&str] = &[
     "lanes::Adopt",
     "lanes::AcceptGraph",
     "lanes::Dump",
+    "task::Run",
 ];
 
 fn use_default_settings(cx: &mut TestAppContext) {
