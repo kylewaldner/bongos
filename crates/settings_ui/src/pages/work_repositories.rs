@@ -90,12 +90,12 @@ fn render_notice(store: Entity<WorkStore>, cx: &mut Context<SettingsWindow>) -> 
         .into_any_element()
 }
 
-/// "Worktree root: ..." for `row`.
+/// "Worktree root: ..." for `row`, with the layer that set it ("own", "default", "project",
+/// "from project profile <name>" or "lane").
 fn root_line(row: &RepositoryRow) -> String {
-    match (row.root_source, &row.template) {
-        (RootSource::Own, Some(template)) => format!("Worktree root: {template} (own)"),
-        (RootSource::Default, Some(template)) => format!("Worktree root: {template} (default)"),
-        _ => "Worktree root: central".to_string(),
+    match (&row.root_source, &row.template) {
+        (RootSource::Central, _) | (_, None) => "Worktree root: central".to_string(),
+        (source, Some(template)) => format!("Worktree root: {template} ({})", source.label()),
     }
 }
 

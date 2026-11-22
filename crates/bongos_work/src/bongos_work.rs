@@ -89,7 +89,7 @@ pub use text_views::{open_file_at_line, open_following_text};
 pub use working_copy_commands::{
     edit_in_working_copy, working_copy_open_path, working_copy_to_edit,
 };
-pub use worktrees::expand_home;
+pub use worktrees::{expand_home, probe_writable};
 
 /// Where the work tree lives. The app passes `~/.bongos`; tests pass a temporary directory, so no
 /// test touches the real home.
