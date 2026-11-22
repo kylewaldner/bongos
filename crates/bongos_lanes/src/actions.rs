@@ -1,6 +1,8 @@
 //! The `lanes` actions, hidden from the command palette while `lanes.enabled` is false. While it
-//! is false each one only says that lanes are off. Lanes run in the engine host; while they are
-//! on, the commands that act on the lanes say that this window does not reach it yet.
+//! is false each one only says that lanes are off. Lanes run in the engine host. `lanes: start`
+//! in a window that holds the project's writer starts one and hands the writer over to it
+//! ([`bongos_engine_host::start_handover`]); the runs of the window finish their current step
+//! first, or are interrupted when the person says so. The other commands go to the writer.
 //!
 //! `lanes: accept graph` runs here, in the writer process: it records the person who pressed the
 //! key from the action and lands the graph stamp as that person. `lanes: adopt` records its
@@ -10,16 +12,21 @@
 
 use std::any::TypeId;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::host::LanesPayload;
 use anyhow::Result;
-use bongos_engine_host::{EngineAccess, EngineAccesses, HostCommand, LanesVerb};
+use bongos_engine_host::{
+    DrainChoice, DrainPrompt, EngineAccess, EngineAccesses, EngineHostProcess, EngineRuns,
+    HandoverRequest, HandoverRuns as _, HostCommand, LanesVerb, ProgramSpawner,
+    default_host_log_path, start_handover,
+};
 use bongos_lanes_model::{AdoptRefusal, Author, LaneId, LaneState, LanesState, OwnerState, TaskId};
 use bongos_project_repo::{ProjectRepo, ProjectRepositorySettings};
 use bongos_work_model::PersonAtKeyboard;
 use bongos_work_model::commands::Context as WorkContext;
 use command_palette_hooks::CommandPaletteFilter;
-use gpui::{App, Context, Global, Task, Window};
+use gpui::{App, AppContext as _, Context, Global, Task, Window};
 use settings::{Settings as _, SettingsStore};
 use workspace::notifications::NotificationId;
 use workspace::{Toast, Workspace};
@@ -693,10 +700,177 @@ fn answer_message(answer: &serde_json::Value) -> String {
         .to_string()
 }
 
+/// The choices `lanes: start` offers while runs of this window still run a node; the first
+/// waits for them, the second interrupts them.
+pub const DRAIN_CHOICES: [&str; 3] = [
+    "Start lanes; they finish their step here first",
+    "Interrupt them now",
+    "Cancel",
+];
+
+/// The choices offered again when the runs still run past the handover timeout.
+pub const DRAIN_AGAIN_CHOICES: [&str; 2] = ["Keep waiting", "Interrupt them now"];
+
+/// What `lanes: start` says while runs of this window still run a node.
+pub fn drain_question(busy: usize) -> String {
+    match busy {
+        1 => "1 run in this window finishes its current step first".to_string(),
+        n => format!("{n} runs in this window finish their current step first"),
+    }
+}
+
+/// `lanes: start`. Lanes run in an engine host: a window that holds the project's writer starts
+/// one, which takes the writer over (the runs here finish their current step first, or are
+/// interrupted when the person says so), and the start then goes to it. A window that reaches
+/// an engine host already sends the start there.
+fn start_action(
+    workspace: &mut Workspace,
+    _: &lanes::Start,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if !LanesSettings::get_global(cx).enabled {
+        show_toast(workspace, OFF_MESSAGE, cx);
+        return;
+    }
+    let Some((repo, access)) = sole_project(cx) else {
+        show_toast(workspace, ENGINE_HOST_MESSAGE, cx);
+        return;
+    };
+    let ctx = WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx));
+    let person = ctx.author.name;
+    if !access.is_local() || EngineHostProcess::is_running(cx) {
+        let payload = LanesPayload {
+            person: Some(person),
+            ..LanesPayload::default()
+        };
+        send_lanes_command(access, LanesVerb::Start, payload, window, cx);
+        return;
+    }
+    let runs = match EngineRuns.live_runs(&repo, cx) {
+        Ok(runs) => runs,
+        Err(error) => {
+            show_toast(workspace, &format!("Lanes did not start: {error:#}"), cx);
+            return;
+        }
+    };
+    let busy = EngineRuns.in_flight(&runs, cx);
+    if busy == 0 {
+        hand_over_and_start(repo, DrainChoice::Wait, person, window, cx);
+        return;
+    }
+    let labels = DRAIN_CHOICES.iter().map(ToString::to_string).collect();
+    let then = Box::new(
+        move |index: usize, _: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| {
+            let choice = match index {
+                0 => DrainChoice::Wait,
+                1 => DrainChoice::InterruptNow,
+                _ => return,
+            };
+            hand_over_and_start(repo, choice, person, window, cx);
+        },
+    );
+    pick(workspace, drain_question(busy), labels, then, window, cx);
+}
+
+/// Starts the engine host, which takes this window's writer over, then sends it the start.
+fn hand_over_and_start(
+    repo: ProjectRepo,
+    choice: DrainChoice,
+    person: String,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let spawner = match ProgramSpawner::current_exe() {
+        Ok(spawner) => spawner,
+        Err(error) => {
+            let message = format!("Lanes did not start: {error:#}");
+            cx.spawn_in(window, async move |workspace, cx| {
+                workspace
+                    .update(cx, |workspace, cx| show_toast(workspace, &message, cx))
+                    .ok();
+            })
+            .detach();
+            return;
+        }
+    };
+    let workspace_handle = cx.entity().downgrade();
+    let window_handle = window.window_handle();
+    let ask_again: DrainPrompt = Rc::new(move |busy, cx: &mut App| {
+        let (sender, answer) = futures::channel::oneshot::channel();
+        let sender = Rc::new(std::cell::RefCell::new(Some(sender)));
+        let workspace = workspace_handle.clone();
+        window_handle
+            .update(cx, |_, window, cx| {
+                workspace.update(cx, |workspace, cx| {
+                    let labels = DRAIN_AGAIN_CHOICES.iter().map(ToString::to_string).collect();
+                    let then = Box::new(
+                        move |index: usize,
+                              _: &mut Workspace,
+                              _: &mut Window,
+                              _: &mut Context<Workspace>| {
+                            let choice = if index == 1 {
+                                DrainChoice::InterruptNow
+                            } else {
+                                DrainChoice::Wait
+                            };
+                            if let Some(sender) = sender.borrow_mut().take() {
+                                sender.send(choice).ok();
+                            }
+                        },
+                    );
+                    pick(workspace, drain_question(busy), labels, then, window, cx);
+                })
+            })
+            .ok();
+        // Dismissed, the drain keeps waiting.
+        cx.background_spawn(async move { answer.await.unwrap_or(DrainChoice::Wait) })
+    });
+    let log = default_host_log_path(&repo.location().id);
+    let request = HandoverRequest {
+        choice,
+        ask_again: Some(ask_again),
+    };
+    let handing = start_handover(&repo, Arc::new(spawner), log, request, cx);
+    cx.spawn_in(window, async move |workspace, cx| {
+        let message = match handing.await {
+            Ok(client) => {
+                // This window is a client of the engine host now; its lanes are the host's.
+                let sending = workspace.update(cx, |_, cx| {
+                    cx.set_global(WindowLanes(None));
+                    let payload = LanesPayload {
+                        person: Some(person),
+                        ..LanesPayload::default()
+                    };
+                    EngineAccess::Remote(client).request(
+                        HostCommand::Lanes {
+                            verb: LanesVerb::Start,
+                            payload: serde_json::to_value(payload).unwrap_or_default(),
+                        },
+                        cx,
+                    )
+                });
+                match sending {
+                    Ok(sending) => match sending.await {
+                        Ok(answer) => answer_message(&answer),
+                        Err(error) => format!("{error:#}"),
+                    },
+                    Err(error) => format!("{error:#}"),
+                }
+            }
+            Err(error) => format!("Lanes did not start: {error:#}"),
+        };
+        workspace
+            .update(cx, |workspace, cx| show_toast(workspace, &message, cx))
+            .ok();
+    })
+    .detach();
+}
+
 /// Registers the handlers of the actions of lanes on `workspace`. None is bound to a key.
 pub fn register(workspace: &mut Workspace) {
     register_host_command::<lanes::Show>(workspace, LanesVerb::Status);
-    register_host_command::<lanes::Start>(workspace, LanesVerb::Start);
+    workspace.register_action(start_action);
     register_host_command::<lanes::Stop>(workspace, LanesVerb::Stop);
     register_host_command::<lanes::Pause>(workspace, LanesVerb::Pause);
     register_host_command::<lanes::Resume>(workspace, LanesVerb::Resume);
