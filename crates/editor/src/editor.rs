@@ -9471,6 +9471,15 @@ impl Editor {
         }
     }
 
+    /// The overlays set under `key`, in paint order, for tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn navigation_overlays(&self, key: NavigationOverlayKey) -> Vec<NavigationTargetOverlay> {
+        self.navigation_overlays
+            .get(&key)
+            .map(|overlays| overlays.to_vec())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn navigation_overlay_sets(
         &self,
     ) -> &HashMap<NavigationOverlayKey, Arc<[NavigationTargetOverlay]>> {
