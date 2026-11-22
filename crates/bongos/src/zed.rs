@@ -549,6 +549,11 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
 
         let multi_workspace_handle = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
+            // The last window with live runs does what `lanes.on_last_window_close` says first,
+            // and closes itself afterwards.
+            if bongos_lanes::close_window_after_lanes(&multi_workspace_handle, window, cx) {
+                return false;
+            }
             multi_workspace_handle
                 .update(cx, |multi_workspace, cx| {
                     // We'll handle closing asynchronously
