@@ -2568,6 +2568,7 @@ name = "bongos_lanes"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bongos_checks",
  "bongos_lanes_model",
  "bongos_project_repo",
  "bongos_project_repo_model",
@@ -2578,6 +2579,7 @@ dependencies = [
  "command_palette_hooks",
  "futures 0.3.32",
  "gpui",
+ "log",
  "project",
  "release_channel",
  "semver",
