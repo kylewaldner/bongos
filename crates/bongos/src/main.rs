@@ -296,7 +296,12 @@ fn main() {
 
     // The engine host never opens a window and is not the app's single instance.
     if let Some(project_id) = args.engine_host.clone() {
-        engine_host::run(project_id, args.probe);
+        let mode = match args.read.clone() {
+            Some(words) => engine_host::Mode::Read(words),
+            None if args.probe => engine_host::Mode::Probe,
+            None => engine_host::Mode::Host,
+        };
+        engine_host::run(project_id, mode);
     }
 
     if args.system_specs {
@@ -1712,6 +1717,20 @@ struct Args {
     /// With `--engine-host`, exits 0 once the engine is initialized and its settings are on.
     #[arg(long, hide = true, requires = "engine_host")]
     probe: bool,
+
+    /// With `--engine-host`, runs one read mode (its name, then its arguments, which may start
+    /// with `--`) against the project's store opened for reading only, prints its output and
+    /// exits.
+    #[arg(
+        long,
+        hide = true,
+        requires = "engine_host",
+        conflicts_with = "probe",
+        num_args = 1..,
+        allow_hyphen_values = true,
+        value_names = ["NAME", "ARGS"]
+    )]
+    read: Option<Vec<String>>,
 
     /// Output current environment variables as JSON to stdout
     #[arg(long, hide = true)]

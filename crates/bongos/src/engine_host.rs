@@ -4,17 +4,23 @@
 //! another engine host holds it), serves the project's socket in host mode, runs the lanes'
 //! dispatcher, logs to `<logs>/engine-host-<12 hex>.log`, and exits once idle for
 //! `lanes.host.idle_exit_seconds`.
+//!
+//! With `--read <name> [args...]` the same headless start runs one read mode instead (see
+//! [`bongos_engine_host::ReadModes`]): it opens the project's store for reading only, never as
+//! the writer, prints what the mode returns on stdout and exits. Exit codes: 0 done, 1 a setting
+//! is off or the project cannot be read, 2 no read mode of that name is registered.
 
 use std::io::Write as _;
 use std::{process, rc::Rc, sync::Arc};
 
 use anyhow::anyhow;
 use bongos_engine_host::{
-    ClientOptions, EngineHostProcess, HostProcessOptions, host_log_path, take_host_writer,
+    ClientOptions, EngineHostProcess, HostProcessOptions, ReadModes, ReadProject, host_log_path,
+    take_host_writer,
 };
 use bongos_lanes::LanesSettings;
 use bongos_project_repo::{
-    ClientKind, Location, RepositoryLocations, StateApplyHooks, StateWriter,
+    ClientKind, Location, RepositoryLocations, StateApplyHooks, StateStore, StateWriter,
 };
 use bongos_work::{OpenedProject, ProjectOpening};
 use fs::{Fs, RealFs};
@@ -37,6 +43,27 @@ fn first_setting_off(cx: &App) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// The message naming the first setting a read mode needs that is off: the lanes' own settings
+/// are checked by the command line and by the features whose modes these are.
+fn first_read_setting_off(cx: &App) -> Option<&'static str> {
+    if !bongos_work::WorkSettings::get_global(cx).enabled {
+        Some("work is off (work.enabled)")
+    } else if !bongos_project_repo::ProjectRepositorySettings::get_global(cx).enabled {
+        Some("project repositories are off (project_repository.enabled)")
+    } else {
+        None
+    }
+}
+
+/// What this process does once its engine is initialized.
+pub enum Mode {
+    Host,
+    /// Exit 0 once the engine is initialized and every setting it needs is on.
+    Probe,
+    /// Run the read mode named first, with the arguments after it.
+    Read(Vec<String>),
 }
 
 fn fail(code: i32, message: impl std::fmt::Display) -> ! {
@@ -63,9 +90,8 @@ fn load_user_settings(cx: &mut App) {
     }
 }
 
-/// Starts the engine host for `project_id` and never returns. With `probe` it exits 0 once the
-/// engine is initialized and every setting it needs is on.
-pub fn run(project_id: String, probe: bool) -> ! {
+/// Starts the engine host for `project_id` and never returns.
+pub fn run(project_id: String, mode: Mode) -> ! {
     let file_errors = crate::init_paths();
     if !file_errors.is_empty() {
         fail(1, format!("cannot create directories: {file_errors:?}"));
@@ -96,16 +122,64 @@ pub fn run(project_id: String, probe: bool) -> ! {
         bongos_lanes::init(cx);
         bongos_engine_host::init(cx);
 
+        match mode {
+            Mode::Read(words) => {
+                if let Some(message) = first_read_setting_off(cx) {
+                    fail(1, message);
+                }
+                read(&project_id, &words, locations, cx);
+                return;
+            }
+            Mode::Host | Mode::Probe => {}
+        }
         if let Some(message) = first_setting_off(cx) {
             fail(1, message);
         }
-        if probe {
+        if matches!(mode, Mode::Probe) {
             println!("engine host ready");
             process::exit(0);
         }
         host(&project_id, locations, cx);
     });
     process::exit(0)
+}
+
+/// Runs the read mode named by the first of `words` against the project's store, opened for
+/// reading only, prints its output and exits.
+fn read(project_id: &str, words: &[String], locations: Option<std::path::PathBuf>, cx: &mut App) {
+    let Some((name, args)) = words.split_first() else {
+        fail(2, "--read needs the name of a read mode");
+    };
+    if !ReadModes::is_registered(name, cx) {
+        eprintln!("bongos: no read mode {name} is registered");
+        process::exit(2);
+    }
+    let location = find_location(project_id, locations);
+    ReadProject::set(location.clone(), cx);
+    let reader = match StateStore::open_reader(&location) {
+        Ok(reader) => reader,
+        Err(error) => fail(1, format!("{error:#}")),
+    };
+    let Some(running) = ReadModes::run(name, args, &reader, cx) else {
+        fail(2, format!("no read mode {name} is registered"));
+    };
+    cx.spawn(async move |_| {
+        // The mode was handed the reader for the call only; it stays open until the answer is in.
+        let _reader = reader;
+        match running.await {
+            Ok(output) => {
+                let mut stdout = std::io::stdout().lock();
+                let written = writeln!(stdout, "{}", output.trim_end_matches('\n'))
+                    .and_then(|()| stdout.flush());
+                if let Err(error) = written {
+                    fail(1, format!("writing the output: {error}"));
+                }
+                process::exit(0);
+            }
+            Err(error) => fail(1, format!("{error:#}")),
+        }
+    })
+    .detach();
 }
 
 /// Sends this process's log to the project's engine host log, rotated at
