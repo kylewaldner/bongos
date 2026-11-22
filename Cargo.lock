@@ -2235,7 +2235,6 @@ dependencies = [
  "bongos_emacs",
  "bongos_minibuffer",
  "bongos_window",
- "command_palette_hooks",
  "editor",
  "gpui",
  "language",
