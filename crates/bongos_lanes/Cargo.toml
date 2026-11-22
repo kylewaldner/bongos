@@ -1,0 +1,36 @@
+[package]
+name = "bongos_lanes"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/bongos_lanes.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+bongos_lanes_model.workspace = true
+bongos_project_repo.workspace = true
+bongos_project_repo_model.workspace = true
+bongos_workflow.workspace = true
+bongos_workflow_model.workspace = true
+command_palette_hooks.workspace = true
+gpui.workspace = true
+settings.workspace = true
+toml.workspace = true
+util.workspace = true
+workspace.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+project = { workspace = true, features = ["test-support"] }
+release_channel.workspace = true
+semver.workspace = true
+settings = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
+workspace = { workspace = true, features = ["test-support"] }

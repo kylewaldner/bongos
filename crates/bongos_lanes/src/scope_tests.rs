@@ -1,0 +1,158 @@
+//! Tests of the `lane-run-scope` approval hook.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use bongos_project_repo::{ApprovalHook, ApprovalInput, ApprovalOpinion, AutomaticRule};
+use bongos_project_repo_model::checks::{ApprovalPolicy, ApprovalVerdict, Judgment, LiveFacts, judge};
+use bongos_project_repo_model::{Author, AuthorKind, ChangeMeta, ChangeSummary, FileChange};
+
+use crate::runs::LaneRuns;
+use crate::scope::LaneRunScope;
+use crate::test_support::{lanes_state, tree};
+
+const PROJECT: &str = "project-1";
+
+fn hook() -> LaneRunScope {
+    let runs = LaneRuns::default();
+    runs.set(PROJECT, lanes_state());
+    LaneRunScope::new(runs)
+}
+
+fn workflow_run(run: &str) -> Author {
+    let mut author = Author::workflow("build");
+    author.run = Some(run.to_string());
+    author
+}
+
+fn summary(files: &[(&str, FileChange)], redefined: &[&str]) -> ChangeSummary {
+    ChangeSummary {
+        files: files
+            .iter()
+            .map(|(path, change)| (path.to_string(), *change))
+            .collect(),
+        tasks_redefined: redefined.iter().map(|id| id.to_string()).collect(),
+        ..ChangeSummary::default()
+    }
+}
+
+/// The hook's opinion of `summary` by `author`, and check 9's verdict with only this hook.
+fn opinion_and_verdict(
+    author: Author,
+    summary: &ChangeSummary,
+) -> (ApprovalOpinion, ApprovalVerdict) {
+    let master = tree(&["tasks/feature", "tasks/feature/tasks/leaf", "tasks/other"]);
+    let meta = ChangeMeta::new("change", author);
+    let live = LiveFacts::from_states(BTreeMap::new());
+    let hook = hook();
+    let opinion = hook.judge(&ApprovalInput {
+        change_id: "c1",
+        project_id: PROJECT,
+        summary,
+        meta: &meta,
+        live: &live,
+        master: &master,
+        change: &master,
+        master_root: Path::new("master"),
+        change_root: Path::new("change"),
+    });
+    let kind = meta.author.kind();
+    let policy = ApprovalPolicy::default();
+    assert_eq!(policy.rule_for(kind), hook.rule());
+    let rule_opinions = [(hook.name().to_string(), opinion.clone())];
+    let verdict = judge(&Judgment {
+        policy: &policy,
+        author_kind: kind,
+        rows: &[],
+        amend_patch_id: "",
+        rule_opinions: &rule_opinions,
+        hook_opinions: &[],
+        rollback: None,
+    });
+    (opinion, verdict)
+}
+
+/// A change inside the owned task's `documents/` and `tasks/`.
+fn inside() -> ChangeSummary {
+    summary(
+        &[
+            ("tasks/feature/documents/design.md", FileChange::Added),
+            ("tasks/feature/tasks/leaf/task.toml", FileChange::Modified),
+            ("tasks/feature/tasks/leaf/plan.md", FileChange::Added),
+        ],
+        &["leaf"],
+    )
+}
+
+#[test]
+fn lanes_the_hook_is_the_declared_scope_rule() {
+    let hook = hook();
+    assert_eq!(hook.name(), "lane-run-scope");
+    assert_eq!(hook.rule(), Some(AutomaticRule::DeclaredScope));
+}
+
+#[test]
+fn lanes_a_lane_runs_change_inside_its_owned_documents_and_tasks_is_approved() {
+    let (opinion, verdict) = opinion_and_verdict(workflow_run("run-lane"), &inside());
+    assert!(matches!(opinion, ApprovalOpinion::Approve(_)), "{opinion:?}");
+    assert!(verdict.is_approved(), "{verdict:?}");
+}
+
+#[test]
+fn lanes_the_same_change_by_a_hand_started_run_waits_for_a_person() {
+    let author = workflow_run("run-by-hand");
+    assert_eq!(author.kind(), AuthorKind::Workflow);
+    let (opinion, verdict) = opinion_and_verdict(author, &inside());
+    assert_eq!(opinion, ApprovalOpinion::NoOpinion);
+    assert!(!verdict.is_approved(), "{verdict:?}");
+    assert!(verdict.waiting_reason().is_some());
+
+    // A run with no run id, and an agent, get no opinion either.
+    let (opinion, _) = opinion_and_verdict(Author::workflow("build"), &inside());
+    assert_eq!(opinion, ApprovalOpinion::NoOpinion);
+    let mut agent = Author::agent("agent");
+    agent.run = Some("run-lane".to_string());
+    let (opinion, _) = opinion_and_verdict(agent, &inside());
+    assert_eq!(opinion, ApprovalOpinion::NoOpinion);
+}
+
+#[test]
+fn lanes_a_lane_runs_edit_of_its_top_level_task_toml_waits_for_a_person() {
+    let own_file = summary(
+        &[("tasks/feature/task.toml", FileChange::Modified)],
+        &["feature"],
+    );
+    let (opinion, verdict) = opinion_and_verdict(workflow_run("run-lane"), &own_file);
+    match &opinion {
+        ApprovalOpinion::NeedsPerson(reason) => {
+            assert!(reason.contains("tasks/feature/task.toml"), "{reason}")
+        }
+        other => panic!("expected a person, got {other:?}"),
+    }
+    assert!(!verdict.is_approved(), "{verdict:?}");
+
+    // The file alone, without the summary naming the task, waits too.
+    let file_only = summary(&[("tasks/feature/task.toml", FileChange::Modified)], &[]);
+    let (opinion, _) = opinion_and_verdict(workflow_run("run-lane"), &file_only);
+    assert!(matches!(opinion, ApprovalOpinion::NeedsPerson(_)), "{opinion:?}");
+}
+
+#[test]
+fn lanes_a_lane_runs_change_outside_its_owned_scope_waits_for_a_person() {
+    for outside in [
+        summary(&[("tasks/other/task.toml", FileChange::Modified)], &["other"]),
+        summary(&[("tasks/feature/plan.md", FileChange::Modified)], &[]),
+        summary(&[("project.toml", FileChange::Modified)], &[]),
+        summary(
+            &[("tasks/feature/documents/../../other/task.toml", FileChange::Modified)],
+            &[],
+        ),
+    ] {
+        let (opinion, verdict) = opinion_and_verdict(workflow_run("run-lane"), &outside);
+        assert!(
+            matches!(opinion, ApprovalOpinion::NeedsPerson(_)),
+            "{outside:?}: {opinion:?}"
+        );
+        assert!(!verdict.is_approved());
+    }
+}
