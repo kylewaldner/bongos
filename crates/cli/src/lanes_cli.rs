@@ -387,16 +387,18 @@ fn setting_off(word: &Word, env: &dyn Env) -> Option<&'static str> {
 fn scheduled_firing(word: &Word) -> Option<&str> {
     match word {
         Word::Trigger {
-            verb: TriggerWord::Fire {
-                name,
-                scheduled: true,
-            },
+            verb:
+                TriggerWord::Fire {
+                    name,
+                    scheduled: true,
+                },
         }
         | Word::Queue {
-            verb: QueueWord::Push {
-                name,
-                scheduled: true,
-            },
+            verb:
+                QueueWord::Push {
+                    name,
+                    scheduled: true,
+                },
         } => Some(name),
         _ => None,
     }
@@ -526,16 +528,26 @@ fn command_of(word: &Word) -> Command {
         // lane.
         Word::Trigger {
             verb: TriggerWord::Fire { name, scheduled },
-        } => extension("trigger", "fire", json!({ "name": name, "scheduled": scheduled })),
+        } => extension(
+            "trigger",
+            "fire",
+            json!({ "name": name, "scheduled": scheduled }),
+        ),
         Word::Queue {
             verb: QueueWord::Push { name, scheduled },
-        } => extension("queue", "push", json!({ "name": name, "scheduled": scheduled })),
+        } => extension(
+            "queue",
+            "push",
+            json!({ "name": name, "scheduled": scheduled }),
+        ),
         Word::Pool {
             verb: PoolWord::Status,
         } => extension("pool", "status", json!({})),
-        Word::Profile { args } => {
-            Command::Read(std::iter::once("profile".to_string()).chain(args.clone()).collect())
-        }
+        Word::Profile { args } => Command::Read(
+            std::iter::once("profile".to_string())
+                .chain(args.clone())
+                .collect(),
+        ),
     }
 }
 
@@ -1040,7 +1052,9 @@ pub(crate) mod real {
         }
 
         fn work_enabled(&self) -> bool {
-            user_settings()["work"]["enabled"].as_bool().unwrap_or(false)
+            user_settings()["work"]["enabled"]
+                .as_bool()
+                .unwrap_or(false)
         }
 
         fn project_repository_enabled(&self) -> bool {

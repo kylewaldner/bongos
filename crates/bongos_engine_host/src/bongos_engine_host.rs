@@ -75,6 +75,6 @@ pub fn init(cx: &mut gpui::App) {
 #[cfg(test)]
 mod engine_host_tests;
 #[cfg(test)]
-mod read_modes_tests;
-#[cfg(test)]
 mod handover_tests;
+#[cfg(test)]
+mod read_modes_tests;

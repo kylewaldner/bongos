@@ -654,7 +654,10 @@ fn only_the_lanes_words_are_taken() {
 
 fn extension_of(command: &Value) -> (&str, &Value) {
     let extension = &command["extension"];
-    (extension["namespace"].as_str().unwrap(), &extension["payload"])
+    (
+        extension["namespace"].as_str().unwrap(),
+        &extension["payload"],
+    )
 }
 
 #[test]
@@ -669,7 +672,10 @@ fn trigger_queue_and_pool_reach_the_writer_as_extension_commands() {
         assert_eq!(outcome.code, EXIT_DONE, "{words}: {outcome:?}");
         let sent = fake.sent();
         let (sent_namespace, payload) = extension_of(sent.last().unwrap());
-        assert_eq!((sent_namespace, payload["verb"].as_str()), (namespace, Some(verb)));
+        assert_eq!(
+            (sent_namespace, payload["verb"].as_str()),
+            (namespace, Some(verb))
+        );
     }
     let sent = fake.sent();
     assert_eq!(extension_of(&sent[0]).1["name"], "nightly");
@@ -680,7 +686,14 @@ fn trigger_queue_and_pool_reach_the_writer_as_extension_commands() {
 #[test]
 fn the_stand_in_words_need_a_subcommand_and_a_name() {
     let fake = Fake::new();
-    for words in ["trigger", "trigger fire", "queue", "queue push", "pool", "pool frob"] {
+    for words in [
+        "trigger",
+        "trigger fire",
+        "queue",
+        "queue push",
+        "pool",
+        "pool frob",
+    ] {
         assert_eq!(fake.run(words).code, EXIT_USAGE, "{words}");
     }
     assert!(fake.log().is_empty());
@@ -709,17 +722,27 @@ fn a_scheduled_firing_with_no_writer_starts_a_host_and_sends_to_it() {
 
     let queued = Fake::new();
     assert_eq!(queued.run("queue push build --scheduled").code, EXIT_DONE);
-    assert_eq!(queued.log()[0], "start_host p1 bongos queue push hand_over=false");
+    assert_eq!(
+        queued.log()[0],
+        "start_host p1 bongos queue push hand_over=false"
+    );
 }
 
 #[test]
 fn a_scheduled_firing_goes_to_a_window_or_a_host_that_holds_the_writer_and_starts_none() {
     for writer in [window_writer(), host_writer()] {
-        for words in ["trigger fire nightly --scheduled", "queue push build --scheduled"] {
+        for words in [
+            "trigger fire nightly --scheduled",
+            "queue push build --scheduled",
+        ] {
             let fake = Fake::new().with_writer(writer.clone());
             let outcome = fake.run(words);
             assert_eq!(outcome.code, EXIT_DONE, "{words}: {outcome:?}");
-            assert_eq!(fake.log(), vec!["connect /hosts/p1.sock".to_string()], "{words}");
+            assert_eq!(
+                fake.log(),
+                vec!["connect /hosts/p1.sock".to_string()],
+                "{words}"
+            );
             assert_eq!(fake.sent().len(), 1, "{words}");
         }
     }
@@ -737,8 +760,7 @@ fn a_scheduled_firing_with_lanes_off_names_the_setting_and_starts_nothing() {
         let outcome = fake.run(words);
         assert_eq!(outcome.code, EXIT_REFUSED, "{words}");
         assert_eq!(
-            outcome.stderr,
-            "lanes are off (lanes.enabled); open the project in a window\n",
+            outcome.stderr, "lanes are off (lanes.enabled); open the project in a window\n",
             "{words}"
         );
         assert!(outcome.stdout.is_empty());
@@ -851,7 +873,10 @@ fn an_unregistered_profile_read_exits_with_the_apps_code() {
         stderr: "no read mode profile is registered\n".to_string(),
     });
     let outcome = fake.run("profile");
-    assert_eq!((outcome.code, outcome.stderr.as_str()), (2, "no read mode profile is registered\n"));
+    assert_eq!(
+        (outcome.code, outcome.stderr.as_str()),
+        (2, "no read mode profile is registered\n")
+    );
 }
 
 #[cfg(unix)]
@@ -1066,7 +1091,11 @@ fi
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let listener = UnixListener::bind(root.join("p1.sock")).unwrap();
-        serve(listener, "9.9.9", |_| json!({ "ok": { "message": "fired" } }));
+        serve(
+            listener,
+            "9.9.9",
+            |_| json!({ "ok": { "message": "fired" } }),
+        );
 
         let env = TimerEnv {
             project: ProjectRef {
@@ -1079,14 +1108,24 @@ fi
             log: root.join("host.log"),
             both_checked: std::sync::Barrier::new(2),
         };
-        let args: Vec<String> = ["trigger", "fire", "nightly", "--scheduled", "--project", "p1"]
-            .map(str::to_string)
-            .into();
+        let args: Vec<String> = [
+            "trigger",
+            "fire",
+            "nightly",
+            "--scheduled",
+            "--project",
+            "p1",
+        ]
+        .map(str::to_string)
+        .into();
         let outcomes: Vec<Outcome> = std::thread::scope(|scope| {
             let timers: Vec<_> = (0..2)
                 .map(|_| scope.spawn(|| execute(&args, &env)))
                 .collect();
-            timers.into_iter().map(|timer| timer.join().unwrap()).collect()
+            timers
+                .into_iter()
+                .map(|timer| timer.join().unwrap())
+                .collect()
         });
         std::fs::remove_file(root.join("alive")).unwrap();
 

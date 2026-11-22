@@ -5,7 +5,7 @@ use std::rc::Rc;
 use anyhow::{Result, anyhow};
 use bongos_project_repo::{StateReader, StateStore};
 use futures::channel::oneshot;
-use gpui::{App, Global, Task, TestAppContext};
+use gpui::{App, BorrowAppContext as _, Global, Task, TestAppContext};
 use serde_json::json;
 
 use crate::engine_host_tests::fixture;
