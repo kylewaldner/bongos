@@ -2381,12 +2381,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures 0.3.32",
+ "git",
+ "gpui",
  "libc",
  "log",
  "paths",
  "sandbox",
  "smol",
  "tempfile",
+ "text",
  "thiserror 2.0.17",
  "util",
 ]
