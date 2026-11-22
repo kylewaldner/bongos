@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::dispatcher::{
     Dispatcher, DispatcherRecord, Lanes, LanesParts, dispatcher_record, held_task, put_dispatcher,
 };
-use crate::lane_waits::{ask_in, asked_text, asks_in, delete_ask};
+use crate::lane_waits::{ask_in, asked_text, asks_in, delete_ask, publish_asks};
 use crate::store::{put_lane, put_owner, read_state_in};
 
 /// The reason of a lane that stopped for the bound of the start.
@@ -186,7 +186,13 @@ impl Dispatcher {
             return false;
         }
         match end_if_at_rest(self.parts(), &self.0.config.events, cx) {
-            Ok(ended) => ended,
+            Ok(ended) => {
+                if ended {
+                    // No pass runs any more, so nothing would withdraw the published asks.
+                    publish_asks(&self.0.config.project, Vec::new(), cx);
+                }
+                ended
+            }
             Err(error) => {
                 log::error!("lanes: ending the dispatcher: {error:#}");
                 false
@@ -230,6 +236,7 @@ fn stop_one(tx: &mut StateTx, state: &LanesState, lane: &LaneRecord, now: &str) 
             updated.stop_requested = Some(StopCause::Stop);
         }
         LaneState::Idle | LaneState::Waiting => {
+            delete_ask(tx, &lane.id())?;
             updated.state = LaneState::Idle;
             updated.reason = None;
             updated.stop_requested = Some(StopCause::Stop);
@@ -256,6 +263,10 @@ fn pause(parts: &LanesParts, lane: &LaneId, by: &Author) -> Result<String> {
             bail!("{lane} is not a lane");
         };
         let mut updated = record.clone();
+        if record.state == LaneState::Waiting {
+            // The lane leaves the wait the ask was for, so the ask goes with the change.
+            delete_ask(tx, lane)?;
+        }
         let message = match record.state {
             LaneState::Idle | LaneState::Waiting if record.job.is_none() => {
                 updated.state = LaneState::Paused;
@@ -307,8 +318,10 @@ fn resume(parts: &LanesParts, lane: &LaneId) -> Result<String> {
                 if record.job.is_none() {
                     updated.state = LaneState::Idle;
                     updated.reason = None;
+                    format!("{lane} resumed")
+                } else {
+                    format!("{lane} no longer waits on you; it still waits for its job's hooks")
                 }
-                format!("{lane} resumed")
             }
             LaneState::Idle | LaneState::Waiting => format!("{lane} is not paused"),
             LaneState::Halted => bail!("{lane} is halted; retry its run or adopt its task"),

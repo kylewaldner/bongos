@@ -133,7 +133,7 @@ fn asked(harness: &Harness) -> Option<String> {
     status.lanes[0].asked.clone()
 }
 
-// Acceptance 1: the handler hears a lane enter a floor wait, and again at the next pass.
+// the handler hears a lane enter a floor wait, and again at the next pass.
 #[gpui::test]
 async fn a_handler_hears_a_floor_wait_and_again_at_the_next_pass(cx: &mut TestAppContext) {
     let keep = handler(LaneWaitAction::Keep, cx);
@@ -159,7 +159,7 @@ async fn a_handler_hears_a_floor_wait_and_again_at_the_next_pass(cx: &mut TestAp
     assert_waits_on_floor(&harness);
 }
 
-// Acceptance 1 and 4: a question still pending is not asked again, however many passes run.
+// a question still pending is not asked again, however many passes run.
 #[gpui::test]
 async fn a_pending_question_is_not_asked_again(cx: &mut TestAppContext) {
     let slow = handler(LaneWaitAction::Keep, cx);
@@ -179,7 +179,7 @@ async fn a_pending_question_is_not_asked_again(cx: &mut TestAppContext) {
     assert_waits_on_floor(&harness);
 }
 
-// Acceptance 2: `RecheckAfter(1 s)` evaluates the lane again after a second, and not before.
+// `RecheckAfter(1 s)` evaluates the lane again after a second, and not before.
 #[gpui::test]
 async fn recheck_after_a_second_evaluates_the_lane_after_a_second(cx: &mut TestAppContext) {
     let _recheck = handler(LaneWaitAction::RecheckAfter(Duration::from_secs(1)), cx);
@@ -227,7 +227,7 @@ fn work_tree() -> bongos_work_model::store::WorkTree {
     )])
 }
 
-// Acceptance 3: an ask shows on the lane row, on the task it owns and on that task's ancestors
+// an ask shows on the lane row, on the task it owns and on that task's ancestors
 // until `lanes: resume` clears it and evaluates the lane; no timed pass evaluates it meanwhile.
 #[gpui::test]
 async fn an_ask_needs_you_until_resume_clears_it(cx: &mut TestAppContext) {
@@ -276,7 +276,7 @@ async fn an_ask_needs_you_until_resume_clears_it(cx: &mut TestAppContext) {
     assert!(harness.writer.read(read_asks).unwrap().is_empty());
 }
 
-// Acceptance 4: the handlers are asked in registration order and the first answer other than
+// the handlers are asked in registration order and the first answer other than
 // `Keep` decides; the later ones are not asked.
 #[gpui::test]
 async fn handlers_are_asked_in_order_until_one_decides(cx: &mut TestAppContext) {
@@ -299,7 +299,7 @@ async fn handlers_are_asked_in_order_until_one_decides(cx: &mut TestAppContext) 
     assert_eq!(asked(&harness).as_deref(), Some("free some space"));
 }
 
-// Acceptance 4: with every handler keeping, each is asked in order at each pass, and the wait
+// with every handler keeping, each is asked in order at each pass, and the wait
 // behaves as with none: the timed pass evaluates the lane again.
 #[gpui::test]
 async fn keeping_handlers_leave_the_wait_as_it_was(cx: &mut TestAppContext) {
@@ -319,7 +319,7 @@ async fn keeping_handlers_leave_the_wait_as_it_was(cx: &mut TestAppContext) {
     assert_eq!(harness.engine.job_tasks(), ["a"]);
 }
 
-// Acceptance 4: with no handler a wait behaves as before: no ask, and the timed pass evaluates
+// with no handler a wait behaves as before: no ask, and the timed pass evaluates
 // the lane again.
 #[gpui::test]
 async fn with_no_handler_a_wait_behaves_as_before(cx: &mut TestAppContext) {
@@ -449,7 +449,7 @@ pub(super) fn failing_verify(lanes: &[LaneId], cx: &mut TestAppContext) -> Arc<V
     profile
 }
 
-// Acceptance 5: a failing `verify_lane` at a job's start clears the reserved job, so a second
+// a failing `verify_lane` at a job's start clears the reserved job, so a second
 // lane takes a task of the same one-instance workflow; the lane waits with the problems.
 #[gpui::test]
 async fn a_failing_verify_clears_the_job_for_another_lane(cx: &mut TestAppContext) {
@@ -488,7 +488,7 @@ fn drain(events: &mut futures::channel::mpsc::UnboundedReceiver<StateEvent>) -> 
     drained
 }
 
-// Acceptance 6: a retry of a halted lane's failed run makes the lane run and its owner active,
+// a retry of a halted lane's failed run makes the lane run and its owner active,
 // with the halt reason gone and the retry in the task's history, in one transaction; a second
 // report of the retry changes nothing, and `lanes: resume` says it already runs.
 #[gpui::test]
