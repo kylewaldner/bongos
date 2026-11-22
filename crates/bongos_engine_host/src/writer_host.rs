@@ -111,12 +111,25 @@ impl WriterHost {
     }
 
     /// Serves again after a handover the other process never finished: `host.json` names this
-    /// process with no move, and the socket is bound again when it was served.
+    /// process with no move, and the socket is bound again when it was served. When the socket
+    /// cannot be served again, `host.json` still names this process with no move (and no
+    /// socket), so no opener waits on a move that ended, and the error says why it is not served.
     pub fn take_back(&mut self, cx: &mut App) -> Result<()> {
         self.info.moving = None;
         self.moved = false;
         let serve = self.options.serve_socket;
-        self.announce(serve, cx)
+        let announced = self.announce(serve, cx);
+        if announced.is_err() {
+            self.server = None;
+            self.info.socket = None;
+            if let Err(error) = write_host_file(self.repo.location(), &self.info) {
+                log::error!(
+                    "clearing the move of {} in host.json: {error:#}",
+                    self.repo.location().id
+                );
+            }
+        }
+        announced
     }
 
     /// Starts or stops serving the socket, as `lanes.enabled` turns on or off, and rewrites

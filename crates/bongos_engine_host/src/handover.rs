@@ -22,8 +22,9 @@
 //!    first, in order) and reaches the engines through it from then on.
 //!
 //! When the host never takes the lock (it died, or the start timeout passed with the lock free),
-//! the window takes the writer back: the lock again (tried again while a third process holds it
-//! for an instant, up to [`TAKE_BACK_GUARD`]), then `moving` cleared, the queued writes applied
+//! the window takes the writer back: the lock again (tried again for as long as a third process
+//! holds it, with an error logged every [`TAKE_BACK_WARN_EVERY`]; the move never ends with no
+//! writer), then `moving` cleared, the queued writes applied
 //! here, the work undrained ([`undrain_here`]), the runs loaded again, and the person told "the
 //! engine host did not start; see <log>". The lock is taken before `moving` is cleared, so no
 //! third process keeps it in between.
@@ -108,10 +109,11 @@ pub fn did_not_start(log: &Path) -> String {
     format!("the engine host did not start; see {}", log.display())
 }
 
-/// How long a take-back keeps trying the lock while another process holds it after the host
-/// died. Only the window and the host keep the lock; a third process holds it for an instant at
-/// most, so this only guards against a hang.
-pub const TAKE_BACK_GUARD: Duration = Duration::from_secs(120);
+/// How often a take-back that still cannot get the lock logs it again. Only the window and the
+/// host keep the lock and a third process holds it for an instant at most, so a take-back that
+/// waits this long is a fault; it keeps trying all the same, since the move ends only with one
+/// writer.
+pub const TAKE_BACK_WARN_EVERY: Duration = Duration::from_secs(120);
 
 /// The runs of the project being handed over, as this process's engine holds them.
 pub trait HandoverRuns {
@@ -257,6 +259,8 @@ struct Handovers {
     /// Whether the process the writer moves to still runs ([`process_is`] unless a test injects
     /// another).
     alive: ProcessCheck,
+    /// [`TAKE_BACK_WARN_EVERY`] unless a test sets another.
+    warn_every: Duration,
 }
 
 impl Handovers {
@@ -304,6 +308,7 @@ pub fn install_handovers(
         done: HashMap::new(),
         abandoned: HashMap::new(),
         alive: system_process_check(),
+        warn_every: TAKE_BACK_WARN_EVERY,
     });
 }
 
@@ -312,6 +317,14 @@ pub fn install_handovers(
 pub fn set_process_check(alive: ProcessCheck, cx: &mut App) {
     if cx.has_global::<Handovers>() {
         cx.global_mut::<Handovers>().alive = alive;
+    }
+}
+
+/// Makes this process's take-backs log that they still cannot get the lock every `every`,
+/// instead of [`TAKE_BACK_WARN_EVERY`]. For tests, which keep a take-back waiting past it.
+pub fn set_take_back_warn_every(every: Duration, cx: &mut App) {
+    if cx.has_global::<Handovers>() {
+        cx.global_mut::<Handovers>().warn_every = every;
     }
 }
 
@@ -408,6 +421,7 @@ pub(crate) fn serve_handover(
     let times = (handovers.times)(cx);
     let client = handovers.client.clone();
     let alive = handovers.alive.clone();
+    let warn_every = handovers.warn_every;
     let runs = match runs_source.live_runs(repo, cx) {
         Ok(runs) => runs,
         Err(error) => return Task::ready(Err(error)),
@@ -439,6 +453,7 @@ pub(crate) fn serve_handover(
         client,
         queue: Arc::new(QueueSink::new(cx.background_executor().clone())),
         alive,
+        warn_every,
         ended: Rc::new(Cell::new(false)),
     };
     cx.spawn(async move |cx| {
@@ -457,19 +472,33 @@ pub(crate) fn serve_handover(
     })
 }
 
-/// Takes `repo`'s writer back after a release, trying again while another process holds the
-/// lock (a third process holds it for an instant at most), up to `guard`. Blocks.
-fn retake_retrying(repo: &ProjectRepo, guard: Duration) -> Result<(), String> {
-    let deadline = Instant::now() + guard;
+/// Takes `repo`'s writer back after a release, trying again for as long as another process
+/// holds the lock (a third process holds it for an instant at most), logging every `warn_every`
+/// that it still waits. Blocks until this process holds the writer again.
+fn retake_retrying(repo: &ProjectRepo, warn_every: Duration) {
+    let mut warned_at = Instant::now();
     loop {
-        let error = match repo.retake_writer() {
-            Ok(()) => return Ok(()),
-            Err(error) => error.to_string(),
-        };
-        if Instant::now() >= deadline {
-            return Err(error);
+        match repo.retake_writer() {
+            Ok(()) => return,
+            Err(error) => warn_still_retaking(repo, &error, &mut warned_at, warn_every),
         }
         std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Logs that the take-back of `repo` still cannot get the lock, once every `warn_every`.
+fn warn_still_retaking(
+    repo: &ProjectRepo,
+    error: &OpenError,
+    warned_at: &mut Instant,
+    warn_every: Duration,
+) {
+    if warned_at.elapsed() >= warn_every {
+        log::error!(
+            "still taking the writer of {} back, which another process holds: {error}",
+            repo.location().id
+        );
+        *warned_at = Instant::now();
     }
 }
 
@@ -488,6 +517,8 @@ struct Move {
     client: ClientOptions,
     queue: Arc<QueueSink>,
     alive: ProcessCheck,
+    /// How often a take-back that still cannot get the lock logs it.
+    warn_every: Duration,
     /// Set once the move ended here (attached, kept or taken back): a second ending is ignored.
     ended: Rc<Cell<bool>>,
 }
@@ -538,10 +569,14 @@ impl Move {
         let queue_wait = self.times.start_timeout;
         cx.background_spawn(async move { repo.release_writer(queue_wait).await })
             .await?;
-        // The runs and checks of other projects, if any, go on here.
+        // The runs and checks of other projects, if any, go on here: task checks, then the runs,
+        // the reverse of the drain. This project's writer participants stay drained (they begin
+        // in the host, or again here at a take-back, which then undrains them before checks and
+        // runs again), and no run of this project starts here until the move ends, since
+        // `refuse_starts` stays on until `finish`.
         cx.update(|cx| {
-            self.runs_source.undrain(cx);
             self.runs_source.undrain_checks(cx);
+            self.runs_source.undrain(cx);
         });
         log::info!(
             "released the writer of {} to pid {}",
@@ -659,11 +694,8 @@ impl Move {
             });
             return;
         }
-        let retaken = retake_off_thread(self.repo.clone()).await;
-        cx.update(|cx| match retaken {
-            Ok(()) => self.take_back(&reason, cx),
-            Err(error) => self.lost(&error, cx),
-        });
+        retake_off_thread(self.repo.clone(), self.warn_every, cx).await;
+        cx.update(|cx| self.take_back(&reason, cx));
     }
 
     /// Steps 4 and 5 from the window's side, after the release: waits for the new writer and
@@ -681,13 +713,17 @@ impl Move {
         }
         let this = self.clone();
         cx.spawn(async move |cx| {
-            let next = receiver
-                .await
-                .unwrap_or_else(|_| NextWriter::Back("the wait for the host ended".to_string()));
+            let next = match receiver.await {
+                Ok(next) => next,
+                Err(_) => {
+                    // The wait ended with no answer: the writer comes back here all the same.
+                    retake_off_thread(this.repo.clone(), this.warn_every, cx).await;
+                    NextWriter::Back("the wait for the host ended".to_string())
+                }
+            };
             cx.update(|cx| match next {
                 NextWriter::Took(client) => this.attach(client, cx),
                 NextWriter::Back(reason) => this.take_back(&reason, cx),
-                NextWriter::Lost(reason) => this.lost(&reason, cx),
             });
         })
         .detach();
@@ -702,6 +738,7 @@ impl Move {
             client: self.client.clone(),
             executor,
             alive: self.alive.clone(),
+            warn_every: self.warn_every,
         }
     }
 
@@ -788,41 +825,38 @@ impl Move {
         self.runs_source.reload(&handed, cx);
         finish(&self.id, Err(did_not_start(&self.client.log)), cx);
     }
-
-    /// The host never took the writer and the lock could not be taken back within
-    /// [`TAKE_BACK_GUARD`]: another process kept it, against the rule that only the window and
-    /// the host keep it. Nothing loads here; the person is told.
-    fn lost(&self, reason: &str, cx: &mut App) {
-        if self.ended.replace(true) {
-            return;
-        }
-        log::error!("could not take the writer of {} back: {reason}", self.id);
-        finish(
-            &self.id,
-            Err(format!(
-                "{}; the writer could not be taken back: {reason}",
-                did_not_start(&self.client.log)
-            )),
-            cx,
-        );
-    }
 }
 
-/// [`retake_retrying`] on a thread of its own, with [`TAKE_BACK_GUARD`].
-fn retake_off_thread(repo: ProjectRepo) -> impl std::future::Future<Output = Result<(), String>> {
+/// [`retake_retrying`] on a thread of its own (on a background task when no thread starts).
+/// Resolves once this process holds the writer again.
+fn retake_off_thread(
+    repo: ProjectRepo,
+    warn_every: Duration,
+    cx: &AsyncApp,
+) -> impl std::future::Future<Output = ()> + use<> {
     let (sender, receiver) = oneshot::channel();
+    let thread_repo = repo.clone();
     let spawned = std::thread::Builder::new()
         .name("engine-host-take-back".to_string())
         .spawn(move || {
-            sender.send(retake_retrying(&repo, TAKE_BACK_GUARD)).ok();
+            retake_retrying(&thread_repo, warn_every);
+            sender.send(()).ok();
         });
-    async move {
-        if let Err(error) = spawned {
-            return Err(format!("taking the writer back: {error}"));
+    let fallback = match spawned {
+        Ok(_) => None,
+        Err(error) => {
+            log::error!("taking the writer back on a thread of its own: {error}");
+            Some(
+                cx.background_executor()
+                    .spawn(async move { retake_retrying(&repo, warn_every) }),
+            )
         }
-        receiver
-            .await
-            .unwrap_or_else(|_| Err("the take-back ended with no answer".to_string()))
+    };
+    async move {
+        match fallback {
+            Some(retaking) => retaking.await,
+            None => receiver.await.unwrap_or(()),
+        }
     }
 }
 
@@ -835,14 +869,13 @@ struct Waiting {
     client: ClientOptions,
     executor: BackgroundExecutor,
     alive: ProcessCheck,
+    warn_every: Duration,
 }
 
 enum NextWriter {
     Took(HostClient),
     /// This process holds the lock again.
     Back(String),
-    /// The host is gone and another process kept the lock past [`TAKE_BACK_GUARD`].
-    Lost(String),
 }
 
 impl Waiting {
@@ -850,11 +883,12 @@ impl Waiting {
     /// it; takes the writer back once the host is gone, or once the start timeout passed and
     /// the lock is free. While the host lives and holds the lock it is still opening the project,
     /// so this waits; once it is gone, another process holding the lock holds it for an instant,
-    /// so this tries again, up to [`TAKE_BACK_GUARD`].
+    /// so this tries again until it gets it, logging every [`Self::warn_every`] that it still
+    /// waits: the move ends only with one writer.
     fn wait(&self) -> NextWriter {
         let alive: Alive<'_> = &*self.alive;
         let deadline = Instant::now() + self.start_timeout;
-        let mut held_since: Option<Instant> = None;
+        let mut warned_at = Instant::now();
         loop {
             if let Some(info) = read_host_file(&self.location)
                 && info.moving.is_none()
@@ -885,15 +919,12 @@ impl Waiting {
                             log::error!("taking the writer back: {error:#}");
                         }
                         if gone {
-                            let since = *held_since.get_or_insert_with(Instant::now);
-                            if since.elapsed() >= TAKE_BACK_GUARD {
-                                return NextWriter::Lost(format!(
-                                    "pid {} ended before it took the writer, and after {}s: \
-                                     {error}",
-                                    self.to.to_pid,
-                                    TAKE_BACK_GUARD.as_secs()
-                                ));
-                            }
+                            warn_still_retaking(
+                                &self.repo,
+                                &error,
+                                &mut warned_at,
+                                self.warn_every,
+                            );
                         }
                     }
                 }

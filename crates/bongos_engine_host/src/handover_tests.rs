@@ -349,8 +349,8 @@ async fn a_handover_drains_then_moves_the_writer_and_the_window_attaches_to_the_
             "drain checks".to_string(),
             "live".to_string(),
             format!("hand over [\"run-1\"] to {pid}"),
-            "undrain".to_string(),
             "undrain checks".to_string(),
+            "undrain".to_string(),
         ]
     );
     let (moving, held) = state.borrow().at_hand_over.clone().unwrap();
@@ -464,8 +464,8 @@ async fn a_window_with_no_live_run_hands_over_without_waiting(
             "drain checks".to_string(),
             "live".to_string(),
             format!("hand over [] to {pid}"),
-            "undrain".to_string(),
             "undrain checks".to_string(),
+            "undrain".to_string(),
         ]
     );
     let (_host, _) = serve_host(&fixture, writer, host_cx);
@@ -519,8 +519,8 @@ async fn a_drain_past_its_timeout_asks_again_and_interrupt_them_now_moves_on(
             "interrupt [\"run-1\"]".to_string(),
             "live".to_string(),
             format!("hand over [\"run-1\"] to {pid}"),
-            "undrain".to_string(),
             "undrain checks".to_string(),
+            "undrain".to_string(),
         ]
     );
     let (_host, _) = serve_host(&fixture, writer, host_cx);
@@ -934,6 +934,29 @@ async fn an_opener_during_a_move_waits_and_attaches_as_a_client(cx: &mut TestApp
     }
 }
 
+// A take-back whose socket cannot be bound again still clears the move in `host.json`, so no
+// opener waits on a move that ended: it names the window with no move and no socket.
+#[gpui::test]
+async fn a_take_back_that_cannot_serve_still_clears_the_move(cx: &mut TestAppContext) {
+    let fixture = fixture();
+    let mut host = cx
+        .update(|cx| WriterHost::start(fixture.repo.clone(), fixture.writer_options(true), cx))
+        .unwrap();
+    let socket = host.info().socket.clone().unwrap();
+    host.set_moving(Some(Moving::to(std::process::id())))
+        .unwrap();
+    host.stop_accepting();
+    // Something that is not a socket now sits where the socket would be bound again.
+    std::fs::create_dir_all(socket.join("blocked")).unwrap();
+
+    assert!(cx.update(|cx| host.take_back(cx)).is_err());
+    let info = read_host_file(fixture.location()).unwrap();
+    assert_eq!(
+        (info.pid, info.moving, info.socket),
+        (std::process::id(), None, None)
+    );
+}
+
 // An opener that read `host.json` before the move was written and then won the lock reads it
 // again and lets the lock go at once.
 #[gpui::test]
@@ -1128,8 +1151,8 @@ async fn a_run_in_a_check_gets_checks_drained_for_exactly_the_returned_key(
             format!("checks drained run-1 {}", check_key()),
             "live".to_string(),
             format!("hand over [\"run-1\", \"run-2\"] to {pid}"),
-            "undrain".to_string(),
             "undrain checks".to_string(),
+            "undrain".to_string(),
         ]
     );
     let (_host, _) = serve_host(&fixture, writer, host_cx);
@@ -1270,8 +1293,8 @@ async fn participants_drain_in_order_only_after_the_runs_and_checks_drained(
             format!("p2 drain {id} busy=0"),
             "live".to_string(),
             format!("hand over [\"run-1\", \"run-2\"] to {pid}"),
-            "undrain".to_string(),
             "undrain checks".to_string(),
+            "undrain".to_string(),
         ]
     );
     let (_host, _) = serve_host(&fixture, writer, host_cx);
@@ -1451,8 +1474,8 @@ async fn interrupt_them_now_waits_for_the_stopped_checks_to_be_recorded_first(
             "interrupt [\"run-1\"]".to_string(),
             "live".to_string(),
             format!("hand over [\"run-1\"] to {pid}"),
-            "undrain".to_string(),
             "undrain checks".to_string(),
+            "undrain".to_string(),
         ]
     );
     let (_host, _) = serve_host(&fixture, writer, host_cx);
@@ -1486,8 +1509,8 @@ async fn with_no_participant_and_no_check_the_drain_is_the_runs_alone(
             "drain checks".to_string(),
             "live".to_string(),
             format!("hand over [\"run-1\"] to {pid}"),
-            "undrain".to_string(),
             "undrain checks".to_string(),
+            "undrain".to_string(),
         ]
     );
     let (_host, _) = serve_host(&fixture, writer, host_cx);
@@ -1677,14 +1700,17 @@ async fn a_failing_participant_undrain_does_not_stop_the_take_back(cx: &mut Test
     assert_eq!(logged, take_back_order(&id, &["p2", "p1"], &["p1", "p2"]));
 }
 
-// A third process holds the lock for a moment as the take-back begins: the window tries again
-// while it holds it, and takes the writer once it lets go.
+// A third process holds the lock as the take-back begins, past the time the window logs it
+// still waits: the window never gives up (that would leave no writer, `moving` set and the runs
+// unloaded), keeps trying while it holds it, and takes the writer once it lets go.
 #[gpui::test]
 async fn a_take_back_waits_out_a_third_process_holding_the_lock(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let fixture = fixture();
     let id = fixture.location().id.clone();
     let (state, liveness) = window_with_participants(&fixture, &["p1"], &[], cx);
+    // Every failed try is past the warning.
+    cx.update(|cx| crate::set_take_back_warn_every(Duration::ZERO, cx));
     let mut watch = cx
         .update(|cx| expect_handover(&id, wait_request(), cx))
         .unwrap();
@@ -1703,6 +1729,10 @@ async fn a_take_back_waits_out_a_third_process_holding_the_lock(cx: &mut TestApp
     );
     assert!(matches!(watch.done.try_recv(), Ok(None)), "still trying");
     assert!(!log(&state).contains(&"reload [\"run-1\"]".to_string()));
+    assert!(
+        read_host_file(fixture.location()).unwrap().moving.is_some(),
+        "the move is not over until the writer is back"
+    );
 
     drop(third);
     let Err(error) = watch.done.await.unwrap() else {
