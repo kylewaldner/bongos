@@ -159,6 +159,10 @@ pub struct RunSetup {
     /// The run works on a snapshot: its worktree is read and never written, and it has no
     /// repository, run branch or fan-out branch worktrees.
     pub snapshot: bool,
+    /// The run works in its project's work directory (`work/<run id>` of the project's files
+    /// folder): writable, but with no repository, run branch or fan-out branch worktrees, and its
+    /// programs run only inside the OS sandbox, which keeps the rest of the folder read-only.
+    pub work_dir: bool,
     /// For a project subject: the project, its files folder and the definitions its agents are
     /// pointed at.
     pub project: Option<ProjectSource>,
@@ -189,6 +193,12 @@ pub fn lane_dir_variable(name: &str) -> String {
 }
 
 impl RunSetup {
+    /// The run has no branches: it works on a snapshot or in its project's work directory, so
+    /// every key runs in its one tree and a join has nothing to merge.
+    pub fn branchless(&self) -> bool {
+        self.snapshot || self.work_dir
+    }
+
     /// The edits every node of the run gets, in order: the run's own, less any that names one of
     /// bongos's own `BONGOS_*` variables, then for a lane run `BONGOS_LANE`, `BONGOS_LANE_KIND`
     /// and one `BONGOS_LANE_DIR_<NAME>` per named directory. So no edit changes a `BONGOS_*`

@@ -973,6 +973,10 @@ fn a_project_subject_run_toml_round_trips_with_no_todo_and_an_empty_task_id() {
     assert!(text.contains("kind = \"project\""), "{text}");
     assert_eq!(RunToml::parse(&text).unwrap(), run);
     assert_eq!(run.subject.task_id(), None);
+    run.tree = Some(RunTreeRecord::Work);
+    let text = run.to_toml();
+    assert!(text.contains("kind = \"work\""), "{text}");
+    assert_eq!(RunToml::parse(&text).unwrap(), run);
 }
 
 #[test]

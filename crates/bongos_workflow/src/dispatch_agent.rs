@@ -220,13 +220,13 @@ pub(crate) fn system_for(binding: &RunBinding) -> Result<String, String> {
 }
 
 /// Where `key` runs: the run worktree, or for a key inside a fan-out its branch worktree, which
-/// is created from the run branch when it does not exist yet. A run on a snapshot has no branch
-/// to make one from: every key runs in the snapshot.
+/// is created from the run branch when it does not exist yet. A run on a snapshot or in a
+/// project's work directory has no branch to make one from: every key runs in its one tree.
 pub(crate) fn node_worktree(
     key: &NodeKey,
     binding: &RunBinding,
 ) -> Result<std::path::PathBuf, String> {
-    let Some((fan, index)) = key.branch.last().filter(|_| !binding.setup.snapshot) else {
+    let Some((fan, index)) = key.branch.last().filter(|_| !binding.setup.branchless()) else {
         return Ok(binding.worktree.path.clone());
     };
     let path = branch_worktree_path(&binding.worktree.run_dir, fan, *index);

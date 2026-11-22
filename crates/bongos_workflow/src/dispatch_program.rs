@@ -149,6 +149,9 @@ impl NodeKind for ProgramNodes {
         let try_dir = try_dir(&binding.attempt_dir, key, node.try_number);
         let snapshot = binding.setup.snapshot;
         let program_node = ProgramNode {
+            // Only the OS sandbox keeps a project's files folder, which holds every run's
+            // records, read-only around a run's work directory.
+            needs_sandbox: binding.setup.work_dir,
             script,
             output: definition_node.output.clone(),
             permissions,
@@ -158,9 +161,9 @@ impl NodeKind for ProgramNodes {
                 .as_ref()
                 .map(|polls| PollPlan::resolve(polls, &inputs.programs)),
             state,
-            // A snapshot is no repository of the run's: none of its git metadata is writable,
-            // even when it sits inside one.
-            git_common_dir: if snapshot {
+            // A snapshot or a work directory is no repository of the run's: none of its git
+            // metadata is writable, even when it sits inside one.
+            git_common_dir: if binding.setup.branchless() {
                 None
             } else {
                 common_git_dir(&worktree)
