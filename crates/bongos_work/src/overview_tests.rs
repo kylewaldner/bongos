@@ -43,7 +43,7 @@ fn invoicing(base: &Path, worktree_root: Option<&str>) -> Repository {
 }
 
 fn row_of(repository: &Repository, layout: &Layout) -> RepositoryRow {
-    row(repository, layout, Vec::new(), false)
+    row(repository, layout, None, Vec::new(), false)
 }
 
 #[test]
@@ -468,4 +468,27 @@ fn the_screen_labels_the_layer_that_won(cx: &mut TestAppContext) {
         // A repository no source decides keeps the settings layer and root.
         assert_eq!(RootLayers::winning(&other, cx), settings);
     });
+}
+
+#[test]
+fn a_layer_above_the_settings_gives_the_rows_root_preview_and_problem() {
+    let (_temp, base) = base();
+    let layout = layout_in(&base, Some("~/trees/{repo}"));
+    let repository = invoicing(&base, None);
+    let layer = RootLayer {
+        template: Some("/fast/{repo}/{slug}".to_string()),
+        source: RootSource::Project,
+    };
+    let row = row(&repository, &layout, Some(&layer), Vec::new(), false);
+    assert_eq!(row.root_source, RootSource::Project);
+    assert_eq!(row.template.as_deref(), Some("/fast/{repo}/{slug}"));
+    assert_eq!(row.preview, "/fast/invoicing/<task>");
+
+    let broken = RootLayer {
+        template: Some("/fast/{nope}".to_string()),
+        source: RootSource::Project,
+    };
+    let row = self::row(&repository, &layout, Some(&broken), Vec::new(), false);
+    assert!(row.preview.is_empty());
+    assert!(matches!(row.problem, Some(RootProblem::Template(_))));
 }

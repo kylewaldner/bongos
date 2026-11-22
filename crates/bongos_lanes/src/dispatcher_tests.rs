@@ -658,6 +658,70 @@ async fn start_attaches_to_the_dispatcher_of_a_live_host(cx: &mut TestAppContext
     assert!(harness.state().lanes.is_empty());
 }
 
+#[gpui::test]
+async fn a_bounded_start_that_attaches_keeps_its_bound_and_says_lanes_already_run(
+    cx: &mut TestAppContext,
+) {
+    let harness = harness(&builds(1), graph(vec![leaf("a")]), &[]);
+    harness
+        .host
+        .live_hosts
+        .borrow_mut()
+        .insert("other-host".to_string());
+    harness
+        .writer
+        .transact(|tx| {
+            put_dispatcher(
+                tx,
+                &DispatcherRecord {
+                    run_id: "0190running".to_string(),
+                    host: "other-host".to_string(),
+                    started: SINCE.to_string(),
+                    by: Author::System,
+                    bound: None,
+                    unattended: None,
+                    definition_commit: None,
+                    table_commit: None,
+                    table_wait: None,
+                    stopped_by: None,
+                    ended: None,
+                },
+            )
+        })
+        .unwrap();
+
+    let request = StartLanes {
+        bound: Some(bongos_lanes_model::PickBound::Within(
+            bongos_lanes_model::TaskId::new("0193"),
+        )),
+        ..start_request()
+    };
+    let started = start(&harness, request, cx).await;
+
+    assert!(started.attached);
+    assert_eq!(started.run_id, "0190running");
+    assert!(started.dispatcher.is_none());
+    assert_eq!(
+        started.unapplied_bound,
+        Some(bongos_lanes_model::PickBound::Within(
+            bongos_lanes_model::TaskId::new("0193")
+        ))
+    );
+    let text = crate::host::started_message(&started);
+    assert!(
+        text.starts_with("Lanes already run (run 0190running)"),
+        "{text}"
+    );
+    assert!(text.contains("within 0193"), "{text}");
+    // The table the start loaded is what the project's `[locations]` layer answers from.
+    let project = harness.host.project.clone();
+    assert!(
+        cx.update(|cx| crate::LaneTables::get(&project, cx))
+            .is_some()
+    );
+    assert!(harness.engine.dispatcher_starts.borrow().is_empty());
+}
+
 // PRD 6: three lanes busy at once.
 #[gpui::test]
 async fn three_lanes_take_three_tasks_at_once(cx: &mut TestAppContext) {

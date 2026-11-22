@@ -449,6 +449,36 @@ routes = [{ to = "done" }]
 kind = "success"
 "#;
 
+const AFTER_GATED_FLOW: &str = r#"
+schema = 1
+name = "after"
+start = "merge"
+
+[nodes.merge]
+kind = "program"
+use = "merge"
+gate = { when = "after", question = "Merged, carry on?" }
+output = { result = { type = "choice", values = ["merged", "conflict"] } }
+routes = [{ to = "done" }]
+
+[ends.done]
+kind = "success"
+"#;
+
+#[test]
+fn a_gate_after_a_step_does_not_make_it_gated() {
+    let root = TempDir::new().unwrap();
+    let dir = root.path().join("after");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("workflow.toml"), AFTER_GATED_FLOW).unwrap();
+    let dirs = bongos_workflow_model::LayerDirs {
+        profile: Some(root.path().to_path_buf()),
+        ..Default::default()
+    };
+    let found = crate::ungated_steps(&dirs, &["after".to_string()]);
+    assert_eq!(found["after"], vec!["merge".to_string()]);
+}
+
 #[test]
 fn the_summary_finds_steps_that_merge_or_deploy_without_a_gate() {
     let root = TempDir::new().unwrap();
@@ -535,4 +565,30 @@ workflow = "ship"
     );
     assert_eq!(inputs.workflows[0].ungated, vec!["merge".to_string()]);
     assert_eq!(inputs.bound.as_deref(), Some("within 0193"));
+}
+
+#[test]
+fn the_time_in_job_reads_from_the_given_clock() {
+    use crate::lanes_rows::time_in_job;
+    let at = |text: &str| {
+        chrono::DateTime::parse_from_rfc3339(text)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    };
+    let now = at("2026-03-01T11:05:09Z");
+    assert_eq!(time_in_job(SINCE, now).as_deref(), Some("1h 05m"));
+    assert_eq!(
+        time_in_job(SINCE, at("2026-03-01T10:00:45Z")).as_deref(),
+        Some("45s")
+    );
+    assert_eq!(
+        time_in_job(SINCE, at("2026-03-01T10:12:59Z")).as_deref(),
+        Some("12m")
+    );
+    // A start in the future, and one that does not parse.
+    assert_eq!(
+        time_in_job(SINCE, at("2026-03-01T09:00:00Z")).as_deref(),
+        Some("0s")
+    );
+    assert_eq!(time_in_job("yesterday", now), None);
 }

@@ -32,6 +32,8 @@ pub struct LaneRow {
     pub run_lifecycle: Option<String>,
     /// When the lane's job started.
     pub job_started: Option<String>,
+    /// How long the lane's job has run ("12m"); filled by the view from its clock.
+    pub in_job: Option<String>,
     /// Why the lane is idle, waiting, paused or stopped; `None` while it works.
     pub reason: Option<String>,
 }
@@ -114,6 +116,7 @@ pub fn lanes_view_rows(
                     .as_ref()
                     .and_then(|job| (facts.run_lifecycle)(&job.run_id)),
                 job_started: lane.job.as_ref().map(|job| job.started.clone()),
+                in_job: None,
                 reason,
             }
         })
@@ -137,4 +140,18 @@ pub fn lanes_view_rows(
         rows,
         needs_you,
     }
+}
+
+/// How long a job that started at `started` (RFC 3339) has run at `now`: "45s", "12m" or "1h 05m".
+/// `None` when `started` does not parse. A start in the future reads as "0s".
+pub fn time_in_job(started: &str, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    let started = chrono::DateTime::parse_from_rfc3339(started).ok()?;
+    let seconds = (now - started.with_timezone(&chrono::Utc))
+        .num_seconds()
+        .max(0);
+    Some(match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3599 => format!("{}m", seconds / 60),
+        _ => format!("{}h {:02}m", seconds / 3600, seconds % 3600 / 60),
+    })
 }
