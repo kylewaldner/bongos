@@ -45,7 +45,7 @@ use crate::actions::task;
 use crate::commands::{is_open_leaf, queue, ready, show_toast, with_task};
 use crate::repositories::resolve_repository;
 use crate::settings::Repository;
-use crate::{WorkSettings, WorkStore, modals};
+use crate::{WorkSettings, WorkStore, WorktreeRootResolvers, modals};
 
 /// The directory under a repository's root that held the worktrees of its tasks before the
 /// worktree root settings. Worktrees already there stay there.
@@ -106,7 +106,9 @@ pub(crate) struct Request {
     repository: Repository,
     /// The repository's primary checkout, with `~` expanded.
     repository_path: PathBuf,
-    worktree: PathBuf,
+    /// Where the worktree goes; `None` for a start that cuts the branch alone (a lane that runs
+    /// the leaf in its own tree).
+    worktree: Option<PathBuf>,
     location: Location,
     branch: Branch,
     /// The old-format folder (`projects/<slug>` or `oneoffs`) the task is in, claimed while its
@@ -146,7 +148,20 @@ impl Request {
     /// The path the worktree is planned at.
     #[cfg(test)]
     pub(crate) fn worktree(&self) -> &Path {
-        &self.worktree
+        self.worktree.as_deref().expect("a worktree is planned")
+    }
+
+    /// Where the worktree's root came from.
+    #[cfg(test)]
+    pub(crate) fn source(&self) -> &Source {
+        &self.location.source
+    }
+
+    /// The path the worktree is planned at, or the refusal of a branch-only request.
+    fn planned_worktree(&self) -> Result<&Path> {
+        self.worktree
+            .as_deref()
+            .context("this start cuts the branch alone and makes no worktree")
     }
 
     /// The request with its root set by `source` instead.
@@ -183,7 +198,13 @@ fn start_task(
         home: util::paths::home_dir().clone(),
         central,
     };
-    match plan(&tree, id, &repositories, &layout) {
+    let planned = {
+        let app: &gpui::App = cx;
+        plan_with(&tree, id, &repositories, &layout, &|project, repo| {
+            WorktreeRootResolvers::root(project, repo, app)
+        })
+    };
+    match planned {
         Err(message) => show_toast(workspace, message, cx),
         Ok(Plan::Ready(request)) => create(request, workspace, window, cx),
         Ok(Plan::ChoosePullRequest { request, urls }) => modals::pick(
@@ -219,12 +240,31 @@ fn start_task(
     }
 }
 
-/// Decides what `task: start` does for the task `id`, or why it does nothing.
+/// Decides what `task: start` does for the task `id`, or why it does nothing, from the settings
+/// alone.
+#[cfg(test)]
 pub(crate) fn plan(
     tree: &WorkTree,
     id: &str,
     repositories: &[Repository],
     layout: &Layout,
+) -> Result<Plan, String> {
+    plan_with(tree, id, repositories, layout, &|_, _| None)
+}
+
+/// A worktree root decided before the settings: `(project id, repository name)` to the root
+/// template and its layer ([`WorktreeRootResolvers::root`] in the app).
+pub(crate) type RootOverride<'a> = &'a dyn Fn(&str, &str) -> Option<(String, Source)>;
+
+/// Decides what `task: start` does for the task `id`, or why it does nothing. `root_override` is
+/// asked first for the root of a project task's repository; a root it gives from a source that
+/// does not fall back (the project, a profile, a lane) never moves to the central directory.
+pub(crate) fn plan_with(
+    tree: &WorkTree,
+    id: &str,
+    repositories: &[Repository],
+    layout: &Layout,
+    root_override: RootOverride<'_>,
 ) -> Result<Plan, String> {
     let place = Place::locate(tree, id)?;
     let slug = place.slug();
@@ -289,31 +329,62 @@ pub(crate) fn plan(
         .filter(|task| task.dir != place.task.dir)
         .filter_map(|task| task.file.as_ref()?.worktree.as_deref().map(expand_home))
         .collect();
-    let template = configured(repository, layout);
     let spot = |template| Spot {
         template,
         repository,
         layout,
     };
-    let (worktree, _) = worktree_spot(&spot(template), slug, id, &held)?;
-    let location = match template {
-        None => Location {
-            source: Source::Central,
-            central: None,
-        },
-        Some(configured) => Location {
-            source: match configured.layer {
-                TemplateLayer::Own => Source::Own,
-                TemplateLayer::Default => Source::Default,
-            },
-            central: Some(worktree_spot(&spot(None), slug, id, &held).map(|(path, _)| path)),
-        },
+    let project_id = place.project.and_then(|project| project.task.id());
+    let overridden = project_id.and_then(|project| root_override(project, &repository.name));
+    let (worktree, location) = match &overridden {
+        Some((text, source)) => {
+            let template = Some(Configured {
+                text,
+                layer: TemplateLayer::Own,
+            });
+            let (worktree, _) =
+                worktree_spot(&spot(template), slug, id, &held).map_err(|error| {
+                    format!(
+                        "the worktree root {text} of {} ({} layer): {error}",
+                        repository.name,
+                        source.label()
+                    )
+                })?;
+            let central = source
+                .falls_back()
+                .then(|| worktree_spot(&spot(None), slug, id, &held).map(|(path, _)| path));
+            let location = Location {
+                source: source.clone(),
+                central,
+            };
+            (worktree, location)
+        }
+        None => {
+            let template = configured(repository, layout);
+            let (worktree, _) = worktree_spot(&spot(template), slug, id, &held)?;
+            let location = match template {
+                None => Location {
+                    source: Source::Central,
+                    central: None,
+                },
+                Some(configured) => Location {
+                    source: match configured.layer {
+                        TemplateLayer::Own => Source::Own,
+                        TemplateLayer::Default => Source::Default,
+                    },
+                    central: Some(
+                        worktree_spot(&spot(None), slug, id, &held).map(|(path, _)| path),
+                    ),
+                },
+            };
+            (worktree, location)
+        }
     };
     let request = |branch| Request {
         id: id.to_string(),
         repository: repository.clone(),
         repository_path: repository_path.clone(),
-        worktree: worktree.clone(),
+        worktree: Some(worktree.clone()),
         location: location.clone(),
         branch,
         old_dir: old_dir.clone(),
@@ -859,6 +930,7 @@ async fn run_setup(
 /// not record it. Refuses a path or branch something else holds. When the planned parent is not
 /// writable and the plan is not already central, the worktree goes to the central path instead.
 async fn make_worktree(fs: Arc<dyn Fs>, request: &Request) -> Result<StartedWorktree> {
+    let planned = request.planned_worktree()?;
     let repository_path = &request.repository_path;
     let git_binary = which::which("git").ok();
     let repository = fs
@@ -883,25 +955,24 @@ async fn make_worktree(fs: Arc<dyn Fs>, request: &Request) -> Result<StartedWork
         _ => None,
     };
     let planned_parent = || {
-        request
-            .worktree
+        planned
             .parent()
-            .unwrap_or(&request.worktree)
+            .unwrap_or(planned)
             .to_string_lossy()
             .into_owned()
     };
 
     // An earlier start made the worktree but did not record it: at the planned path, or at the
     // central path it fell back to.
-    let found = if std::fs::symlink_metadata(&request.worktree).is_ok() {
-        if !ours(&request.worktree) {
+    let found = if std::fs::symlink_metadata(planned).is_ok() {
+        if !ours(planned) {
             bail!(
                 "{} already exists and is not a worktree of {} on {branch}; nothing was created",
-                request.worktree.display(),
+                planned.display(),
                 request.repository.name
             );
         }
-        Some((request.worktree.clone(), None))
+        Some((planned.to_path_buf(), None))
     } else {
         central
             .filter(|central| std::fs::symlink_metadata(central).is_ok() && ours(central))
@@ -1025,6 +1096,109 @@ async fn make_worktree(fs: Arc<dyn Fs>, request: &Request) -> Result<StartedWork
     }
 }
 
+/// A leaf to start on its branch alone, with no worktree: a lane that runs the leaf in its own
+/// tree starts it this way. The checks, the branch name and its base are those of `task: start`.
+#[derive(Clone, Debug)]
+pub struct BranchStart(Request);
+
+impl BranchStart {
+    pub fn task_id(&self) -> &str {
+        &self.0.id
+    }
+
+    pub fn branch(&self) -> &str {
+        match &self.0.branch {
+            Branch::New { name, .. } | Branch::PullRequest { name, .. } => name,
+        }
+    }
+
+    /// The repository's primary checkout, where the branch is cut.
+    pub fn repository_path(&self) -> &Path {
+        &self.0.repository_path
+    }
+}
+
+/// Plans a branch-only start of the leaf `id` with the app's settings, or the refusal `task:
+/// start` would give. A babysit leaf starts on a PR's head, so it is refused here.
+pub fn plan_branch_start(tree: &WorkTree, id: &str, cx: &gpui::App) -> Result<BranchStart, String> {
+    let central = crate::central_worktrees_dir(cx)
+        .ok_or_else(|| "the central worktree directory is not known".to_string())?;
+    let settings = WorkSettings::get_global(cx);
+    let layout = Layout {
+        default_root: settings.default_worktree_root.clone(),
+        home: util::paths::home_dir().clone(),
+        central,
+    };
+    branch_start(plan_with(
+        tree,
+        id,
+        &settings.repositories,
+        &layout,
+        &|_, _| None,
+    ))
+}
+
+/// The branch-only form of a `task: start` plan: no worktree.
+pub(crate) fn branch_start(planned: Result<Plan, String>) -> Result<BranchStart, String> {
+    match planned? {
+        Plan::Ready(request) => Ok(BranchStart(Request {
+            worktree: None,
+            ..request
+        })),
+        Plan::ChoosePullRequest { request, .. } => Err(format!(
+            "{} is a babysit task, which starts on a PR's head; start it by hand",
+            request.id
+        )),
+    }
+}
+
+/// Cuts the branch of `start` from its base with `git branch` in the primary checkout. Nothing
+/// else changes there: no worktree, no checkout, no exclude line. A branch of that name that
+/// already exists is refused and left alone.
+pub async fn make_branch(fs: Arc<dyn Fs>, start: &BranchStart) -> Result<model::StartedBranch> {
+    let request = &start.0;
+    let Branch::New { name, base } = &request.branch else {
+        bail!("a PR's branch is checked out by hand; nothing was created");
+    };
+    let repository_path = &request.repository_path;
+    let git_binary = which::which("git").context("git is not on PATH; nothing was created")?;
+    let repository = fs
+        .open_repo(&repository_path.join(".git"), Some(&git_binary))
+        .with_context(|| format!("{} is not a git repository", repository_path.display()))?;
+    let branch_ref = format!("refs/heads/{name}");
+    let exists = repository
+        .revparse_batch(vec![branch_ref])
+        .await?
+        .into_iter()
+        .next()
+        .flatten()
+        .is_some();
+    if exists {
+        bail!("The branch {name} already exists; nothing was created");
+    }
+    let base = resolve_base(repository.as_ref(), base.clone()).await;
+    let base_sha = resolve_sha(repository.as_ref(), &base)
+        .await
+        .ok_or_else(|| {
+            anyhow!(
+                "{} has no branch {base} to start from",
+                request.repository.name
+            )
+        })?;
+    run_git(
+        &git_binary,
+        repository_path,
+        &["branch", "--no-track", "--end-of-options", name, &base_sha],
+    )
+    .await
+    .context("nothing was created")?;
+    Ok(model::StartedBranch {
+        branch: name.clone(),
+        base,
+        base_sha,
+    })
+}
+
 /// The path to make the worktree at: the planned one when its parent can be made and written,
 /// else the central one, with the planned parent as the fallback to report. Refuses when the
 /// planned path is already central, there is no central path, or its parent fails too.
@@ -1032,8 +1206,9 @@ pub(crate) fn writable_spot(
     request: &Request,
     planned_parent: impl Fn() -> String,
 ) -> Result<(PathBuf, Option<String>)> {
-    let error = match prepare_parent(&request.worktree) {
-        Ok(()) => return Ok((request.worktree.clone(), None)),
+    let planned = request.planned_worktree()?;
+    let error = match prepare_parent(planned) {
+        Ok(()) => return Ok((planned.to_path_buf(), None)),
         Err(error) => error,
     };
     if request.location.source == Source::Central {

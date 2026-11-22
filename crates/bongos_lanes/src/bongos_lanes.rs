@@ -3,7 +3,9 @@
 //! with its snapshot exporter, the live and activity sources a project repository reads, the
 //! `lane-run-scope` approval hook, and the lane commands (hidden while `lanes.enabled` is false).
 //! Also where a lane's trees and directories go and how they are made (`locations`, `create`,
-//! `prepare`), the job environment (`env`), the project profile seam and the job hooks.
+//! `prepare`), the job environment (`env`), the project profile seam and the job hooks; a job's
+//! trees (`job_trees`), the reset and save of a lane's persistent tree and the merge in it
+//! (`lane_tree`), and the worktree roots lanes give a hand start (`roots`).
 
 mod actions;
 mod create;
@@ -11,9 +13,12 @@ mod definitions;
 mod env;
 mod exporter;
 mod hooks;
+mod job_trees;
+mod lane_tree;
 mod locations;
 mod prepare;
 mod profile;
+mod roots;
 mod runs;
 mod scope;
 mod settings;
@@ -33,6 +38,15 @@ pub use definitions::{LANES_FILE, LANES_FOLDER, prompt_lane_diagnostics, validat
 pub use env::{apply_env, second_tree_env, tip_env};
 pub use exporter::{EXPORT_NAMESPACE, LanesExporter, STATE_FILE};
 pub use hooks::{AFTER_TREE_CREATED, JobHook, JobHooks};
+pub use job_trees::{
+    CurrentJobTrees, ExtraRepositories, JobRepositories, JobRepository, JobStart, JobTrees,
+    StartedTrees, forbidden_for, start_job_trees,
+};
+pub use lane_tree::{
+    Forbidden, LaneMerge, LaneMergeError, LaneMerged, LastEnd, LastRun, MergeTarget, ResetOutcome,
+    ResetRequest, SAVE_EMAIL, SAVE_NAME, SAVED_REFS, SaveTarget, Saved, add_tree, check_own_tree,
+    git_tree_maker, lane_tree, merge_in_lane_tree, reset_tree,
+};
 pub use locations::{
     Fallback, LaneLocation, LaneLocations, Layer, LocationInputs, Place, RepositoryPlace,
     binding_of, check_lanes, check_overlap, resolve_lane, table_lane_ids, tree_name, tree_slug,
@@ -42,6 +56,7 @@ pub use prepare::{
     system_free_space, wait_lane,
 };
 pub use profile::{LaneProfileSource, LaneProfiles};
+pub use roots::{LaneRootResolver, LaneTables};
 pub use runs::{LaneActivity, LaneLiveSource, LaneRuns, OwnedScope, SOURCE_NAME};
 pub use scope::LaneRunScope;
 pub use settings::{LanesHostSettings, LanesOnInterruption, LanesOnLastWindowClose, LanesSettings};
@@ -63,6 +78,7 @@ pub fn init(cx: &mut App) {
     ActivitySources::global().register(Arc::new(LaneActivity { runs: runs.clone() }));
     LaneRunScope::register(runs.clone(), cx);
     cx.set_global(runs);
+    bongos_work::WorktreeRootResolvers::register(Arc::new(LaneRootResolver), cx);
 }
 
 #[cfg(test)]
@@ -76,9 +92,15 @@ mod env_tests;
 #[cfg(test)]
 mod exporter_tests;
 #[cfg(test)]
+mod job_trees_tests;
+#[cfg(test)]
+mod lane_tree_tests;
+#[cfg(test)]
 mod locations_tests;
 #[cfg(test)]
 mod prepare_tests;
+#[cfg(test)]
+mod roots_tests;
 #[cfg(test)]
 mod runs_tests;
 #[cfg(test)]

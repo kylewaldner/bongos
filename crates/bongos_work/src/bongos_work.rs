@@ -30,6 +30,7 @@ mod ref_watch;
 mod registry;
 mod repositories;
 mod restore_commands;
+mod root_resolvers;
 mod seams;
 mod settings;
 mod status;
@@ -75,6 +76,7 @@ pub use registry::{
     RunStart, observe_view_opened,
 };
 pub use repositories::{default_kind, find_repository, merge_is_ship, resolve_repository};
+pub use root_resolvers::{WorktreeRootResolver, WorktreeRootResolvers};
 pub use seams::{
     ChangeId, DefinitionWriter, DefinitionWriters, ProjectSource, ProjectSources, WriteOutcome,
 };
@@ -89,7 +91,7 @@ pub use text_views::{open_file_at_line, open_following_text};
 pub use working_copy_commands::{
     edit_in_working_copy, working_copy_open_path, working_copy_to_edit,
 };
-pub use worktrees::{expand_home, probe_writable};
+pub use worktrees::{BranchStart, expand_home, make_branch, plan_branch_start, probe_writable};
 
 /// Where the work tree lives. The app passes `~/.bongos`; tests pass a temporary directory, so no
 /// test touches the real home.
@@ -190,6 +192,8 @@ impl WorkStore {
 
 #[cfg(test)]
 mod artifact_tests;
+#[cfg(test)]
+mod branch_start_tests;
 #[cfg(test)]
 mod command_tests;
 #[cfg(test)]
