@@ -23,10 +23,12 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use crate::{
-    ClientMessage, ClientOptions, EngineAccess, HostClient, HostCommand, HostCommands, HostEvent,
-    HostInfo, HostMode, LanesVerb, OpenedState, PROTOCOL_VERSION, ServerMessage, WorkflowVerb,
-    WriterHost, WriterOptions, checks_handler, live_host, not_answering, open_state_with_hooks,
-    read_host_file, register_checks, version_refusal, write_host_file,
+    Attach, ClientMessage, ClientOptions, EngineAccess, EngineHostProcess, EnsureHost, HostClient,
+    HostCommand, HostCommands, HostEvent, HostInfo, HostMode, HostProcessOptions, HostSpawner,
+    LanesVerb, OpenedState, PROTOCOL_VERSION, ServerMessage, SpawnedHost, WorkflowVerb, WriterHost,
+    WriterHosts, WriterOptions, checks_handler, ensure_host, live_host, not_answering,
+    open_host_writer, open_state_with_hooks, read_host_file, register_checks, version_refusal,
+    write_host_file,
 };
 
 const VERSION: &str = "1.2.3";
@@ -773,4 +775,290 @@ async fn a_rerouted_command_in_the_writer_runs_the_handler_locally(cx: &mut Test
         .unwrap();
     assert_eq!(answer, json!("ok"));
     assert_eq!(*seen.borrow(), [true]);
+}
+
+// ---- The engine host process and `ensure_host` ----
+
+const IDLE_EXIT: Duration = Duration::from_secs(300);
+
+/// Starts this process as the fixture's engine host; the flag turns true when it exits.
+fn start_host_process(fixture: &Fixture, cx: &mut TestAppContext) -> Rc<std::cell::Cell<bool>> {
+    let exited = Rc::new(std::cell::Cell::new(false));
+    let on_exit = exited.clone();
+    cx.update(|cx| {
+        EngineHostProcess::start(
+            fixture.repo.clone(),
+            HostProcessOptions {
+                bongos_version: VERSION.to_string(),
+                hosts_dir: fixture.hosts_dir(),
+                idle_exit: IDLE_EXIT,
+            },
+            Rc::new(|_: &App| false),
+            Box::new(move |_| on_exit.set(true)),
+            cx,
+        )
+    })
+    .unwrap();
+    exited
+}
+
+fn host_connections(cx: &mut TestAppContext) -> usize {
+    cx.update(|cx| {
+        cx.try_global::<WriterHosts>()
+            .and_then(|hosts| {
+                hosts
+                    .hosts()
+                    .first()?
+                    .server()
+                    .map(|s| s.connection_count())
+            })
+            .unwrap_or(0)
+    })
+}
+
+/// Waits for `condition`, letting the app run, with a generous guard against a hang.
+fn wait_for(cx: &mut TestAppContext, mut condition: impl FnMut(&mut TestAppContext) -> bool) {
+    let guard = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        cx.run_until_parked();
+        if condition(cx) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < guard,
+            "the condition never held"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+// An engine host with nothing attached and nothing running exits once the idle time is up, on
+// the executor's clock, and removes its host.json and socket.
+#[gpui::test]
+async fn an_idle_engine_host_exits_and_removes_its_files(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let exited = start_host_process(&fixture, cx);
+
+    let info = live_host(fixture.location()).expect("a live writer");
+    assert_eq!(info.mode, HostMode::Host);
+    assert_eq!(info.pid, std::process::id());
+    let socket = info.socket.expect("a socket");
+    assert!(socket.exists());
+    assert!(cx.update(|cx| EngineHostProcess::is_running(cx)));
+
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(IDLE_EXIT - Duration::from_secs(1));
+    cx.run_until_parked();
+    assert!(!exited.get(), "exited before the idle time was up");
+
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    assert!(exited.get(), "did not exit once idle");
+    assert!(read_host_file(fixture.location()).is_none());
+    assert!(!socket.exists());
+}
+
+// A connected client keeps the host from idling; once it goes, the idle time starts then.
+#[gpui::test]
+async fn a_connected_client_keeps_the_engine_host_running(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let exited = start_host_process(&fixture, cx);
+    let client = fixture.connect(ClientKind::Cli, cx);
+    wait_for(cx, |cx| host_connections(cx) == 1);
+
+    cx.executor().advance_clock(IDLE_EXIT * 3);
+    cx.run_until_parked();
+    assert!(!exited.get(), "exited with a client attached");
+
+    drop(client);
+    wait_for(cx, |cx| host_connections(cx) == 0);
+    cx.executor()
+        .advance_clock(IDLE_EXIT - Duration::from_secs(1));
+    cx.run_until_parked();
+    assert!(
+        !exited.get(),
+        "the idle time counted from before the client left"
+    );
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    assert!(exited.get());
+    assert!(read_host_file(fixture.location()).is_none());
+}
+
+// A second engine host of the same project is refused by the writer lock and told who runs.
+#[gpui::test]
+async fn a_second_engine_host_is_refused_by_the_writer_lock(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let _exited = start_host_process(&fixture, cx);
+    let info = live_host(fixture.location()).expect("a live writer");
+
+    let refused = open_host_writer(fixture.location(), &StateApplyHooks::new()).err();
+    assert_eq!(
+        refused.as_deref(),
+        Some(
+            format!(
+                "an engine host for project-1 is already running (pid {}, started {})",
+                info.pid,
+                info.started.to_rfc3339()
+            )
+            .as_str()
+        )
+    );
+    // The first host still holds the writer and its host.json.
+    assert_eq!(live_host(fixture.location()), Some(info));
+}
+
+/// A spawner that starts nothing: it counts its calls and runs `on_spawn` in their place.
+struct FakeSpawner {
+    spawns: Arc<std::sync::atomic::AtomicUsize>,
+    on_spawn: Box<dyn Fn() + Send + Sync>,
+    exits: Option<String>,
+}
+
+struct FakeChild(Option<String>);
+
+impl SpawnedHost for FakeChild {
+    fn try_exit(&mut self) -> Option<String> {
+        self.0.clone()
+    }
+
+    fn release(self: Box<Self>) {}
+}
+
+impl HostSpawner for FakeSpawner {
+    fn spawn(&self, _: &str, _: &Path) -> anyhow::Result<Box<dyn SpawnedHost>> {
+        self.spawns
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        (self.on_spawn)();
+        Ok(Box::new(FakeChild(self.exits.clone())))
+    }
+}
+
+fn ensure_options(
+    fixture: &Fixture,
+    on_spawn: Box<dyn Fn() + Send + Sync>,
+    exits: Option<String>,
+    timeout: Duration,
+) -> (EnsureHost, Arc<std::sync::atomic::AtomicUsize>) {
+    let spawns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let options = EnsureHost {
+        spawner: Arc::new(FakeSpawner {
+            spawns: spawns.clone(),
+            on_spawn,
+            exits,
+        }),
+        log: fixture.root.path().join("logs").join("engine-host.log"),
+        start_timeout: timeout,
+        poll_interval: Duration::from_millis(1),
+    };
+    (options, spawns)
+}
+
+// With a live writer named in host.json, ensure_host attaches to it at once and starts nothing.
+#[gpui::test]
+async fn ensure_host_attaches_at_once_to_a_live_writer(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let host = start_writer(&fixture, true, cx);
+    let (options, spawns) = ensure_options(
+        &fixture,
+        Box::new(|| panic!("a host was started beside a live writer")),
+        None,
+        Duration::from_secs(60),
+    );
+
+    let attach = ensure_host(fixture.location(), "lanes: start", &options).unwrap();
+    assert_eq!(
+        attach,
+        Attach {
+            writer_pid: std::process::id(),
+            socket: host.server().map(|server| server.socket().to_path_buf()),
+            mode: HostMode::Window,
+            spawned: false,
+        }
+    );
+    assert_eq!(spawns.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let client = HostClient::connect(
+        &attach.socket.unwrap(),
+        fixture.client_options(ClientKind::Cli),
+        cx.executor(),
+    )
+    .unwrap();
+    assert_eq!(client.welcomed().writer_pid, std::process::id());
+}
+
+// A host.json naming a dead pid, or this pid with another start time, is not live: ensure_host
+// starts a host and attaches to whichever writer host.json names live afterwards.
+#[test]
+fn ensure_host_starts_a_host_past_a_dead_or_restarted_writer() {
+    let fixture = fixture();
+    let ours = HostInfo::this_process(HostMode::Host, None, VERSION, chrono::Utc::now());
+    let restarted = HostInfo {
+        start_time: Some(ours.start_time.unwrap_or(0) + 1),
+        ..ours.clone()
+    };
+    let dead = HostInfo {
+        pid: i32::MAX as u32 - 7,
+        ..ours.clone()
+    };
+    for stale in [restarted, dead] {
+        assert!(!stale.is_live());
+        write_host_file(fixture.location(), &stale).unwrap();
+        let location = fixture.location().clone();
+        let live = ours.clone();
+        let (options, spawns) = ensure_options(
+            &fixture,
+            Box::new(move || write_host_file(&location, &live).unwrap()),
+            None,
+            Duration::from_secs(60),
+        );
+        let attach = ensure_host(fixture.location(), "lanes: start", &options).unwrap();
+        assert_eq!(spawns.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(attach.spawned);
+        assert_eq!(attach.writer_pid, std::process::id());
+        assert_eq!(attach.mode, HostMode::Host);
+    }
+}
+
+// When no live writer appears in time, the error names the reason and the host's log.
+#[test]
+fn ensure_host_timeout_names_the_log() {
+    let fixture = fixture();
+    let (options, spawns) = ensure_options(
+        &fixture,
+        Box::new(|| {}),
+        Some("exit status: 1".to_string()),
+        Duration::from_millis(20),
+    );
+    let error = ensure_host(fixture.location(), "lanes: start", &options)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(spawns.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(error.contains("lanes: start"), "{error}");
+    assert!(error.contains("exit status: 1"), "{error}");
+    assert!(
+        error.ends_with(&format!("see {}", options.log.display())),
+        "{error}"
+    );
+    let log = std::fs::read_to_string(&options.log).unwrap();
+    assert!(
+        log.contains("starting the engine host: lanes: start"),
+        "{log}"
+    );
+}
+
+#[test]
+fn the_engine_host_log_is_named_for_the_project() {
+    let path = crate::host_log_path(Path::new("/logs"), "project-1");
+    let hex = crate::project_hex("project-1");
+    assert_eq!(hex.len(), 12);
+    assert_eq!(path, PathBuf::from(format!("/logs/engine-host-{hex}.log")));
+    assert_eq!(
+        crate::socket_path(Path::new("/hosts"), "project-1"),
+        PathBuf::from(format!("/hosts/{hex}.sock"))
+    );
 }

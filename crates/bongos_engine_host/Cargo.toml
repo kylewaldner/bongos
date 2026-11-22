@@ -30,6 +30,7 @@ settings.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+util.workspace = true
 
 [dev-dependencies]
 bongos_work_model = { workspace = true, features = ["gpui", "test-support"] }
