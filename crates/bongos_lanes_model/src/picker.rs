@@ -4,14 +4,39 @@
 //! [`LaneTable`] and the [`PickOptions`] it is given and writes nothing. Its result depends on the
 //! content of its inputs, never on their order. The rules, for lane L of kind K:
 //!
-//! 1. Stamp (not implemented yet; see [`PickOptions`]).
+//! 1. Stamp: with a recorded stamp ([`PickOptions::stamp`]) that differs from the graph's, every
+//!    lane gets nothing and waits with [`WaitReason::StaleGraph`]. Without one the check is off.
 //! 2. Own task first: a lane that owns a top-level task picks only under it.
 //! 3. Free lane candidates: leaves whose owner is free for L.
 //! 4. Eligibility of each candidate.
-//! 5. Ahead kinds (not implemented yet).
-//! 6. Areas (not implemented yet).
+//! 5. Ahead kinds: a free lane of a kind with `ahead` prepares unowned tasks whose top-level
+//!    task's edge targets are all finished, while the ahead cap has room ([`WaitReason::AheadCap`]).
+//!    The assignment sets the owner `ahead`. Area rules do not apply to ahead kinds.
+//! 6. Areas: see [`area_conflict`] and the "Area rule" section below.
 //! 7. Rank: the best rank key wins.
-//! 8. Staleness (not implemented yet; [`Assignment::refresh_first`] is always false).
+//! 8. Staleness: a first job on a `prepared`, not yet refreshed owner whose rule has
+//!    `staleness` carries [`Assignment::refresh_first`].
+//!
+//! # Area rule
+//!
+//! The unit the area rule reasons about is the owner of a leaf (its top-level task, or the leaf
+//! itself with `owner = "self"`), with the area tags of the unit and everything under it, as
+//! [`parallel`] uses. A unit is in flight when it is owned `active` (on any lane), `stopped` or
+//! `halted`, or when it is started past its first job (a leaf under it finished, or two leaves
+//! started); a unit whose leaves are all finished, or whose owner is `done`, is not. `ahead` and
+//! `prepared` owners alone are not in flight. A unit "on another lane" is one whose owner record
+//! names a lane other than L, or no lane.
+//!
+//! For a lane of a kind with `areas` on and no `ahead`, a candidate unit C:
+//! - when C is not in flight (L would start it): waits while a conflicting unit is in flight on
+//!   another lane, or has a live job on another lane;
+//! - when C is in flight (L owns it, or L would resume or adopt started work): waits while a
+//!   conflicting unit in flight on another lane is earlier in order, or has a live job on
+//!   another lane. Earlier order wins, so two conflicting in-flight units never wait on each
+//!   other.
+//!
+//! A live job is a holding owner record whose lane record is `running`, or a leaf with an active
+//! run. Halted and stopped units stay in flight until adopted, resumed or finished.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -19,8 +44,10 @@ use serde::Serialize;
 
 use crate::graph::{PickGraph, PickTask};
 use crate::rank::{Chains, RankKey, RankLevel, critical_path, rank_key};
+use crate::stamp::{self, StampDiff, StampFile};
 use crate::state::{
     Author, LaneId, LaneState, LanesState, OwnerRecord, OwnerState, PinTarget, TaskId, WaitReason,
+    short_run,
 };
 use crate::table::{DispatchRule, LaneKind, LaneTable, OwnerMode};
 
@@ -45,9 +72,6 @@ pub enum PickBound {
 }
 
 /// What the picker reads besides the graph, the run state and the table.
-///
-/// Extension points for later rules: the recorded graph stamp (rule 1), ahead caps (rule 5),
-/// in-flight areas (rule 6) and staleness (rule 8) are not read yet; they become fields here.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PickOptions {
     /// Effective lane counts per kind (the profile's overrides); a kind not listed uses the
@@ -60,6 +84,8 @@ pub struct PickOptions {
     pub bound: Option<PickBound>,
     /// How many waiting tasks the dry run lists; `None` lists all.
     pub waiting_limit: Option<usize>,
+    /// The recorded graph stamp (`stamp.toml`); `None` turns the stamp check (rule 1) off.
+    pub stamp: Option<StampFile>,
 }
 
 /// A change to an owner record that an assignment implies. The pick stays pure; the
@@ -100,7 +126,8 @@ pub struct Assignment {
     /// "started first; chain 11 jobs; order 4".
     pub reason: String,
     pub owner_change: Vec<OwnerChange>,
-    /// Run the rule's refresh workflow first (rule 8; always false until it exists).
+    /// Run the staleness script first, and the rule's refresh workflow when it says stale
+    /// (rule 8).
     pub refresh_first: bool,
 }
 
@@ -147,6 +174,46 @@ struct Choice {
     workflow: String,
     inputs: Vec<(String, String)>,
     owner_change: Option<OwnerChange>,
+    refresh_first: bool,
+}
+
+/// The workflow a dispatch rule (or the open todo) gives a leaf.
+struct Matched {
+    workflow: String,
+    inputs: Vec<(String, String)>,
+    /// The matched rule sets `staleness`.
+    staleness: bool,
+}
+
+/// Where a unit is in flight, for the area rule.
+#[derive(Debug, Clone)]
+struct Flight {
+    lane: Option<LaneId>,
+    /// "in flight on build-2", "halted on build-2", "stopped", "in flight".
+    where_: String,
+}
+
+/// An owner unit as the area rule sees it.
+#[derive(Debug, Clone)]
+struct Unit {
+    order: u32,
+    areas: BTreeSet<String>,
+    flight: Option<Flight>,
+    /// A live job: the lane it runs on (`None` for a run on no lane) and where, for messages.
+    live: Option<(Option<LaneId>, String)>,
+}
+
+/// What every candidate of one lane's evaluation shares.
+struct LaneContext<'a> {
+    kind: Option<&'a LaneKind>,
+    /// The kind runs ahead with this cap.
+    ahead_cap: Option<u32>,
+    /// The area rule applies.
+    areas: bool,
+    /// Every unit by id, empty when the area rule does not apply.
+    units: BTreeMap<TaskId, Unit>,
+    /// Owners prepared and not started plus owners being prepared.
+    ahead_count: u32,
 }
 
 struct Ranked<T> {
@@ -167,9 +234,11 @@ struct Picker<'a> {
     table: &'a LaneTable,
     opts: &'a PickOptions,
     chains: Chains,
+    /// How the graph differs from the recorded stamp, when it does (rule 1).
+    stale: Option<StampDiff>,
 }
 
-/// Picks the work of `lane` (rules 2, 3, 4 and 7).
+/// Picks the work of `lane` (rules 1 to 8).
 pub fn pick(
     graph: &PickGraph,
     state: &LanesState,
@@ -182,7 +251,8 @@ pub fn pick(
 }
 
 /// The dry run: [`pick`] for every lane in index order against a scratch copy of the state, so
-/// a later lane sees an earlier lane's hypothetical claim. Writes nothing.
+/// a later lane sees an earlier lane's hypothetical claim. A paused, stopped or halted lane's
+/// outcome is listed but its claim is not applied. Writes nothing.
 pub fn explain(
     graph: &PickGraph,
     state: &LanesState,
@@ -205,6 +275,12 @@ pub fn explain(
     let mut assigned = BTreeSet::new();
     for lane in &lanes {
         let outcome = Picker::new(graph, table, &scratch_opts).pick(&scratch, lane);
+        // A paused, stopped or halted lane takes nothing in the real pass, so its hypothetical
+        // claim is shown but not applied for the lanes after it.
+        if !lane_live(&scratch, lane) {
+            per_lane.push((lane.clone(), outcome));
+            continue;
+        }
         match &outcome {
             PickOutcome::Assign(assignment) => {
                 apply_changes(&mut scratch, &assignment.owner_change, lane);
@@ -245,17 +321,7 @@ pub fn explain(
         waiting.truncate(limit);
     }
 
-    let live = lanes
-        .iter()
-        .filter(|lane| {
-            state.lanes.get(*lane).is_none_or(|record| {
-                !matches!(
-                    record.state,
-                    LaneState::Paused | LaneState::Stopped | LaneState::Halted
-                )
-            })
-        })
-        .count() as u32;
+    let live = lanes.iter().filter(|lane| lane_live(state, lane)).count() as u32;
     let started = |task: &TaskId| top_started(graph, state, task);
     DryRun {
         per_lane,
@@ -330,8 +396,15 @@ fn plainly_ready(graph: &PickGraph, leaf: &PickTask) -> bool {
         })
 }
 
-/// The first tag two tasks share that no exemption allows, unless the two tasks are an
-/// exempted pair. A tag listed in any `[[exempt]] tags` entry never conflicts.
+/// The first tag (in sorted order) two tasks share that no exemption allows, unless the two tasks
+/// are an exempted pair.
+///
+/// Exemptions: an `[[exempt]] tasks` entry exempts every pair of distinct tasks it lists. An
+/// `[[exempt]] tags` entry exempts every pair of the tags it lists, a tag with itself included,
+/// so "a task tagged x and a task tagged y may run together" for any x and y in the entry.
+/// Because two tasks conflict only through a tag they both carry, that means a tag listed in any
+/// tags entry never conflicts: `tags = ["editor", "billing"]` lets two `editor` tasks run
+/// together, as well as two `billing` tasks. A one-tag entry exempts just that tag.
 pub fn area_conflict(
     table: &LaneTable,
     a: &TaskId,
@@ -339,10 +412,11 @@ pub fn area_conflict(
     b: &TaskId,
     b_areas: &BTreeSet<String>,
 ) -> Option<String> {
-    let pair_exempt = table.exemptions.iter().any(|exemption| {
-        let listed = |id: &TaskId| exemption.tasks.iter().any(|task| task.value == id.0);
-        listed(a) && listed(b)
-    });
+    let pair_exempt = a != b
+        && table.exemptions.iter().any(|exemption| {
+            let listed = |id: &TaskId| exemption.tasks.iter().any(|task| task.value == id.0);
+            listed(a) && listed(b)
+        });
     if pair_exempt {
         return None;
     }
@@ -387,6 +461,17 @@ fn effective_count(table: &LaneTable, opts: &PickOptions, kind: &str) -> Option<
 /// Whether the lane still exists: its kind is declared and its index is within the count.
 fn lane_exists(table: &LaneTable, opts: &PickOptions, lane: &LaneId) -> bool {
     effective_count(table, opts, &lane.kind).is_some_and(|count| lane.index <= count)
+}
+
+/// Whether the lane can take work: it has no record yet, or its record is not paused, stopped or
+/// halted.
+fn lane_live(state: &LanesState, lane: &LaneId) -> bool {
+    state.lanes.get(lane).is_none_or(|record| {
+        !matches!(
+            record.state,
+            LaneState::Paused | LaneState::Stopped | LaneState::Halted
+        )
+    })
 }
 
 /// The owner of a leaf: its top-level task, or itself with `owner = "self"`.
@@ -435,11 +520,16 @@ fn apply_changes(state: &mut LanesState, changes: &[OwnerChange], by: &LaneId) {
 
 impl<'a> Picker<'a> {
     fn new(graph: &'a PickGraph, table: &'a LaneTable, opts: &'a PickOptions) -> Self {
+        let stale = opts.stamp.as_ref().and_then(|recorded| {
+            let current = stamp::compute(graph, table);
+            (!current.matches(recorded)).then(|| stamp::diff(recorded, &current))
+        });
         Self {
             graph,
             table,
             opts,
             chains: Chains::compute(graph),
+            stale,
         }
     }
 
@@ -468,7 +558,7 @@ impl<'a> Picker<'a> {
                     reason: best.rank.reason(),
                     rank: best.rank,
                     owner_change,
-                    refresh_first: false,
+                    refresh_first: best.value.refresh_first,
                 })
             }
             None => PickOutcome::Nothing {
@@ -486,7 +576,23 @@ impl<'a> Picker<'a> {
 
     /// Every candidate of `lane`, eligible or waiting, each list best ranked first.
     fn evaluate(&self, state: &LanesState, lane: &LaneId) -> Result<Evaluation, LaneHold> {
-        // Rule 1 (stamp) goes here.
+        // Rule 1: a stale graph stops every pick; running jobs are not this function's business.
+        if let Some(diff) = &self.stale {
+            let task = diff
+                .first_task()
+                .or_else(|| self.graph.top().first())
+                .cloned()
+                .unwrap_or_else(|| TaskId::new(""));
+            return Ok(Evaluation {
+                eligible: Vec::new(),
+                waiting: vec![Ranked {
+                    rank: RankKey { levels: Vec::new() },
+                    task,
+                    value: WaitReason::StaleGraph { diff: diff.clone() },
+                }],
+                released: Vec::new(),
+            });
+        }
         let mut released = Vec::new();
         let mut view: Option<LanesState> = None;
         // Rule 2: own task first.
@@ -552,6 +658,18 @@ impl<'a> Picker<'a> {
         }
         // Rule 3: a free lane considers every leaf.
         let state = view.as_ref().unwrap_or(state);
+        // Rule 5: a lane resumes its own unfinished preparation before anything else.
+        let preparing = state.owners.iter().find(|(_, owner)| {
+            owner.state == OwnerState::Ahead && owner.lane.as_ref() == Some(lane)
+        });
+        if let Some((task, _)) = preparing {
+            let leaves = self.graph.leaves_under(task);
+            if leaves.iter().any(|leaf| !leaf.is_finished()) {
+                let mut evaluation = self.rank_candidates(state, lane, &leaves, false);
+                evaluation.released = released;
+                return Ok(evaluation);
+            }
+        }
         let leaves: Vec<&PickTask> = self.graph.leaves().collect();
         let mut evaluation = self.rank_candidates(state, lane, &leaves, false);
         evaluation.released = released;
@@ -572,6 +690,7 @@ impl<'a> Picker<'a> {
                 self.graph.has_started_leaf(task)
             }
         };
+        let ctx = self.lane_context(state, lane);
         let mut eligible = Vec::new();
         let mut waiting = Vec::new();
         for leaf in leaves {
@@ -579,7 +698,7 @@ impl<'a> Picker<'a> {
                 continue;
             }
             let rank = rank_key(self.graph, &self.chains, &leaf.id, &started);
-            match self.check(state, lane, leaf, owned) {
+            match self.check(&ctx, state, lane, leaf, owned) {
                 Ok(choice) => eligible.push(Ranked {
                     rank,
                     task: leaf.id.clone(),
@@ -592,7 +711,6 @@ impl<'a> Picker<'a> {
                 }),
             }
         }
-        // Rule 6 (areas) and rule 5 (ahead kinds) filter `eligible` here.
         // Rule 7: rank.
         eligible.sort_by(|a, b| a.rank.cmp(&b.rank));
         waiting.sort_by(|a, b| a.rank.cmp(&b.rank));
@@ -603,16 +721,135 @@ impl<'a> Picker<'a> {
         }
     }
 
-    /// Rule 4, with rule 3's owner check first for a free lane.
+    /// What every candidate of `lane` shares: its kind, whether it runs ahead, the units the area
+    /// rule reads and the ahead count.
+    fn lane_context(&self, state: &LanesState, lane: &LaneId) -> LaneContext<'a> {
+        let kind = self.table.kinds.iter().find(|kind| kind.name == lane.kind);
+        let ahead_cap = kind
+            .and_then(|kind| kind.ahead.as_ref())
+            .map(|ahead| ahead.cap);
+        let areas = kind.is_some_and(|kind| kind.areas) && ahead_cap.is_none();
+        let units = if areas {
+            self.units(state)
+        } else {
+            BTreeMap::new()
+        };
+        let ahead_count = if ahead_cap.is_some() {
+            self.ahead_count(state)
+        } else {
+            0
+        };
+        LaneContext {
+            kind,
+            ahead_cap,
+            areas,
+            units,
+            ahead_count,
+        }
+    }
+
+    /// Owners prepared with no leaf started (and still in the graph), plus owners being prepared.
+    fn ahead_count(&self, state: &LanesState) -> u32 {
+        state
+            .owners
+            .iter()
+            .filter(|(task, owner)| match owner.state {
+                OwnerState::Ahead => true,
+                OwnerState::Prepared => {
+                    self.graph.task(task).is_some() && !self.graph.has_started_leaf(task)
+                }
+                _ => false,
+            })
+            .count() as u32
+    }
+
+    /// Every owner unit of a walked leaf, with its areas, whether it is in flight and its live
+    /// job.
+    fn units(&self, state: &LanesState) -> BTreeMap<TaskId, Unit> {
+        let keys: BTreeSet<TaskId> = self
+            .graph
+            .leaves()
+            .map(|leaf| owner_key(self.graph, self.table, &leaf.id))
+            .collect();
+        keys.into_iter()
+            .map(|key| {
+                let unit = Unit {
+                    order: self.graph.order(&key),
+                    areas: self.graph.subtree_areas(&key),
+                    flight: self.flight(state, &key),
+                    live: self.live(state, &key),
+                };
+                (key, unit)
+            })
+            .collect()
+    }
+
+    fn flight(&self, state: &LanesState, unit: &TaskId) -> Option<Flight> {
+        let leaves = self.graph.leaves_under(unit);
+        if !leaves.is_empty() && leaves.iter().all(|leaf| leaf.is_finished()) {
+            return None;
+        }
+        let at = |what: &str, lane: &Option<LaneId>| Flight {
+            lane: lane.clone(),
+            where_: match lane {
+                Some(lane) => format!("{what} on {lane}"),
+                None => what.to_string(),
+            },
+        };
+        match state
+            .owners
+            .get(unit)
+            .map(|owner| (owner.state, &owner.lane))
+        {
+            Some((OwnerState::Active, lane)) => Some(at("in flight", lane)),
+            Some((OwnerState::Halted, lane)) => Some(at("halted", lane)),
+            Some((OwnerState::Stopped, lane)) => Some(at("stopped", lane)),
+            Some((OwnerState::Done, _)) => None,
+            Some((OwnerState::Ahead | OwnerState::Prepared, _)) | None => {
+                let finished = leaves.iter().any(|leaf| leaf.is_finished());
+                let started = leaves.iter().filter(|leaf| leaf.started).count();
+                (finished || started >= 2).then(|| at("in flight", &None))
+            }
+        }
+    }
+
+    fn live(&self, state: &LanesState, unit: &TaskId) -> Option<(Option<LaneId>, String)> {
+        let on_running_lane = state
+            .owners
+            .get(unit)
+            .filter(|owner| holds(owner.state))
+            .and_then(|owner| owner.lane.as_ref())
+            .filter(|lane| {
+                state
+                    .lanes
+                    .get(*lane)
+                    .is_some_and(|record| record.state == LaneState::Running)
+            });
+        if let Some(lane) = on_running_lane {
+            return Some((Some(lane.clone()), format!("live job on {lane}")));
+        }
+        self.graph
+            .leaves_under(unit)
+            .iter()
+            .find_map(|leaf| leaf.active_run.as_ref())
+            .map(|run| (None, format!("run {} is active", short_run(run))))
+    }
+
+    /// Rule 4, with rule 3's owner check first for a free lane, rule 5 for an ahead kind, rule 6
+    /// and rule 8.
     fn check(
         &self,
+        ctx: &LaneContext<'_>,
         state: &LanesState,
         lane: &LaneId,
         leaf: &PickTask,
         owned: bool,
     ) -> Result<Choice, WaitReason> {
+        let ahead = !owned && ctx.ahead_cap.is_some();
         let owner_change = if owned {
             None
+        } else if ahead {
+            Some(self.claim_ahead(state, lane, leaf)?)
         } else {
             Some(self.claim(state, lane, leaf)?)
         };
@@ -629,6 +866,9 @@ impl<'a> Picker<'a> {
                 });
             }
         }
+        if ahead {
+            self.check_strict(leaf)?;
+        }
         if let Some(run) = &leaf.active_run {
             return Err(WaitReason::ActiveRun { run: run.clone() });
         }
@@ -637,17 +877,151 @@ impl<'a> Picker<'a> {
                 return Err(WaitReason::Held { reason });
             }
         }
-        let kind = self.table.kinds.iter().find(|kind| kind.name == lane.kind);
-        let Some((workflow, inputs)) = kind.and_then(|kind| self.workflow_for(kind, leaf)) else {
+        let Some(matched) = ctx.kind.and_then(|kind| self.workflow_for(kind, leaf)) else {
             return Err(self.no_workflow(lane, leaf));
         };
         self.check_pins(state, lane, &path)?;
-        self.check_instances(&workflow)?;
+        if ctx.areas {
+            self.check_areas(ctx, lane, leaf, owned)?;
+        }
+        self.check_instances(&matched.workflow)?;
+        if ahead && let Some(cap) = ctx.ahead_cap {
+            let resumes = owner_change
+                .as_ref()
+                .is_some_and(|change| change.from == Some(OwnerState::Ahead));
+            if !resumes && ctx.ahead_count >= cap {
+                return Err(WaitReason::AheadCap {
+                    n: ctx.ahead_count,
+                    cap,
+                });
+            }
+        }
+        // Rule 8: the first job on a prepared owner that was never refreshed.
+        let refresh_first = matched.staleness
+            && owner_change.as_ref().is_some_and(|change| {
+                change.from == Some(OwnerState::Prepared)
+                    && state
+                        .owners
+                        .get(&change.task)
+                        .is_some_and(|owner| !owner.refreshed)
+            });
         Ok(Choice {
-            workflow,
-            inputs,
+            workflow: matched.workflow,
+            inputs: matched.inputs,
             owner_change,
+            refresh_first,
         })
+    }
+
+    /// Rule 5's strict rule: every edge target of the leaf's top-level task is finished, not
+    /// merely reached. A target missing from the graph is not finished.
+    fn check_strict(&self, leaf: &PickTask) -> Result<(), WaitReason> {
+        let top = self.graph.top_level_of(&leaf.id);
+        let Some(task) = self.graph.task(&top) else {
+            return Ok(());
+        };
+        let unfinished = task.edges.iter().find(|edge| {
+            !self
+                .graph
+                .task(&edge.target)
+                .is_some_and(|target| target.is_finished())
+        });
+        match unfinished {
+            None => Ok(()),
+            Some(edge) => Err(WaitReason::Dependency {
+                on: edge.target.clone(),
+                progress: if edge.reached {
+                    format!(
+                        "{} reached; an ahead lane waits until it is finished",
+                        edge.unblock
+                    )
+                } else {
+                    edge.progress.clone()
+                },
+            }),
+        }
+    }
+
+    /// Rule 6 (see the module documentation).
+    fn check_areas(
+        &self,
+        ctx: &LaneContext<'_>,
+        lane: &LaneId,
+        leaf: &PickTask,
+        owned: bool,
+    ) -> Result<(), WaitReason> {
+        let key = owner_key(self.graph, self.table, &leaf.id);
+        let Some(candidate) = ctx.units.get(&key) else {
+            return Ok(());
+        };
+        let continuing = owned || candidate.flight.is_some();
+        let mut others: Vec<(&TaskId, &Unit)> = ctx
+            .units
+            .iter()
+            .filter(|(other, _)| **other != key)
+            .collect();
+        others.sort_by_key(|(other, unit)| (unit.order, *other));
+        for (other, unit) in others {
+            let in_flight = unit
+                .flight
+                .as_ref()
+                .filter(|flight| flight.lane.as_ref() != Some(lane))
+                .filter(|_| !continuing || unit.order < candidate.order)
+                .map(|flight| flight.where_.clone());
+            let live = unit
+                .live
+                .as_ref()
+                .filter(|(on, _)| on.as_ref() != Some(lane))
+                .map(|(_, where_)| where_.clone());
+            let Some(where_) = in_flight.or(live) else {
+                continue;
+            };
+            if let Some(tag) = area_conflict(self.table, &key, &candidate.areas, other, &unit.areas)
+            {
+                return Err(WaitReason::Area {
+                    tag,
+                    with: other.clone(),
+                    where_,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Rule 5's claim: an unowned owner, or one this lane (or a lane that no longer exists) was
+    /// preparing, becomes `ahead` on `lane`.
+    fn claim_ahead(
+        &self,
+        state: &LanesState,
+        lane: &LaneId,
+        leaf: &PickTask,
+    ) -> Result<OwnerChange, WaitReason> {
+        let key = owner_key(self.graph, self.table, &leaf.id);
+        let claim = |from: Option<&OwnerRecord>| OwnerChange {
+            task: key.clone(),
+            from: from.map(|owner| owner.state),
+            from_lane: from.and_then(|owner| owner.lane.clone()),
+            to: OwnerState::Ahead,
+            lane: Some(lane.clone()),
+        };
+        let Some(owner) = state.owners.get(&key) else {
+            return Ok(claim(None));
+        };
+        match (owner.state, &owner.lane) {
+            (OwnerState::Ahead, None) => Ok(claim(Some(owner))),
+            (OwnerState::Ahead, Some(other))
+                if other == lane || !lane_exists(self.table, self.opts, other) =>
+            {
+                Ok(claim(Some(owner)))
+            }
+            (OwnerState::Done, _) => Err(WaitReason::Finished),
+            (OwnerState::Prepared, _) => Err(WaitReason::Other("already prepared".to_string())),
+            (state, Some(other)) => Err(WaitReason::Owner {
+                lane: other.clone(),
+                state,
+            }),
+            (state, None) => Err(WaitReason::Other(format!("owner is {state} with no lane"))),
+        }
     }
 
     /// Rule 3: whether the leaf's owner is free for `lane`, and the claim that takes it.
@@ -712,18 +1086,18 @@ impl<'a> Picker<'a> {
 
     /// The first matching rule of the kind's list gives the workflow; with an empty list, or a
     /// matching rule that says `use_todo_workflow`, the open todo's workflow does.
-    fn workflow_for(
-        &self,
-        kind: &LaneKind,
-        leaf: &PickTask,
-    ) -> Option<(String, Vec<(String, String)>)> {
+    fn workflow_for(&self, kind: &LaneKind, leaf: &PickTask) -> Option<Matched> {
         let todo_workflow = || {
             leaf.open_todo
                 .as_ref()
                 .and_then(|todo| todo.workflow.clone())
         };
         if kind.rules.is_empty() {
-            return todo_workflow().map(|workflow| (workflow, Vec::new()));
+            return todo_workflow().map(|workflow| Matched {
+                workflow,
+                inputs: Vec::new(),
+                staleness: false,
+            });
         }
         let rule = kind
             .rules
@@ -735,11 +1109,16 @@ impl<'a> Picker<'a> {
             .iter()
             .map(|(name, value)| (name.clone(), value.value.clone()))
             .collect();
-        match &rule.workflow {
-            Some(workflow) => Some((workflow.value.clone(), inputs)),
-            None if rule.use_todo_workflow => todo_workflow().map(|workflow| (workflow, inputs)),
+        let workflow = match &rule.workflow {
+            Some(workflow) => Some(workflow.value.clone()),
+            None if rule.use_todo_workflow => todo_workflow(),
             None => None,
-        }
+        }?;
+        Some(Matched {
+            workflow,
+            inputs,
+            staleness: rule.staleness.is_some(),
+        })
     }
 
     /// `LaneKind` when another kind's rules would give the leaf a workflow, else `NoWorkflow`.
@@ -785,13 +1164,7 @@ impl<'a> Picker<'a> {
             }
             if let Some(to) = &target.lane {
                 let running = LaneId::parse(to).is_some_and(|pinned| {
-                    lane_exists(self.table, self.opts, &pinned)
-                        && state.lanes.get(&pinned).is_none_or(|record| {
-                            !matches!(
-                                record.state,
-                                LaneState::Paused | LaneState::Stopped | LaneState::Halted
-                            )
-                        })
+                    lane_exists(self.table, self.opts, &pinned) && lane_live(state, &pinned)
                 });
                 return Err(if running {
                     WaitReason::Pin { to: to.clone() }

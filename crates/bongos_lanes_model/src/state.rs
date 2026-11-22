@@ -8,6 +8,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::stamp::StampDiff;
 use crate::table::Pin;
 
 /// A lane instance such as `build-2`. Indexes are 1-based.
@@ -126,6 +127,16 @@ pub enum WaitReason {
     PinNotRunning {
         to: String,
     },
+    /// An ahead kind's cap has no room: `n` tasks are prepared and not started, or being
+    /// prepared.
+    AheadCap {
+        n: u32,
+        cap: u32,
+    },
+    /// The structure of the graph differs from the recorded stamp.
+    StaleGraph {
+        diff: StampDiff,
+    },
     /// The workflow's instance limit has no room.
     InstanceLimit {
         workflow: String,
@@ -173,6 +184,13 @@ impl fmt::Display for WaitReason {
             WaitReason::Owner { lane, state } => write!(f, "owned by {lane} ({state})"),
             WaitReason::Pin { to } => write!(f, "pinned to {to}"),
             WaitReason::PinNotRunning { to } => write!(f, "pinned to {to}, which is not running"),
+            WaitReason::AheadCap { n, cap } => {
+                write!(
+                    f,
+                    "ahead cap reached: {n} prepared or preparing (cap {cap})"
+                )
+            }
+            WaitReason::StaleGraph { diff } => write!(f, "{diff}"),
             WaitReason::InstanceLimit {
                 workflow,
                 active,
