@@ -46,6 +46,9 @@ pub enum RepoCommand {
         author: Author,
         person: Option<PersonClaim>,
     },
+    /// Abandons a change: its row is marked, its worktree and branch go, master is untouched.
+    /// As in-process, abandoning needs no person.
+    Abandon { change_id: String },
     /// `project: show history` through a filter.
     ShowHistory { filter: HistoryFilter },
     /// A snapshot of the state for `reason`. Only a verified window's `manual` skips the

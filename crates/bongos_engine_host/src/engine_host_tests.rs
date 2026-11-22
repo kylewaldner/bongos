@@ -306,6 +306,69 @@ async fn a_cli_peers_approve_with_a_person_claim_writes_no_approval_and_a_window
     assert_eq!(rows[0].basis, ApprovalBasis::PersonApprove);
 }
 
+// `project: approve` and abandoning in a client window go to the writer, which writes the
+// approval row and abandons the change; the client reads both back from its own reader.
+#[gpui::test]
+async fn a_client_windows_approve_and_abandon_reach_the_writer(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let repo = fixture.repo.clone();
+    let agent = Author::agent("chat 1");
+    let at = chrono::DateTime::parse_from_rfc3339("2026-03-01T10:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let mut copies = Vec::new();
+    for (name, slug, id) in [
+        ("amber-otter-0001", "alpha", "a1"),
+        ("amber-otter-0002", "beta", "b1"),
+    ] {
+        let copy = block_on(repo.create_working_copy(name, "work/", &agent, at)).unwrap();
+        let task = copy
+            .path
+            .join(format!("definitions/tasks/{slug}/task.toml"));
+        std::fs::create_dir_all(task.parent().unwrap()).unwrap();
+        std::fs::write(&task, definition(id, slug)).unwrap();
+        block_on(
+            repo.git()
+                .commit_if_dirty(&copy.path, "add", &Identity::default()),
+        )
+        .unwrap();
+        copies.push(copy);
+    }
+    let _host = start_writer(&fixture, true, cx);
+    let OpenedState::Client { client, reader, .. } = open_state_with_hooks(
+        fixture.location(),
+        &StateApplyHooks::new(),
+        fixture.client_options(ClientKind::Window),
+        cx.executor(),
+    )
+    .unwrap() else {
+        panic!("the second opener took the writer");
+    };
+    let client_repo = ProjectRepo::new(fixture.location().clone(), fixture.repo.git().clone())
+        .with_state(StateHandle::Reader(Arc::new(reader)));
+    client_repo.replace_sink(Arc::new(client));
+
+    let keyboard = bongos_work_model::commands::Context::at_keyboard(
+        bongos_work_model::PersonAtKeyboard::for_test(),
+    );
+    let approved = client_repo
+        .approve(&copies[0].change_id, keyboard, at)
+        .await
+        .unwrap();
+    assert_eq!(approved.basis, ApprovalBasis::PersonApprove);
+    let rows = repo.approvals(&copies[0].change_id).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].basis, ApprovalBasis::PersonApprove);
+
+    client_repo
+        .abandon_now(&copies[1].change_id, at)
+        .await
+        .unwrap();
+    let row = repo.change(&copies[1].change_id).unwrap().unwrap();
+    assert_eq!(row.state, bongos_project_repo::ChangeState::Abandoned);
+}
+
 #[gpui::test]
 async fn a_protocol_or_version_mismatch_is_refused_with_the_version_text(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
@@ -518,6 +581,79 @@ async fn a_host_file_naming_a_dead_pid_or_another_start_time_is_never_live_and_a
 fn socket_mode(path: &Path) -> u32 {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::metadata(path).unwrap().permissions().mode()
+}
+
+// A client that stops reading never blocks a broadcast: its queue fills, its connection is
+// ended, and the other clients still hear every later event.
+#[gpui::test]
+async fn a_client_that_never_reads_does_not_block_broadcast(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let host = start_writer(&fixture, true, cx);
+    let socket = host.server().unwrap().socket().to_path_buf();
+
+    // By hand on another thread: hello, subscribe to everything, then a request whose reply
+    // proves the subscription is in place. After that the client reads nothing.
+    let (ready, stuck) = futures::channel::oneshot::channel::<UnixStream>();
+    std::thread::spawn(move || {
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        for message in [
+            ClientMessage::Hello {
+                protocol: PROTOCOL_VERSION,
+                bongos_version: VERSION.to_string(),
+                client: ClientKind::Window,
+            },
+            ClientMessage::Subscribe { topics: Vec::new() },
+            ClientMessage::Request {
+                id: 7,
+                command: HostCommand::Host(crate::protocol::HostCtl::Status),
+            },
+        ] {
+            stream
+                .write_all(&crate::protocol::encode_line(&message).unwrap())
+                .unwrap();
+        }
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if let ServerMessage::Reply { id: 7, .. } = serde_json::from_str(&line).unwrap() {
+                break;
+            }
+        }
+        ready.send(stream).ok();
+    });
+    let mut stuck = stuck.await.unwrap();
+
+    // Far more than the socket's buffer and the queue hold; every call returns.
+    let text = "x".repeat(4096);
+    for _ in 0..(crate::server::OUTBOX_LINES * 8) {
+        host.server()
+            .unwrap()
+            .broadcast(&HostEvent::Notice { text: text.clone() });
+    }
+    // The stuck connection was ended: reading it now comes to its end.
+    let mut rest = Vec::new();
+    std::io::Read::read_to_end(&mut stuck, &mut rest).ok();
+
+    let listener = fixture.connect(ClientKind::Window, cx);
+    let mut events = listener
+        .subscribe(Some(vec![crate::protocol::HostTopic::Notices]))
+        .unwrap();
+    // The subscription travels on its own; a request after it proves it arrived.
+    listener
+        .request(HostCommand::Host(crate::protocol::HostCtl::Status))
+        .await
+        .unwrap();
+    host.server().unwrap().broadcast(&HostEvent::Notice {
+        text: "after".to_string(),
+    });
+    assert_eq!(
+        events.next().await,
+        Some(HostEvent::Notice {
+            text: "after".to_string()
+        })
+    );
 }
 
 // A rerouted `workflow:` or `lanes:` command from a client reaches the handler the writer

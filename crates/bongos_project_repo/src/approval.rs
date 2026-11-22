@@ -373,7 +373,23 @@ impl ProjectRepo {
         now: DateTime<Utc>,
     ) -> Result<ApprovalRow> {
         let grant = PersonGrant::from_context(&mut ctx).ok_or_else(|| anyhow!(NEEDS_A_WINDOW))?;
-        self.approve_with(change_id, grant, now).await
+        if self.writer_or_error().is_ok() || self.sink().is_none() {
+            return self.approve_with(change_id, grant, now).await;
+        }
+        // Another process holds the writer: the approval travels to it as this window's claim
+        // of the person, which it trusts from a verified window alone, and the row it wrote is
+        // read back from this process's reader.
+        let name = grant.into_name();
+        self.send_command(crate::sink::RepoCommand::Approve {
+            change_id: change_id.to_string(),
+            person: crate::sink::PersonClaim { name: name.clone() },
+        })
+        .await?;
+        self.approvals(change_id)?
+            .into_iter()
+            .rev()
+            .find(|row| row.name == name && row.basis == ApprovalBasis::PersonApprove)
+            .ok_or_else(|| anyhow!("the writer recorded no approval of {change_id}"))
     }
 
     pub(crate) async fn approve_with(

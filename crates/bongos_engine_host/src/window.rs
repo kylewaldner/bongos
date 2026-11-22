@@ -61,7 +61,7 @@ impl WriterHosts {
 }
 
 /// Makes every project this process opens from now on open through the engine host's rules.
-/// Call after `bongos_work::init`.
+/// Call before `bongos_work::init` opens the first project, so every project opens this way.
 pub fn install_window(hosting: WindowHosting, cx: &mut App) {
     let clients: Arc<Mutex<HashMap<String, HostClient>>> = Arc::default();
     let executor = cx.background_executor().clone();

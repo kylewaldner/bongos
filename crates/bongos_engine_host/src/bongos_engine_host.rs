@@ -23,7 +23,8 @@ pub use checks::{checks_handler, register_checks};
 pub use client::{ANSWER_TIMEOUT, ClientOptions, HostClient, Welcomed, not_answering};
 pub use commands::{HostCommands, HostHandler, VerbHandler, local_identity};
 pub use host_file::{
-    HOST_FILE, HostInfo, Moving, host_file_path, live_host, read_host_file, write_host_file,
+    HOST_FILE, HostInfo, Moving, host_file_path, live_host, process_is, read_host_file,
+    write_host_file,
 };
 pub use protocol::{
     ClientMessage, HostCommand, HostCtl, HostEvent, HostMode, HostResult, HostTopic, LanesVerb,

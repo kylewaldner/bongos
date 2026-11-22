@@ -65,7 +65,7 @@ impl HostInfo {
 
 /// Whether `pid` runs now with `start_time`. Where the system reports no start time, a running
 /// pid with none recorded counts.
-pub(crate) fn process_is(pid: u32, start_time: Option<u64>) -> bool {
+pub fn process_is(pid: u32, start_time: Option<u64>) -> bool {
     if pid == 0 {
         return false;
     }

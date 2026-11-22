@@ -7,6 +7,8 @@
 //! Starting the dispatcher and the commands that need it (`start`, `dry run`, `pick`) belong to
 //! the engine host process, not to a window: a window answers that they run there.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use anyhow::{Result, anyhow, bail};
@@ -212,7 +214,7 @@ pub fn ensure_window_lanes(cx: &mut App) -> Option<Rc<Lanes>> {
     let repo = sole_writer_repo(cx).ok()?;
     let writer = repo.state()?.writer()?.clone();
     let engine = WorkflowEngine::ensure(cx)?;
-    let host: Rc<dyn LanesHost> = Rc::new(ProjectLanesHost { repo });
+    let host: Rc<dyn LanesHost> = Rc::new(ProjectLanesHost::new(repo));
     let engine: Rc<dyn JobEngine> = Rc::new(engine);
     let lanes = Rc::new(Lanes::new(LanesParts {
         host,
@@ -228,6 +230,23 @@ pub fn ensure_window_lanes(cx: &mut App) -> Option<Rc<Lanes>> {
 /// task graph, its locations, and the work a halted job left in its lane's trees.
 pub struct ProjectLanesHost {
     pub repo: ProjectRepo,
+    /// The lane table and stamp text at the commits [`LanesHost::load_commit`] read, so the
+    /// sync calls never run git on the main thread.
+    loaded: Rc<RefCell<HashMap<String, AtCommit>>>,
+}
+
+/// What git said about a commit's lane files.
+#[derive(Clone)]
+struct AtCommit {
+    table: Result<Option<String>, String>,
+    stamp: Result<Option<StampFile>, String>,
+}
+
+/// How many commits' files are kept; the verified commit only moves forward.
+const LOADED_COMMITS: usize = 4;
+
+fn not_loaded(commit: &str) -> String {
+    format!("the lane files at {commit} were not read yet")
 }
 
 fn problem(message: String) -> Vec<Problem> {
@@ -239,6 +258,13 @@ fn problem(message: String) -> Vec<Problem> {
 }
 
 impl ProjectLanesHost {
+    pub fn new(repo: ProjectRepo) -> Self {
+        Self {
+            repo,
+            loaded: Rc::default(),
+        }
+    }
+
     fn table_path() -> String {
         format!("{DEFINITIONS_DIR}/{LANES_FOLDER}/{LANES_FILE}")
     }
@@ -274,9 +300,43 @@ impl LanesHost for ProjectLanesHost {
         true
     }
 
+    fn load_commit(&self, commit: &str, cx: &mut App) -> Task<()> {
+        if self.loaded.borrow().contains_key(commit) {
+            return Task::ready(());
+        }
+        let repo = self.repo.clone();
+        let commit = commit.to_string();
+        let loaded = self.loaded.clone();
+        let reading = cx.background_spawn({
+            let commit = commit.clone();
+            async move {
+                let table = file_at(&repo, &commit, &Self::table_path())
+                    .await
+                    .map_err(|error| format!("{error:#}"));
+                let stamp = read_stamp(&repo, &commit)
+                    .await
+                    .map_err(|error| format!("{error:#}"));
+                AtCommit { table, stamp }
+            }
+        });
+        cx.spawn(async move |_| {
+            let read = reading.await;
+            let mut loaded = loaded.borrow_mut();
+            if loaded.len() >= LOADED_COMMITS {
+                loaded.clear();
+            }
+            loaded.insert(commit, read);
+        })
+    }
+
     fn lane_table(&self, commit: &str) -> Result<LaneTable, String> {
-        let text = futures::executor::block_on(file_at(&self.repo, commit, &Self::table_path()))
-            .map_err(|error| format!("{error:#}"))?
+        let text = self
+            .loaded
+            .borrow()
+            .get(commit)
+            .ok_or_else(|| not_loaded(commit))?
+            .table
+            .clone()?
             .unwrap_or_else(|| "schema = 1\n".to_string());
         parse(&text).map_err(|error| format!("line {}: {}", error.line, error.message))
     }
@@ -297,56 +357,86 @@ impl LanesHost for ProjectLanesHost {
         from_work_tree(&tree, &self.project_id(), &LiveFacts::default())
     }
 
+    /// `window-<pid>-<start time>`, or `window-<pid>` where the system reports no start time.
     fn host_id(&self) -> String {
-        format!("window-{}", std::process::id())
+        let pid = std::process::id();
+        match bongos_workflow::process::start_time(pid) {
+            Some(start) => format!("window-{pid}-{start}"),
+            None => format!("window-{pid}"),
+        }
     }
 
+    /// The same rule as `host.json`: the pid runs now with the start time the id recorded.
     fn host_live(&self, host: &str) -> bool {
-        host.strip_prefix("window-")
-            .and_then(|pid| pid.parse::<u32>().ok())
-            .is_some_and(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists())
+        let Some(rest) = host.strip_prefix("window-") else {
+            return false;
+        };
+        let (pid, start) = match rest.split_once('-') {
+            Some((pid, start)) => (pid, start.parse::<u64>().ok()),
+            None => (rest, None),
+        };
+        pid.parse::<u32>()
+            .is_ok_and(|pid| bongos_engine_host::process_is(pid, start))
     }
 
     fn now(&self) -> String {
         Utc::now().to_rfc3339()
     }
 
-    fn left_work(&self, lane: &LaneId, job: &JobRecord, cx: &App) -> Vec<LeftWork> {
-        let Ok(inputs) = LocationInputs::from_app(&self.project_id(), cx) else {
-            return Vec::new();
+    fn left_work(&self, lane: &LaneId, job: &JobRecord, cx: &App) -> Task<Vec<LeftWork>> {
+        let Some(mut work) = self.left_work_without_branch(lane, job, cx) else {
+            return Task::ready(Vec::new());
         };
-        let Some((repo_name, repository, branch)) = self.task_repository(job, &inputs, cx) else {
-            return Vec::new();
-        };
-        let Some(verified) = self
+        let git = self.repo.git().clone();
+        let run = job.run_id.clone();
+        cx.background_spawn(async move {
+            let request = &mut work.request;
+            if let Some(last) = request.last.as_mut() {
+                last.run_branch =
+                    latest_run_branch(&git, &request.repository, &request.add_from, &run).await;
+            }
+            vec![work]
+        })
+    }
+
+    fn stamp(&self, commit: &str) -> Result<Option<StampFile>, String> {
+        self.loaded
+            .borrow()
+            .get(commit)
+            .ok_or_else(|| not_loaded(commit))?
+            .stamp
+            .clone()
+    }
+}
+
+impl ProjectLanesHost {
+    /// The work `job` left on `lane`, its last run branch not looked up yet (that needs git).
+    fn left_work_without_branch(
+        &self,
+        lane: &LaneId,
+        job: &JobRecord,
+        cx: &App,
+    ) -> Option<LeftWork> {
+        let inputs = LocationInputs::from_app(&self.project_id(), cx).ok()?;
+        let (repo_name, repository, branch) = self.task_repository(job, &inputs, cx)?;
+        let verified = self
             .repo
             .state()
-            .and_then(|state| state.read(|read| read.verified_commit()).ok().flatten())
-        else {
-            return Vec::new();
-        };
-        let Ok(table) = self.lane_table(&verified) else {
-            return Vec::new();
-        };
+            .and_then(|state| state.read(|read| read.verified_commit()).ok().flatten())?;
+        let table = self.lane_table(&verified).ok()?;
         let profile = LaneProfiles::source(cx);
         let ids = crate::locations::table_lane_ids(&table, &self.project_id(), profile.as_deref());
-        let Ok(all) = check_lanes(&inputs, &table, &ids, profile.as_deref()) else {
-            return Vec::new();
-        };
-        let Some(locations) = all
+        let all = check_lanes(&inputs, &table, &ids, profile.as_deref()).ok()?;
+        let locations = all
             .iter()
             .find(|locations| &locations.lane == lane)
-            .cloned()
-        else {
-            return Vec::new();
-        };
+            .cloned()?;
         let tree = WorkStore::global(cx)
             .and_then(|store| store.read(cx).snapshot())
             .map(|tree| (*tree).clone())
             .unwrap_or_default();
         let forbidden = forbidden_for(lane, &inputs, &all, &tree);
-        let run_branch = latest_run_branch(self.repo.git(), &repository, &branch, &job.run_id);
-        vec![LeftWork {
+        Some(LeftWork {
             git: Git::new("git"),
             request: ResetRequest {
                 locations,
@@ -358,24 +448,19 @@ impl LanesHost for ProjectLanesHost {
                 run_branch: String::new(),
                 last: Some(LastRun {
                     run_id: job.run_id.clone(),
-                    run_branch,
+                    run_branch: String::new(),
                     end: LastEnd::Halted,
                 }),
                 save_max_file_bytes: LanesSettings::get_global(cx).save_max_file_bytes,
                 forbidden,
             },
-        }]
-    }
-
-    fn stamp(&self, commit: &str) -> Result<Option<StampFile>, String> {
-        futures::executor::block_on(read_stamp(&self.repo, commit))
-            .map_err(|error| format!("{error:#}"))
+        })
     }
 }
 
 /// The run branch of `run` in `repository` with the most attempts: `run_branch_name` with the
 /// attempt the run reached, which only git knows.
-fn latest_run_branch(
+async fn latest_run_branch(
     git: &bongos_project_repo::Git,
     repository: &std::path::Path,
     task_branch: &str,
@@ -384,10 +469,12 @@ fn latest_run_branch(
     let first = run_branch_name(task_branch, run, 1);
     let prefix = first.trim_end_matches('1').to_string();
     let pattern = format!("refs/heads/{prefix}*");
-    let listed = futures::executor::block_on(git.run(
-        repository,
-        &["for-each-ref", "--format=%(refname:short)", &pattern],
-    ));
+    let listed = git
+        .run(
+            repository,
+            &["for-each-ref", "--format=%(refname:short)", &pattern],
+        )
+        .await;
     let Ok(listed) = listed else {
         return first;
     };

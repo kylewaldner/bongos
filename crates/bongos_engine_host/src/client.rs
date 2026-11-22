@@ -184,16 +184,16 @@ impl HostClient {
         self.inner.shared.closed.load(Ordering::SeqCst)
     }
 
-    /// Sends `command` and resolves with the writer's answer.
+    /// Sends `command` and resolves with the writer's answer. The socket is written when the
+    /// future is first polled, never on the caller's thread.
     pub fn request(
         &self,
         command: HostCommand,
     ) -> impl std::future::Future<Output = Result<serde_json::Value>> + Send + 'static {
         let inner = self.inner.clone();
         let executor = self.executor.clone();
-        let sent = self.send_request(command);
         async move {
-            let (id, answer) = sent?;
+            let (id, answer) = Self::send_request(&inner, command)?;
             let timeout = executor.timer(inner.options.answer_timeout).fuse();
             futures::pin_mut!(timeout);
             let mut answer = answer.fuse();
@@ -215,8 +215,10 @@ impl HostClient {
         }
     }
 
-    fn send_request(&self, command: HostCommand) -> Result<(u64, oneshot::Receiver<HostResult>)> {
-        let inner = &self.inner;
+    fn send_request(
+        inner: &Inner,
+        command: HostCommand,
+    ) -> Result<(u64, oneshot::Receiver<HostResult>)> {
         if inner.shared.not_answering.load(Ordering::SeqCst) {
             bail!(not_answering(&inner.options.log));
         }

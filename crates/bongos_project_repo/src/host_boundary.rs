@@ -168,6 +168,13 @@ impl HostBoundary {
                     change_id: copy.change_id,
                 })
             }
+            RepoCommand::Abandon { change_id } => {
+                self.repo
+                    .abandon_now(&change_id, now)
+                    .await
+                    .map_err(|error| anyhow!("{error}"))?;
+                Ok(RepoReply::Done)
+            }
             RepoCommand::ShowHistory { filter } => Ok(RepoReply::History {
                 entries: self.repo.change_history(&filter, now).await?,
             }),

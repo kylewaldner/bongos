@@ -10,6 +10,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
@@ -28,28 +29,46 @@ use crate::protocol::{
 /// How long a new connection may take to say `Hello`.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How many lines may wait for a slow client before the connection is dropped.
+pub(crate) const OUTBOX_LINES: usize = 256;
+
 /// One accepted connection after its `Hello`.
 struct Connection {
     id: u64,
     peer: PeerIdentity,
-    /// Shut down to end the connection's thread.
+    /// Shut down to end the connection's threads.
     stream: UnixStream,
-    writer: Mutex<UnixStream>,
+    /// The lines the connection's writing thread sends, so no caller ever blocks on a client.
+    outbox: SyncSender<Vec<u8>>,
     /// `None` until the client subscribes; an empty set is every topic.
     topics: Mutex<Option<HashSet<HostTopic>>>,
 }
 
 impl Connection {
-    /// Sends `message`; false when the connection is gone.
+    /// Queues `message` without blocking; false when the connection is gone. A client whose
+    /// queue is full is not reading, so its connection is ended.
     fn send(&self, message: &ServerMessage) -> bool {
         let Ok(line) = encode_line(message) else {
             return false;
         };
-        let mut writer = self.writer.lock();
-        writer
-            .write_all(&line)
-            .and_then(|()| writer.flush())
-            .is_ok()
+        match self.outbox.try_send(line) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => {
+                log::warn!(
+                    "dropping the connection of pid {}: it stopped reading",
+                    self.peer.pid()
+                );
+                self.close();
+                false
+            }
+            Err(TrySendError::Disconnected(_)) => false,
+        }
+    }
+
+    /// Ends the connection: its reading thread sees the end of the stream and forgets it, and its
+    /// writing thread's write fails.
+    fn close(&self) {
+        self.stream.shutdown(std::net::Shutdown::Both).ok();
     }
 
     fn wants(&self, topic: HostTopic) -> bool {
@@ -200,7 +219,7 @@ impl Drop for EngineServer {
         // Wakes the accepting thread, which sees `stopping` and ends.
         UnixStream::connect(&self.shared.socket).ok();
         for connection in self.shared.connections.lock().drain(..) {
-            connection.stream.shutdown(std::net::Shutdown::Both).ok();
+            connection.close();
         }
         std::fs::remove_file(&self.shared.socket).ok();
     }
@@ -296,13 +315,19 @@ fn serve_connection(
     };
     let peer = peer_identity(&stream, client).context("reading the peer's identity")?;
     stream.set_read_timeout(None)?;
+    let (outbox, lines) = std::sync::mpsc::sync_channel::<Vec<u8>>(OUTBOX_LINES);
     let connection = Arc::new(Connection {
         id: shared.next_connection.fetch_add(1, Ordering::SeqCst),
         peer,
         stream: stream.try_clone()?,
-        writer: Mutex::new(writer),
+        outbox,
         topics: Mutex::new(None),
     });
+    let closer = stream.try_clone()?;
+    std::thread::Builder::new()
+        .name("engine-host-writer".to_string())
+        .spawn(move || write_lines(writer, closer, lines))
+        .context("starting a connection's writing thread")?;
     shared.connections.lock().push(connection.clone());
     let generation = welcome.writer.generation().unwrap_or(0);
     let welcomed = connection.send(&ServerMessage::Welcome {
@@ -319,6 +344,21 @@ fn serve_connection(
     };
     shared.forget(connection.id);
     outcome
+}
+
+/// Writes a connection's queued lines until every sender is gone; a failed write ends the
+/// connection.
+fn write_lines(mut writer: UnixStream, closer: UnixStream, lines: Receiver<Vec<u8>>) {
+    for line in lines {
+        if writer
+            .write_all(&line)
+            .and_then(|()| writer.flush())
+            .is_err()
+        {
+            closer.shutdown(std::net::Shutdown::Both).ok();
+            return;
+        }
+    }
 }
 
 fn read_requests(
