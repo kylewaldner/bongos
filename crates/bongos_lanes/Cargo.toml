@@ -15,6 +15,7 @@ doctest = false
 [dependencies]
 anyhow.workspace = true
 bongos_checks.workspace = true
+bongos_engine_host.workspace = true
 bongos_lanes_model.workspace = true
 bongos_project_repo.workspace = true
 bongos_project_repo_model.workspace = true
@@ -28,7 +29,9 @@ futures.workspace = true
 gpui.workspace = true
 log.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 settings.workspace = true
+smol.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 util.workspace = true

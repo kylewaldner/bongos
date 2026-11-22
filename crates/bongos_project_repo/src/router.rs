@@ -510,6 +510,24 @@ pub fn apply_state_only(
     Ok(())
 }
 
+impl crate::ProjectRepo {
+    /// Applies a state-only change as [`apply_state_only`] does, with its state ops through the
+    /// project's sink when one is set (a process that does not hold the writer), then its file
+    /// ops under the project's files part.
+    pub async fn apply_state_change(
+        &self,
+        state: Vec<StateOp>,
+        files: &[FileOp],
+        origin: Author,
+    ) -> Result<()> {
+        self.apply_state(state, origin).await?;
+        for op in files {
+            apply_file_op(&self.location.files, op)?;
+        }
+        Ok(())
+    }
+}
+
 /// The file ops among staged `ops`, which wait for the landing.
 pub(crate) fn staged_file_ops(ops: &[StateOp]) -> Vec<FileOp> {
     ops.iter()

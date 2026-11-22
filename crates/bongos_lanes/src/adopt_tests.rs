@@ -218,8 +218,8 @@ impl LanesHost for TreeHost {
         )
     }
 
-    fn left_work(&self, lane: &LaneId, job: &JobRecord, _cx: &App) -> Vec<LeftWork> {
-        vec![LeftWork {
+    fn left_work(&self, lane: &LaneId, job: &JobRecord, _cx: &App) -> gpui::Task<Vec<LeftWork>> {
+        gpui::Task::ready(vec![LeftWork {
             git: self.fixture.git.clone(),
             request: ResetRequest {
                 locations: self.locations(lane),
@@ -233,7 +233,7 @@ impl LanesHost for TreeHost {
                 save_max_file_bytes: 1000,
                 forbidden: self.forbidden(lane),
             },
-        }]
+        }])
     }
 }
 

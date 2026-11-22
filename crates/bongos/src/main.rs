@@ -562,6 +562,19 @@ fn main() {
             cx,
         );
         bongos_language_status::init(paths::logs_dir(), cx);
+        // Before the projects open: the first process to open one holds its writer (and serves its
+        // socket while lanes are on), a later one attaches to it.
+        bongos_engine_host::install_window(
+            bongos_engine_host::WindowHosting {
+                bongos_version: release_channel::AppVersion::global(cx).to_string(),
+                log: paths::log_file().clone(),
+                hosts_dir: bongos_engine_host::default_hosts_dir(),
+                lanes_enabled: std::rc::Rc::new(|cx| {
+                    <bongos_lanes::LanesSettings as settings::Settings>::get_global(cx).enabled
+                }),
+            },
+            cx,
+        );
         bongos_work::init(
             fs.clone(),
             bongos_work::WorkDirs::new(util::paths::home_dir(), paths::data_dir()),
@@ -584,6 +597,7 @@ fn main() {
         bongos_workflow::init(cx);
         bongos_checks::init(cx);
         bongos_lanes::init(cx);
+        bongos_engine_host::init(cx);
         let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
         let workspace_store = cx.new(|cx| WorkspaceStore::new(client.clone(), cx));
 

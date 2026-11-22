@@ -22,6 +22,7 @@ mod done_owners;
 mod env;
 mod exporter;
 mod hooks;
+mod host;
 mod job_trees;
 mod lane_control;
 mod lane_tree;
@@ -42,8 +43,8 @@ use bongos_project_repo::{ActivitySources, LiveSources};
 use gpui::App;
 
 pub use accept_graph::{
-    ACCEPT_SUBJECT, Accepted, STAMP_FILE, accept_graph, accept_graph_now, read_stamp, stamp_at,
-    stamp_path,
+    ACCEPT_SUBJECT, Accepted, STAMP_FILE, accept_graph, accept_graph_for_peer, accept_graph_now,
+    read_stamp, stamp_at, stamp_path,
 };
 pub use actions::{
     AdoptArgs, AdoptPrompt, DROP_CHOICES, ENGINE_HOST_MESSAGE, LanesToast,
@@ -66,6 +67,7 @@ pub use done_owners::CLEARED_NO_CHECKS;
 pub use env::{apply_env, second_tree_env, tip_env};
 pub use exporter::{EXPORT_NAMESPACE, LanesExporter, STATE_FILE};
 pub use hooks::{AFTER_TREE_CREATED, BEFORE_JOB, BeforeJob, JobEnd, JobHook, JobHookCx, JobHooks};
+pub use host::{LanesPayload, ProjectLanesHost, ensure_window_lanes, register_host};
 pub use job_trees::{
     CurrentJobTrees, ExtraRepositories, JobRepositories, JobRepository, JobStart, JobTrees,
     StartedTrees, forbidden_for, start_job_trees,
@@ -130,6 +132,7 @@ pub fn init(cx: &mut App) {
         cx,
     )));
     trees.register(cx);
+    register_host(cx);
 }
 
 #[cfg(test)]
@@ -148,6 +151,8 @@ mod done_owners_tests;
 mod env_tests;
 #[cfg(test)]
 mod exporter_tests;
+#[cfg(test)]
+mod host_tests;
 #[cfg(test)]
 mod job_trees_tests;
 #[cfg(test)]
