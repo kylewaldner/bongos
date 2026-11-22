@@ -1,9 +1,17 @@
-//! The command line of the lanes: `bongos lanes ...`, `bongos run` and `bongos host ...`.
+//! The command line of the lanes: `bongos lanes ...`, `bongos run` and `bongos host ...`, and the
+//! words later features fill in: `bongos trigger`, `bongos queue`, `bongos pool` and `bongos
+//! profile`.
 //!
 //! Each command reaches the process that holds the project's state writer, whatever it is (a
-//! window or an engine host process), over the project's socket. With no writer, `lanes start`
-//! and `run` start an engine host; `status`, `dry-run` and `pick` run the app binary once in its
-//! read mode; the other commands say no lanes are running. Everything that touches the machine
+//! window or an engine host process), over the project's socket. With no writer, `lanes start`,
+//! `run`, `trigger`, `queue` and `pool` start an engine host; `status`, `dry-run`, `pick` and
+//! `profile` run the app binary once in its read mode; the other commands say no lanes are
+//! running. `trigger`, `queue` and `pool` carry their subcommands to the writer as an extension
+//! command of the same name (`HostCommands::register` in the writer serves it; the engine host
+//! has a stand-in until the feature that owns the word registers its own), so a feature adds
+//! subcommands here and a handler there without changing how the words are dispatched.
+//! `profile` needs only `work.enabled` and `project_repository.enabled`; every other word needs
+//! `lanes.enabled`. Everything that touches the machine
 //! (settings, project list, `host.json`, the socket, the app binary) goes through [`Env`], so the
 //! dispatch is tested with fakes and no display. This module links only serde and the wire
 //! format of the project socket, never the app.
@@ -18,13 +26,26 @@ use clap::{CommandFactory as _, Parser, Subcommand, ValueEnum};
 use serde_json::{Value, json};
 
 /// The first words that make `bongos` run this module instead of opening paths.
-pub const WORDS: [&str; 3] = ["lanes", "run", "host"];
+pub const WORDS: [&str; 7] = [
+    "lanes", "run", "host", "trigger", "queue", "pool", "profile",
+];
 
 /// What the engine host answers a request with when the writer moves to another process.
 pub const MOVING_REFUSAL: &str = "the writer is moving; retry";
 
 /// The text of the refusal when `lanes.enabled` is off.
 pub const LANES_OFF: &str = "lanes are off (lanes.enabled); open the project in a window";
+
+/// The text of the refusal when `work.enabled` is off.
+pub const WORK_OFF: &str = "work is off (work.enabled)";
+
+/// The text of the refusal when `project_repository.enabled` is off.
+pub const PROJECT_REPOSITORY_OFF: &str =
+    "project repositories are off (project_repository.enabled)";
+
+/// The file in the state folder where a scheduled firing that found no project is recorded, one
+/// JSON line each, for a person to see what a timer missed.
+pub const MISSES_FILE: &str = "scheduled-misses.jsonl";
 
 /// The schema a `status --json` document names.
 pub const STATUS_SCHEMA: &str = "lanes-status 1";
@@ -75,6 +96,57 @@ enum Word {
         #[command(subcommand)]
         verb: HostWord,
     },
+    /// Triggers.
+    Trigger {
+        #[command(subcommand)]
+        verb: TriggerWord,
+    },
+    /// The queue of runs waiting for room.
+    Queue {
+        #[command(subcommand)]
+        verb: QueueWord,
+    },
+    /// The pools of runs.
+    Pool {
+        #[command(subcommand)]
+        verb: PoolWord,
+    },
+    /// Lane profiles, read from the project without a running host.
+    Profile {
+        /// What the profile reads are told, as they are written.
+        #[arg(num_args = 0.., allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+}
+
+// The subcommands of `trigger`, `queue` and `pool` are stand-ins that only reach the writer; the
+// features that own the words replace them with their real subcommands.
+#[derive(Subcommand, Debug)]
+enum TriggerWord {
+    /// Fire a trigger by hand, or from a timer with `--scheduled`.
+    Fire {
+        name: String,
+        /// The firing comes from a timer: with lanes off it starts nothing, and a project that
+        /// is not on this machine is recorded as a miss.
+        #[arg(long)]
+        scheduled: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum QueueWord {
+    /// Put a workflow in the queue.
+    Push {
+        name: String,
+        /// The push comes from a timer; the same rules as `trigger fire --scheduled`.
+        #[arg(long)]
+        scheduled: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PoolWord {
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -218,6 +290,14 @@ pub trait Env {
     ) -> Result<WriterInfo, StartFailure>;
     /// Runs the app binary once in its `--read` mode with `args` (`status`, `--json`, ...).
     fn read_mode(&self, project: &ProjectRef, args: &[String]) -> Result<ReadOutput, String>;
+    /// `work.enabled` of the user settings.
+    fn work_enabled(&self) -> bool;
+    /// `project_repository.enabled` of the user settings.
+    fn project_repository_enabled(&self) -> bool;
+    /// The time now as RFC 3339 text; the one clock of the commands.
+    fn now(&self) -> String;
+    /// Appends `line` (one JSON document, no newline) to [`MISSES_FILE`] in the state folder.
+    fn record_miss(&self, line: &str) -> Result<(), String>;
 }
 
 /// What a command printed and how it ended.
@@ -271,15 +351,89 @@ pub fn execute(args: &[String], env: &dyn Env) -> Outcome {
     if let Err(text) = check_lanes(&parsed.word) {
         return Outcome::fail(EXIT_USAGE, text);
     }
-    if !env.lanes_enabled() {
-        return Outcome::fail(EXIT_REFUSED, LANES_OFF);
+    if let Some(text) = setting_off(&parsed.word, env) {
+        return Outcome::fail(EXIT_REFUSED, text);
     }
     let project = match select_project(parsed.project.as_deref(), env) {
         Ok(project) => project,
-        Err(text) => return Outcome::fail(EXIT_USAGE, text),
+        Err(text) => {
+            return match scheduled_firing(&parsed.word) {
+                Some(trigger) => miss(parsed.project.as_deref(), trigger, &text, env),
+                None => Outcome::fail(EXIT_USAGE, text),
+            };
+        }
     };
     let command = command_of(&parsed.word);
     run_command(&project, command, env)
+}
+
+/// The text naming the first setting the word needs that is off.
+fn setting_off(word: &Word, env: &dyn Env) -> Option<&'static str> {
+    if matches!(word, Word::Profile { .. }) {
+        return if !env.work_enabled() {
+            Some(WORK_OFF)
+        } else if !env.project_repository_enabled() {
+            Some(PROJECT_REPOSITORY_OFF)
+        } else {
+            None
+        };
+    }
+    // Seam (the pools feature): `queue` and `pool` also check `pools.enabled` here and name it
+    // when it is off.
+    (!env.lanes_enabled()).then_some(LANES_OFF)
+}
+
+/// The name of the trigger or workflow a timer fires, for a scheduled word.
+fn scheduled_firing(word: &Word) -> Option<&str> {
+    match word {
+        Word::Trigger {
+            verb:
+                TriggerWord::Fire {
+                    name,
+                    scheduled: true,
+                },
+        }
+        | Word::Queue {
+            verb:
+                QueueWord::Push {
+                    name,
+                    scheduled: true,
+                },
+        } => Some(name),
+        _ => None,
+    }
+}
+
+/// A scheduled firing whose project is not on this machine: one line in [`MISSES_FILE`], exit 2.
+fn miss(project: Option<&str>, trigger: &str, reason: &str, env: &dyn Env) -> Outcome {
+    let line = json!({
+        "at": env.now(),
+        "project": project,
+        "trigger": trigger,
+        "reason": reason,
+    });
+    match env.record_miss(&line.to_string()) {
+        Ok(()) => Outcome::fail(
+            EXIT_USAGE,
+            format!("{reason}\nthis firing was recorded in {MISSES_FILE}"),
+        ),
+        Err(error) => Outcome::fail(
+            EXIT_USAGE,
+            format!("{reason}\nthis firing could not be recorded in {MISSES_FILE}: {error}"),
+        ),
+    }
+}
+
+/// Appends one line to [`MISSES_FILE`] in `state`, creating the folder and the file.
+pub fn append_miss(state: &Path, line: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    std::fs::create_dir_all(state)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(state.join(MISSES_FILE))?;
+    // One write, so lines of two timers never mix.
+    file.write_all(format!("{line}\n").as_bytes())
 }
 
 /// The lane names in the arguments must look like `build-2`.
@@ -324,6 +478,14 @@ enum Command {
     HostStop {
         now: bool,
     },
+    /// An extension command of the writer: `trigger`, `queue` or `pool`.
+    Extension {
+        namespace: &'static str,
+        verb: &'static str,
+        payload: Value,
+    },
+    /// A read mode of the app binary, whatever holds the writer.
+    Read(Vec<String>),
 }
 
 fn command_of(word: &Word) -> Command {
@@ -362,6 +524,39 @@ fn command_of(word: &Word) -> Command {
             HostWord::Status => Command::HostStatus,
             HostWord::Stop { now } => Command::HostStop { now: *now },
         },
+        // A run started this way is a hand-started run, never a lane run: nothing here names a
+        // lane.
+        Word::Trigger {
+            verb: TriggerWord::Fire { name, scheduled },
+        } => extension(
+            "trigger",
+            "fire",
+            json!({ "name": name, "scheduled": scheduled }),
+        ),
+        Word::Queue {
+            verb: QueueWord::Push { name, scheduled },
+        } => extension(
+            "queue",
+            "push",
+            json!({ "name": name, "scheduled": scheduled }),
+        ),
+        Word::Pool {
+            verb: PoolWord::Status,
+        } => extension("pool", "status", json!({})),
+        Word::Profile { args } => Command::Read(
+            std::iter::once("profile".to_string())
+                .chain(args.clone())
+                .collect(),
+        ),
+    }
+}
+
+fn extension(namespace: &'static str, verb: &'static str, mut payload: Value) -> Command {
+    payload["verb"] = json!(verb);
+    Command::Extension {
+        namespace,
+        verb,
+        payload,
     }
 }
 
@@ -486,6 +681,28 @@ fn run_command(project: &ProjectRef, command: Command, env: &dyn Env) -> Outcome
                 |reply| message_of(&reply),
             )
         }
+        Command::Extension {
+            namespace,
+            verb,
+            payload,
+        } => {
+            // A live writer, a window or a host, gets the command; with none a host starts.
+            let writer = match writer {
+                Some(writer) => writer,
+                None => match env.start_host(project, &format!("bongos {namespace} {verb}"), false)
+                {
+                    Ok(writer) => writer,
+                    Err(failure) => return start_failed(&failure),
+                },
+            };
+            send(
+                env,
+                &writer,
+                json!({ "extension": { "namespace": namespace, "payload": payload } }),
+                |reply| message_of(&reply),
+            )
+        }
+        Command::Read(args) => read_outcome(env, project, &args),
         Command::LaneVerb {
             verb,
             lane,
@@ -511,14 +728,7 @@ fn run_command(project: &ProjectRef, command: Command, env: &dyn Env) -> Outcome
                     args.push("--lane".to_string());
                     args.push(lane);
                 }
-                match env.read_mode(project, &args) {
-                    Ok(output) => Outcome {
-                        code: output.code,
-                        stdout: output.stdout,
-                        stderr: output.stderr,
-                    },
-                    Err(text) => Outcome::fail(EXIT_REFUSED, text),
-                }
+                read_outcome(env, project, &args)
             }
             None => Outcome::done("no lanes are running"),
         },
@@ -537,6 +747,18 @@ fn run_command(project: &ProjectRef, command: Command, env: &dyn Env) -> Outcome
             ),
             None => Outcome::done("no engine host is running"),
         },
+    }
+}
+
+/// Runs the app's read mode with `args` and passes its exit code and output on.
+fn read_outcome(env: &dyn Env, project: &ProjectRef, args: &[String]) -> Outcome {
+    match env.read_mode(project, args) {
+        Ok(output) => Outcome {
+            code: output.code,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        },
+        Err(text) => Outcome::fail(EXIT_REFUSED, text),
     }
 }
 
@@ -731,6 +953,8 @@ pub(crate) mod real {
     const ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
     const POLL: Duration = Duration::from_millis(25);
     const MOVING_RETRY: Duration = Duration::from_millis(50);
+    /// How long a caller waits for the writer that refused a started host to announce itself.
+    const EXITED_GRACE: Duration = Duration::from_secs(2);
 
     /// The machine this process runs on.
     pub struct RealEnv {
@@ -827,6 +1051,28 @@ pub(crate) mod real {
                 .unwrap_or(false)
         }
 
+        fn work_enabled(&self) -> bool {
+            user_settings()["work"]["enabled"]
+                .as_bool()
+                .unwrap_or(false)
+        }
+
+        fn project_repository_enabled(&self) -> bool {
+            user_settings()["project_repository"]["enabled"]
+                .as_bool()
+                .unwrap_or(false)
+        }
+
+        fn now(&self) -> String {
+            chrono::Utc::now().to_rfc3339()
+        }
+
+        fn record_miss(&self, line: &str) -> Result<(), String> {
+            let state = paths::state_dir();
+            super::append_miss(state, line)
+                .map_err(|error| format!("writing {}: {error}", state.display()))
+        }
+
         fn projects(&self) -> Result<Vec<ProjectRef>, String> {
             let path = paths::state_dir().join("project-repositories.toml");
             let text = match std::fs::read_to_string(&path) {
@@ -856,8 +1102,7 @@ pub(crate) mod real {
         }
 
         fn writer(&self, project: &ProjectRef) -> Option<WriterInfo> {
-            let (file, live) = host_file(project)?;
-            live.then(|| writer_of(&file))
+            live_writer(project)
         }
 
         fn connect(&self, socket: &Path) -> Result<Box<dyn Session>, RequestError> {
@@ -876,62 +1121,14 @@ pub(crate) mod real {
         ) -> Result<WriterInfo, StartFailure> {
             let log =
                 paths::logs_dir().join(format!("engine-host-{}.log", project_hex(&project.id)));
-            let failure = |message: String| StartFailure {
-                message,
-                log: log.clone(),
-            };
-            if !hand_over {
-                if let Some(writer) = self.writer(project) {
-                    return Ok(writer);
-                }
-            }
-            if let Some(directory) = log.parent() {
-                std::fs::create_dir_all(directory).map_err(|error| failure(error.to_string()))?;
-            }
-            let output = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log)
-                .map_err(|error| failure(format!("opening the host log: {error}")))?;
-            writeln!(&output, "starting the engine host: {reason}").ok();
-            let errors = output
-                .try_clone()
-                .map_err(|error| failure(error.to_string()))?;
-            let mut command = std::process::Command::new(&self.program);
-            command.arg("--engine-host").arg(&project.id);
-            let mut child = util::process::Child::spawn(
-                command,
-                Stdio::null(),
-                Stdio::from(output),
-                Stdio::from(errors),
+            start_host_process(
+                &self.program,
+                project,
+                reason,
+                hand_over,
+                &log,
+                start_timeout(),
             )
-            .map_err(|error| failure(format!("starting the engine host: {error}")))?;
-            let timeout = start_timeout();
-            let deadline = Instant::now() + timeout;
-            loop {
-                if let Some((file, true)) = host_file(project) {
-                    let done = file.moving.is_none() && (!hand_over || file.mode == "host");
-                    if done {
-                        return Ok(writer_of(&file));
-                    }
-                }
-                if let Ok(Some(status)) = child.try_status() {
-                    // A host refused by the lock exits while the first one holds the writer.
-                    if let Some((file, true)) = host_file(project)
-                        && file.moving.is_none()
-                    {
-                        return Ok(writer_of(&file));
-                    }
-                    return Err(failure(format!("the engine host exited ({status})")));
-                }
-                if Instant::now() >= deadline {
-                    return Err(failure(format!(
-                        "the engine host did not start within {}s",
-                        timeout.as_secs_f64()
-                    )));
-                }
-                std::thread::sleep(POLL);
-            }
         }
 
         // The command line has nothing else to do while the read mode runs, so it blocks.
@@ -950,6 +1147,86 @@ pub(crate) mod real {
                 stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
                 stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             })
+        }
+    }
+
+    /// The live writer of `project`, from its `host.json`.
+    pub(crate) fn live_writer(project: &ProjectRef) -> Option<WriterInfo> {
+        let (file, live) = host_file(project)?;
+        live.then(|| writer_of(&file))
+    }
+
+    /// Starts the engine host of `project` with `program` and returns once a writer is live.
+    /// Its output goes to `log`. A host that the lock refuses (another holds the writer) exits;
+    /// the caller attaches to the writer that holds it, which may not have announced itself yet
+    /// when the refused host exits, so that one is waited for a moment.
+    pub(crate) fn start_host_process(
+        program: &Path,
+        project: &ProjectRef,
+        reason: &str,
+        hand_over: bool,
+        log: &Path,
+        timeout: Duration,
+    ) -> Result<WriterInfo, StartFailure> {
+        let failure = |message: String| StartFailure {
+            message,
+            log: log.to_path_buf(),
+        };
+        if !hand_over {
+            if let Some(writer) = live_writer(project) {
+                return Ok(writer);
+            }
+        }
+        if let Some(directory) = log.parent() {
+            std::fs::create_dir_all(directory).map_err(|error| failure(error.to_string()))?;
+        }
+        let output = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
+            .map_err(|error| failure(format!("opening the host log: {error}")))?;
+        writeln!(&output, "starting the engine host: {reason}").ok();
+        let errors = output
+            .try_clone()
+            .map_err(|error| failure(error.to_string()))?;
+        let mut command = std::process::Command::new(program);
+        command.arg("--engine-host").arg(&project.id);
+        let mut child = util::process::Child::spawn(
+            command,
+            Stdio::null(),
+            Stdio::from(output),
+            Stdio::from(errors),
+        )
+        .map_err(|error| failure(format!("starting the engine host: {error}")))?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some((file, true)) = host_file(project) {
+                let done = file.moving.is_none() && (!hand_over || file.mode == "host");
+                if done {
+                    return Ok(writer_of(&file));
+                }
+            }
+            if let Ok(Some(status)) = child.try_status() {
+                let grace = Instant::now() + EXITED_GRACE;
+                loop {
+                    if let Some((file, true)) = host_file(project)
+                        && file.moving.is_none()
+                    {
+                        return Ok(writer_of(&file));
+                    }
+                    if Instant::now() >= grace {
+                        return Err(failure(format!("the engine host exited ({status})")));
+                    }
+                    std::thread::sleep(POLL);
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(failure(format!(
+                    "the engine host did not start within {}s",
+                    timeout.as_secs_f64()
+                )));
+            }
+            std::thread::sleep(POLL);
         }
     }
 

@@ -15,6 +15,7 @@ mod host_file;
 mod host_process;
 mod participants;
 pub mod protocol;
+mod read_modes;
 pub mod server;
 mod socket;
 mod window;
@@ -28,7 +29,9 @@ pub use client::{
     ANSWER_TIMEOUT, ClientOptions, HostClient, MOVING_RETRY, MOVING_TIMEOUT, Welcomed,
     not_answering,
 };
-pub use commands::{HostCommands, HostHandler, VerbHandler, local_identity};
+pub use commands::{
+    HostCommands, HostHandler, STUB_NAMESPACES, VerbHandler, local_identity, register_stub_commands,
+};
 pub use ensure::{
     Attach, ENGINE_HOST_FLAG, EnsureHost, HostSpawner, POLL_INTERVAL, ProgramSpawner, SpawnedHost,
     ensure_host,
@@ -51,6 +54,7 @@ pub use protocol::{
     ClientMessage, HostCommand, HostCtl, HostEvent, HostMode, HostResult, HostTopic, LanesVerb,
     PROTOCOL_VERSION, ServerMessage, WorkflowVerb, version_refusal,
 };
+pub use read_modes::{AsyncReadHandler, ReadHandler, ReadModes, ReadProject};
 pub use server::EngineServer;
 pub use socket::{
     bind_socket, default_host_log_path, default_hosts_dir, host_log_path, project_hex, socket_path,
@@ -65,9 +69,12 @@ pub fn init(cx: &mut gpui::App) {
     register_checks(cx);
     register_workflow(cx);
     install_workflow_remote(cx);
+    register_stub_commands(cx);
 }
 
 #[cfg(test)]
 mod engine_host_tests;
 #[cfg(test)]
 mod handover_tests;
+#[cfg(test)]
+mod read_modes_tests;

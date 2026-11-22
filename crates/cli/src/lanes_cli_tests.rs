@@ -24,6 +24,9 @@ impl Session for FakeSession {
 /// that reaches past the settings, in order.
 struct Fake {
     enabled: bool,
+    work: bool,
+    repository: bool,
+    misses: RefCell<Vec<String>>,
     projects: Vec<ProjectRef>,
     cwd: PathBuf,
     writer: Option<WriterInfo>,
@@ -64,6 +67,9 @@ impl Fake {
     fn new() -> Self {
         Self {
             enabled: true,
+            work: true,
+            repository: true,
+            misses: RefCell::new(Vec::new()),
             projects: vec![project("p1", "/work/one")],
             cwd: PathBuf::from("/elsewhere"),
             writer: None,
@@ -156,7 +162,27 @@ impl Env for Fake {
             .push(format!("read_mode {} {}", project.id, args.join(" ")));
         self.read.clone()
     }
+
+    fn work_enabled(&self) -> bool {
+        self.work
+    }
+
+    fn project_repository_enabled(&self) -> bool {
+        self.repository
+    }
+
+    fn now(&self) -> String {
+        NOW.to_string()
+    }
+
+    fn record_miss(&self, line: &str) -> Result<(), String> {
+        self.misses.borrow_mut().push(line.to_string());
+        Ok(())
+    }
 }
+
+/// The pinned time of the fake machine.
+const NOW: &str = "2026-02-03T04:05:06+00:00";
 
 fn lane(id: &str, state: &str, task: Option<&str>, reason: Option<&str>) -> Value {
     json!({
@@ -618,9 +644,239 @@ fn only_the_lanes_words_are_taken() {
     assert!(is_lanes_word(Some("lanes")));
     assert!(is_lanes_word(Some("run")));
     assert!(is_lanes_word(Some("host")));
+    for word in ["trigger", "queue", "pool", "profile"] {
+        assert!(is_lanes_word(Some(word)), "{word}");
+    }
     assert!(!is_lanes_word(Some("./lanes")));
     assert!(!is_lanes_word(Some("--version")));
     assert!(!is_lanes_word(None));
+}
+
+fn extension_of(command: &Value) -> (&str, &Value) {
+    let extension = &command["extension"];
+    (
+        extension["namespace"].as_str().unwrap(),
+        &extension["payload"],
+    )
+}
+
+#[test]
+fn trigger_queue_and_pool_reach_the_writer_as_extension_commands() {
+    let fake = Fake::new().with_writer(host_writer());
+    for (words, namespace, verb) in [
+        ("trigger fire nightly", "trigger", "fire"),
+        ("queue push build", "queue", "push"),
+        ("pool status", "pool", "status"),
+    ] {
+        let outcome = fake.run(words);
+        assert_eq!(outcome.code, EXIT_DONE, "{words}: {outcome:?}");
+        let sent = fake.sent();
+        let (sent_namespace, payload) = extension_of(sent.last().unwrap());
+        assert_eq!(
+            (sent_namespace, payload["verb"].as_str()),
+            (namespace, Some(verb))
+        );
+    }
+    let sent = fake.sent();
+    assert_eq!(extension_of(&sent[0]).1["name"], "nightly");
+    assert_eq!(extension_of(&sent[0]).1["scheduled"], false);
+    assert_eq!(fake.log(), vec!["connect /hosts/p1.sock".to_string(); 3]);
+}
+
+#[test]
+fn the_stand_in_words_need_a_subcommand_and_a_name() {
+    let fake = Fake::new();
+    for words in [
+        "trigger",
+        "trigger fire",
+        "queue",
+        "queue push",
+        "pool",
+        "pool frob",
+    ] {
+        assert_eq!(fake.run(words).code, EXIT_USAGE, "{words}");
+    }
+    assert!(fake.log().is_empty());
+}
+
+#[test]
+fn a_scheduled_firing_with_no_writer_starts_a_host_and_sends_to_it() {
+    let fake = Fake::new();
+    let outcome = fake.run("trigger fire nightly --scheduled");
+    assert_eq!(outcome.code, EXIT_DONE, "{outcome:?}");
+    assert_eq!(
+        fake.log(),
+        vec![
+            "start_host p1 bongos trigger fire hand_over=false".to_string(),
+            "connect /hosts/p1.sock".to_string()
+        ]
+    );
+    let sent = fake.sent();
+    assert_eq!(sent.len(), 1);
+    let (namespace, payload) = extension_of(&sent[0]);
+    assert_eq!(namespace, "trigger");
+    assert_eq!(payload["scheduled"], true);
+    // A run started this way is a hand-started run: nothing names a lane.
+    assert!(payload.get("lane").is_none());
+    assert!(fake.misses.borrow().is_empty());
+
+    let queued = Fake::new();
+    assert_eq!(queued.run("queue push build --scheduled").code, EXIT_DONE);
+    assert_eq!(
+        queued.log()[0],
+        "start_host p1 bongos queue push hand_over=false"
+    );
+}
+
+#[test]
+fn a_scheduled_firing_goes_to_a_window_or_a_host_that_holds_the_writer_and_starts_none() {
+    for writer in [window_writer(), host_writer()] {
+        for words in [
+            "trigger fire nightly --scheduled",
+            "queue push build --scheduled",
+        ] {
+            let fake = Fake::new().with_writer(writer.clone());
+            let outcome = fake.run(words);
+            assert_eq!(outcome.code, EXIT_DONE, "{words}: {outcome:?}");
+            assert_eq!(
+                fake.log(),
+                vec!["connect /hosts/p1.sock".to_string()],
+                "{words}"
+            );
+            assert_eq!(fake.sent().len(), 1, "{words}");
+        }
+    }
+}
+
+#[test]
+fn a_scheduled_firing_with_lanes_off_names_the_setting_and_starts_nothing() {
+    let mut fake = Fake::new();
+    fake.enabled = false;
+    for words in [
+        "trigger fire nightly --scheduled",
+        "queue push build --scheduled",
+        "pool status",
+    ] {
+        let outcome = fake.run(words);
+        assert_eq!(outcome.code, EXIT_REFUSED, "{words}");
+        assert_eq!(
+            outcome.stderr, "lanes are off (lanes.enabled); open the project in a window\n",
+            "{words}"
+        );
+        assert!(outcome.stdout.is_empty());
+    }
+    assert!(fake.log().is_empty());
+    assert!(fake.misses.borrow().is_empty());
+}
+
+#[test]
+fn a_scheduled_firing_whose_host_cannot_start_is_exit_three_with_the_log() {
+    let mut fake = Fake::new();
+    fake.start = Err(StartFailure {
+        message: "the engine host exited (exit status: 1)".to_string(),
+        log: PathBuf::from("/logs/engine-host-abc.log"),
+    });
+    let outcome = fake.run("trigger fire nightly --scheduled");
+    assert_eq!(outcome.code, EXIT_HOST_START);
+    assert!(outcome.stderr.contains("/logs/engine-host-abc.log"));
+    assert!(fake.sent().is_empty());
+}
+
+#[test]
+fn a_scheduled_firing_for_a_project_not_on_this_machine_records_one_miss_and_is_exit_two() {
+    let fake = Fake::new();
+    let outcome = fake.run("trigger fire nightly --scheduled --project elsewhere");
+    assert_eq!(outcome.code, EXIT_USAGE, "{outcome:?}");
+    assert!(outcome.stderr.contains("elsewhere"));
+    assert!(outcome.stderr.contains(MISSES_FILE));
+    assert!(fake.log().is_empty());
+    let misses = fake.misses.borrow();
+    assert_eq!(misses.len(), 1);
+    let line: Value = serde_json::from_str(&misses[0]).unwrap();
+    assert_eq!(line["at"], NOW);
+    assert_eq!(line["project"], "elsewhere");
+    assert_eq!(line["trigger"], "nightly");
+    assert!(line["reason"].as_str().unwrap().contains("elsewhere"));
+    assert_eq!(line.as_object().unwrap().len(), 4);
+    drop(misses);
+
+    // A project that cannot be told apart is as missing, and the queue's push follows the rule.
+    let mut none = Fake::new();
+    none.projects.clear();
+    assert_eq!(none.run("queue push build --scheduled").code, EXIT_USAGE);
+    let line: Value = serde_json::from_str(&none.misses.borrow()[0]).unwrap();
+    assert_eq!(line["project"], Value::Null);
+    assert_eq!(line["trigger"], "build");
+
+    // A firing by hand records nothing.
+    let by_hand = Fake::new();
+    assert_eq!(
+        by_hand.run("trigger fire nightly --project elsewhere").code,
+        EXIT_USAGE
+    );
+    assert!(by_hand.misses.borrow().is_empty());
+}
+
+#[test]
+fn misses_are_appended_one_json_line_each_to_the_state_folder() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("state");
+    append_miss(&state, r#"{"trigger":"a"}"#).unwrap();
+    append_miss(&state, r#"{"trigger":"b"}"#).unwrap();
+    let text = std::fs::read_to_string(state.join(MISSES_FILE)).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines, [r#"{"trigger":"a"}"#, r#"{"trigger":"b"}"#]);
+    assert!(text.ends_with('\n'));
+}
+
+#[test]
+fn profile_reads_with_lanes_off_whatever_holds_the_writer() {
+    for writer in [None, Some(window_writer()), Some(host_writer())] {
+        let mut fake = Fake::new();
+        fake.writer = writer;
+        fake.enabled = false;
+        let outcome = fake.run("profile show --json --lane build-1");
+        assert_eq!(outcome.code, EXIT_DONE, "{outcome:?}");
+        assert_eq!(outcome.stdout, "read mode output\n");
+        assert_eq!(
+            fake.log(),
+            vec!["read_mode p1 profile show --json --lane build-1".to_string()]
+        );
+        assert!(fake.sent().is_empty());
+    }
+    let fake = Fake::new();
+    assert_eq!(fake.run("profile").code, EXIT_DONE);
+    assert_eq!(fake.log(), vec!["read_mode p1 profile".to_string()]);
+}
+
+#[test]
+fn profile_needs_work_and_project_repositories_but_not_lanes() {
+    let mut fake = Fake::new();
+    fake.work = false;
+    let outcome = fake.run("profile show");
+    assert_eq!(outcome.code, EXIT_REFUSED);
+    assert_eq!(outcome.stderr, "work is off (work.enabled)\n");
+    fake.work = true;
+    fake.repository = false;
+    let outcome = fake.run("profile show");
+    assert_eq!(outcome.code, EXIT_REFUSED);
+    assert!(outcome.stderr.contains("project_repository.enabled"));
+    assert!(fake.log().is_empty());
+}
+
+#[test]
+fn an_unregistered_profile_read_exits_with_the_apps_code() {
+    let mut fake = Fake::new();
+    fake.read = Ok(ReadOutput {
+        code: 2,
+        stdout: String::new(),
+        stderr: "no read mode profile is registered\n".to_string(),
+    });
+    let outcome = fake.run("profile");
+    assert_eq!(
+        (outcome.code, outcome.stderr.as_str()),
+        (2, "no read mode profile is registered\n")
+    );
 }
 
 #[cfg(unix)]
@@ -740,6 +996,147 @@ mod socket {
         assert!(outcome.stderr.contains("bongos host stop"), "{outcome:?}");
     }
 
+    /// The machine of two timers that fire at once: the real start of a host with `program`, the
+    /// real socket, the settings and the project list replaced. Both check for a writer at the
+    /// same moment, so both start a host.
+    struct TimerEnv {
+        project: ProjectRef,
+        program: PathBuf,
+        log: PathBuf,
+        both_checked: std::sync::Barrier,
+    }
+
+    impl Env for TimerEnv {
+        fn lanes_enabled(&self) -> bool {
+            true
+        }
+        fn projects(&self) -> Result<Vec<ProjectRef>, String> {
+            Ok(vec![self.project.clone()])
+        }
+        fn current_dir(&self) -> PathBuf {
+            self.project.folder.clone()
+        }
+        fn writer(&self, project: &ProjectRef) -> Option<WriterInfo> {
+            self.both_checked.wait();
+            crate::lanes_cli::real::live_writer(project)
+        }
+        fn connect(&self, socket: &Path) -> Result<Box<dyn Session>, RequestError> {
+            Ok(Box::new(crate::lanes_cli::real::SocketSession::connect(
+                socket,
+                "9.9.9",
+                Duration::from_millis(1),
+            )?))
+        }
+        fn start_host(
+            &self,
+            project: &ProjectRef,
+            reason: &str,
+            hand_over: bool,
+        ) -> Result<WriterInfo, StartFailure> {
+            crate::lanes_cli::real::start_host_process(
+                &self.program,
+                project,
+                reason,
+                hand_over,
+                &self.log,
+                Duration::from_secs(60),
+            )
+        }
+        fn read_mode(&self, _: &ProjectRef, _: &[String]) -> Result<ReadOutput, String> {
+            panic!("no read mode")
+        }
+        fn work_enabled(&self) -> bool {
+            true
+        }
+        fn project_repository_enabled(&self) -> bool {
+            true
+        }
+        fn now(&self) -> String {
+            NOW.to_string()
+        }
+        fn record_miss(&self, _: &str) -> Result<(), String> {
+            panic!("no miss")
+        }
+    }
+
+    /// A stand-in for the app binary: the first one started wins the lock, announces itself in
+    /// `host.json` and stays until `alive` is removed; any other exits at once, as a host refused
+    /// by the lock does.
+    const HOST_SCRIPT: &str = r#"#!/bin/sh
+echo "$$" >> "@DIR@/starts"
+if mkdir "@DIR@/lock" 2>/dev/null; then
+  echo "$$" >> "@DIR@/hosts"
+  start=$(awk '{print $22}' /proc/$$/stat)
+  printf '{"pid":%s,"start_time":%s,"socket":"@DIR@/p1.sock","mode":"host"}' "$$" "$start" > "@DIR@/state/host.json.tmp"
+  mv "@DIR@/state/host.json.tmp" "@DIR@/state/host.json"
+  while [ -e "@DIR@/alive" ]; do sleep 0.05; done
+else
+  exit 1
+fi
+"#;
+
+    #[test]
+    fn two_scheduled_firings_with_no_writer_both_attach_to_one_host() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::create_dir_all(root.join("state")).unwrap();
+        std::fs::write(root.join("alive"), "").unwrap();
+        let script = root.join("host.sh");
+        std::fs::write(
+            &script,
+            HOST_SCRIPT.replace("@DIR@", root.to_str().unwrap()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let listener = UnixListener::bind(root.join("p1.sock")).unwrap();
+        serve(
+            listener,
+            "9.9.9",
+            |_| json!({ "ok": { "message": "fired" } }),
+        );
+
+        let env = TimerEnv {
+            project: ProjectRef {
+                id: "p1".to_string(),
+                name: "one".to_string(),
+                folder: root.join("work"),
+                state: root.join("state"),
+            },
+            program: script,
+            log: root.join("host.log"),
+            both_checked: std::sync::Barrier::new(2),
+        };
+        let args: Vec<String> = [
+            "trigger",
+            "fire",
+            "nightly",
+            "--scheduled",
+            "--project",
+            "p1",
+        ]
+        .map(str::to_string)
+        .into();
+        let outcomes: Vec<Outcome> = std::thread::scope(|scope| {
+            let timers: Vec<_> = (0..2)
+                .map(|_| scope.spawn(|| execute(&args, &env)))
+                .collect();
+            timers
+                .into_iter()
+                .map(|timer| timer.join().unwrap())
+                .collect()
+        });
+        std::fs::remove_file(root.join("alive")).unwrap();
+
+        for outcome in &outcomes {
+            assert_eq!(outcome.code, EXIT_DONE, "{outcome:?}");
+            assert_eq!(outcome.stdout, "fired\n");
+        }
+        let hosts = std::fs::read_to_string(root.join("hosts")).unwrap();
+        assert_eq!(hosts.lines().count(), 1, "one host took the lock: {hosts}");
+    }
+
     /// The real connection with the machine's lookups replaced: a host writer on `socket`.
     struct FakeSocketEnv {
         inner: RealEnv,
@@ -775,6 +1172,18 @@ mod socket {
         }
         fn read_mode(&self, _: &ProjectRef, _: &[String]) -> Result<ReadOutput, String> {
             panic!("no read mode")
+        }
+        fn work_enabled(&self) -> bool {
+            true
+        }
+        fn project_repository_enabled(&self) -> bool {
+            true
+        }
+        fn now(&self) -> String {
+            NOW.to_string()
+        }
+        fn record_miss(&self, _: &str) -> Result<(), String> {
+            panic!("no miss")
         }
     }
 }
