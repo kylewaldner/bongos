@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bongos_lanes_model::LaneTable;
-use bongos_work::WorktreeRootResolver;
+use bongos_work::{OpenProjectRepos, RootLayer, WorktreeRootResolver, WorktreeRootResolvers};
 use bongos_work_model::worktree_path::Source;
 use gpui::{App, Global};
 use settings::Settings as _;
@@ -56,4 +56,26 @@ impl WorktreeRootResolver for LaneRootResolver {
         let root = table.locations.worktree_root_of(repo)?;
         Some((root.value.clone(), Source::Project))
     }
+}
+
+/// The root and layer lanes decide for `repo` in `project_id`, as the Repositories screen shows
+/// them: the answer of the registered resolvers (this module's [`LaneRootResolver`]), so the screen
+/// and a hand start agree.
+pub fn root_layer_of(project_id: &str, repo: &str, cx: &App) -> Option<RootLayer> {
+    let (template, source) = WorktreeRootResolvers::root(project_id, repo, cx)?;
+    Some(RootLayer {
+        template: Some(template),
+        source,
+    })
+}
+
+/// The [`bongos_work::RootLayerSource`] lanes register: the root of `repo` in the only open
+/// project. With no project open, or several, nothing is decided here and the screen shows the
+/// user's settings.
+pub fn open_project_root_layer(repo: &str, cx: &App) -> Option<RootLayer> {
+    let repos = OpenProjectRepos::listed(cx);
+    let [project] = repos.as_slice() else {
+        return None;
+    };
+    root_layer_of(&project.repo().location().id, repo, cx)
 }

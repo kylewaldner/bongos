@@ -1,4 +1,4 @@
-//! Tests of the Lanes view and its surfaces: the scenario-1 header and an idle reason, a client
+//! Tests of the Lanes view and its surfaces: a header and an idle reason, a client
 //! window that reads the lanes from the store before any event, one notification per gate, and the
 //! point moving focus into a registered section.
 
@@ -44,9 +44,9 @@ fn lane_status(index: u32, state: LaneState) -> LaneStatus {
     }
 }
 
-/// PRD scenario 1: three of five lanes busy, build-4 and build-5 find nothing; four tasks are
+/// Three of five lanes busy, build-4 and build-5 find nothing; four tasks are
 /// ready and six wait.
-fn scenario_one() -> (LanesStatus, DryRun) {
+fn three_of_five_busy() -> (LanesStatus, DryRun) {
     let mut lanes: Vec<LaneStatus> = (1..=3)
         .map(|index| lane_status(index, LaneState::Running))
         .collect();
@@ -131,9 +131,9 @@ fn open_view(
 }
 
 #[gpui::test]
-async fn the_view_shows_scenario_ones_header_and_an_idle_reason(cx: &mut TestAppContext) {
+async fn the_view_shows_a_header_and_an_idle_reason(cx: &mut TestAppContext) {
     let (workspace, cx) = workspace_window(cx).await;
-    let (status, dry) = scenario_one();
+    let (status, dry) = three_of_five_busy();
     let source = Rc::new(FakeSource {
         status,
         dry: Some(dry),
@@ -286,7 +286,7 @@ async fn the_point_moves_focus_into_a_section_and_back(cx: &mut TestAppContext) 
             KeyBinding::new("p", menu::SelectPrevious, Some("LanesView")),
         ]);
     });
-    let (status, _) = scenario_one();
+    let (status, _) = three_of_five_busy();
     let view = open_view(Rc::new(FakeSource { status, dry: None }), &workspace, cx);
     cx.run_until_parked();
     let own = view.read_with(cx, |view, cx| gpui::Focusable::focus_handle(view, cx));

@@ -162,8 +162,8 @@ pub use summary::{
     WorkflowSummary, summary_text,
 };
 pub use surfaces::{
-    DRY_RUN_TITLE, START_CHOICES, SUMMARY_TITLE, open_text_buffer, summarize_then_start,
-    summary_inputs,
+    DRY_RUN_TITLE, START_CHOICES, SUMMARY_TITLE, SummaryContext, open_text_buffer,
+    summarize_then_start, summary_inputs, ungated_steps,
 };
 pub use task_trees::{
     LaneLease, LaneTaskTrees, LaneTreeSetup, OwedTasks, ProcessEnv, SecondTreeLeases, TopLevelOf,
@@ -188,6 +188,7 @@ pub fn init(cx: &mut App) {
     LaneRunScope::register(runs.clone(), cx);
     cx.set_global(runs.clone());
     bongos_work::WorktreeRootResolvers::register(Arc::new(LaneRootResolver), cx);
+    bongos_work::RootLayers::register(roots::open_project_root_layer, cx);
     let trees = LaneTaskTrees::new(
         runs,
         CurrentJobTrees::global(cx),

@@ -10,7 +10,7 @@ use settings::SettingsStore;
 
 use crate::locations_tests::{FakeProfile, table};
 use crate::profile::LaneProfiles;
-use crate::roots::LaneTables;
+use crate::roots::{LaneTables, open_project_root_layer, root_layer_of};
 
 const LOCATED: &str = r#"schema = 1
 
@@ -77,4 +77,36 @@ fn lanes_answer_the_root_of_a_hand_start_only_while_on(cx: &mut TestAppContext) 
     set_enabled(cx, false);
     assert_eq!(root(cx, "project-1"), None);
     assert_eq!(root(cx, "project-2"), None);
+}
+
+#[gpui::test]
+fn the_repositories_screen_gets_the_root_with_the_layer_that_won(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        let store = SettingsStore::new(cx, &settings::default_settings());
+        cx.set_global(store);
+        release_channel::init(semver::Version::new(0, 0, 0), cx);
+        crate::init(cx);
+        LaneTables::set("project-1", Arc::new(table(LOCATED)), cx);
+    });
+    set_enabled(cx, true);
+    let layer = |cx: &mut TestAppContext| cx.update(|cx| root_layer_of("project-1", "app", cx));
+    let found = layer(cx).unwrap();
+    assert_eq!(found.template.as_deref(), Some("/fast/{repo}/{slug}"));
+    assert_eq!(found.source, Source::Project);
+
+    // The profile's root wins, and the root shown goes with it.
+    let profile = FakeProfile {
+        name: Some("fast-disk".to_string()),
+        worktree_root: Some("/profile/{repo}/{slug}".to_string()),
+        ..FakeProfile::default()
+    };
+    cx.update(|cx| LaneProfiles::register(Arc::new(profile), cx));
+    let found = layer(cx).unwrap();
+    assert_eq!(found.template.as_deref(), Some("/profile/{repo}/{slug}"));
+    assert_eq!(found.source.label(), "from project profile fast-disk");
+
+    // With no project open the registered source decides nothing, so the settings show.
+    assert_eq!(cx.update(|cx| open_project_root_layer("app", cx)), None);
+    set_enabled(cx, false);
+    assert_eq!(layer(cx), None);
 }

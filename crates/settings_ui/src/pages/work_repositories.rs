@@ -1,7 +1,7 @@
 //! The Repositories page of the Work settings: for each entry of `work.repositories`, where its
 //! new worktrees go and what is wrong with that, read from the work store's repository overview.
 
-use bongos_work::{RepositoryRow, RootLayers, RootSource, WorkStore};
+use bongos_work::{RepositoryRow, RootLayer, RootLayers, WorkStore};
 use gpui::{Entity, ScrollHandle, prelude::*};
 use serde_json::json;
 use ui::{Divider, prelude::*};
@@ -90,16 +90,14 @@ fn render_notice(store: Entity<WorkStore>, cx: &mut Context<SettingsWindow>) -> 
         .into_any_element()
 }
 
-/// "Worktree root: ..." for `row`, with the layer that won ("own", "default", "project",
-/// "from project profile <name>" or "lane"). `winner` is the layer a registered source decided
-/// ([`RootLayers::winning`]), which is the row's own when none did.
-pub(crate) fn root_line(row: &RepositoryRow, winner: &RootSource) -> String {
-    match (winner, &row.template) {
-        (RootSource::Central, _) | (RootSource::Own | RootSource::Default, None) => {
-            "Worktree root: central".to_string()
-        }
-        (source, Some(template)) => format!("Worktree root: {template} ({})", source.label()),
-        (source, None) => format!("Worktree root: {}", source.label()),
+/// "Worktree root: ..." for the root that won, with the layer that set it ("own", "default",
+/// "project", "from project profile <name>" or "lane"). `winner` is what a registered source
+/// decided ([`RootLayers::winning`]), which is the row's own settings root when none did, so the
+/// root shown is always the one of the layer named.
+pub(crate) fn root_line(winner: &RootLayer) -> String {
+    match &winner.template {
+        None => "Worktree root: central".to_string(),
+        Some(template) => format!("Worktree root: {template} ({})", winner.source.label()),
     }
 }
 
@@ -134,7 +132,7 @@ fn render_row(index: usize, row: RepositoryRow, cx: &mut Context<SettingsWindow>
                         })),
                 ),
         )
-        .child(Label::new(root_line(&row, &RootLayers::winning(&row, cx))).size(LabelSize::Small))
+        .child(Label::new(root_line(&RootLayers::winning(&row, cx))).size(LabelSize::Small))
         .when(!row.preview.is_empty(), |this| {
             this.child(
                 Label::new(format!("New worktrees go to: {}", row.preview)).size(LabelSize::Small),
@@ -165,43 +163,37 @@ fn render_row(index: usize, row: RepositoryRow, cx: &mut Context<SettingsWindow>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use bongos_work::RootSource;
 
-    fn row(template: Option<&str>) -> RepositoryRow {
-        RepositoryRow {
-            name: "invoicing".to_string(),
-            path: PathBuf::from("/src/invoicing"),
-            root_source: RootSource::Default,
+    fn layer(template: Option<&str>, source: RootSource) -> RootLayer {
+        RootLayer {
             template: template.map(str::to_string),
-            preview: String::new(),
-            problem: None,
-            slow_poll: false,
-            old_root: Vec::new(),
+            source,
         }
     }
 
     #[test]
     fn the_root_line_names_the_layer_that_won() {
-        let row = row(Some("~/trees/{repo}"));
         assert_eq!(
-            root_line(&row, &RootSource::Default),
+            root_line(&layer(Some("~/trees/{repo}"), RootSource::Default)),
             "Worktree root: ~/trees/{repo} (default)"
         );
+        // The root is the winning layer's, not the settings template next to its label.
         assert_eq!(
-            root_line(
-                &row,
-                &RootSource::Profile {
+            root_line(&layer(
+                Some("/fast/{repo}"),
+                RootSource::Profile {
                     name: "build-box".to_string()
                 }
-            ),
-            "Worktree root: ~/trees/{repo} (from project profile build-box)"
+            )),
+            "Worktree root: /fast/{repo} (from project profile build-box)"
         );
         assert_eq!(
-            root_line(&row, &RootSource::Project),
-            "Worktree root: ~/trees/{repo} (project)"
+            root_line(&layer(Some("/p/{repo}"), RootSource::Project)),
+            "Worktree root: /p/{repo} (project)"
         );
         assert_eq!(
-            root_line(&self::row(None), &RootSource::Central),
+            root_line(&layer(None, RootSource::Central)),
             "Worktree root: central"
         );
     }

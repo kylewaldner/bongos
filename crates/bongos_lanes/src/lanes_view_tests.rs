@@ -1,4 +1,4 @@
-//! Tests of the data the Lanes view and the dry-run buffer read: PRD scenario 2's dry-run lines
+//! Tests of the data the Lanes view and the dry-run buffer read: the dry-run lines
 //! with nothing written, the rows, the summary, the `wait_text` registry and the gate
 //! notification.
 
@@ -124,7 +124,7 @@ fn files_under(root: &Path) -> Vec<(PathBuf, u64)> {
 }
 
 #[test]
-fn the_dry_run_prints_scenario_two_lines_and_writes_nothing() {
+fn the_dry_run_prints_its_lines_and_writes_nothing() {
     let root = TempDir::new().unwrap();
     let writer = writer(&root);
     let fixture = fixture();
@@ -269,7 +269,7 @@ fn the_registry_is_global(cx: &mut TestAppContext) {
 }
 
 #[test]
-fn the_rows_have_scenario_one_header_idle_reason_and_a_needs_you_listing() {
+fn the_rows_have_a_header_idle_reason_and_a_needs_you_listing() {
     let fixture = fixture();
     let dry = explain(
         &fixture.graph,
@@ -383,9 +383,10 @@ fn a_gate_notifies_exactly_once() {
     let sink = Arc::new(FakeSink::default());
     let notifier = GateNotifier::new(sink.clone());
     let notify = |run: &str, node: &str| {
-        writer
+        let pending = writer
             .transact(|tx| notifier.notify_gate(tx, run, node, "build-2", "needs you", SINCE))
-            .unwrap()
+            .unwrap();
+        pending.inspect(|pending| notifier.send(pending)).is_some()
     };
     assert!(notify("run-1", "merge"));
     assert!(!notify("run-1", "merge"));
@@ -393,4 +394,145 @@ fn a_gate_notifies_exactly_once() {
     assert!(notify("run-1", "deploy"));
     assert!(notify("run-2", "merge"));
     assert_eq!(sink.0.lock().unwrap().len(), 3);
+}
+
+#[test]
+fn a_gate_sends_nothing_when_its_transaction_fails() {
+    let root = TempDir::new().unwrap();
+    let writer = writer(&root);
+    let sink = Arc::new(FakeSink::default());
+    let notifier = GateNotifier::new(sink.clone());
+    let result = writer.transact::<()>(|tx| {
+        let pending = notifier.notify_gate(tx, "run-1", "merge", "build-2", "needs you", SINCE)?;
+        assert!(pending.is_some());
+        anyhow::bail!("the transaction fails after the gate was recorded")
+    });
+    assert!(result.is_err());
+    assert!(sink.0.lock().unwrap().is_empty());
+}
+
+const SHIP_FLOW: &str = r#"
+schema = 1
+name = "ship"
+start = "merge"
+
+[nodes.merge]
+kind = "program"
+use = "merge"
+output = { result = { type = "choice", values = ["merged", "conflict"] } }
+routes = [{ to = "deploy" }]
+
+[nodes.deploy]
+kind = "program"
+use = "wait"
+with = { condition = "deploy" }
+output = { result = { type = "choice", values = ["satisfied", "waiting"] } }
+routes = [{ to = "done" }]
+
+[ends.done]
+kind = "success"
+"#;
+
+const GATED_FLOW: &str = r#"
+schema = 1
+name = "careful"
+start = "merge"
+
+[nodes.merge]
+kind = "program"
+use = "merge"
+gate = { when = "before", question = "Merge now?" }
+output = { result = { type = "choice", values = ["merged", "conflict"] } }
+routes = [{ to = "done" }]
+
+[ends.done]
+kind = "success"
+"#;
+
+#[test]
+fn the_summary_finds_steps_that_merge_or_deploy_without_a_gate() {
+    let root = TempDir::new().unwrap();
+    for (name, text) in [("ship", SHIP_FLOW), ("careful", GATED_FLOW)] {
+        let dir = root.path().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("workflow.toml"), text).unwrap();
+    }
+    let dirs = bongos_workflow_model::LayerDirs {
+        profile: Some(root.path().to_path_buf()),
+        ..Default::default()
+    };
+    let names = ["careful", "missing", "ship"].map(str::to_string);
+    let found = crate::ungated_steps(&dirs, &names);
+    assert_eq!(
+        found["ship"],
+        vec!["merge".to_string(), "deploy".to_string()]
+    );
+    assert_eq!(found["careful"], Vec::<String>::new());
+    assert!(!found.contains_key("missing"));
+}
+
+#[test]
+fn the_summary_takes_counts_unattended_and_bound_from_their_layers() {
+    let table = crate::locations_tests::table(
+        r#"schema = 1
+
+[[kind]]
+name = "design"
+count = 2
+unattended = false
+rules = ["prepare"]
+
+[[kind]]
+name = "build"
+count = 3
+rules = ["prepare"]
+
+[rules.prepare]
+workflow = "ship"
+"#,
+    );
+    let profile = crate::locations_tests::FakeProfile {
+        name: Some("fast-box".to_string()),
+        counts: [("build".to_string(), 5)].into(),
+        ..Default::default()
+    };
+    let context = crate::SummaryContext {
+        project_id: "project-1".to_string(),
+        profile: Some(Arc::new(profile)),
+        ungated: [("ship".to_string(), vec!["merge".to_string()])].into(),
+        within: Some("0193".to_string()),
+    };
+    let inputs = crate::summary_inputs(&table, HandoverNote::default(), &context);
+    let counts: Vec<_> = inputs
+        .counts
+        .iter()
+        .map(|count| (count.kind.as_str(), count.count, count.layer.as_str()))
+        .collect();
+    assert_eq!(
+        counts,
+        [
+            ("design", 2, "lanes.toml"),
+            ("build", 5, "project profile fast-box")
+        ]
+    );
+    let unattended: Vec<_> = inputs
+        .unattended
+        .iter()
+        .map(|choice| {
+            (
+                choice.kind.as_str(),
+                choice.unattended,
+                choice.source.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        unattended,
+        [
+            ("design", false, "lanes.toml"),
+            ("build", true, "the project default")
+        ]
+    );
+    assert_eq!(inputs.workflows[0].ungated, vec!["merge".to_string()]);
+    assert_eq!(inputs.bound.as_deref(), Some("within 0193"));
 }

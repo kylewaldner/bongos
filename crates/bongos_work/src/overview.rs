@@ -52,10 +52,20 @@ pub struct RepositoryRow {
     pub old_root: Vec<(String, String)>,
 }
 
-/// Decides a repository's worktree root layer above the user's settings: the project's lane
-/// table, the project profile, a lane's own location. Gives the layer for the repository named,
-/// or `None` when it does not decide that repository's root.
-pub type RootLayerSource = fn(&str, &gpui::App) -> Option<RootSource>;
+/// The root a layer above the user's settings decided for a repository: its template (with
+/// `{repo}` and `{slug}`) and the layer that set it. The two always go together, so the screen
+/// never pairs one layer's label with another layer's root.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RootLayer {
+    /// The template text in force; `None` for the central directory.
+    pub template: Option<String>,
+    pub source: RootSource,
+}
+
+/// Decides a repository's worktree root above the user's settings: the project's lane table, the
+/// project profile, a lane's own location. Gives the root and layer for the repository named, or
+/// `None` when it does not decide that repository's root.
+pub type RootLayerSource = fn(&str, &gpui::App) -> Option<RootLayer>;
 
 /// The registered [`RootLayerSource`]s, last registered first asked.
 #[derive(Clone, Default)]
@@ -68,10 +78,10 @@ impl RootLayers {
         cx.default_global::<Self>().0.push(source);
     }
 
-    /// The layer that won for `row`: the last registered source that answers, else the layer of
-    /// the user's settings the row was computed with. The Repositories screen labels the root
-    /// with it.
-    pub fn winning(row: &RepositoryRow, cx: &gpui::App) -> RootSource {
+    /// The root and layer that won for `row`: the last registered source that answers, else the
+    /// root and layer of the user's settings the row was computed with. The Repositories screen
+    /// shows the root with its layer.
+    pub fn winning(row: &RepositoryRow, cx: &gpui::App) -> RootLayer {
         cx.try_global::<Self>()
             .and_then(|layers| {
                 layers
@@ -80,7 +90,10 @@ impl RootLayers {
                     .rev()
                     .find_map(|source| source(&row.name, cx))
             })
-            .unwrap_or_else(|| row.root_source.clone())
+            .unwrap_or_else(|| RootLayer {
+                template: row.template.clone(),
+                source: row.root_source.clone(),
+            })
     }
 }
 

@@ -25,6 +25,8 @@ use bongos_lanes_model::{AdoptRefusal, Author, LaneId, LaneState, LanesState, Ow
 use bongos_project_repo::{ProjectRepo, ProjectRepositorySettings};
 use bongos_work_model::PersonAtKeyboard;
 use bongos_work_model::commands::Context as WorkContext;
+use bongos_work_model::derive::{self, Shape};
+use bongos_work_model::store::WorkTree;
 use command_palette_hooks::CommandPaletteFilter;
 use gpui::{App, AppContext as _, Context, Global, Task, Window};
 use settings::{Settings as _, SettingsStore};
@@ -628,6 +630,7 @@ fn start_adopt(
                 lane: Some(args.lane.to_string()),
                 reason: Some(args.reason.clone()),
                 confirm_drop: args.confirm_drop,
+                within: None,
                 person: Some(ctx.author.name.clone()),
             };
             let sending = access.request(
@@ -742,6 +745,16 @@ fn start_action(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
+    start_within(workspace, None, window, cx);
+}
+
+/// `lanes: start`, bounded to the group `within` when it names one (`task: run` on a group).
+fn start_within(
+    workspace: &mut Workspace,
+    within: Option<String>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
     if !LanesSettings::get_global(cx).enabled {
         show_toast(workspace, OFF_MESSAGE, cx);
         return;
@@ -763,17 +776,24 @@ fn start_action(
         window_mode,
         runs_in_progress,
     };
+    let bound = within.clone();
     crate::surfaces::summarize_then_start(
         repo,
         handover,
-        Box::new(move |workspace, window, cx| start_confirmed(workspace, window, cx)),
+        bound,
+        Box::new(move |workspace, window, cx| start_confirmed(workspace, within, window, cx)),
         window,
         cx,
     );
 }
 
 /// What `lanes: start` does once the person confirmed the summary.
-fn start_confirmed(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+fn start_confirmed(
+    workspace: &mut Workspace,
+    within: Option<String>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
     let Some((repo, access)) = sole_project(cx) else {
         show_toast(workspace, ENGINE_HOST_MESSAGE, cx);
         return;
@@ -783,6 +803,7 @@ fn start_confirmed(workspace: &mut Workspace, window: &mut Window, cx: &mut Cont
     if !access.is_local() || EngineHostProcess::is_running(cx) {
         let payload = LanesPayload {
             person: Some(person),
+            within,
             ..LanesPayload::default()
         };
         send_lanes_command(access, LanesVerb::Start, payload, window, cx);
@@ -797,7 +818,7 @@ fn start_confirmed(workspace: &mut Workspace, window: &mut Window, cx: &mut Cont
     };
     let busy = EngineRuns.in_flight(&runs, cx);
     if busy == 0 {
-        hand_over_and_start(repo, DrainChoice::Wait, person, window, cx);
+        hand_over_and_start(repo, DrainChoice::Wait, person, within, window, cx);
         return;
     }
     let labels = DRAIN_CHOICES.iter().map(ToString::to_string).collect();
@@ -808,7 +829,7 @@ fn start_confirmed(workspace: &mut Workspace, window: &mut Window, cx: &mut Cont
                 1 => DrainChoice::InterruptNow,
                 _ => return,
             };
-            hand_over_and_start(repo, choice, person, window, cx);
+            hand_over_and_start(repo, choice, person, within, window, cx);
         },
     );
     pick(workspace, drain_question(busy), labels, then, window, cx);
@@ -819,6 +840,7 @@ fn hand_over_and_start(
     repo: ProjectRepo,
     choice: DrainChoice,
     person: String,
+    within: Option<String>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -884,6 +906,7 @@ fn hand_over_and_start(
                     cx.set_global(WindowLanes(None));
                     let payload = LanesPayload {
                         person: Some(person),
+                        within,
                         ..LanesPayload::default()
                     };
                     EngineAccess::Remote(client).request(
@@ -911,14 +934,50 @@ fn hand_over_and_start(
     .detach();
 }
 
-/// `task: run`: an alias of `lanes: start`; the app binds it to the focused group.
+/// What `task: run` does for the task at point.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunTarget {
+    /// A group: `lanes: start` bounded to it.
+    Group(String),
+    /// A leaf: feature 20's `workflow: run`, which asks for the leaf's workflow.
+    Leaf,
+    /// No task at point: `lanes: start` over the whole project.
+    Project,
+}
+
+/// Where `task: run` goes for `task` (the task at point) in `tree`.
+pub fn run_target(tree: Option<&WorkTree>, task: Option<&str>) -> RunTarget {
+    let (Some(tree), Some(id)) = (tree, task) else {
+        return RunTarget::Project;
+    };
+    match tree.task_by_id(id) {
+        None => RunTarget::Project,
+        Some(found) if derive::shape(found, tree) == Shape::Group => {
+            RunTarget::Group(id.to_string())
+        }
+        Some(_) => RunTarget::Leaf,
+    }
+}
+
+/// `task: run`: on a group it is `lanes: start` bounded to the group; on a leaf it is
+/// `workflow: run`; with no task at point it starts the lanes over the whole project.
 fn run_alias_action(
     workspace: &mut Workspace,
     _: &task::Run,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    start_action(workspace, &lanes::Start, window, cx);
+    if !LanesSettings::get_global(cx).enabled {
+        show_toast(workspace, OFF_MESSAGE, cx);
+        return;
+    }
+    let tree = bongos_work::WorkStore::global(cx).and_then(|store| store.read(cx).snapshot());
+    let at_point = bongos_work::task_at_point(workspace, window, cx);
+    match run_target(tree.as_deref(), at_point.as_deref()) {
+        RunTarget::Group(id) => start_within(workspace, Some(id), window, cx),
+        RunTarget::Project => start_within(workspace, None, window, cx),
+        RunTarget::Leaf => window.dispatch_action(Box::new(bongos_workflow::workflow::Run), cx),
+    }
 }
 
 /// Registers the handlers of the actions of lanes on `workspace`. None is bound to a key.

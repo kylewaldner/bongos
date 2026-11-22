@@ -17,8 +17,8 @@ use std::rc::Rc;
 use anyhow::{Result, anyhow, bail};
 use bongos_engine_host::{EngineHostProcess, HostCommands, HostEvent, LanesVerb, WriterHosts};
 use bongos_lanes_model::{
-    Author, JobRecord, LaneId, LaneTable, LiveFacts, PickGraph, Problem, RunSubject, StampFile,
-    TaskId, from_work_tree, parse, short_run,
+    Author, JobRecord, LaneId, LaneTable, LiveFacts, PickBound, PickGraph, Problem, RunSubject,
+    StampFile, TaskId, from_work_tree, parse, short_run,
 };
 use bongos_project_repo::{
     ChangeFilter, ChangeState, LandingEvent, LandingResult, PeerIdentity, PersonClaim, ProjectRepo,
@@ -62,6 +62,9 @@ pub struct LanesPayload {
     pub reason: Option<String>,
     /// The person agreed to drop a halted job's unreadable work.
     pub confirm_drop: bool,
+    /// A start bounded to this group (`task: run` on a group): the lanes take only leaves under it.
+    #[serde(default)]
+    pub within: Option<String>,
     /// The person at the sending window's keyboard. The writer takes it as the author only from a
     /// window of its own executable; a command-line peer's is ignored.
     pub person: Option<String>,
@@ -185,7 +188,9 @@ fn handle(
         LanesVerb::Start if EngineHostProcess::is_running(cx) => {
             let starting = lanes.start(
                 StartLanes {
-                    bound: None,
+                    bound: payload
+                        .within
+                        .map(|group| PickBound::Within(TaskId::new(group))),
                     max_jobs: None,
                     unattended: None,
                     by,

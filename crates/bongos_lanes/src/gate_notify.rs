@@ -35,20 +35,29 @@ pub fn notify_open_gates(
     if !enabled || client_attached || gates.is_empty() {
         return Ok(0);
     }
-    writer.transact(|tx| {
+    let pending = writer.transact(|tx| {
         let state = read_state_in(tx)?;
         let Some(lane) = lane_of_run(&state, run_id) else {
-            return Ok(0);
+            return Ok(Vec::new());
         };
-        let mut sent = 0;
+        let mut pending = Vec::new();
         for (key, question) in gates {
             let title = format!("{lane} needs you");
-            if notifier.notify_gate(tx, run_id, &key.to_string(), &title, question, now)? {
-                sent += 1;
-            }
+            pending.extend(notifier.notify_gate(
+                tx,
+                run_id,
+                &key.to_string(),
+                &title,
+                question,
+                now,
+            )?);
         }
-        Ok(sent)
-    })
+        Ok(pending)
+    })?;
+    for notification in &pending {
+        notifier.send(notification);
+    }
+    Ok(pending.len())
 }
 
 fn lane_of_run(state: &LanesState, run_id: &str) -> Option<String> {

@@ -3,10 +3,14 @@
 //! pre-run summary in a read-only buffer before it asks whether to start. Each reads the project's
 //! store and repository only, so a client window shows the same.
 
+use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use bongos_lanes_model::LaneTable;
 use bongos_project_repo::ProjectRepo;
+use bongos_workflow::WorkflowEngine;
+use bongos_workflow_model::LayerDirs;
 use editor::{Editor, MultiBuffer};
 use gpui::{AppContext as _, Context, Window};
 use language::Capability;
@@ -15,8 +19,10 @@ use workspace::Workspace;
 
 use crate::LanesSettings;
 use crate::actions::{OFF_MESSAGE, ONE_PROJECT_MESSAGE, lanes, pick, show_toast};
+use crate::dispatcher::PROJECT_UNATTENDED;
 use crate::dry_run::{DryRunInputs, dry_run_buffer_in};
 use crate::lanes_view::{StoreLanes, show_lanes_view};
+use crate::profile::{LaneProfileSource, LaneProfiles};
 use crate::read_modes::load;
 use crate::store::read_state;
 use crate::summary::{
@@ -144,18 +150,48 @@ pub fn dry_run_action(
     .detach();
 }
 
-/// The summary inputs the lane table alone gives: each kind's count (the layer is the table, and
-/// the profile when it sets one), the workflows its rules name, and the kinds that say whether
-/// they run unattended. The steps that merge or deploy without a gate need the definitions and
-/// are added by the caller that has them.
-pub fn summary_inputs(table: &LaneTable, handover: HandoverNote) -> SummaryInputs {
+/// What the summary needs besides the lane table.
+#[derive(Clone, Default)]
+pub struct SummaryContext {
+    /// The project id, which the profile is asked about.
+    pub project_id: String,
+    /// The project profile, when one is registered: its counts win over the table's.
+    pub profile: Option<Arc<dyn LaneProfileSource>>,
+    /// For each workflow name, the steps that merge or deploy without a gate.
+    pub ungated: BTreeMap<String, Vec<String>>,
+    /// The group the lanes are bounded to, when the start names one.
+    pub within: Option<String>,
+}
+
+/// The summary inputs from the lane table: each kind's effective count with its layer (the
+/// project profile's when it sets one, else the table), the workflows its rules name with their
+/// ungated steps from `context`, each kind's unattended choice with its source (the kind's own,
+/// else the project default the dispatcher uses), and the bound.
+pub fn summary_inputs(
+    table: &LaneTable,
+    handover: HandoverNote,
+    context: &SummaryContext,
+) -> SummaryInputs {
     let counts = table
         .kinds
         .iter()
-        .map(|kind| KindCount {
-            kind: kind.name.clone(),
-            count: kind.count,
-            layer: "lanes.toml".to_string(),
+        .map(|kind| {
+            let profile = context.profile.as_deref();
+            match profile.and_then(|profile| profile.count(&context.project_id, &kind.name)) {
+                Some(count) => KindCount {
+                    kind: kind.name.clone(),
+                    count,
+                    layer: match profile.and_then(|profile| profile.name(&context.project_id)) {
+                        Some(name) => format!("project profile {name}"),
+                        None => "the project profile".to_string(),
+                    },
+                },
+                None => KindCount {
+                    kind: kind.name.clone(),
+                    count: kind.count,
+                    layer: "lanes.toml".to_string(),
+                },
+            }
         })
         .collect();
     let mut names: Vec<String> = table
@@ -172,13 +208,17 @@ pub fn summary_inputs(table: &LaneTable, handover: HandoverNote) -> SummaryInput
     let unattended = table
         .kinds
         .iter()
-        .filter_map(|kind| {
-            kind.unattended
-                .map(|unattended| crate::summary::UnattendedChoice {
-                    kind: kind.name.clone(),
-                    unattended,
-                    source: "lanes.toml".to_string(),
-                })
+        .map(|kind| match kind.unattended {
+            Some(unattended) => crate::summary::UnattendedChoice {
+                kind: kind.name.clone(),
+                unattended,
+                source: "lanes.toml".to_string(),
+            },
+            None => crate::summary::UnattendedChoice {
+                kind: kind.name.clone(),
+                unattended: PROJECT_UNATTENDED.value,
+                source: "the project default".to_string(),
+            },
         })
         .collect();
     SummaryInputs {
@@ -186,13 +226,57 @@ pub fn summary_inputs(table: &LaneTable, handover: HandoverNote) -> SummaryInput
         workflows: names
             .into_iter()
             .map(|name| WorkflowSummary {
+                ungated: context.ungated.get(&name).cloned().unwrap_or_default(),
                 name,
-                ungated: Vec::new(),
             })
             .collect(),
         unattended,
-        bound: None,
+        bound: context
+            .within
+            .as_ref()
+            .map(|group| format!("within {group}")),
         handover,
+    }
+}
+
+/// The steps of each workflow in `names` that merge, or wait on a deploy, with no gate. A name no
+/// layer defines, or a definition that does not parse, is left out (the definition check says
+/// why).
+pub fn ungated_steps(dirs: &LayerDirs, names: &[String]) -> BTreeMap<String, Vec<String>> {
+    let resolution = bongos_workflow_model::layers::resolve(dirs);
+    let mut found = BTreeMap::new();
+    for name in names {
+        let Some(resolved) = resolution.get(name) else {
+            continue;
+        };
+        let path = resolved
+            .dir
+            .join(bongos_workflow_model::layers::DEFINITION_FILE);
+        let Some(definition) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| bongos_workflow_model::parse(&text).ok())
+        else {
+            continue;
+        };
+        let steps = definition
+            .nodes
+            .iter()
+            .filter(|node| node.gate.is_none() && merges_or_deploys(node))
+            .map(|node| node.name.clone())
+            .collect();
+        found.insert(name.clone(), steps);
+    }
+    found
+}
+
+fn merges_or_deploys(node: &bongos_workflow_model::definition::Node) -> bool {
+    let used = node.use_node.as_ref().map(|used| used.value.as_str());
+    match used {
+        Some("merge") => true,
+        Some("wait") => {
+            node.with.get("condition").and_then(|value| value.as_str()) == Some("deploy")
+        }
+        _ => false,
     }
 }
 
@@ -201,24 +285,58 @@ pub fn summary_inputs(table: &LaneTable, handover: HandoverNote) -> SummaryInput
 pub fn summarize_then_start(
     repo: ProjectRepo,
     handover: HandoverNote,
+    within: Option<String>,
     start: Box<dyn FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>)>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
     let location = repo.location().clone();
-    let loading = cx.background_spawn(async move { load(&location, 1).await });
+    let project_id = location.id.clone();
+    let engine_dirs = cx
+        .try_global::<WorkflowEngine>()
+        .map(|engine| engine.dirs().clone())
+        .unwrap_or_default();
+    let profile = LaneProfiles::source(cx);
+    let loading = cx.background_spawn(async move {
+        let loaded = load(&location, 1).await?;
+        let mut names: Vec<String> = loaded
+            .table
+            .rules
+            .iter()
+            .filter_map(|rule| {
+                rule.workflow
+                    .as_ref()
+                    .map(|workflow| workflow.value.clone())
+            })
+            .collect();
+        names.sort();
+        names.dedup();
+        // The project layer is the shown commit's; the shipped and profile layers are the
+        // engine's. Reading git here blocks, which this executor allows.
+        let mut dirs = engine_dirs;
+        let layer = bongos_workflow::definitions::project_layer_in(&repo, None).ok();
+        dirs.project = layer.as_ref().map(|layer| layer.dir.clone());
+        let ungated = ungated_steps(&dirs, &names);
+        Ok::<_, anyhow::Error>((loaded, ungated))
+    });
     cx.spawn_in(window, async move |workspace, cx| {
         let loaded = loading.await;
         workspace
             .update_in(cx, |workspace, window, cx| {
-                let table = match loaded {
-                    Ok(loaded) => loaded.table,
+                let (table, ungated) = match loaded {
+                    Ok((loaded, ungated)) => (loaded.table, ungated),
                     Err(error) => {
                         show_toast(workspace, &format!("Lanes did not start: {error:#}"), cx);
                         return;
                     }
                 };
-                let inputs = summary_inputs(&table, handover);
+                let context = SummaryContext {
+                    project_id,
+                    profile,
+                    ungated,
+                    within,
+                };
+                let inputs = summary_inputs(&table, handover, &context);
                 let text = summary_text(&inputs, &SummarySections::sections(cx), cx);
                 open_text_buffer(SUMMARY_TITLE.to_string(), text, workspace, window, cx);
                 let choices = START_CHOICES.iter().map(ToString::to_string).collect();

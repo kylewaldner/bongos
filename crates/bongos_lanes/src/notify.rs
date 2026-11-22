@@ -82,8 +82,11 @@ impl GateNotifier {
         Self::new(Arc::new(SystemSink))
     }
 
-    /// Notifies that the gate `node_key` of run `run_id` waits on a person, unless it did before.
-    /// The record (the time `now`) commits with the transaction. Returns whether a notification went out.
+    /// Records that the gate `node_key` of run `run_id` waits on a person, unless it did before.
+    /// The record (the time `now`) commits with the transaction. Returns the notification to
+    /// [`send`](Self::send) once the transaction has committed, or `None` when the gate was
+    /// notified before. Nothing is sent from inside the transaction, so a rolled-back record
+    /// never leaves a notification behind.
     pub fn notify_gate(
         &self,
         tx: &mut StateTx,
@@ -92,14 +95,28 @@ impl GateNotifier {
         title: &str,
         body: &str,
         now: &str,
-    ) -> Result<bool> {
+    ) -> Result<Option<PendingNotification>> {
         let key = format!("{NOTIFIED_PREFIX}{run_id}/{node_key}");
         let mut kv = tx.kv(LANES_NAMESPACE);
         if kv.get(&key)?.is_some() {
-            return Ok(false);
+            return Ok(None);
         }
         kv.put(&key, toml::Value::String(now.to_string()))?;
-        self.sink.notify(title, body);
-        Ok(true)
+        Ok(Some(PendingNotification {
+            title: title.to_string(),
+            body: body.to_string(),
+        }))
     }
+
+    /// Sends a notification that [`notify_gate`](Self::notify_gate) returned.
+    pub fn send(&self, pending: &PendingNotification) {
+        self.sink.notify(&pending.title, &pending.body);
+    }
+}
+
+/// A gate notification recorded in a transaction and not sent yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingNotification {
+    pub title: String,
+    pub body: String,
 }

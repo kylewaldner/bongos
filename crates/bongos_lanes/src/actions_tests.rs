@@ -334,3 +334,23 @@ async fn lanes_adopt_of_an_unreadable_tree_asks_to_confirm_the_drop(cx: &mut Tes
         "{last}"
     );
 }
+
+#[test]
+fn task_run_goes_to_the_group_the_leaf_or_the_project() {
+    use crate::actions::{RunTarget, run_target};
+    use bongos_work_model::fixtures;
+    let tree = fixtures::tree(vec![fixtures::group(
+        "phase",
+        vec![fixtures::pr_ship("feature")],
+    )]);
+    let phase = fixtures::id_of(&tree, "phase");
+    let feature = fixtures::id_of(&tree, "feature");
+    assert_eq!(
+        run_target(Some(&tree), Some(&phase)),
+        RunTarget::Group(phase.clone())
+    );
+    assert_eq!(run_target(Some(&tree), Some(&feature)), RunTarget::Leaf);
+    assert_eq!(run_target(Some(&tree), None), RunTarget::Project);
+    assert_eq!(run_target(Some(&tree), Some("gone")), RunTarget::Project);
+    assert_eq!(run_target(None, Some(&phase)), RunTarget::Project);
+}
