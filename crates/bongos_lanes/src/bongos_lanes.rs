@@ -18,6 +18,7 @@ mod env;
 mod exporter;
 mod hooks;
 mod job_trees;
+mod lane_control;
 mod lane_tree;
 mod locations;
 mod prepare;
@@ -53,6 +54,10 @@ pub use hooks::{AFTER_TREE_CREATED, JobHook, JobHooks};
 pub use job_trees::{
     CurrentJobTrees, ExtraRepositories, JobRepositories, JobRepository, JobStart, JobTrees,
     StartedTrees, forbidden_for, start_job_trees,
+};
+pub use lane_control::{
+    BOUND_REASON, DispatcherPhase, LaneEvent, LaneEvents, LaneStatus, LaneTarget, LanesStatus,
+    RunEnd,
 };
 pub use lane_tree::{
     Forbidden, LaneMerge, LaneMergeError, LaneMerged, LastEnd, LastRun, MergeTarget, ResetOutcome,

@@ -41,6 +41,7 @@ use gpui::{App, Task};
 use serde::{Deserialize, Serialize};
 
 use crate::job_trees::JobTrees;
+use crate::lane_control::{BOUND_REASON, LaneEvents, RunEnd, paused_reason};
 use crate::locations::table_lane_ids;
 use crate::profile::LaneProfiles;
 use crate::store::{LANES_NAMESPACE, delete_lane, put_lane, put_owner, read_state_in};
@@ -56,6 +57,8 @@ const MAX_RESTARTS: usize = 8;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartLanes {
     pub bound: Option<PickBound>,
+    /// A lane stops after this many jobs of this start.
+    pub max_jobs: Option<u32>,
     /// Whether the lanes' runs run unattended; `None` leaves it to the lane kind or the project.
     pub unattended: Option<bool>,
     pub by: Author,
@@ -92,6 +95,12 @@ pub struct DispatcherRecord {
     pub unattended: Option<UnattendedChoice>,
     #[serde(default)]
     pub definition_commit: Option<String>,
+    /// Who asked every lane to stop.
+    #[serde(default)]
+    pub stopped_by: Option<Author>,
+    /// How the run ended, once it did.
+    #[serde(default)]
+    pub ended: Option<RunEnd>,
 }
 
 /// Reads the dispatcher record in `tx`.
@@ -208,6 +217,9 @@ pub trait JobEngine {
     fn instance_limit(&self, workflow: &str) -> Option<u32>;
     /// Calls `f` with every run status change from now on.
     fn observe(&self, f: Box<dyn Fn(&WorkflowEvent, &mut App)>, cx: &mut App);
+    /// Ends the dispatcher's own run: cancelled when every lane was stopped on request, succeeded
+    /// when every lane stopped for its bound. `note` says why.
+    fn end_dispatcher(&self, run: &str, end: RunEnd, note: &str, cx: &mut App);
 }
 
 impl JobEngine for WorkflowEngine {
@@ -246,6 +258,19 @@ impl JobEngine for WorkflowEngine {
 
     fn observe(&self, f: Box<dyn Fn(&WorkflowEvent, &mut App)>, cx: &mut App) {
         WorkflowEngine::observe(cx, f);
+    }
+
+    fn end_dispatcher(&self, run: &str, end: RunEnd, note: &str, cx: &mut App) {
+        match end {
+            RunEnd::Cancelled => {
+                log::info!("lanes: cancelling the dispatcher run {run}: {note}");
+                if let Err(refusal) = self.cancel(&run.to_string(), cx) {
+                    log::error!("lanes: cancelling the dispatcher run {run}: {refusal}");
+                }
+            }
+            // The engine has no way to finish a run on its own yet; the run stays active.
+            RunEnd::Succeeded => log::info!("lanes: the dispatcher run {run} is done: {note}"),
+        }
     }
 }
 
@@ -323,16 +348,21 @@ pub struct LanesStarted {
 /// The lanes of one project.
 pub struct Lanes {
     pub parts: LanesParts,
+    pub(crate) events: LaneEvents,
 }
 
 impl Lanes {
     pub fn new(parts: LanesParts) -> Self {
-        Self { parts }
+        Self {
+            parts,
+            events: LaneEvents::default(),
+        }
     }
 
     /// Starts the lanes, or attaches to the dispatcher a live host runs.
     pub fn start(&self, request: StartLanes, cx: &mut App) -> Task<Result<LanesStarted>> {
         let parts = self.parts.clone();
+        let events = self.events.clone();
         let host = parts.host.clone();
         if !host.is_repository_project() {
             return Task::ready(Err(StartRefusal::NotRepositoryProject.into()));
@@ -346,7 +376,7 @@ impl Lanes {
             if let Some(verify) = verify {
                 verify.await.map_err(StartRefusal::Profile)?;
             }
-            cx.update(|cx| start_verified(parts, project, request, cx))
+            cx.update(|cx| start_verified(parts, events, project, request, cx))
                 .map_err(Into::into)
         })
     }
@@ -354,6 +384,7 @@ impl Lanes {
 
 fn start_verified(
     parts: LanesParts,
+    events: LaneEvents,
     project: String,
     request: StartLanes,
     cx: &mut App,
@@ -425,6 +456,8 @@ fn start_verified(
         bound: request.bound.as_ref().map(RecordedBound::from),
         unattended,
         definition_commit: Some(verified.clone()),
+        stopped_by: None,
+        ended: None,
     };
     parts
         .writer
@@ -441,8 +474,10 @@ fn start_verified(
         table,
         counts,
         bound: request.bound,
+        max_jobs: request.max_jobs,
         unattended,
         verified,
+        events,
     });
     dispatcher.run(cx);
     dispatcher.evaluate(true, cx);
@@ -477,6 +512,25 @@ fn reconcile(tx: &mut StateTx, counts: &BTreeMap<String, u32>) -> Result<()> {
             put_lane(tx, &lane)?;
         }
     }
+    // A new start makes a stopped lane idle again (it takes its own stopped task first) and
+    // forgets a stop recorded on a halted or paused lane. A halted or paused lane stays as it is.
+    for (id, lane) in &state.lanes {
+        if plan.remove_now.contains(id) || plan.stop_after_job.contains(id) {
+            continue;
+        }
+        let mut updated = lane.clone();
+        if updated.stop_requested == Some(StopCause::Stop) {
+            updated.stop_requested = None;
+        }
+        if updated.state == LaneState::Stopped {
+            updated.state = LaneState::Idle;
+            updated.reason = None;
+            updated.stop_requested = None;
+        }
+        if updated != *lane {
+            put_lane(tx, &updated)?;
+        }
+    }
     Ok(())
 }
 
@@ -490,9 +544,11 @@ pub struct DispatcherConfig {
     /// The effective lane count of each kind.
     pub counts: BTreeMap<String, u32>,
     pub bound: Option<PickBound>,
+    pub max_jobs: Option<u32>,
     /// The start's unattended choice.
     pub unattended: Option<UnattendedChoice>,
     pub verified: String,
+    pub events: LaneEvents,
 }
 
 /// The loop of one project's lanes. Cheap to clone.
@@ -509,6 +565,10 @@ pub(crate) struct Inner {
     again: Cell<Option<bool>>,
     passes: Cell<usize>,
     restarts: Cell<usize>,
+    /// The dispatcher's run ended; no pass runs any more.
+    ended: Cell<bool>,
+    /// Each lane's `jobs_done` when this dispatcher first saw it, for `max_jobs`.
+    baseline: RefCell<BTreeMap<LaneId, u32>>,
     triggers: RefCell<Vec<Task<()>>>,
 }
 
@@ -539,6 +599,8 @@ impl Dispatcher {
             again: Cell::new(None),
             passes: Cell::new(0),
             restarts: Cell::new(0),
+            ended: Cell::new(false),
+            baseline: RefCell::new(BTreeMap::new()),
             triggers: RefCell::new(Vec::new()),
         }))
     }
@@ -651,6 +713,9 @@ impl Dispatcher {
     /// asked for while one runs runs right after it.
     pub fn evaluate(&self, full: bool, cx: &mut App) {
         let inner = &self.0;
+        if inner.ended.get() {
+            return;
+        }
         if inner.passing.get() {
             let pending = inner.again.get().unwrap_or(false);
             inner.again.set(Some(pending || full));
@@ -666,6 +731,19 @@ impl Dispatcher {
             }
         }
         inner.passing.set(false);
+        if self.end_if_at_rest(cx) {
+            inner.ended.set(true);
+        } else if self.run_ended() {
+            inner.ended.set(true);
+        }
+    }
+
+    /// Whether the dispatcher's record says its run ended (another handle ended it).
+    fn run_ended(&self) -> bool {
+        self.parts()
+            .writer
+            .transact(dispatcher_record)
+            .is_ok_and(|record| record.is_some_and(|record| record.ended.is_some()))
     }
 
     fn pass(&self, full: bool, cx: &mut App) {
@@ -739,6 +817,25 @@ impl Dispatcher {
             self.stop_at_boundary(tx, &state, &updated, now)?;
             return Ok(LaneStep::Nothing);
         }
+        if updated.pause_requested {
+            updated.state = LaneState::Paused;
+            updated.pause_requested = false;
+            updated.reason = Some(paused_reason(&record.reason));
+            put_lane(tx, &updated)?;
+            return Ok(LaneStep::Nothing);
+        }
+        if let Some(max) = self.0.config.max_jobs {
+            let base = *self
+                .0
+                .baseline
+                .borrow_mut()
+                .entry(lane.clone())
+                .or_insert(record.jobs_done);
+            if record.jobs_done.saturating_sub(base) >= max {
+                self.stop_for_bound(tx, &state, updated, now)?;
+                return Ok(LaneStep::Nothing);
+            }
+        }
         let commit = match commit {
             JobCommit::Use(commit) => commit.clone(),
             JobCommit::Wait(reason) => {
@@ -783,6 +880,10 @@ impl Dispatcher {
                 owner_change,
             } => {
                 apply_owner_changes(tx, &state, &owner_change, lane, now)?;
+                if self.0.config.bound.is_some() && only_bound(&reasons) {
+                    self.stop_for_bound(tx, &state, updated, now)?;
+                    return Ok(LaneStep::Nothing);
+                }
                 updated.state = LaneState::Idle;
                 updated.reason = Some(idle_reason(reasons));
                 write_lane_if_changed(tx, record, &updated)?;
@@ -797,6 +898,20 @@ impl Dispatcher {
                 Ok(LaneStep::Nothing)
             }
         }
+    }
+
+    /// Stops an idle lane that reached its bound, with the owner of its task.
+    fn stop_for_bound(
+        &self,
+        tx: &mut StateTx,
+        state: &LanesState,
+        mut lane: LaneRecord,
+        now: &str,
+    ) -> Result<()> {
+        lane.state = LaneState::Idle;
+        lane.reason = Some(WaitReason::Other(BOUND_REASON.to_string()));
+        lane.stop_requested = Some(StopCause::Bound);
+        self.stop_at_boundary(tx, state, &lane, now)
     }
 
     /// Stops an idle lane with a stop asked for, with the owner of its task.
@@ -906,6 +1021,20 @@ impl Dispatcher {
 
 /// The reason of an idle lane when the picker names no candidate at all.
 pub const NOTHING_READY: &str = "nothing ready";
+
+/// Whether every reason a lane found for waiting is the bound, another lane's ownership or a
+/// finished task, with at least one the bound: the lane has reached its bound.
+fn only_bound(reasons: &[bongos_lanes_model::Waiting]) -> bool {
+    reasons
+        .iter()
+        .any(|waiting| waiting.reason == WaitReason::Bound)
+        && reasons.iter().all(|waiting| {
+            matches!(
+                waiting.reason,
+                WaitReason::Bound | WaitReason::Owner { .. } | WaitReason::Finished
+            )
+        })
+}
 
 /// What an idle lane shows: the best-ranked candidate's reason, skipping candidates another lane
 /// owns (they are that lane's work, not this one's wait), or [`NOTHING_READY`].

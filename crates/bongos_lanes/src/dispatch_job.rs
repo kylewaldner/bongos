@@ -304,6 +304,15 @@ fn job_changed(
     } else {
         (transition.lane.clone(), Some(transition.owner.clone()))
     };
+    let mut lane_after = lane_after;
+    if lane.pause_requested {
+        match lane_after.state {
+            // The pause is applied by the next pass; it keeps who asked for it.
+            LaneState::Idle => lane_after.reason = lane.reason,
+            LaneState::Paused | LaneState::Stopped => lane_after.pause_requested = false,
+            LaneState::Running | LaneState::Halted | LaneState::Waiting => {}
+        }
+    }
     put_lane(tx, &lane_after)?;
     if let (Some((task, before)), Some(owner_after)) = (&held, owner_after) {
         if *before != owner_after {
