@@ -50,7 +50,7 @@ impl Git {
 
     /// Runs git with `args` in `directory` and returns its whole output, whatever the exit status.
     /// Replace refs are ignored (`GIT_NO_REPLACE_OBJECTS`): a program node may write `refs/`.
-    pub(crate) async fn output(&self, directory: &Path, args: &[&str]) -> Result<Output, GitError> {
+    pub async fn output(&self, directory: &Path, args: &[&str]) -> Result<Output, GitError> {
         util::command::new_command(&self.binary)
             .current_dir(directory)
             .env("GIT_NO_REPLACE_OBJECTS", "1")
@@ -66,7 +66,7 @@ impl Git {
 
     /// Runs git with `args` in `directory` and returns its trimmed output, or its error output as
     /// the error.
-    pub(crate) async fn run(&self, directory: &Path, args: &[&str]) -> Result<String, GitError> {
+    pub async fn run(&self, directory: &Path, args: &[&str]) -> Result<String, GitError> {
         let output = self.output(directory, args).await?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -79,7 +79,7 @@ impl Git {
     }
 
     /// Whether `directory`'s worktree has uncommitted changes, untracked files included.
-    pub(crate) async fn is_dirty(&self, directory: &Path) -> Result<bool, GitError> {
+    pub async fn is_dirty(&self, directory: &Path) -> Result<bool, GitError> {
         let status = self
             .run(
                 directory,
