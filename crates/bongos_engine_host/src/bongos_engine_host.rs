@@ -13,6 +13,7 @@ mod ensure;
 mod handover;
 mod host_file;
 mod host_process;
+mod participants;
 pub mod protocol;
 pub mod server;
 mod socket;
@@ -45,6 +46,7 @@ pub use host_process::{
     BUSY_RECHECK, EngineHostProcess, HostBusy, HostProcessOptions, held_by_message, host_is_busy,
     open_host_writer, stop_serving, take_host_writer, wait_until_idle,
 };
+pub use participants::{WriterParticipant, WriterParticipants};
 pub use protocol::{
     ClientMessage, HostCommand, HostCtl, HostEvent, HostMode, HostResult, HostTopic, LanesVerb,
     PROTOCOL_VERSION, ServerMessage, WorkflowVerb, version_refusal,

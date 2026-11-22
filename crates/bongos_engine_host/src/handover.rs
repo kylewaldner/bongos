@@ -3,10 +3,15 @@
 //! The host connects to the window's socket and asks for the writer (`Host(Handover)`), then
 //! waits on the writer lock with a blocking `flock`. The window, in order:
 //! 1. answers every other request with [`MOVING_REFUSAL`] (clients try again);
-//! 2. drains the workflow engine: no new node starts, the nodes running finish and are recorded;
-//!    runs with no process (a gate, a sleeping poll) are handed over as they are. When a node
-//!    still runs after `lanes.host.handover_timeout_seconds`, the person is asked again whether
-//!    to wait or to interrupt the runs now (recorded interrupted, as at quit);
+//! 2. drains the workflow engine and task checks together: no new node starts, the nodes
+//!    running finish and are recorded; runs with no process (a gate, a sleeping poll) are handed
+//!    over as they are. Task checks stop their check runs; each workflow checks node whose check
+//!    was stopped gets `ChecksDrained` and counts as parked, so a long check never delays the
+//!    drain, and the run starts that key again from its kept parts in the host. When a node still
+//!    runs after `lanes.host.handover_timeout_seconds`, the person is asked again whether to wait
+//!    or to interrupt the runs now (recorded interrupted, as at quit). Once both drains resolved,
+//!    the writer participants ([`WriterParticipants`]) drain one after the other, in
+//!    registration order, so none drains while a node process runs;
 //! 3. writes `host.json` with `moving: { to_pid }`, appends `HandedOver` to every live run of the
 //!    project and unloads them (it never writes to them again), sends its own later writes to a
 //!    queue, tells its clients the writer moves, stops taking clients, removes the socket,
@@ -24,8 +29,10 @@
 //! and attaches to the new writer. One that read `host.json` before `moving` was written and
 //! then won the lock reads it again right after ([`take_writer_checked`]) and lets the lock go.
 //!
-//! Draining task checks and the writer participants other features register join step 2 later;
-//! they plug in beside [`HandoverRuns::drain`].
+//! A cancelled handover undrains the runs and task checks here, only once task checks' drain
+//! resolved and each node whose check it stopped got `ChecksDrained` (so that node starts again
+//! from its kept parts); "interrupt them now" waits for that too. Undraining the writer
+//! participants on a take-back belongs with the take-back.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -35,12 +42,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
+use bongos_checks::ChecksEngine;
 use bongos_project_repo::{
     LocalSink, Location, OpenError, PeerIdentity, ProjectRepo, RepoCommand, RepoReply,
     StateApplyHooks, StateEvent, StateOp, StateSink, StateStore, StateWriter,
 };
 use bongos_project_repo_model::Author;
 use bongos_workflow::WorkflowEngine;
+use bongos_workflow_model::NodeKey;
 use futures::channel::oneshot;
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{App, AppContext as _, AsyncApp, BackgroundExecutor, Global, Task};
@@ -51,6 +60,7 @@ use crate::access::{EngineAccess, EngineAccesses};
 use crate::client::{ClientOptions, HostClient};
 use crate::ensure::{HostSpawner, POLL_INTERVAL};
 use crate::host_file::{HostInfo, Moving, move_in_progress, process_is, read_host_file};
+use crate::participants::WriterParticipants;
 use crate::protocol::{HostCommand, HostCtl, HostEvent, HostTopic};
 use crate::window::WriterHosts;
 
@@ -99,6 +109,14 @@ pub trait HandoverRuns {
     fn drain(&self, cx: &mut App) -> oneshot::Receiver<()>;
     /// Lets nodes start again.
     fn undrain(&self, cx: &mut App);
+    /// Task checks' drain: stops every check run and resolves with the workflow nodes, as
+    /// `(run, key)`, whose checks it stopped.
+    fn drain_checks(&self, cx: &mut App) -> Task<Vec<(String, NodeKey)>>;
+    /// Task checks take runs again.
+    fn undrain_checks(&self, cx: &mut App);
+    /// Records `ChecksDrained { key }` in `run`: the key counts as parked and the run starts it
+    /// again from its kept parts wherever it is loaded next.
+    fn checks_drained(&self, run: &str, key: &NodeKey, cx: &mut App);
     /// Stops the processes of `runs` and records them interrupted.
     fn interrupt(&self, runs: &[String], cx: &mut App);
     /// `HandedOver { to_pid }` to each of `runs`, then unloads them.
@@ -142,6 +160,29 @@ impl HandoverRuns for EngineRuns {
     fn undrain(&self, cx: &mut App) {
         if let Some(engine) = cx.try_global::<WorkflowEngine>() {
             engine.undrain();
+        }
+    }
+
+    fn drain_checks(&self, cx: &mut App) -> Task<Vec<(String, NodeKey)>> {
+        match ChecksEngine::global(cx) {
+            Some(engine) => engine.update(cx, |engine, cx| engine.drain(cx)),
+            None => Task::ready(Vec::new()),
+        }
+    }
+
+    fn undrain_checks(&self, cx: &mut App) {
+        if let Some(engine) = ChecksEngine::global(cx) {
+            engine.update(cx, |engine, cx| engine.undrain(cx));
+        }
+    }
+
+    fn checks_drained(&self, run: &str, key: &NodeKey, cx: &mut App) {
+        let Some(engine) = cx.try_global::<WorkflowEngine>().cloned() else {
+            return;
+        };
+        if let Err(error) = engine.checks_drained(run, key, cx) {
+            // An interrupted run, or one no longer loaded: its key is not in flight here.
+            log::warn!("recording the drained check {key} of run {run}: {error}");
         }
     }
 
@@ -438,8 +479,11 @@ impl Move {
         let queue_wait = self.times.start_timeout;
         cx.background_spawn(async move { repo.release_writer(queue_wait).await })
             .await?;
-        // The runs of other projects, if any, go on here.
-        cx.update(|cx| self.runs_source.undrain(cx));
+        // The runs and checks of other projects, if any, go on here.
+        cx.update(|cx| {
+            self.runs_source.undrain(cx);
+            self.runs_source.undrain_checks(cx);
+        });
         log::info!(
             "released the writer of {} to pid {}",
             self.id,
@@ -448,19 +492,68 @@ impl Move {
         Ok(())
     }
 
-    /// Step 2: no new node starts; waits for the running ones, asking again past the timeout.
+    /// Step 2: no new node starts and task checks stop, together; waits for the running nodes,
+    /// asking again past the timeout; then drains the writer participants in order.
     async fn drain(&self, request: Option<HandoverRequest>, cx: &mut AsyncApp) -> Result<()> {
-        // Task checks are stopped beside this drain (their nodes then count as parked), and the
-        // writer participants other features register drain after both, in registration
-        // order; neither exists yet, so the drain is the runs' alone.
-        let mut drained = cx.update(|cx| self.runs_source.drain(cx)).fuse();
+        self.drain_runs_and_checks(request, cx).await?;
+        // Only now, with no node process running, the writer participants, one after the other.
+        cx.update(|cx| WriterParticipants::drain(&self.id, cx))
+            .await;
+        Ok(())
+    }
+
+    /// The runs' drain and task checks' drain, started together. Each workflow node whose check
+    /// was stopped gets `ChecksDrained` (exactly those task checks name), which parks it, so the
+    /// runs' drain then waits only on the other nodes.
+    ///
+    /// Every way out waits for task checks' drain to resolve and its nodes to be recorded first:
+    /// a cancel (then the checks are undrained, and a stopped check whose run ended after that
+    /// would no longer count as drained, so its cancelled report would become the node's
+    /// result), and "interrupt them now" (a run whose only node in flight is a check is parked,
+    /// not recorded interrupted).
+    async fn drain_runs_and_checks(
+        &self,
+        request: Option<HandoverRequest>,
+        cx: &mut AsyncApp,
+    ) -> Result<()> {
+        let (runs_drained, checks_drained) = cx.update(|cx| {
+            (
+                self.runs_source.drain(cx),
+                self.runs_source.drain_checks(cx),
+            )
+        });
+        let runs_source = self.runs_source.clone();
+        let recording = cx.clone();
+        let checks = async move {
+            let stopped = checks_drained.await;
+            recording.update(|cx| {
+                for (run, key) in &stopped {
+                    runs_source.checks_drained(run, key, cx);
+                }
+            });
+        }
+        .boxed_local()
+        .shared();
+        let mut drained = {
+            let checks = checks.clone();
+            async move {
+                checks.await;
+                runs_drained.await
+            }
+        }
+        .boxed_local()
+        .fuse();
         let mut choice = request
             .as_ref()
             .map_or(DrainChoice::Wait, |request| request.choice);
         loop {
             match choice {
-                DrainChoice::Cancel => bail!(CANCELLED),
+                DrainChoice::Cancel => {
+                    checks.await;
+                    bail!(CANCELLED);
+                }
                 DrainChoice::InterruptNow => {
+                    checks.clone().await;
                     cx.update(|cx| self.runs_source.interrupt(&self.runs, cx));
                     choice = DrainChoice::Wait;
                 }
@@ -497,6 +590,7 @@ impl Move {
     /// again here and the queued writes land here.
     fn keep(&self, moving_written: bool, error: &anyhow::Error, cx: &mut App) {
         self.runs_source.undrain(cx);
+        self.runs_source.undrain_checks(cx);
         if moving_written {
             if let Err(error) = self.repo.retake_writer() {
                 log::error!("keeping the writer of {}: {error:#}", self.id);

@@ -19,6 +19,7 @@ bongos_work.workspace = true
 bongos_project_repo.workspace = true
 bongos_project_repo_model.workspace = true
 bongos_workflow.workspace = true
+bongos_workflow_model.workspace = true
 chrono.workspace = true
 futures.workspace = true
 gpui.workspace = true

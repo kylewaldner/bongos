@@ -1,7 +1,8 @@
 //! The handover through real sockets and a real state store in a temporary folder: the window is
 //! one test app holding the writer, the engine host's side runs on a thread of its own (asking
 //! for the writer and waiting on the lock as the host process does) and then serves the project
-//! from a second test app. The window's runs are a recording fake.
+//! from a second test app. The window's runs, task checks and writer participants are recording
+//! fakes.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -16,6 +17,7 @@ use bongos_project_repo::{
     StateStore, StateWriter,
 };
 use bongos_project_repo_model::Author;
+use bongos_workflow_model::NodeKey;
 use futures::channel::oneshot;
 use gpui::{App, AppContext as _, Task, TestAppContext};
 
@@ -24,8 +26,9 @@ use crate::{
     ClientOptions, DrainChoice, EngineAccess, EngineAccesses, HandoverRequest, HandoverRuns,
     HandoverTimes, HostClient, HostCommand, HostInfo, HostMode, HostSpawner, MOVING_REFUSAL,
     MOVING_RETRY, Moving, OpenedState, SpawnedHost, WriterHost, WriterHosts, WriterOptions,
-    did_not_start, expect_handover, install_handovers, is_moving, live_host, open_state_with_hooks,
-    read_host_file, start_handover, take_writer_checked, take_writer_from_window, write_host_file,
+    WriterParticipant, WriterParticipants, did_not_start, expect_handover, install_handovers,
+    is_moving, live_host, open_state_with_hooks, read_host_file, start_handover,
+    take_writer_checked, take_writer_from_window, write_host_file,
 };
 
 const LONG: Duration = Duration::from_secs(60);
@@ -43,6 +46,13 @@ struct FakeState {
     runs: Vec<String>,
     /// Whether starts under the project's files are refused now.
     refusing: bool,
+    /// The checks keys running now: each counts in `busy` until `ChecksDrained` parks it.
+    checking: Vec<(String, NodeKey)>,
+    /// What task checks' drain resolves with: the nodes whose checks it stopped.
+    stopped_checks: Vec<(String, NodeKey)>,
+    /// Whether task checks' drain waits for [`release_checks`] (its runs still stopping).
+    hold_checks: bool,
+    checks: Option<oneshot::Sender<Vec<(String, NodeKey)>>>,
 }
 
 /// The window's runs: `runs` are live, `busy` of them run a node until [`finish_nodes`].
@@ -81,6 +91,39 @@ impl HandoverRuns for FakeRuns {
         state.drain = None;
     }
 
+    fn drain_checks(&self, cx: &mut App) -> Task<Vec<(String, NodeKey)>> {
+        let mut state = self.state.borrow_mut();
+        state.log.push("drain checks".to_string());
+        if !state.hold_checks {
+            return Task::ready(state.stopped_checks.clone());
+        }
+        let (sender, receiver) = oneshot::channel();
+        state.checks = Some(sender);
+        cx.background_spawn(async move { receiver.await.unwrap_or_default() })
+    }
+
+    fn undrain_checks(&self, _cx: &mut App) {
+        self.state
+            .borrow_mut()
+            .log
+            .push("undrain checks".to_string());
+    }
+
+    fn checks_drained(&self, run: &str, key: &NodeKey, _cx: &mut App) {
+        let mut state = self.state.borrow_mut();
+        state.log.push(format!("checks drained {run} {key}"));
+        let parked = (run.to_string(), key.clone());
+        if let Some(index) = state.checking.iter().position(|check| *check == parked) {
+            state.checking.remove(index);
+            state.busy -= 1;
+            if state.busy == 0
+                && let Some(drain) = state.drain.take()
+            {
+                drain.send(()).ok();
+            }
+        }
+    }
+
     fn interrupt(&self, runs: &[String], _cx: &mut App) {
         let mut state = self.state.borrow_mut();
         state.log.push(format!("interrupt {runs:?}"));
@@ -115,6 +158,15 @@ fn finish_nodes(state: &Rc<RefCell<FakeState>>) {
     }
 }
 
+/// Task checks' drain resolves: the check runs it stopped have ended.
+fn release_checks(state: &Rc<RefCell<FakeState>>) {
+    let mut state = state.borrow_mut();
+    let stopped = state.stopped_checks.clone();
+    if let Some(checks) = state.checks.take() {
+        checks.send(stopped).ok();
+    }
+}
+
 fn log(state: &Rc<RefCell<FakeState>>) -> Vec<String> {
     state.borrow().log.clone()
 }
@@ -141,6 +193,16 @@ fn window(
         runs: runs.iter().map(ToString::to_string).collect(),
         ..FakeState::default()
     }));
+    window_from(fixture, state, start_timeout, cx)
+}
+
+/// [`window`] with runs already set up in `state`.
+fn window_from(
+    fixture: &Fixture,
+    state: Rc<RefCell<FakeState>>,
+    start_timeout: Duration,
+    cx: &mut TestAppContext,
+) -> Rc<RefCell<FakeState>> {
     let fake = FakeRuns {
         state: state.clone(),
         location: fixture.location().clone(),
@@ -284,9 +346,11 @@ async fn a_handover_drains_then_moves_the_writer_and_the_window_attaches_to_the_
         vec![
             "live".to_string(),
             "drain".to_string(),
+            "drain checks".to_string(),
             "live".to_string(),
             format!("hand over [\"run-1\"] to {pid}"),
             "undrain".to_string(),
+            "undrain checks".to_string(),
         ]
     );
     let (moving, held) = state.borrow().at_hand_over.clone().unwrap();
@@ -397,9 +461,11 @@ async fn a_window_with_no_live_run_hands_over_without_waiting(
         vec![
             "live".to_string(),
             "drain".to_string(),
+            "drain checks".to_string(),
             "live".to_string(),
             format!("hand over [] to {pid}"),
             "undrain".to_string(),
+            "undrain checks".to_string(),
         ]
     );
     let (_host, _) = serve_host(&fixture, writer, host_cx);
@@ -449,10 +515,12 @@ async fn a_drain_past_its_timeout_asks_again_and_interrupt_them_now_moves_on(
         vec![
             "live".to_string(),
             "drain".to_string(),
+            "drain checks".to_string(),
             "interrupt [\"run-1\"]".to_string(),
             "live".to_string(),
             format!("hand over [\"run-1\"] to {pid}"),
             "undrain".to_string(),
+            "undrain checks".to_string(),
         ]
     );
     let (_host, _) = serve_host(&fixture, writer, host_cx);
@@ -487,7 +555,10 @@ async fn a_cancelled_handover_keeps_the_writer_in_the_window(cx: &mut TestAppCon
     };
     assert!(refused.contains(crate::CANCELLED), "{refused}");
     assert!(watch.done.await.unwrap().is_err());
-    assert_eq!(log(&state), vec!["live", "drain", "undrain"]);
+    assert_eq!(
+        log(&state),
+        vec!["live", "drain", "drain checks", "undrain", "undrain checks"]
+    );
     assert!(!state.borrow().refusing, "runs start here again");
     assert!(!writer_of(&fixture).is_released());
     assert_eq!(read_host_file(fixture.location()).unwrap().moving, None);
@@ -925,4 +996,477 @@ async fn a_stale_move_with_both_processes_dead_is_ignored(cx: &mut TestAppContex
         Err(OpenError::HeldBy { .. })
     ));
     drop(host);
+}
+
+/// A writer participant that records what it is told in `log`, with how many nodes ran when it
+/// was drained. With a gate, its drain resolves only once the gate is opened.
+struct FakeParticipant {
+    name: &'static str,
+    log: Rc<RefCell<Vec<String>>>,
+    runs: Option<Rc<RefCell<FakeState>>>,
+    gate: RefCell<Option<oneshot::Receiver<()>>>,
+}
+
+impl FakeParticipant {
+    fn register(
+        name: &'static str,
+        log: &Rc<RefCell<Vec<String>>>,
+        runs: Option<&Rc<RefCell<FakeState>>>,
+        gate: Option<oneshot::Receiver<()>>,
+        cx: &mut TestAppContext,
+    ) {
+        let participant = Rc::new(Self {
+            name,
+            log: log.clone(),
+            runs: runs.cloned(),
+            gate: RefCell::new(gate),
+        });
+        cx.update(|cx| WriterParticipants::register(participant, cx));
+    }
+
+    fn push(&self, line: String) {
+        self.log.borrow_mut().push(line.clone());
+        if let Some(runs) = &self.runs {
+            runs.borrow_mut().log.push(line);
+        }
+    }
+}
+
+impl WriterParticipant for FakeParticipant {
+    fn started(&self, project: &str, _cx: &mut App) {
+        self.push(format!("{} started {project}", self.name));
+    }
+
+    fn drain(&self, project: &str, cx: &mut App) -> Task<()> {
+        let busy = self.runs.as_ref().map_or(0, |runs| runs.borrow().busy);
+        self.push(format!("{} drain {project} busy={busy}", self.name));
+        match self.gate.borrow_mut().take() {
+            Some(gate) => cx.background_spawn(async move {
+                gate.await.ok();
+            }),
+            None => Task::ready(()),
+        }
+    }
+
+    fn undrain(&self, project: &str, _cx: &mut App) {
+        self.push(format!("{} undrain {project}", self.name));
+    }
+}
+
+fn check_key() -> NodeKey {
+    NodeKey::new("check", 1)
+}
+
+fn wait_request() -> HandoverRequest {
+    HandoverRequest {
+        choice: DrainChoice::Wait,
+        ask_again: None,
+    }
+}
+
+// `lanes: start` with a hand-started run in a check and another in an agent node: task checks'
+// drain names run-1's check key, which alone gets `ChecksDrained`, before the runs are handed
+// over; the other run's node finishes first.
+#[gpui::test]
+async fn a_run_in_a_check_gets_checks_drained_for_exactly_the_returned_key(
+    cx: &mut TestAppContext,
+    host_cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let state = Rc::new(RefCell::new(FakeState {
+        busy: 2,
+        runs: vec!["run-1".to_string(), "run-2".to_string()],
+        checking: vec![("run-1".to_string(), check_key())],
+        stopped_checks: vec![("run-1".to_string(), check_key())],
+        ..FakeState::default()
+    }));
+    let state = window_from(&fixture, state, LONG, cx);
+    let id = fixture.location().id.clone();
+    let watch = cx
+        .update(|cx| expect_handover(&id, wait_request(), cx))
+        .unwrap();
+    let taken = ask_for_writer(&fixture, cx);
+    wait_for(cx, |_| {
+        log(&state).contains(&format!("checks drained run-1 {}", check_key()))
+    });
+    assert_eq!(state.borrow().busy, 1, "run-2's node still runs");
+    assert!(taken.try_recv().is_err(), "the host waits on the lock");
+
+    finish_nodes(&state);
+    let writer = wait_for_writer(&taken, cx).unwrap();
+    let pid = std::process::id();
+    assert_eq!(
+        log(&state),
+        vec![
+            "live".to_string(),
+            "drain".to_string(),
+            "drain checks".to_string(),
+            format!("checks drained run-1 {}", check_key()),
+            "live".to_string(),
+            format!("hand over [\"run-1\", \"run-2\"] to {pid}"),
+            "undrain".to_string(),
+            "undrain checks".to_string(),
+        ]
+    );
+    let (_host, _) = serve_host(&fixture, writer, host_cx);
+    assert!(watch.done.await.unwrap().is_ok());
+}
+
+// A run in a `checks` node whose check would run for hours: task checks stop it, the key is
+// parked by `ChecksDrained`, and the writer moves with no node finishing and no clock moving.
+#[gpui::test]
+async fn a_check_that_would_run_for_hours_does_not_delay_the_drain(
+    cx: &mut TestAppContext,
+    host_cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let state = Rc::new(RefCell::new(FakeState {
+        busy: 1,
+        runs: vec!["run-1".to_string()],
+        checking: vec![("run-1".to_string(), check_key())],
+        stopped_checks: vec![("run-1".to_string(), check_key())],
+        ..FakeState::default()
+    }));
+    let state = window_from(&fixture, state, LONG, cx);
+    let taken = ask_for_writer(&fixture, cx);
+    let writer = wait_for_writer(&taken, cx).unwrap();
+    let log = log(&state);
+    let drained = format!("checks drained run-1 {}", check_key());
+    let at = |line: &str| log.iter().position(|logged| logged == line).unwrap();
+    assert!(at(&drained) < at(&format!("hand over [\"run-1\"] to {}", std::process::id())));
+    assert!(!log.iter().any(|line| line.starts_with("interrupt")));
+    let (_host, _) = serve_host(&fixture, writer, host_cx);
+    wait_for(cx, |cx| is_remote(&fixture, cx));
+}
+
+// A writer participant is started in the window when it becomes the writer, drained during the
+// handover once no node runs, and started in the host once it takes the writer.
+#[gpui::test]
+async fn a_writer_participant_starts_in_the_window_drains_at_the_handover_and_starts_in_the_host(
+    cx: &mut TestAppContext,
+    host_cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let id = fixture.location().id.clone();
+    let state = Rc::new(RefCell::new(FakeState {
+        busy: 1,
+        runs: vec!["run-1".to_string()],
+        ..FakeState::default()
+    }));
+    let in_window = Rc::new(RefCell::new(Vec::new()));
+    FakeParticipant::register("p", &in_window, Some(&state), None, cx);
+    let in_host = Rc::new(RefCell::new(Vec::new()));
+    FakeParticipant::register("h", &in_host, None, None, host_cx);
+    let state = window_from(&fixture, state, LONG, cx);
+    assert_eq!(*in_window.borrow(), vec![format!("p started {id}")]);
+
+    let taken = ask_for_writer(&fixture, cx);
+    wait_for(cx, |_| log(&state).contains(&"drain checks".to_string()));
+    assert_eq!(in_window.borrow().len(), 1, "not drained while a node runs");
+    finish_nodes(&state);
+    let writer = wait_for_writer(&taken, cx).unwrap();
+    assert_eq!(
+        *in_window.borrow(),
+        vec![format!("p started {id}"), format!("p drain {id} busy=0")]
+    );
+    assert!(in_host.borrow().is_empty());
+    let (_host, _) = serve_host(&fixture, writer, host_cx);
+    assert_eq!(*in_host.borrow(), vec![format!("h started {id}")]);
+    wait_for(cx, |cx| is_remote(&fixture, cx));
+    assert_eq!(
+        in_window.borrow().len(),
+        2,
+        "never undrained after the move"
+    );
+}
+
+// Two participants, a node still running and a check stopping: the runs' and task checks' drains
+// start together; the check is parked and the node finishes; only then participant 1 drains, and
+// participant 2 only once participant 1 resolved; then the runs are handed over.
+#[gpui::test]
+async fn participants_drain_in_order_only_after_the_runs_and_checks_drained(
+    cx: &mut TestAppContext,
+    host_cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let id = fixture.location().id.clone();
+    let state = Rc::new(RefCell::new(FakeState {
+        busy: 2,
+        runs: vec!["run-1".to_string(), "run-2".to_string()],
+        checking: vec![("run-1".to_string(), check_key())],
+        stopped_checks: vec![("run-1".to_string(), check_key())],
+        hold_checks: true,
+        ..FakeState::default()
+    }));
+    let participants = Rc::new(RefCell::new(Vec::new()));
+    let (open_first, first_gate) = oneshot::channel();
+    FakeParticipant::register("p1", &participants, Some(&state), Some(first_gate), cx);
+    FakeParticipant::register("p2", &participants, Some(&state), None, cx);
+    let state = window_from(&fixture, state, LONG, cx);
+    let drains = |participants: &Rc<RefCell<Vec<String>>>| {
+        participants
+            .borrow()
+            .iter()
+            .filter(|line| line.contains(" drain "))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+
+    let taken = ask_for_writer(&fixture, cx);
+    wait_for(cx, |_| log(&state).contains(&"drain checks".to_string()));
+    let started: Vec<String> = log(&state).into_iter().skip(2).collect();
+    assert_eq!(started, vec!["live", "drain", "drain checks"]);
+
+    release_checks(&state);
+    let drained = format!("checks drained run-1 {}", check_key());
+    wait_for(cx, |_| log(&state).contains(&drained));
+    assert!(drains(&participants).is_empty(), "a node still runs");
+
+    finish_nodes(&state);
+    wait_for(cx, |_| !drains(&participants).is_empty());
+    assert_eq!(drains(&participants), vec![format!("p1 drain {id} busy=0")]);
+    assert!(taken.try_recv().is_err(), "the host waits on the lock");
+
+    open_first.send(()).unwrap();
+    let writer = wait_for_writer(&taken, cx).unwrap();
+    let pid = std::process::id();
+    assert_eq!(
+        log(&state),
+        vec![
+            format!("p1 started {id}"),
+            format!("p2 started {id}"),
+            "live".to_string(),
+            "drain".to_string(),
+            "drain checks".to_string(),
+            drained,
+            format!("p1 drain {id} busy=0"),
+            format!("p2 drain {id} busy=0"),
+            "live".to_string(),
+            format!("hand over [\"run-1\", \"run-2\"] to {pid}"),
+            "undrain".to_string(),
+            "undrain checks".to_string(),
+        ]
+    );
+    let (_host, _) = serve_host(&fixture, writer, host_cx);
+    wait_for(cx, |cx| is_remote(&fixture, cx));
+}
+
+/// run-1 in a check whose run is still stopping (task checks' drain waits for
+/// [`release_checks`]), and `busy` nodes in all.
+fn checking_window(
+    fixture: &Fixture,
+    runs: &[&str],
+    busy: usize,
+    cx: &mut TestAppContext,
+) -> Rc<RefCell<FakeState>> {
+    let state = Rc::new(RefCell::new(FakeState {
+        busy,
+        runs: runs.iter().map(ToString::to_string).collect(),
+        checking: vec![("run-1".to_string(), check_key())],
+        stopped_checks: vec![("run-1".to_string(), check_key())],
+        hold_checks: true,
+        ..FakeState::default()
+    }));
+    window_from(fixture, state, LONG, cx)
+}
+
+// "Cancel" chosen up front while task checks still stop a check: the window keeps the writer
+// only once their drain resolved and the check's node got `ChecksDrained`, and undrains task
+// checks after that, so the node starts again from its kept parts instead of taking its
+// cancelled run as its result.
+#[gpui::test]
+async fn a_cancel_while_a_check_stops_records_checks_drained_before_undraining_checks(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let state = checking_window(&fixture, &["run-1"], 1, cx);
+    let id = fixture.location().id.clone();
+    let watch = cx
+        .update(|cx| {
+            expect_handover(
+                &id,
+                HandoverRequest {
+                    choice: DrainChoice::Cancel,
+                    ask_again: None,
+                },
+                cx,
+            )
+        })
+        .unwrap();
+    let taken = ask_for_writer(&fixture, cx);
+    wait_for(cx, |_| log(&state).contains(&"drain checks".to_string()));
+    cx.run_until_parked();
+    assert_eq!(log(&state), vec!["live", "drain", "drain checks"]);
+    assert!(taken.try_recv().is_err(), "the window has not answered yet");
+
+    release_checks(&state);
+    let Err(refused) = wait_for_writer(&taken, cx) else {
+        panic!("the host took the writer of a cancelled handover");
+    };
+    assert!(refused.contains(crate::CANCELLED), "{refused}");
+    assert!(watch.done.await.unwrap().is_err());
+    assert_eq!(
+        log(&state),
+        vec![
+            "live".to_string(),
+            "drain".to_string(),
+            "drain checks".to_string(),
+            format!("checks drained run-1 {}", check_key()),
+            "undrain".to_string(),
+            "undrain checks".to_string(),
+        ]
+    );
+    assert!(!writer_of(&fixture).is_released());
+}
+
+// Asked again past the timeout, the person cancels while a check is still stopping: as with a
+// cancel up front, the check's node gets `ChecksDrained` before task checks are undrained.
+#[gpui::test]
+async fn a_cancel_asked_again_while_a_check_stops_records_checks_drained_first(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let state = checking_window(&fixture, &["run-1", "run-2"], 2, cx);
+    let asked = Rc::new(RefCell::new(Vec::new()));
+    let prompt_asked = asked.clone();
+    let id = fixture.location().id.clone();
+    let watch = cx
+        .update(|cx| {
+            expect_handover(
+                &id,
+                HandoverRequest {
+                    choice: DrainChoice::Wait,
+                    ask_again: Some(Rc::new(move |busy, _cx| {
+                        prompt_asked.borrow_mut().push(busy);
+                        Task::ready(DrainChoice::Cancel)
+                    })),
+                },
+                cx,
+            )
+        })
+        .unwrap();
+    let taken = ask_for_writer(&fixture, cx);
+    wait_for(cx, |_| log(&state).contains(&"drain checks".to_string()));
+    cx.executor().advance_clock(HANDOVER_TIMEOUT);
+    cx.run_until_parked();
+    assert_eq!(*asked.borrow(), vec![2]);
+    assert_eq!(
+        log(&state),
+        vec!["live", "drain", "drain checks"],
+        "nothing undrained while the check stops"
+    );
+    assert!(taken.try_recv().is_err(), "the window has not answered yet");
+
+    release_checks(&state);
+    let Err(refused) = wait_for_writer(&taken, cx) else {
+        panic!("the host took the writer of a cancelled handover");
+    };
+    assert!(refused.contains(crate::CANCELLED), "{refused}");
+    assert!(watch.done.await.unwrap().is_err());
+    assert_eq!(
+        log(&state),
+        vec![
+            "live".to_string(),
+            "drain".to_string(),
+            "drain checks".to_string(),
+            format!("checks drained run-1 {}", check_key()),
+            "undrain".to_string(),
+            "undrain checks".to_string(),
+        ]
+    );
+}
+
+// "Interrupt them now" chosen up front while run-1's only node in flight is a stopping check:
+// the check's node gets `ChecksDrained` before the runs are interrupted, so run-1 is parked, not
+// recorded interrupted.
+#[gpui::test]
+async fn interrupt_them_now_waits_for_the_stopped_checks_to_be_recorded_first(
+    cx: &mut TestAppContext,
+    host_cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let state = checking_window(&fixture, &["run-1"], 1, cx);
+    let id = fixture.location().id.clone();
+    let watch = cx
+        .update(|cx| {
+            expect_handover(
+                &id,
+                HandoverRequest {
+                    choice: DrainChoice::InterruptNow,
+                    ask_again: None,
+                },
+                cx,
+            )
+        })
+        .unwrap();
+    let taken = ask_for_writer(&fixture, cx);
+    wait_for(cx, |_| log(&state).contains(&"drain checks".to_string()));
+    cx.run_until_parked();
+    assert_eq!(
+        log(&state),
+        vec!["live", "drain", "drain checks"],
+        "not interrupted before the stopped check is recorded"
+    );
+
+    release_checks(&state);
+    let writer = wait_for_writer(&taken, cx).unwrap();
+    let pid = std::process::id();
+    assert_eq!(
+        log(&state),
+        vec![
+            "live".to_string(),
+            "drain".to_string(),
+            "drain checks".to_string(),
+            format!("checks drained run-1 {}", check_key()),
+            "interrupt [\"run-1\"]".to_string(),
+            "live".to_string(),
+            format!("hand over [\"run-1\"] to {pid}"),
+            "undrain".to_string(),
+            "undrain checks".to_string(),
+        ]
+    );
+    let (_host, _) = serve_host(&fixture, writer, host_cx);
+    assert!(watch.done.await.unwrap().is_ok());
+}
+
+// With no participant and no check running, the drain is the runs' alone: the writer moves once
+// the running node finishes, with nothing recorded for checks.
+#[gpui::test]
+async fn with_no_participant_and_no_check_the_drain_is_the_runs_alone(
+    cx: &mut TestAppContext,
+    host_cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let state = window(&fixture, &["run-1"], 1, LONG, cx);
+    let taken = ask_for_writer(&fixture, cx);
+    wait_for(cx, |_| log(&state).contains(&"drain checks".to_string()));
+    assert!(
+        taken.try_recv().is_err(),
+        "the host waits on the runs' drain"
+    );
+    finish_nodes(&state);
+    let writer = wait_for_writer(&taken, cx).unwrap();
+    let pid = std::process::id();
+    assert_eq!(
+        log(&state),
+        vec![
+            "live".to_string(),
+            "drain".to_string(),
+            "drain checks".to_string(),
+            "live".to_string(),
+            format!("hand over [\"run-1\"] to {pid}"),
+            "undrain".to_string(),
+            "undrain checks".to_string(),
+        ]
+    );
+    let (_host, _) = serve_host(&fixture, writer, host_cx);
+    wait_for(cx, |cx| is_remote(&fixture, cx));
 }
