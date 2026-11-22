@@ -422,3 +422,118 @@ fn the_new_events_are_tagged_like_the_others_and_old_logs_parse_unchanged() {
         vec![Event::Created, Event::Queued]
     );
 }
+
+// Two runs in a check; the drain stopped only run 1's (task checks named just that key): run 1
+// gets `ChecksDrained` and comes back resumable where it is loaded next, while run 2's started
+// check, with neither a finish nor `ChecksDrained`, comes back interrupted.
+#[test]
+fn only_the_drained_check_resumes_and_a_started_check_with_neither_replays_interrupted() {
+    let temp = TempDir::new().unwrap();
+    let mut runtime = Runtime::new(Limits::default(), FakeRunner::new());
+    runtime.add(spec(temp.path(), 1, CHECKED)).unwrap();
+    runtime.add(spec(temp.path(), 2, CHECKED)).unwrap();
+    runtime.tick();
+    let _drained = runtime.drain();
+    runtime.checks_drained(&run_id(1), &key("check")).unwrap();
+    assert_eq!(runtime.in_flight(&run_id(2)), vec![key("check")]);
+    runtime.hand_over(5);
+
+    let drained_in = |n: u32| {
+        runtime
+            .events(&run_id(n))
+            .unwrap()
+            .iter()
+            .filter(|event| matches!(event, Event::ChecksDrained { .. }))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        drained_in(1),
+        vec![Event::ChecksDrained { key: key("check") }]
+    );
+    assert!(drained_in(2).is_empty());
+
+    let one = replay(runtime.events(&run_id(1)).unwrap());
+    assert!(one.running.is_empty() && one.interrupted.is_empty());
+    let two = replay(runtime.events(&run_id(2)).unwrap());
+    assert!(two.running.contains_key(&key("check")));
+
+    let mut next = Runtime::new(Limits::default(), FakeRunner::new());
+    let loaded = next
+        .load_all(vec![
+            spec(temp.path(), 1, CHECKED),
+            spec(temp.path(), 2, CHECKED),
+        ])
+        .unwrap();
+    assert!(loaded.iter().all(Result::is_ok));
+    assert!(next.state(&run_id(1)).unwrap().interrupted.is_empty());
+    assert!(
+        next.state(&run_id(2))
+            .unwrap()
+            .interrupted
+            .contains_key(&key("check"))
+    );
+    next.tick();
+    assert_eq!(started_nodes(&next, 1), vec!["check"]);
+    assert!(started_nodes(&next, 2).is_empty());
+}
+
+// A check that runs for hours (the fake runner never ends it) does not hold the drain: it
+// resolves as soon as the other run's node finished and the check is recorded drained.
+#[test]
+fn a_long_check_does_not_delay_the_drain() {
+    let temp = TempDir::new().unwrap();
+    let mut runtime = Runtime::new(Limits::default(), FakeRunner::new());
+    runtime.add(spec(temp.path(), 1, CHECKED)).unwrap();
+    runtime.add(spec(temp.path(), 2, TWO)).unwrap();
+    runtime.tick();
+    assert_eq!(runtime.nodes_in_flight(), 2);
+
+    let mut drained = runtime.drain();
+    runtime.runner_mut().release(&run_id(2));
+    runtime.tick();
+    assert_eq!(drained.try_recv(), Ok(None), "the check still runs");
+    runtime.checks_drained(&run_id(1), &key("check")).unwrap();
+    assert_eq!(drained.try_recv(), Ok(Some(())));
+    assert_eq!(runtime.nodes_in_flight(), 0);
+}
+
+// The process a run in a drained check is handed to loads it and starts the check again from its
+// checkpoint by itself: nothing asks a person (no `Resumed`), as it would for an interruption
+// (a lane's `on_interruption = "ask"`, or a loaded interrupted run, which gets no command).
+#[test]
+fn a_drained_check_resumes_after_load_all_with_no_person() {
+    let temp = TempDir::new().unwrap();
+    let dir = spec(temp.path(), 1, CHECKED).attempt_dir;
+    fs::create_dir_all(&dir).unwrap();
+    let log: String = [
+        Event::Created,
+        started("check", 1),
+        Event::ChecksDrained { key: key("check") },
+        Event::HandedOver { to_pid: 6 },
+    ]
+    .iter()
+    .map(Event::to_line)
+    .collect();
+    fs::write(dir.join(EVENTS_FILE), log).unwrap();
+
+    let mut runtime = Runtime::new(Limits::default(), FakeRunner::new());
+    let loaded = runtime
+        .load_all(vec![spec(temp.path(), 1, CHECKED)])
+        .unwrap();
+    assert!(loaded.iter().all(Result::is_ok));
+    let state = runtime.state(&run_id(1)).unwrap();
+    assert!(state.interrupted.is_empty() && state.running.is_empty());
+    runtime.tick();
+    assert_eq!(runtime.in_flight(&run_id(1)), vec![key("check")]);
+    let events = runtime.events(&run_id(1)).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Interrupted { .. } | Event::Resumed))
+    );
+    assert!(matches!(
+        events.last(),
+        Some(Event::NodeStarted { key: again, try_number: 2, .. }) if *again == key("check")
+    ));
+}
