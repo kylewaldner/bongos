@@ -367,7 +367,23 @@ fn placeholder_owner(now: &str) -> OwnerRecord {
     }
 }
 
-fn append_history(tx: &mut StateTx, task: &TaskId, event: &str, now: &str) -> Result<()> {
+pub(crate) fn append_history(
+    tx: &mut StateTx,
+    task: &TaskId,
+    event: &str,
+    now: &str,
+) -> Result<()> {
+    append_history_by(tx, task, event, HISTORY_BY, now)
+}
+
+/// Appends `event` to the task's history, written by `by`.
+pub(crate) fn append_history_by(
+    tx: &mut StateTx,
+    task: &TaskId,
+    event: &str,
+    by: &str,
+    now: &str,
+) -> Result<()> {
     let at = now
         .parse()
         .map_err(|error| anyhow::anyhow!("the time {now} is not a timestamp: {error}"))?;
@@ -375,7 +391,7 @@ fn append_history(tx: &mut StateTx, task: &TaskId, event: &str, now: &str) -> Re
         &task.0,
         HistoryEntry {
             at,
-            by: HISTORY_BY.to_string(),
+            by: by.to_string(),
             event: event.to_string(),
             detail: None,
             extra: Default::default(),

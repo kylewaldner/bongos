@@ -1,18 +1,31 @@
 //! The `lanes` actions, hidden from the command palette while `lanes.enabled` is false. While it
 //! is false each one only says that lanes are off. Lanes run in the engine host; while they are
-//! on, these commands say that this window does not reach it yet.
+//! on, the commands that act on the lanes say that this window does not reach it yet.
+//!
+//! `lanes: accept graph` runs here, in the writer process: it records the person who pressed the
+//! key from the action and lands the graph stamp as that person. `lanes: adopt` records its
+//! author the same way; [`adopt_as_person`] takes the arguments the minibuffer collected
+//! ([`adopt_prompt`] says what it offers) and runs the adopt.
 
 use std::any::TypeId;
 
+use anyhow::Result;
+use bongos_lanes_model::{Author, LaneId, LaneState, LanesState, TaskId};
+use bongos_project_repo::ProjectRepositorySettings;
+use bongos_work_model::PersonAtKeyboard;
+use bongos_work_model::commands::Context as WorkContext;
 use command_palette_hooks::CommandPaletteFilter;
 #[cfg(test)]
 use gpui::Global;
-use gpui::{App, Context, Window};
+use gpui::{App, Context, Task, Window};
 use settings::{Settings as _, SettingsStore};
 use workspace::notifications::NotificationId;
 use workspace::{Toast, Workspace};
 
 use crate::LanesSettings;
+use crate::accept_graph::{Accepted, accept_graph};
+use crate::adopt::{AdoptRequest, Adopted};
+use crate::dispatcher::Lanes;
 
 pub mod lanes {
     use gpui::actions;
@@ -118,7 +131,112 @@ fn register_action<A: gpui::Action>(workspace: &mut Workspace) {
     );
 }
 
-/// Registers the handlers of the actions of lanes on `workspace`.
+/// The toast of `lanes: accept graph` with no single project repository open in this window.
+pub const ONE_PROJECT_MESSAGE: &str = "Open one project repository to accept its task graph";
+
+/// `lanes: accept graph`: lands the stamp of master's graph as the person who pressed the key.
+fn accept_graph_action(
+    workspace: &mut Workspace,
+    _: &lanes::AcceptGraph,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if !LanesSettings::get_global(cx).enabled {
+        show_toast(workspace, OFF_MESSAGE, cx);
+        return;
+    }
+    let repos = bongos_work::OpenProjectRepos::global(cx).list();
+    let [project] = repos.as_slice() else {
+        show_toast(workspace, ONE_PROJECT_MESSAGE, cx);
+        return;
+    };
+    let repo = project.repo().clone();
+    let prefix = ProjectRepositorySettings::get_global(cx)
+        .branch_prefix
+        .clone();
+    let ctx = WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx));
+    let accepting = accept_graph(repo, ctx, prefix, cx);
+    cx.spawn_in(window, async move |workspace, cx| {
+        let message = accepted_message(&accepting.await);
+        workspace
+            .update(cx, |workspace, cx| show_toast(workspace, &message, cx))
+            .ok();
+    })
+    .detach();
+}
+
+/// The toast of an accept.
+pub fn accepted_message(result: &Result<Accepted>) -> String {
+    match result {
+        Ok(Accepted::Landed { commit, .. }) => format!(
+            "Task graph accepted: the stamp landed in {}",
+            &commit[..commit.len().min(12)]
+        ),
+        Ok(Accepted::Unchanged { .. }) => "The task graph is already accepted".to_string(),
+        Err(error) => format!("Could not accept the task graph: {error:#}"),
+    }
+}
+
+/// What the minibuffer asks for `lanes: adopt` of a task: one of the free lanes (idle and owning
+/// nothing), then the reason, which may not be empty.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdoptPrompt {
+    pub task: TaskId,
+    /// The lanes offered, in lane order.
+    pub lanes: Vec<LaneId>,
+    pub lane_prompt: String,
+    pub reason_prompt: String,
+}
+
+/// The prompts of `lanes: adopt` for `task`, offering only the free lanes of `state`.
+pub fn adopt_prompt(state: &LanesState, task: TaskId) -> AdoptPrompt {
+    let lanes = state
+        .lanes
+        .values()
+        .filter(|lane| {
+            lane.state == LaneState::Idle
+                && lane.job.is_none()
+                && state.task_of(&lane.id()).is_none()
+        })
+        .map(|lane| lane.id())
+        .collect();
+    AdoptPrompt {
+        lane_prompt: format!("Adopt {task} on lane: "),
+        reason_prompt: format!("Why adopt {task} (required): "),
+        task,
+        lanes,
+    }
+}
+
+/// What the minibuffer collected for `lanes: adopt`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdoptArgs {
+    pub task: TaskId,
+    pub lane: LaneId,
+    pub reason: String,
+    /// The person confirmed dropping the work of a tree that cannot be read.
+    pub confirm_drop: bool,
+}
+
+/// Runs `lanes: adopt` with the collected `args`, authored by the person of `ctx` (built from the
+/// action with [`PersonAtKeyboard::from_action`]).
+pub fn adopt_as_person(
+    lanes: &Lanes,
+    args: AdoptArgs,
+    ctx: &WorkContext,
+    cx: &mut App,
+) -> Task<Result<Adopted>> {
+    let request = AdoptRequest {
+        task: args.task,
+        lane: args.lane,
+        reason: args.reason,
+        by: Author::Person(ctx.author.name.clone()),
+        confirm_drop: args.confirm_drop,
+    };
+    lanes.adopt(request, cx)
+}
+
+/// Registers the handlers of the actions of lanes on `workspace`. None is bound to a key.
 pub fn register(workspace: &mut Workspace) {
     register_action::<lanes::Show>(workspace);
     register_action::<lanes::Start>(workspace);
@@ -127,7 +245,9 @@ pub fn register(workspace: &mut Workspace) {
     register_action::<lanes::Resume>(workspace);
     register_action::<lanes::DryRun>(workspace);
     register_action::<lanes::Pick>(workspace);
+    // The adopt runs where the lanes run, in the engine host, which this window does not reach
+    // yet; [`adopt_as_person`] is what it runs there.
     register_action::<lanes::Adopt>(workspace);
-    register_action::<lanes::AcceptGraph>(workspace);
+    workspace.register_action(accept_graph_action);
     register_action::<lanes::Dump>(workspace);
 }

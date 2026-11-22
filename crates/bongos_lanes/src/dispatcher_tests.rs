@@ -40,6 +40,10 @@ struct TestHost {
     gates: RefCell<Vec<oneshot::Sender<Result<JobSetup, WaitReason>>>>,
     /// Job preparations fail with this.
     setup_error: RefCell<Option<WaitReason>>,
+    /// The overlap check of the lane locations fails with these.
+    overlap: RefCell<Option<Vec<Problem>>>,
+    /// The recorded graph stamp at every commit.
+    stamp: RefCell<Option<bongos_lanes_model::StampFile>>,
 }
 
 /// A policy that answers every job with one commit decision.
@@ -70,7 +74,14 @@ impl LanesHost for TestHost {
         _lanes: &[LaneId],
         _cx: &App,
     ) -> Result<(), Vec<Problem>> {
-        Ok(())
+        match self.overlap.borrow().clone() {
+            Some(problems) => Err(problems),
+            None => Ok(()),
+        }
+    }
+
+    fn stamp(&self, _commit: &str) -> Result<Option<bongos_lanes_model::StampFile>, String> {
+        Ok(self.stamp.borrow().clone())
     }
 
     fn graph(&self, _cx: &App) -> Option<PickGraph> {
@@ -149,6 +160,10 @@ struct FakeEngine {
     observers: RefCell<Vec<Rc<Observer>>>,
     /// Every end of the dispatcher's run.
     ends: RefCell<Vec<(String, RunEnd, String)>>,
+    /// Every run cancelled through the engine, in order.
+    cancelled: RefCell<Vec<String>>,
+    /// Called at each cancel, before the run's status changes.
+    on_cancel: RefCell<Option<Box<dyn Fn(&str)>>>,
 }
 
 impl JobEngine for FakeEngine {
@@ -195,6 +210,15 @@ impl JobEngine for FakeEngine {
             .borrow_mut()
             .push((run.to_string(), end, note.to_string()));
     }
+
+    fn cancel_run(&self, run: &str, cx: &mut App) -> Result<(), String> {
+        if let Some(on_cancel) = self.on_cancel.borrow().as_ref() {
+            on_cancel(run);
+        }
+        self.cancelled.borrow_mut().push(run.to_string());
+        self.set(run, RunStatus::Cancelled, cx);
+        Ok(())
+    }
 }
 
 impl FakeEngine {
@@ -236,6 +260,25 @@ fn harness(table: &str, graph: PickGraph, limits: &[(&str, u32)]) -> Harness {
     harness_with(table, graph, limits, Rc::new(VerifiedCommitPolicy))
 }
 
+/// The run engine of the tests over `writer`, with the instance limits `limits`.
+fn fake_engine(writer: &Arc<StateWriter>, limits: &[(&str, u32)]) -> Rc<FakeEngine> {
+    Rc::new(FakeEngine {
+        writer: writer.clone(),
+        jobs: RefCell::new(Vec::new()),
+        dispatcher_starts: RefCell::new(Vec::new()),
+        status: RefCell::new(BTreeMap::new()),
+        limits: limits
+            .iter()
+            .map(|(name, limit)| (name.to_string(), *limit))
+            .collect(),
+        refuse: RefCell::new(None),
+        observers: RefCell::new(Vec::new()),
+        ends: RefCell::new(Vec::new()),
+        cancelled: RefCell::new(Vec::new()),
+        on_cancel: RefCell::new(None),
+    })
+}
+
 fn harness_with(
     table: &str,
     graph: PickGraph,
@@ -256,20 +299,10 @@ fn harness_with(
         gated: Cell::new(false),
         gates: RefCell::new(Vec::new()),
         setup_error: RefCell::new(None),
+        overlap: RefCell::new(None),
+        stamp: RefCell::new(None),
     });
-    let engine = Rc::new(FakeEngine {
-        writer: writer.clone(),
-        jobs: RefCell::new(Vec::new()),
-        dispatcher_starts: RefCell::new(Vec::new()),
-        status: RefCell::new(BTreeMap::new()),
-        limits: limits
-            .iter()
-            .map(|(name, limit)| (name.to_string(), *limit))
-            .collect(),
-        refuse: RefCell::new(None),
-        observers: RefCell::new(Vec::new()),
-        ends: RefCell::new(Vec::new()),
-    });
+    let engine = fake_engine(&writer, limits);
     let lanes = Lanes::new(LanesParts {
         host: host.clone(),
         engine: engine.clone(),
@@ -1195,3 +1228,9 @@ async fn a_start_is_skipped_when_the_lane_no_longer_holds_the_run(cx: &mut TestA
 
 #[path = "lane_control_tests.rs"]
 mod lane_control_tests;
+
+#[path = "adopt_tests.rs"]
+mod adopt_tests;
+
+#[path = "counts_tests.rs"]
+mod counts_tests;
