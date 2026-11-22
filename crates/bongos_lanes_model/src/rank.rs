@@ -73,12 +73,7 @@ impl Chains {
     /// with cycles. A back edge to a task still being computed contributes 0, so inside a cycle a
     /// value depends on where the walk entered it; [`Chains::compute`] always enters in the
     /// graph's depth-first order, which keeps the result the same for the same graph.
-    fn chain_of(
-        &mut self,
-        graph: &PickGraph,
-        id: &TaskId,
-        visiting: &mut BTreeSet<TaskId>,
-    ) -> u32 {
+    fn chain_of(&mut self, graph: &PickGraph, id: &TaskId, visiting: &mut BTreeSet<TaskId>) -> u32 {
         if let Some(&value) = self.chain.get(id) {
             return value;
         }

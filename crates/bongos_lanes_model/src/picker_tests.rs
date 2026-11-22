@@ -536,7 +536,10 @@ fn an_own_task_missing_from_the_graph_is_not_released() {
             assert!(owner_change.is_empty());
             assert_eq!(reasons.len(), 1);
             assert_eq!(reasons[0].task, id("gone"));
-            assert_eq!(reasons[0].reason.to_string(), "task is missing from the graph");
+            assert_eq!(
+                reasons[0].reason.to_string(),
+                "task is missing from the graph"
+            );
         }
         other => panic!("expected nothing, got {other:?}"),
     }
