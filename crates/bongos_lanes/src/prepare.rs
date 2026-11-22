@@ -1,7 +1,8 @@
 //! Making a lane's locations before a job: the profile's verify, the overlap check, the disk
 //! floors, then the trees and directories made only below existing roots, and the
-//! `after_tree_created` hooks for each tree made for the first time. Any failure leaves the lane
-//! waiting with the reason; a failure before the making starts leaves the disk as it was.
+//! `after_tree_created` hooks for each tree made, run again at later starts until they have all
+//! succeeded for it. Any failure leaves the lane waiting with the reason; a failure before the
+//! making starts leaves the disk as it was.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -103,21 +104,78 @@ pub fn prepare_lane(
         }
         let repositories = request.inputs.repositories.clone();
         let make_tree = request.make_tree.clone();
-        let prepared = cx
+        let (prepared, pending) = cx
             .background_spawn(async move { make_locations(locations, &repositories, &make_tree) })
             .await
             .map_err(WaitReason::Environment)?;
-        for (repo, path) in &prepared.created_trees {
+        // Each tree's hooks run on their own: a failure leaves that tree's marker for the next
+        // start and does not keep the other tree's hooks from running.
+        let mut failure = None;
+        for (repo, path) in &pending {
+            let mut tree_failed = false;
             for hook in &hooks {
                 let task = cx.update(|cx| hook.after_tree_created(&request.lane, repo, path, cx));
-                task.await.map_err(|message| WaitReason::Hook {
-                    point: AFTER_TREE_CREATED.to_string(),
-                    message,
-                })?;
+                if let Err(message) = task.await {
+                    failure.get_or_insert(WaitReason::Hook {
+                        point: AFTER_TREE_CREATED.to_string(),
+                        message,
+                    });
+                    tree_failed = true;
+                    break;
+                }
+            }
+            if !tree_failed {
+                let marker = setup_marker(path);
+                cx.background_spawn(async move { clear_marker(&marker) })
+                    .await
+                    .map_err(WaitReason::Environment)?;
             }
         }
-        Ok(prepared)
+        match failure {
+            Some(reason) => Err(reason),
+            None => Ok(prepared),
+        }
     })
+}
+
+/// The file that records a lane tree whose `after_tree_created` hooks have not all succeeded
+/// yet: next to the tree, outside it, in the directory made below the tree's root. It is made
+/// before the tree, so a tree left by a crash or a failed hook has its hooks run at the next
+/// start.
+pub fn setup_marker(tree: &Path) -> PathBuf {
+    let name = tree
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    tree.with_file_name(format!(".{name}.setup-pending"))
+}
+
+/// Makes the marker of `tree`; one already there (a plain file) is kept. No link is followed.
+fn write_marker(tree: &Path) -> Result<(), String> {
+    let marker = setup_marker(tree);
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+    {
+        Ok(_) => Ok(()),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::AlreadyExists
+                && std::fs::symlink_metadata(&marker)
+                    .is_ok_and(|metadata| metadata.file_type().is_file()) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(format!("creating {}: {error}", marker.display())),
+    }
+}
+
+fn clear_marker(marker: &Path) -> Result<(), String> {
+    match std::fs::remove_file(marker) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("removing {}: {error}", marker.display())),
+    }
 }
 
 /// The problems as one wait reason.
@@ -211,11 +269,13 @@ fn exists(path: &Path) -> bool {
 }
 
 /// Checks every root first, so a refusal makes nothing; then makes the directories and trees.
+/// Also returns, as `(repo, path)`, every tree whose hooks are still to run: those made now and
+/// those an earlier start left with their marker.
 fn make_locations(
     mut locations: LaneLocations,
     repositories: &[crate::locations::RepositoryPlace],
     make_tree: &MakeTree,
-) -> Result<PreparedLane, String> {
+) -> Result<(PreparedLane, Vec<(String, PathBuf)>), String> {
     let lane = locations.lane.clone();
     for item in &mut locations.items {
         if exists(&item.path) {
@@ -253,6 +313,7 @@ fn make_locations(
     }
 
     let mut created_trees = Vec::new();
+    let mut pending = Vec::new();
     for item in &locations.items {
         let made = |error: crate::create::CreateError| format!("{lane} {}: {error}", item.name);
         match &item.place {
@@ -263,10 +324,15 @@ fn make_locations(
             }
             Place::Tree { repo, base } => {
                 if exists(&item.path) {
+                    if exists(&setup_marker(&item.path)) {
+                        pending.push((repo.clone(), item.path.clone()));
+                    }
                     continue;
                 }
                 let parent = item.path.parent().unwrap_or(&item.path);
                 create_below_existing(parent, &item.root).map_err(made)?;
+                write_marker(&item.path)
+                    .map_err(|error| format!("{lane} {}: {error}", item.name))?;
                 let repository_path = repositories
                     .iter()
                     .find(|repository| &repository.name == repo)
@@ -281,11 +347,15 @@ fn make_locations(
                 })
                 .map_err(|error| format!("{lane} {}: {error:#}", item.name))?;
                 created_trees.push((repo.clone(), item.path.clone()));
+                pending.push((repo.clone(), item.path.clone()));
             }
         }
     }
-    Ok(PreparedLane {
-        locations,
-        created_trees,
-    })
+    Ok((
+        PreparedLane {
+            locations,
+            created_trees,
+        },
+        pending,
+    ))
 }

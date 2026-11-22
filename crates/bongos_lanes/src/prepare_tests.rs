@@ -16,7 +16,8 @@ use crate::create_tests::{listing, set_mode, writable};
 use crate::hooks::{AFTER_TREE_CREATED, JobHook, JobHooks};
 use crate::locations_tests::{BUILD_TABLE, FakeProfile, inputs, table};
 use crate::prepare::{
-    FreeSpace, MakeTree, PrepareRequest, PreparedLane, TreeRequest, prepare_lane, wait_lane,
+    FreeSpace, MakeTree, PrepareRequest, PreparedLane, TreeRequest, prepare_lane, setup_marker,
+    wait_lane,
 };
 use crate::profile::LaneProfileSource;
 
@@ -122,7 +123,7 @@ impl Machine {
 #[derive(Default)]
 struct FakeHook {
     calls: Mutex<Vec<(String, String, PathBuf)>>,
-    fail: Option<String>,
+    fail: Mutex<Option<String>>,
 }
 
 impl JobHook for FakeHook {
@@ -137,7 +138,7 @@ impl JobHook for FakeHook {
             .lock()
             .unwrap()
             .push((lane.to_string(), repo.to_string(), path.to_path_buf()));
-        let fail = self.fail.clone();
+        let fail = self.fail.lock().unwrap().clone();
         cx.background_spawn(async move {
             match fail {
                 Some(message) => Err(message),
@@ -382,13 +383,22 @@ async fn an_unwritable_profile_root_refuses_while_a_default_root_falls_back(
 }
 
 #[gpui::test]
-async fn a_failing_hook_leaves_the_lane_waiting_with_its_message(cx: &mut TestAppContext) {
+async fn a_failing_hook_leaves_the_lane_waiting_and_runs_again_until_it_succeeds(
+    cx: &mut TestAppContext,
+) {
     let machine = Machine::new();
     let hook = Arc::new(FakeHook {
-        fail: Some("setup script exited with 2".to_string()),
+        fail: Mutex::new(Some("setup script exited with 2".to_string())),
         ..FakeHook::default()
     });
     cx.update(|cx| JobHooks::register(hook.clone(), cx));
+    let tip = machine.path().join("data/worktrees/app/lane-build-1");
+    let second = machine.path().join("data/worktrees/app/lane-build-1-base");
+    let both = [
+        ("build-1".to_string(), "app".to_string(), tip.clone()),
+        ("build-1".to_string(), "app".to_string(), second.clone()),
+    ];
+
     let reason = prepare(cx, machine.request(table(BUILD_TABLE)), None)
         .await
         .unwrap_err();
@@ -399,7 +409,59 @@ async fn a_failing_hook_leaves_the_lane_waiting_with_its_message(cx: &mut TestAp
             message: "setup script exited with 2".to_string(),
         })
     );
-    assert_eq!(hook.calls.lock().unwrap().len(), 1);
+    assert_eq!(
+        *hook.calls.lock().unwrap(),
+        both,
+        "the first tree's failure does not skip the second tree's hook"
+    );
+    assert!(setup_marker(&tip).is_file());
+    assert!(setup_marker(&second).is_file());
+
+    // The next start finds both trees made but not set up: the hook runs again for both.
+    let reason = prepare(cx, machine.request(table(BUILD_TABLE)), None)
+        .await
+        .unwrap_err();
+    assert!(matches!(reason, WaitReason::Hook { .. }), "{reason:?}");
+    assert_eq!(hook.calls.lock().unwrap()[2..], both);
+    assert_eq!(machine.made_count(), 2, "no tree is made twice");
+
+    // Once it succeeds the markers go, and later starts do not call it.
+    *hook.fail.lock().unwrap() = None;
+    let prepared = prepare(cx, machine.request(table(BUILD_TABLE)), None)
+        .await
+        .unwrap();
+    assert!(prepared.created_trees.is_empty());
+    assert_eq!(hook.calls.lock().unwrap()[4..], both);
+    assert!(!setup_marker(&tip).exists());
+    assert!(!setup_marker(&second).exists());
+    prepare(cx, machine.request(table(BUILD_TABLE)), None)
+        .await
+        .unwrap();
+    assert_eq!(hook.calls.lock().unwrap().len(), 6);
+}
+
+#[gpui::test]
+async fn a_tree_left_with_its_marker_by_a_crash_has_its_hook_run(cx: &mut TestAppContext) {
+    let machine = Machine::new();
+    prepare(cx, machine.request(table(BUILD_TABLE)), None)
+        .await
+        .unwrap();
+    let tip = machine.path().join("data/worktrees/app/lane-build-1");
+    assert!(!setup_marker(&tip).exists());
+
+    // As if the app stopped between making the tree and running its hooks.
+    std::fs::write(setup_marker(&tip), "").unwrap();
+    let hook = Arc::new(FakeHook::default());
+    cx.update(|cx| JobHooks::register(hook.clone(), cx));
+    let prepared = prepare(cx, machine.request(table(BUILD_TABLE)), None)
+        .await
+        .unwrap();
+    assert!(prepared.created_trees.is_empty());
+    assert_eq!(
+        *hook.calls.lock().unwrap(),
+        [("build-1".to_string(), "app".to_string(), tip.clone())]
+    );
+    assert!(!setup_marker(&tip).exists());
 }
 
 #[gpui::test]
