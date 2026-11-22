@@ -17,6 +17,7 @@ use gpui::TestAppContext;
 use crate::job_trees::{
     CurrentJobTrees, JobRepositories, JobRepository, JobStart, StartedTrees, start_job_trees,
 };
+use crate::lane_tree::reset_tree;
 use crate::lane_tree_tests::{Fixture, RUN_1, RUN_2, RUN_3, git};
 use crate::locations::{Place, binding_of};
 use crate::locations_tests::table;
@@ -126,7 +127,21 @@ fn setup(fixture: &Fixture, profile: Vec<EnvEdit>) -> LaneTreeSetup {
             dirs: BTreeMap::new(),
         },
         profile,
+        forbidden: fixture.forbidden(),
     }
+}
+
+/// `build-1`'s setup with its location `name` moved to `path`.
+fn moved(fixture: &Fixture, name: &str, path: &Path) -> LaneTreeSetup {
+    let mut setup = setup(fixture, Vec::new());
+    setup
+        .locations
+        .items
+        .iter_mut()
+        .find(|item| item.name == name)
+        .unwrap()
+        .path = path.to_path_buf();
+    setup
 }
 
 /// The trees over `runs` and `jobs`, with `build-1` set up from the fixture and `docs-1` bound to
@@ -482,4 +497,104 @@ async fn tip_and_env_answer_per_repository_with_the_profiles_edits(cx: &mut Test
     assert_eq!(shared.tip("leaf", "app"), None);
     assert!(shared.env("leaf", "app").is_empty());
     assert_eq!(Path::new(leased.path()), path_of(&fixture, "tree:app:base"));
+}
+
+/// Adds a linked worktree of `repository` at `path`, detached.
+fn add_worktree(repository: &Path, path: &Path) {
+    git(
+        repository,
+        &["worktree", "add", "-q", "--detach", &path.to_string_lossy()],
+    );
+}
+
+#[gpui::test]
+async fn a_second_tree_overlapping_the_tip_is_never_reset_or_lent(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::build(TABLE, |_| None);
+    let runs = LaneRuns::default();
+    runs.set(PROJECT, state(OwnerState::Active, "leaf-2"));
+    let jobs = CurrentJobTrees::default();
+    let trees = trees(&fixture, &runs, &jobs, Vec::new(), process(&[]));
+    start_job(&fixture, &trees, RUN_1).await;
+    assert_eq!(answer(&trees, "leaf", "app"), "lease");
+    let tip = fixture.tip();
+    let app_base = path_of(&fixture, "tree:app:base");
+    let job = fixture.task_job(RUN_2, None);
+
+    // The second tree inside the tip, a linked worktree of its own; then the tip inside the
+    // second tree.
+    let inner = tip.join("base");
+    add_worktree(&fixture.app, &inner);
+    for (setup, second) in [
+        (moved(&fixture, "tree:app:base", &inner), inner.clone()),
+        (
+            moved(&fixture, "tree:app", &app_base.join("tip")),
+            app_base.clone(),
+        ),
+    ] {
+        std::fs::write(second.join("left.txt"), "left\n").unwrap();
+        let mut request = fixture.request(&job, true);
+        request.locations = setup.locations.clone();
+        trees.set_lane(build(1), setup);
+        assert_eq!(answer(&trees, "leaf", "app"), "unavailable");
+        let error = reset_tree(&fixture.git, &request).await.unwrap_err();
+        assert!(error.contains("overlaps"), "{}: {error}", second.display());
+        assert!(second.join("left.txt").exists(), "{}", second.display());
+    }
+
+    trees.set_lane(build(1), setup(&fixture, Vec::new()));
+    assert_eq!(answer(&trees, "leaf", "app"), "lease");
+}
+
+#[gpui::test]
+async fn a_second_tree_at_a_plain_checkout_or_a_forbidden_place_is_not_lent(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::build(TABLE, |_| None);
+    let before = fixture.untouched();
+    let runs = LaneRuns::default();
+    runs.set(PROJECT, state(OwnerState::Active, "leaf-2"));
+    let jobs = CurrentJobTrees::default();
+    let trees = trees(&fixture, &runs, &jobs, Vec::new(), process(&[]));
+    start_job(&fixture, &trees, RUN_1).await;
+    assert_eq!(answer(&trees, "leaf", "app"), "lease");
+
+    // A checkout of its own (a `.git` directory) where the second tree should be: neither lent
+    // nor reset.
+    let plain = fixture.base.join("data/worktrees/app/plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    git(&plain, &["init", "-q", "-b", "main"]);
+    std::fs::write(plain.join("mine.txt"), "mine\n").unwrap();
+    let setup_plain = moved(&fixture, "tree:app:base", &plain);
+    let mut request = fixture.request(&fixture.task_job(RUN_2, None), true);
+    request.locations = setup_plain.locations.clone();
+    trees.set_lane(build(1), setup_plain);
+    assert_eq!(answer(&trees, "leaf", "app"), "unavailable");
+    let error = reset_tree(&fixture.git, &request).await.unwrap_err();
+    assert!(error.contains("not a worktree of"), "{error}");
+    assert!(plain.join("mine.txt").exists());
+
+    // A primary checkout, a task worktree or another lane's tree (both linked worktrees, which
+    // only the forbidden places refuse) is never lent.
+    let other_lane = fixture.all[1].get("tree:app").unwrap().path.clone();
+    add_worktree(&fixture.app, &other_lane);
+    for path in [
+        fixture.app.clone(),
+        fixture.checkout.clone(),
+        fixture.task_worktree.clone(),
+        other_lane,
+    ] {
+        trees.set_lane(build(1), moved(&fixture, "tree:app:base", &path));
+        assert_eq!(
+            answer(&trees, "leaf", "app"),
+            "unavailable",
+            "{}",
+            path.display()
+        );
+    }
+    assert_eq!(fixture.untouched(), before);
+
+    trees.set_lane(build(1), setup(&fixture, Vec::new()));
+    assert_eq!(answer(&trees, "leaf", "app"), "lease");
 }

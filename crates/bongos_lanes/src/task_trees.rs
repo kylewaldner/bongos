@@ -16,7 +16,7 @@ use bongos_lanes_model::{EnvEdit, LaneId, OwnerState, TaskId, TokenError, TokenV
 use crate::create::lexical;
 use crate::env::{apply_env, second_tree_env, tip_env};
 use crate::job_trees::CurrentJobTrees;
-use crate::lane_tree::{check_apart_from_tips, lane_tree};
+use crate::lane_tree::{Forbidden, check_apart_from_tips, check_own_tree, lane_tree};
 use crate::locations::LaneLocations;
 use crate::runs::LaneRuns;
 
@@ -90,6 +90,9 @@ pub struct LaneTreeSetup {
     pub values: TokenValues,
     /// The project profile's edits for the lane, applied last.
     pub profile: Vec<EnvEdit>,
+    /// What the job start refused to reset; a second tree that is, holds or sits inside any of
+    /// it is never lent.
+    pub forbidden: Forbidden,
 }
 
 impl LaneTreeSetup {
@@ -176,7 +179,8 @@ impl LaneTaskTrees {
         self.inner.leases.clone()
     }
 
-    /// Sets `lane`'s setup at its job start.
+    /// Sets `lane`'s setup at its job start, only after [`crate::start_job_trees`] returned `Ok`
+    /// for the same locations and forbidden places, so a lane whose trees were refused lends none.
     pub fn set_lane(&self, lane: LaneId, setup: LaneTreeSetup) {
         self.inner
             .setups
@@ -251,7 +255,10 @@ impl LaneTaskTrees {
         let Some(path) = setup.second_tree(repo) else {
             return SecondTree::Unavailable;
         };
-        if let Err(message) = check_apart_from_tips(path, &setup.locations) {
+        // The holder checks out and cleans in the lent tree: it gets the same checks as a reset.
+        if let Err(message) = check_own_tree(path, path, &setup.forbidden)
+            .and_then(|_| check_apart_from_tips(path, &setup.locations))
+        {
             log::error!("{lane}: {message}");
             return SecondTree::Unavailable;
         }
@@ -266,9 +273,20 @@ impl LaneTaskTrees {
             return SecondTree::Busy;
         };
         // Lending makes nothing: a second tree not made yet is made by the lane's next job start.
-        let is_tree = std::fs::symlink_metadata(hold.path())
-            .is_ok_and(|metadata| metadata.file_type().is_dir());
-        if !is_tree {
+        // Only a linked worktree is lent (its `.git` is a file); a checkout of its own is not.
+        let is_dir = |path: &Path| {
+            std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
+        };
+        let is_linked = std::fs::symlink_metadata(hold.path().join(".git"))
+            .is_ok_and(|metadata| metadata.file_type().is_file());
+        if !is_dir(hold.path()) {
+            return SecondTree::Unavailable;
+        }
+        if !is_linked {
+            log::error!(
+                "{lane}: {} is not a linked worktree; it is not lent",
+                hold.path().display()
+            );
             return SecondTree::Unavailable;
         }
         let env = apply_env((self.inner.process_env)(), &edits);

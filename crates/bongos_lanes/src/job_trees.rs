@@ -319,6 +319,8 @@ where
         if let Ok(second) = lane_tree(&start.locations, &repository.name, true) {
             match leases.try_hold(&second.path) {
                 None => second_leased.push(repository.name.clone()),
+                // A named binding, never `_`: the hold must last across the reset's await so no
+                // lease is given while the tree is reset.
                 Some(_hold) => {
                     reset_tree(git, &request(true))
                         .await
