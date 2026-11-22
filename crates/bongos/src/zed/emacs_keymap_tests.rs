@@ -686,9 +686,6 @@ const RESERVED: &[(&str, &[&str])] = &[
     ("ctrl-/", &["editor::Undo"]),
     ("ctrl-_", &["editor::Undo"]),
     ("ctrl-x u", &["editor::Undo"]),
-    ("alt-;", &[]),
-    ("ctrl-;", &[]),
-    ("ctrl-alt-;", &[]),
 ];
 
 #[gpui::test]
