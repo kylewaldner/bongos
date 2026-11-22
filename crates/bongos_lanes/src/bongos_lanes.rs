@@ -13,7 +13,10 @@
 //! A prepared task's first job runs its rule's staleness script first (`staleness`). Other
 //! features decide what a waiting lane does through the lane wait handlers (`lane_waits`), whose
 //! asks reach the Work panel through the `lanes` needs-you source. Closing the last window with
-//! live runs does what `lanes.on_last_window_close` says first (`last_window`).
+//! live runs does what `lanes.on_last_window_close` says first (`last_window`). After a crash,
+//! `recovery` reconciles the lanes with the loaded runs when a process becomes the writer and at
+//! every `lanes: start`: a dead host's dispatcher is closed, unstarted jobs are cleared and
+//! `on_interruption` decides whether an interrupted lane run is resumed once or waits.
 
 mod accept_graph;
 mod actions;
@@ -37,6 +40,7 @@ mod pick_extension;
 mod prepare;
 mod profile;
 mod read_modes;
+mod recovery;
 mod roots;
 mod runs;
 mod scope;
@@ -46,6 +50,7 @@ mod status_doc;
 mod store;
 mod task_trees;
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use bongos_project_repo::{ActivitySources, LiveSources};
@@ -118,6 +123,10 @@ pub use prepare::{
     system_free_space, wait_lane,
 };
 pub use profile::{LaneProfileSource, LaneProfiles};
+pub use recovery::{
+    HOST_STOPPED, INTERRUPTIONS_PREFIX, InterruptionRecord, RECOVERY_RETRY, Recovered,
+    interruption_policy, read_interruption, recover,
+};
 pub use roots::{LaneRootResolver, LaneTables};
 pub use runs::{LaneActivity, LaneLiveSource, LaneRuns, OwnedScope, SOURCE_NAME};
 pub use scope::LaneRunScope;
@@ -166,6 +175,7 @@ pub fn init(cx: &mut App) {
     register_needs_you(cx);
     register_host(cx);
     read_modes::register(cx);
+    WriterParticipants::register(Rc::new(recovery::LanesRecovery), cx);
 }
 
 #[cfg(test)]
