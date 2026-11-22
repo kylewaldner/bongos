@@ -195,3 +195,15 @@ fn the_prompt_choices_read_as_answers() {
     );
     assert_eq!(answer_of(None).choice, LastWindowChoice::Cancel);
 }
+
+// A close under way swallows a second; once it ends, even by its task being dropped, the next
+// close starts.
+#[gpui::test]
+fn a_dropped_close_lets_the_next_one_start(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        let first = crate::last_window::start_closing(cx).expect("the first close starts");
+        assert!(crate::last_window::start_closing(cx).is_none());
+        drop(first);
+        assert!(crate::last_window::start_closing(cx).is_some());
+    });
+}

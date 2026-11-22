@@ -7,8 +7,10 @@
 //!
 //! The decision ([`close_first`], [`close_last_window`]) goes through [`LastWindowClose`], so a
 //! test stands in for the prompt, the setting, the handover and the interrupt.
-//! [`close_window_after_lanes`] wires it into the platform's close of a window.
+//! [`close_window_after_lanes`] wires it into the close of a window, from the platform or the
+//! `CloseWindow` action (through `workspace::CloseWindowGuard`). Quitting the app does not ask.
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -21,7 +23,7 @@ use bongos_project_repo::ProjectRepo;
 use gpui::{AnyWindowHandle, App, Global, PromptLevel, Task, WeakEntity, Window};
 use settings::Settings as _;
 use workspace::notifications::NotificationId;
-use workspace::{CloseWindow, MultiWorkspace, Toast};
+use workspace::{MultiWorkspace, Toast};
 
 use crate::{LanesOnLastWindowClose, LanesSettings, LanesToast};
 
@@ -203,19 +205,23 @@ struct WindowCloser {
 
 impl LastWindowClose for WindowCloser {
     fn ask(&self, cx: &mut App) -> Task<LastWindowAnswer> {
-        let asked = self.window.update(cx, |_, window, cx| {
-            window.prompt(
-                PromptLevel::Warning,
-                LAST_WINDOW_QUESTION,
-                Some(LAST_WINDOW_DETAIL),
-                &LAST_WINDOW_CHOICES,
-                cx,
-            )
-        });
-        match asked {
-            Ok(answer) => cx.spawn(async move |_| answer_of(answer.await.ok())),
-            Err(_) => Task::ready(answer_of(None)),
-        }
+        // The close runs while the window is being updated, so the prompt opens once that ended.
+        let handle = self.window;
+        cx.spawn(async move |cx| {
+            let asked = handle.update(cx, |_, window, cx| {
+                window.prompt(
+                    PromptLevel::Warning,
+                    LAST_WINDOW_QUESTION,
+                    Some(LAST_WINDOW_DETAIL),
+                    &LAST_WINDOW_CHOICES,
+                    cx,
+                )
+            });
+            match asked {
+                Ok(answer) => answer_of(answer.await.ok()),
+                Err(_) => answer_of(None),
+            }
+        })
     }
 
     fn remember(&self, setting: LanesOnLastWindowClose, cx: &mut App) {
@@ -241,6 +247,10 @@ impl LastWindowClose for WindowCloser {
                 start_handover(repo, spawner.clone(), log, request, cx)
             })
             .collect();
+        // The window stays open until every handover ended, which can take as long as the
+        // longest live node; say so, once the window is no longer being updated.
+        let handle = self.window;
+        cx.defer(move |cx| show_toast(handle, HANDING_OVER, cx));
         cx.spawn(async move |_| {
             // Every handover runs to its end (moved, or taken back) before the answer.
             let mut failed = None;
@@ -262,23 +272,69 @@ impl LastWindowClose for WindowCloser {
     }
 }
 
+/// The toast while the window waits on its handovers.
+pub const HANDING_OVER: &str = "Handing the live runs over to an engine host; the window \
+    closes once it took them.";
+
+/// The toast when a close comes while an earlier one still waits.
+pub const STILL_CLOSING: &str = "Still closing: waiting on your answer or the handover.";
+
+fn show_toast(handle: AnyWindowHandle, message: &'static str, cx: &mut App) {
+    let Some(handle) = handle.downcast::<MultiWorkspace>() else {
+        return;
+    };
+    handle
+        .update(cx, |multi_workspace, _, cx| {
+            multi_workspace.workspace().update(cx, |workspace, cx| {
+                workspace.show_toast(
+                    Toast::new(NotificationId::unique::<LanesToast>(), message),
+                    cx,
+                )
+            })
+        })
+        .ok();
+}
+
 /// Set while closing the last window waits on the person or a handover, so a second close
 /// does not start another.
 #[derive(Default)]
-struct ClosingLastWindow(bool);
+struct ClosingLastWindow(Rc<Cell<bool>>);
 
 impl Global for ClosingLastWindow {}
 
-/// The platform asks to close `window`: when it is the last window and runs live in projects
-/// whose writer it holds (lanes on), closing first does what `lanes.on_last_window_close` says,
-/// then closes it through `multi_workspace` (or shows why it stays open), and this returns
-/// true. Otherwise returns false and the caller closes the window as usual.
+/// Clears [`ClosingLastWindow`] when the close that set it ends, however it ends (its task
+/// may be dropped with the window).
+pub(crate) struct ClosingReset(Rc<Cell<bool>>);
+
+impl Drop for ClosingReset {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
+}
+
+/// Starts a close of the last window: the reset to hold until it ended, or `None` when one
+/// is already under way.
+pub(crate) fn start_closing(cx: &mut App) -> Option<ClosingReset> {
+    let closing = cx.default_global::<ClosingLastWindow>().0.clone();
+    if closing.replace(true) {
+        return None;
+    }
+    Some(ClosingReset(closing))
+}
+
+/// A window is closing (the platform close or the `CloseWindow` action): when it is the last
+/// window and runs live in projects whose writer it holds (lanes on), closing first does what
+/// `lanes.on_last_window_close` says, then closes it through `multi_workspace` (or shows why it
+/// stays open), and this returns true. Otherwise returns false and the caller closes the window
+/// as usual.
 pub fn close_window_after_lanes(
     multi_workspace: &WeakEntity<MultiWorkspace>,
     window: &mut Window,
     cx: &mut App,
 ) -> bool {
-    if cx.default_global::<ClosingLastWindow>().0 {
+    if cx.default_global::<ClosingLastWindow>().0.get() {
+        let handle = window.window_handle();
+        cx.defer(move |cx| show_toast(handle, STILL_CLOSING, cx));
         return true;
     }
     let settings = LanesSettings::get_global(cx);
@@ -295,7 +351,9 @@ pub fn close_window_after_lanes(
     if first == CloseFirst::Nothing {
         return false;
     }
-    cx.set_global(ClosingLastWindow(true));
+    let Some(reset) = start_closing(cx) else {
+        return true;
+    };
     let closer = Rc::new(WindowCloser {
         window: window.window_handle(),
         projects,
@@ -305,11 +363,10 @@ pub fn close_window_after_lanes(
     window
         .spawn(cx, async move |cx| {
             let outcome = closing.await;
-            cx.update(|_, cx| cx.set_global(ClosingLastWindow(false)))
-                .ok();
+            drop(reset);
             multi_workspace
                 .update_in(cx, |multi_workspace, window, cx| match outcome {
-                    CloseOutcome::Close => multi_workspace.close_window(&CloseWindow, window, cx),
+                    CloseOutcome::Close => multi_workspace.close_window_unguarded(window, cx),
                     CloseOutcome::StayOpen(Some(message)) => {
                         multi_workspace.workspace().update(cx, |workspace, cx| {
                             workspace.show_toast(
