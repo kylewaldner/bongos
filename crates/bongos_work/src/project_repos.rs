@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 use bongos_project_repo::router::{self, Routed};
 use bongos_project_repo::{
-    ApprovalRow, BACKUP_TICK, LandingEvent, LoadedProject, ProjectRepo, ProjectRepositorySettings,
-    QuickEdit, Recovery, StateEvent, check_fresh, written_tasks,
+    ApprovalRow, BACKUP_TICK, LandingEvent, LoadedProject, PersonClaim, ProjectRepo,
+    ProjectRepositorySettings, QuickEdit, Recovery, RepoCommand, RepoReply, StateEvent,
+    check_fresh, written_tasks,
 };
 use bongos_project_repo_model::ChangeMeta;
 use bongos_work_model::PersonAtKeyboard;
@@ -292,6 +293,10 @@ impl LandingWatch {
     }
 }
 
+/// Why a write is refused in a process that neither holds the writer nor reaches it.
+const NOT_THE_WRITER: &str =
+    "this project is open in another bongos process; work there or close it";
+
 fn seam_name(loaded: &LoadedProject) -> String {
     format!("project-repository:{}", loaded.repo().location().id)
 }
@@ -348,19 +353,17 @@ impl DefinitionWriter for RepoWriter {
         match router::route(tree, &change).map_err(WriteError::Refused)? {
             Routed::StateOnly { state, files } => {
                 let repo = self.loaded.repo();
-                let Some(writer) = repo.state().and_then(|state| state.writer()) else {
-                    return Err(WriteError::Refused(
-                        "this project is open in another bongos process; work there or close it"
-                            .to_string(),
-                    ));
-                };
-                router::apply_state_only(
-                    writer,
-                    &repo.location().files,
-                    &state,
+                let holds_writer = repo.state().and_then(|state| state.writer()).is_some();
+                if !holds_writer && repo.sink().is_none() {
+                    return Err(WriteError::Refused(NOT_THE_WRITER.to_string()));
+                }
+                // Through the project's sink when one is set (the writer of another process),
+                // else on this process's writer.
+                futures::executor::block_on(repo.apply_state_change(
+                    state,
                     &files,
-                    &ctx.author,
-                )
+                    ctx.author.clone(),
+                ))
                 .map_err(|error| WriteError::Failed(format!("{error:#}")))?;
                 Ok(WriteOutcome::Applied(change))
             }
@@ -394,6 +397,28 @@ impl DefinitionWriter for RepoWriter {
                     name,
                 };
                 let repo = self.loaded.repo().clone();
+                if repo.state().and_then(|state| state.writer()).is_none() {
+                    // Another process holds the writer: the edit travels to it with only a
+                    // claim of the person, which it trusts from a verified window alone.
+                    if repo.sink().is_none() {
+                        return Err(WriteError::Refused(NOT_THE_WRITER.to_string()));
+                    }
+                    let person = attestation.map(|_| PersonClaim {
+                        name: ctx.author.name.clone(),
+                    });
+                    let reply = futures::executor::block_on(
+                        repo.send_command(RepoCommand::QuickEdit { edit, person }),
+                    )
+                    .map_err(|error| WriteError::Failed(format!("{error:#}")))?;
+                    return match reply {
+                        RepoReply::Started { change_id } => {
+                            Ok(WriteOutcome::Landing { change, change_id })
+                        }
+                        other => Err(WriteError::Failed(format!(
+                            "unexpected answer to a quick edit: {other:?}"
+                        ))),
+                    };
+                }
                 // The store's serial writer runs on a background thread and waits for the
                 // branch and the row, so the snapshot it publishes next shows the change pending.
                 let started =
