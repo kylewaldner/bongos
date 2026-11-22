@@ -1,5 +1,7 @@
 //! A lane job's start and end. The start runs after the transaction that reserved the job's run
-//! id: the job's trees and environment are prepared, the job hooks' `before_job` are awaited (when
+//! id: the project profile's `verify_lane` checks the machine (a failure clears the job like a
+//! `before_job` refusal, leaving the lane waiting with the problems), the job's trees and
+//! environment are prepared, the job hooks' `before_job` are awaited (when
 //! any hook is registered), then the run is started. A refusal is cleared in a second
 //! transaction: one of the machine leaves the lane waiting, any other halts the lane and its
 //! task. The end of a job comes from its run's status changes.
@@ -41,6 +43,8 @@ use crate::pick_extension::{
     JobChange, PickExtension, PickExtensions, extension_job_changed, lane_after_run,
     lane_after_unstarted, with_engine,
 };
+use crate::prepare::problems_reason;
+use crate::profile::LaneProfiles;
 use crate::staleness::{Staleness, StalenessCheck};
 use crate::store::{put_lane, put_owner, read_state, read_state_in};
 use crate::task_trees::LaneTaskTrees;
@@ -100,14 +104,32 @@ enum HookPhase {
 type Then = Box<dyn FnOnce(&Dispatcher, &mut App)>;
 
 impl Dispatcher {
-    /// Prepares the job's trees and environment, runs the staleness script of a prepared task's
-    /// first job, then starts its run.
+    /// Checks the machine for the lane (the project profile's `verify_lane`), prepares the job's
+    /// trees and environment, runs the staleness script of a prepared task's first job, then
+    /// starts its run. A failing verify clears the job as a `before_job` refusal does: the lane
+    /// waits with the problems and nothing of the job is prepared.
     pub(crate) fn start_job(&self, pending: PendingJob, cx: &mut App) {
         let host = self.parts().host.clone();
-        let setup = host.prepare_job(&pending.lane, &pending.job, cx);
+        let verify = LaneProfiles::source(cx)
+            .map(|profile| profile.verify_lane(&self.0.config.project, &pending.lane, cx));
+        // With no verify the preparation starts at once, as it always did.
+        let preparing = match verify {
+            None => Ok(host.prepare_job(&pending.lane, &pending.job, cx)),
+            Some(verify) => Err(verify),
+        };
         let weak = self.downgrade();
         cx.spawn(async move |cx| {
-            let setup = setup.await;
+            let setup = match preparing {
+                Ok(setup) => setup.await,
+                Err(verify) => match verify.await {
+                    Ok(()) => {
+                        let setup =
+                            cx.update(|cx| host.prepare_job(&pending.lane, &pending.job, cx));
+                        setup.await
+                    }
+                    Err(problems) => Err(problems_reason(&problems)),
+                },
+            };
             let staleness = match (&setup, &pending.refresh) {
                 (Ok(setup), Some(refresh)) => {
                     let check = staleness_check(&pending, refresh, setup);

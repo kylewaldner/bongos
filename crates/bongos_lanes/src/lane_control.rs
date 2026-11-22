@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::dispatcher::{
     Dispatcher, DispatcherRecord, Lanes, LanesParts, dispatcher_record, held_task, put_dispatcher,
 };
+use crate::lane_waits::{ask_in, asked_text, asks_in, delete_ask, publish_asks};
 use crate::store::{put_lane, put_owner, read_state_in};
 
 /// The reason of a lane that stopped for the bound of the start.
@@ -102,6 +103,9 @@ pub struct LaneStatus {
     pub task: Option<TaskId>,
     pub pause_requested: bool,
     pub stop_requested: bool,
+    /// What the lane asks of a person while it waits on one (a lane wait handler's ask), until
+    /// `lanes: resume`.
+    pub asked: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,7 +145,8 @@ impl Lanes {
         pause(&self.parts, lane, by)
     }
 
-    /// Resumes a paused or stopped lane, or withdraws a pause not yet applied.
+    /// Resumes a paused or stopped lane, withdraws a pause not yet applied, or clears the ask of a
+    /// lane waiting on a person so it is evaluated again.
     pub fn resume(&self, lane: &LaneId) -> Result<String> {
         resume(&self.parts, lane)
     }
@@ -181,7 +186,13 @@ impl Dispatcher {
             return false;
         }
         match end_if_at_rest(self.parts(), &self.0.config.events, cx) {
-            Ok(ended) => ended,
+            Ok(ended) => {
+                if ended {
+                    // No pass runs any more, so nothing would withdraw the published asks.
+                    publish_asks(&self.0.config.project, Vec::new(), cx);
+                }
+                ended
+            }
             Err(error) => {
                 log::error!("lanes: ending the dispatcher: {error:#}");
                 false
@@ -225,6 +236,7 @@ fn stop_one(tx: &mut StateTx, state: &LanesState, lane: &LaneRecord, now: &str) 
             updated.stop_requested = Some(StopCause::Stop);
         }
         LaneState::Idle | LaneState::Waiting => {
+            delete_ask(tx, &lane.id())?;
             updated.state = LaneState::Idle;
             updated.reason = None;
             updated.stop_requested = Some(StopCause::Stop);
@@ -251,6 +263,10 @@ fn pause(parts: &LanesParts, lane: &LaneId, by: &Author) -> Result<String> {
             bail!("{lane} is not a lane");
         };
         let mut updated = record.clone();
+        if record.state == LaneState::Waiting {
+            // The lane leaves the wait the ask was for, so the ask goes with the change.
+            delete_ask(tx, lane)?;
+        }
         let message = match record.state {
             LaneState::Idle | LaneState::Waiting if record.job.is_none() => {
                 updated.state = LaneState::Paused;
@@ -295,6 +311,18 @@ fn resume(parts: &LanesParts, lane: &LaneId) -> Result<String> {
                 format!("{lane} no longer pauses")
             }
             LaneState::Running => format!("{lane} is already running"),
+            // A lane waiting on a person: the ask is cleared and the lane evaluated again, by
+            // the pass this commit starts (a lane holding a job waits for that job's hooks).
+            LaneState::Waiting if ask_in(tx, lane)?.is_some_and(|ask| ask.applies_to(record)) => {
+                delete_ask(tx, lane)?;
+                if record.job.is_none() {
+                    updated.state = LaneState::Idle;
+                    updated.reason = None;
+                    format!("{lane} resumed")
+                } else {
+                    format!("{lane} no longer waits on you; it still waits for its job's hooks")
+                }
+            }
             LaneState::Idle | LaneState::Waiting => format!("{lane} is not paused"),
             LaneState::Halted => bail!("{lane} is halted; retry its run or adopt its task"),
         };
@@ -306,9 +334,9 @@ fn resume(parts: &LanesParts, lane: &LaneId) -> Result<String> {
 }
 
 fn status(parts: &LanesParts) -> Result<LanesStatus> {
-    let (state, record) = parts
+    let (state, record, asks) = parts
         .writer
-        .transact(|tx| Ok((read_state_in(tx)?, dispatcher_record(tx)?)))?;
+        .transact(|tx| Ok((read_state_in(tx)?, dispatcher_record(tx)?, asks_in(tx)?)))?;
     let phase = record
         .as_ref()
         .map(|record| match (&record.ended, &record.stopped_by) {
@@ -329,6 +357,7 @@ fn status(parts: &LanesParts) -> Result<LanesStatus> {
             task: state.task_of(&lane.id()).cloned(),
             pause_requested: lane.pause_requested,
             stop_requested: lane.stop_requested.is_some(),
+            asked: asked_text(&state, &asks, &lane.id()),
         })
         .collect();
     Ok(LanesStatus {
