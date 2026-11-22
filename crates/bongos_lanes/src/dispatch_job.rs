@@ -22,7 +22,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use bongos_lanes_model::{
     AssignedWork, Author, JobEnd, JobEndInput, JobRecord, LaneId, LaneRecord, LaneState, LaneTable,
-    LanesState, OwnerRecord, OwnerState, PickGraph, RunSubject, TaskId, WaitReason,
+    LanesState, OwnerRecord, OwnerState, PickGraph, RunSubject, TaskId, Transition, WaitReason,
     lane_after_retry, owner_after_job_end, short_run, stop_at_job_boundary,
 };
 use bongos_project_repo::{CommitId, StateTx};
@@ -32,13 +32,16 @@ use bongos_workflow_model::InputValue;
 use bongos_workflow_model::record::{EndState, LaneRef, Lifecycle, StartedBy};
 use gpui::{App, Task};
 
-use crate::dispatcher::{Dispatcher, JobSetup, PendingJob, environment_refusal, held_task};
+use crate::dispatcher::{
+    AheadLanding, Dispatcher, JobSetup, PendingJob, RefreshFirst, environment_refusal, held_task,
+};
 use crate::hooks::{BeforeJob, JobEnd as HookEnd, JobHookCx, JobHooks, after_job_of};
 use crate::job_trees::CurrentJobTrees;
 use crate::pick_extension::{
     JobChange, PickExtension, PickExtensions, extension_job_changed, lane_after_run,
     lane_after_unstarted, with_engine,
 };
+use crate::staleness::{Staleness, StalenessCheck};
 use crate::store::{put_lane, put_owner, read_state, read_state_in};
 use crate::task_trees::LaneTaskTrees;
 
@@ -62,6 +65,9 @@ enum ClearedAt {
 
 /// The reason an extension hears for a job dropped before its run started.
 pub const DROPPED_BEFORE_START: &str = "dropped before its run started";
+
+/// What a lane halts with when its job's staleness script fails, before the failure.
+pub const STALENESS_FAILED: &str = "staleness script failed: ";
 
 impl Cleared {
     fn text(&self) -> String {
@@ -94,23 +100,48 @@ enum HookPhase {
 type Then = Box<dyn FnOnce(&Dispatcher, &mut App)>;
 
 impl Dispatcher {
-    /// Prepares the job's trees and environment, then starts its run.
+    /// Prepares the job's trees and environment, runs the staleness script of a prepared task's
+    /// first job, then starts its run.
     pub(crate) fn start_job(&self, pending: PendingJob, cx: &mut App) {
-        let setup = self
-            .parts()
-            .host
-            .prepare_job(&pending.lane, &pending.job, cx);
+        let host = self.parts().host.clone();
+        let setup = host.prepare_job(&pending.lane, &pending.job, cx);
         let weak = self.downgrade();
         cx.spawn(async move |cx| {
             let setup = setup.await;
+            let staleness = match (&setup, &pending.refresh) {
+                (Ok(setup), Some(refresh)) => {
+                    let check = staleness_check(&pending, refresh, setup);
+                    let answer = cx.update(|cx| host.staleness(check, cx));
+                    Some(answer.await)
+                }
+                _ => None,
+            };
             if let Some(inner) = weak.upgrade() {
-                cx.update(|cx| Dispatcher(inner).finish_start(pending, setup, cx));
+                cx.update(|cx| Dispatcher(inner).finish_start(pending, setup, staleness, cx));
             }
         })
         .detach();
     }
 
-    fn finish_start(&self, pending: PendingJob, setup: Result<JobSetup, WaitReason>, cx: &mut App) {
+    fn finish_start(
+        &self,
+        mut pending: PendingJob,
+        setup: Result<JobSetup, WaitReason>,
+        staleness: Option<Result<Staleness, String>>,
+        cx: &mut App,
+    ) {
+        if setup.is_ok()
+            && let Some(answer) = staleness
+        {
+            match self.apply_staleness(&mut pending, answer) {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(cleared) => {
+                    self.clear_start(&pending, &cleared, ClearedAt::NotStarted, cx);
+                    return;
+                }
+            }
+        }
         let cleared = match setup {
             Err(reason) => Some((Cleared::Wait(reason), ClearedAt::NotStarted)),
             Ok(setup) => {
@@ -150,6 +181,51 @@ impl Dispatcher {
         };
         if let Some((cleared, at)) = cleared {
             self.clear_start(&pending, &cleared, at, cx);
+        }
+    }
+
+    /// Applies a staleness script's answer to a job its lane still holds: the owner is marked
+    /// refreshed, and on `stale` the job runs the rule's refresh workflow instead. Returns
+    /// whether the job is still to start, or how to clear it when the script failed.
+    fn apply_staleness(
+        &self,
+        pending: &mut PendingJob,
+        answer: Result<Staleness, String>,
+    ) -> Result<bool, Cleared> {
+        let Some(refresh) = pending.refresh.clone() else {
+            return Ok(true);
+        };
+        let staleness =
+            answer.map_err(|text| Cleared::Halt(format!("{STALENESS_FAILED}{text}")))?;
+        let now = self.parts().host.now();
+        let result = self
+            .parts()
+            .writer
+            .transact(|tx| record_staleness(tx, pending, &refresh, staleness, &now));
+        match result {
+            Ok(false) => {
+                log::info!(
+                    "lanes: {} no longer holds run {}, not starting it",
+                    pending.lane,
+                    pending.job.run_id
+                );
+                Ok(false)
+            }
+            Ok(true) => {
+                if staleness == Staleness::Stale {
+                    pending.job.workflow = refresh.refresh.workflow;
+                }
+                Ok(true)
+            }
+            Err(error) => {
+                log::error!(
+                    "lanes: recording the staleness of {}: {error:#}",
+                    refresh.task
+                );
+                Err(Cleared::Wait(WaitReason::Other(format!(
+                    "recording the staleness answer: {error:#}"
+                ))))
+            }
         }
     }
 
@@ -523,24 +599,161 @@ impl Dispatcher {
     pub fn on_workflow_event(&self, event: &WorkflowEvent, cx: &mut App) {
         let WorkflowEvent::Changed { run, state, .. } = event;
         self.note_lifecycle(run, *state);
+        if *state == RunStatus::Succeeded && self.is_ahead_job(run) {
+            self.await_ahead_landing(run, cx);
+            return;
+        }
+        self.apply_job_change(run, *state, None, cx);
+    }
+
+    /// Whether `run` is the job of a running ahead lane that no pick extension assigned: its
+    /// success waits for the landings it asked for.
+    fn is_ahead_job(&self, run: &str) -> bool {
+        // On an error the change is applied at once, which reads the state again and logs it.
+        self.ahead_job_runs()
+            .is_ok_and(|runs| runs.iter().any(|ahead| ahead == run))
+    }
+
+    /// The runs of the running ahead lanes' jobs that no pick extension assigned.
+    fn ahead_job_runs(&self) -> Result<Vec<String>> {
+        let table = self.table();
+        let state = self.parts().writer.read(read_state)?;
+        Ok(state
+            .lanes
+            .values()
+            .filter(|lane| {
+                lane.state == LaneState::Running && lane_kind_is_ahead(&table, &lane.id())
+            })
+            .filter_map(|lane| lane.job.as_ref())
+            .filter(|job| job.extension.is_none())
+            .map(|job| job.run_id.clone())
+            .collect())
+    }
+
+    /// Waits again for the landings of every ahead job whose run already succeeded. A dispatcher
+    /// that starts (the app restarted, or the lanes were started again) hears no event of a
+    /// success that came before it, and the earlier dispatcher's wait went with it.
+    pub(crate) fn resume_ahead_landings(&self, cx: &mut App) {
+        let runs = match self.ahead_job_runs() {
+            Ok(runs) => runs,
+            Err(error) => {
+                log::error!("lanes: reading the ahead jobs to wait on: {error:#}");
+                return;
+            }
+        };
+        for run in runs {
+            if self.parts().engine.run_status(&run) == Some(RunStatus::Succeeded) {
+                self.await_ahead_landing(&run, cx);
+            }
+        }
+    }
+
+    /// An ahead job's run succeeded: its lane keeps the job and its owner stays `Ahead` until
+    /// every landing the run asked for resolved; then the end is applied with what they came to.
+    /// One wait per run; the dispatcher holds it, so dropping the dispatcher ends it.
+    fn await_ahead_landing(&self, run: &str, cx: &mut App) {
+        if self.0.ahead_landings.borrow().contains_key(run) {
+            return;
+        }
+        let landing = self.parts().host.ahead_landing(run, cx);
+        let weak = self.downgrade();
+        let key = run.to_string();
+        let run = key.clone();
+        let wait = cx.spawn(async move |cx| {
+            let landing = landing.await;
+            let Some(inner) = weak.upgrade() else {
+                return;
+            };
+            // This task is running: detached, not dropped.
+            if let Some(wait) = inner.ahead_landings.borrow_mut().remove(&run) {
+                wait.detach();
+            }
+            cx.update(|cx| {
+                Dispatcher(inner).apply_job_change(&run, RunStatus::Succeeded, Some(landing), cx)
+            });
+        });
+        self.0.ahead_landings.borrow_mut().insert(key, wait);
+    }
+
+    /// Applies `run`'s status change to its lane and owner, then evaluates. `landing` is what an
+    /// ahead job's landings came to; `None` for any other change.
+    fn apply_job_change(
+        &self,
+        run: &str,
+        state: RunStatus,
+        landing: Option<AheadLanding>,
+        cx: &mut App,
+    ) {
         let graph = self.parts().host.graph(cx);
         let now = self.parts().host.now();
         let table = self.table();
+        let master = self.verified();
         let extensions = PickExtensions::extensions(cx);
         let result = with_engine(&self.parts().engine, || {
             self.parts().writer.transact(|tx| {
-                job_changed(tx, run, *state, graph.as_ref(), &table, &extensions, &now)
+                let end = JobChangeInput {
+                    graph: graph.as_ref(),
+                    table: &table,
+                    master: &master,
+                    landing: landing.as_ref(),
+                    now: &now,
+                };
+                job_changed(tx, run, state, &end, &extensions)
             })
         });
+        let ended = matches!(
+            state,
+            RunStatus::Succeeded | RunStatus::Failed | RunStatus::Halted | RunStatus::Cancelled
+        );
         match result {
-            Ok(Some(lane)) if matches!(state, RunStatus::Succeeded | RunStatus::Cancelled) => {
-                CurrentJobTrees::clear(&lane, cx);
+            Ok(Some(lane)) => {
+                if matches!(state, RunStatus::Succeeded | RunStatus::Cancelled) {
+                    CurrentJobTrees::clear(&lane, cx);
+                }
+                if ended {
+                    self.parts().host.snapshot_after_job(&lane, run, state, cx);
+                }
             }
-            Ok(_) => {}
+            Ok(None) => {}
             Err(error) => log::error!("lanes: the change of run {run}: {error:#}"),
         }
         self.settle_if_ended(run, cx);
         self.schedule(false, cx);
+    }
+}
+
+/// Whether lanes of `kind` prepare ahead of their task's turn.
+fn lane_kind_is_ahead(table: &LaneTable, lane: &LaneId) -> bool {
+    table
+        .kinds
+        .iter()
+        .any(|kind| kind.name == lane.kind && kind.ahead.is_some())
+}
+
+/// What lane leaves its job and the job's task with when the landing its ahead run asked for was
+/// refused: both halt with the reason.
+fn halted_by_landing(
+    owner: &OwnerRecord,
+    lane: &LaneRecord,
+    run: &str,
+    reason: &str,
+    now: &str,
+) -> Transition {
+    let text = format!("landing refused: {reason}");
+    let mut lane = lane.clone();
+    lane.state = LaneState::Halted;
+    lane.job = None;
+    lane.reason = Some(WaitReason::Failed(text.clone()));
+    lane.jobs_done += 1;
+    let mut owner = owner.clone();
+    owner.state = OwnerState::Halted;
+    owner.reason = Some(text.clone());
+    owner.by = Author::System;
+    owner.since = now.to_string();
+    Transition {
+        owner,
+        lane,
+        history: Some(format!("run {} succeeded, but its {text}", short_run(run))),
     }
 }
 
@@ -596,6 +809,65 @@ fn clear_job(
         }
     }
     put_lane(tx, &lane)
+}
+
+/// The staleness check of `pending`'s job in the trees and environment of `setup`.
+fn staleness_check(
+    pending: &PendingJob,
+    refresh: &RefreshFirst,
+    setup: &JobSetup,
+) -> StalenessCheck {
+    let tree = match (&setup.trees, &setup.tree) {
+        (Some(trees), _) => Some(trees.primary().to_path_buf()),
+        (None, bongos_workflow::RunTree::Lane { path, .. }) => Some(path.clone()),
+        (None, _) => None,
+    };
+    StalenessCheck {
+        lane: pending.lane.clone(),
+        task: refresh.task.clone(),
+        prepared_commit: refresh.prepared_commit.clone(),
+        script: refresh.refresh.staleness.clone(),
+        definition_commit: pending.job.definition_commit.clone(),
+        tree,
+        env: setup.env.clone(),
+    }
+}
+
+/// Records a staleness answer for a job `pending.lane` still holds: the owner is refreshed, and
+/// on `stale` the lane's job runs the refresh workflow, noted in the task's history. Returns
+/// whether the lane still holds the job.
+fn record_staleness(
+    tx: &mut StateTx,
+    pending: &PendingJob,
+    refresh: &RefreshFirst,
+    staleness: Staleness,
+    now: &str,
+) -> Result<bool> {
+    let state = read_state_in(tx)?;
+    if !lane_holds(&state, &pending.lane, &pending.job.run_id) {
+        return Ok(false);
+    }
+    if let Some(owner) = state.owners.get(&refresh.task) {
+        let mut owner = owner.clone();
+        owner.refreshed = true;
+        put_owner(tx, &refresh.task, &owner)?;
+    }
+    let event = match staleness {
+        Staleness::Stale => {
+            let mut lane = state.lanes[&pending.lane].clone();
+            if let Some(job) = &mut lane.job {
+                job.workflow = refresh.refresh.workflow.clone();
+            }
+            put_lane(tx, &lane)?;
+            format!(
+                "staleness script says stale; {} runs {} first",
+                pending.lane, refresh.refresh.workflow
+            )
+        }
+        Staleness::Fresh => "staleness script says fresh".to_string(),
+    };
+    append_history(tx, &refresh.task, &event, now)?;
+    Ok(true)
 }
 
 /// Shows a lane that a hook's `set_wait` showed waiting as running again, when it still holds
@@ -668,16 +940,33 @@ fn lifecycle_of(status: RunStatus) -> Lifecycle {
     }
 }
 
+/// What a run's status change is applied with.
+struct JobChangeInput<'a> {
+    graph: Option<&'a PickGraph>,
+    table: &'a LaneTable,
+    /// The verified commit, which an ahead job's success leaves its task prepared at when its
+    /// run landed nothing it waited for.
+    master: &'a str,
+    /// What an ahead job's landings came to, once resolved.
+    landing: Option<&'a AheadLanding>,
+    now: &'a str,
+}
+
 /// Applies a run's status change to the lane whose job it is. Returns that lane.
 fn job_changed(
     tx: &mut StateTx,
     run: &str,
     status: RunStatus,
-    graph: Option<&PickGraph>,
-    table: &LaneTable,
+    input: &JobChangeInput<'_>,
     extensions: &[Arc<dyn PickExtension>],
-    now: &str,
 ) -> Result<Option<LaneId>> {
+    let JobChangeInput {
+        graph,
+        table,
+        master,
+        landing,
+        now,
+    } = *input;
     let state = read_state_in(tx)?;
     let Some(lane) = state
         .lanes
@@ -742,27 +1031,38 @@ fn job_changed(
             return Ok(Some(id));
         }
     }
-    let lane_kind_is_ahead = table
-        .kinds
-        .iter()
-        .any(|kind| kind.name == id.kind && kind.ahead.is_some());
+    let lane_kind_is_ahead = lane_kind_is_ahead(table, &id);
     let all_leaves_finished = match (&held, graph) {
         (Some((task, _)), Some(graph)) => all_finished(graph, task),
         _ => false,
-    };
-    let input = JobEndInput {
-        outcome,
-        lane_kind_is_ahead,
-        all_leaves_finished,
-        checks_owed: false,
-        prepared_commit: None,
-        now,
     };
     let owner = held
         .as_ref()
         .map(|(_, owner)| owner.clone())
         .unwrap_or_else(|| placeholder_owner(now));
-    let transition = owner_after_job_end(&owner, &lane, &input);
+    let succeeded = outcome == JobEnd::Succeeded;
+    let transition = match landing {
+        Some(AheadLanding::Refused(reason)) if succeeded && lane_kind_is_ahead => {
+            halted_by_landing(&owner, &lane, run, reason, now)
+        }
+        _ => {
+            // An ahead job's success leaves its task prepared at the commit its landings
+            // reached, else at the verified commit.
+            let prepared_commit = match landing {
+                Some(AheadLanding::Landed { commit }) => commit.clone(),
+                _ => master.to_string(),
+            };
+            let input = JobEndInput {
+                outcome,
+                lane_kind_is_ahead,
+                all_leaves_finished,
+                checks_owed: false,
+                prepared_commit: lane_kind_is_ahead.then_some(prepared_commit),
+                now,
+            };
+            owner_after_job_end(&owner, &lane, &input)
+        }
+    };
     let (lane_after, owner_after) = if transition.lane.state == LaneState::Idle {
         stop_at_job_boundary(&transition.lane, Some(&transition.owner), now)
     } else {
@@ -798,12 +1098,17 @@ fn lane_holds(state: &LanesState, lane: &LaneId, run_id: &str) -> bool {
         .is_some_and(|job| job.run_id == run_id)
 }
 
-/// The task of a lane's job and its owner record; none for a job with no task.
+/// The task of a lane's job and its owner record; none for a job with no task. Owner records
+/// are kept per top-level task, so a job on a leaf below one has the owner record that names its
+/// lane.
 pub(crate) fn job_owner(state: &LanesState, lane: &LaneRecord) -> Option<(TaskId, OwnerRecord)> {
     let RunSubject::Task(task) = &lane.job.as_ref()?.subject else {
         return None;
     };
-    let owner = state.owners.get(task)?;
+    if let Some(owner) = state.owners.get(task) {
+        return Some((task.clone(), owner.clone()));
+    }
+    let (task, owner) = held_task(state, &lane.id())?;
     Some((task.clone(), owner.clone()))
 }
 

@@ -20,7 +20,7 @@ pub use graph::{
 };
 pub use picker::{
     AssignedWork, Assignment, DryRun, InstanceUse, LaneHold, OwnerChange, PickBound, PickOptions,
-    PickOutcome, Waiting, area_conflict, explain, parallel, pick, table_lanes,
+    PickOutcome, Refresh, Waiting, area_conflict, explain, parallel, pick, table_lanes,
 };
 pub use problem::Problem;
 pub use rank::{Chains, RankKey, RankLevel, critical_path};

@@ -11,21 +11,25 @@
 //! ends.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
 use anyhow::{Result, anyhow, bail};
 use bongos_engine_host::{EngineHostProcess, HostCommands, HostEvent, LanesVerb, WriterHosts};
 use bongos_lanes_model::{
     Author, JobRecord, LaneId, LaneTable, LiveFacts, PickGraph, Problem, RunSubject, StampFile,
-    TaskId, from_work_tree, parse,
+    TaskId, from_work_tree, parse, short_run,
 };
-use bongos_project_repo::{PeerIdentity, PersonClaim, ProjectRepo};
+use bongos_project_repo::{
+    ChangeFilter, ChangeState, LandingEvent, LandingResult, PeerIdentity, PersonClaim, ProjectRepo,
+    SnapshotReason,
+};
 use bongos_project_repo_model::layout::DEFINITIONS_DIR;
 use bongos_work::{OpenProjectRepos, WorkStore};
-use bongos_workflow::WorkflowEngine;
 use bongos_workflow::worktrees::{Git, run_branch_name};
+use bongos_workflow::{RunStatus, WorkflowEngine};
 use chrono::Utc;
+use futures::StreamExt as _;
 use gpui::{App, AppContext as _, Global, Task};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -37,13 +41,15 @@ use crate::actions::{OFF_MESSAGE, WindowLanes, accepted_message, adopted_message
 use crate::adopt::{AdoptRequest, LeftWork};
 use crate::definitions::{LANES_FILE, LANES_FOLDER};
 use crate::dispatcher::{
-    Dispatcher, JobEngine, Lanes, LanesHost, LanesParts, StartLanes, VerifiedCommitPolicy,
+    AheadLanding, Dispatcher, JobEngine, Lanes, LanesHost, LanesParts, StartLanes,
+    VerifiedCommitPolicy,
 };
 use crate::job_trees::forbidden_for;
 use crate::lane_control::{LaneTarget, LanesStatus};
 use crate::lane_tree::{LastEnd, LastRun, ResetRequest};
 use crate::locations::{LocationInputs, check_lanes};
 use crate::profile::LaneProfiles;
+use crate::staleness::PinnedTree;
 
 /// What a `lanes:` command carries besides its verb.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -482,9 +488,164 @@ impl LanesHost for ProjectLanesHost {
             .stamp
             .clone()
     }
+
+    fn materialize(&self, commit: Option<&str>, cx: &mut App) -> Task<Result<PinnedTree, String>> {
+        let commit = match commit {
+            Some(commit) => commit.to_string(),
+            None => match self.verified_commit() {
+                Some(commit) => commit,
+                None => return Task::ready(Err("the project has no verified commit".to_string())),
+            },
+        };
+        let repo = self.repo.clone();
+        cx.background_spawn(async move {
+            let guard = repo
+                .materialize(&commit)
+                .await
+                .map_err(|error| format!("{error:#}"))?;
+            Ok(PinnedTree {
+                root: guard.path().to_path_buf(),
+                guard: Box::new(guard),
+            })
+        })
+    }
+
+    fn ahead_landing(&self, run: &str, cx: &mut App) -> Task<AheadLanding> {
+        // Subscribed before the changes are read, so no landing that ends meanwhile is missed.
+        let events = self.repo.landing_events();
+        // The open and requested changes. An open one counts while this process lands it, or
+        // is about to: a quick edit's row is open until its landing, which runs on after the
+        // run heard that it started, takes it.
+        let filter = ChangeFilter {
+            run: Some(run.to_string()),
+            state: None,
+            ..ChangeFilter::default()
+        };
+        let pending = match self.repo.changes(&filter) {
+            Ok(rows) => rows
+                .into_iter()
+                .filter(|row| {
+                    row.state == ChangeState::Requested
+                        || self.repo.landing_in_process(&row.change_id)
+                })
+                .map(|row| row.change_id)
+                .collect(),
+            Err(error) => {
+                return Task::ready(AheadLanding::Refused(format!(
+                    "reading the changes of run {}: {error:#}",
+                    short_run(run)
+                )));
+            }
+        };
+        let repo = self.repo.clone();
+        cx.background_spawn(async move { await_landings(&repo, pending, events).await })
+    }
+
+    /// The run engine snapshots the other job ends when it exports the run; a halted run it
+    /// does not, so it is taken here.
+    fn snapshot_after_job(&self, _lane: &LaneId, run: &str, status: RunStatus, cx: &mut App) {
+        if status != RunStatus::Halted {
+            return;
+        }
+        let repo = self.repo.clone();
+        let run = run.to_string();
+        cx.background_spawn(async move {
+            if let Err(error) = repo.snapshot_now(SnapshotReason::JobEnd, Utc::now()).await {
+                log::warn!("lanes: snapshot after halted run {run}: {error:#}");
+            }
+        })
+        .detach();
+    }
+}
+
+/// What one landing event of a change an ahead run waits on says: `None` while it is landing.
+fn landing_end(event: LandingEvent) -> Option<Result<String, String>> {
+    match event {
+        LandingEvent::Landed { commit } => Some(Ok(commit)),
+        LandingEvent::Refused { reasons } => Some(Err(reasons.join("; "))),
+        LandingEvent::Conflict { files } => Some(Err(format!("conflict in {}", files.join(", ")))),
+        LandingEvent::Ended { reason } => Some(Err(reason)),
+        LandingEvent::Queued { .. } | LandingEvent::Checking | LandingEvent::Waiting { .. } => None,
+    }
+}
+
+/// The reason an ahead job halts when a change it asked to land was left requested by an earlier
+/// process: nothing in this one lands it, so no landing would ever report its end.
+pub(crate) const LANDING_INTERRUPTED: &str =
+    "its landing was interrupted by a restart; land it again, then adopt the lane";
+
+/// Waits until every change in `pending` landed (the verified commit after them, or nothing when
+/// there was none to wait for) or one did not (refused, in conflict, ended with no verdict,
+/// abandoned, or left requested by an earlier process).
+pub(crate) async fn await_landings(
+    repo: &ProjectRepo,
+    mut pending: BTreeSet<String>,
+    mut events: futures::channel::mpsc::UnboundedReceiver<(String, LandingEvent)>,
+) -> AheadLanding {
+    let mut last = None;
+    // A landing that ended before the subscription: its row, or the last event it announced.
+    for change in pending.clone() {
+        // Asked first: a landing that ends after this shows in the row or its last event.
+        let in_process = repo.landing_in_process(&change);
+        let ended = match repo.landing_result(&change) {
+            Ok(Some(LandingResult::Landed { commit })) => Some(Ok(commit)),
+            Ok(Some(LandingResult::Abandoned)) => {
+                Some(Err(format!("change {change} was abandoned")))
+            }
+            Ok(_) => repo
+                .landing_status(&change)
+                .and_then(landing_end)
+                .or_else(|| {
+                    (!in_process).then(|| Err(format!("change {change}: {LANDING_INTERRUPTED}")))
+                }),
+            Err(error) => Some(Err(format!("{error:#}"))),
+        };
+        match ended {
+            Some(Ok(commit)) => {
+                pending.remove(&change);
+                last = Some(commit);
+            }
+            Some(Err(reason)) => return AheadLanding::Refused(reason),
+            None => {}
+        }
+    }
+    while !pending.is_empty() {
+        let Some((change, event)) = events.next().await else {
+            return AheadLanding::Refused("the landing engine stopped".to_string());
+        };
+        if !pending.contains(&change) {
+            continue;
+        }
+        match landing_end(event) {
+            Some(Ok(commit)) => {
+                pending.remove(&change);
+                last = Some(commit);
+            }
+            Some(Err(reason)) => return AheadLanding::Refused(reason),
+            None => {}
+        }
+    }
+    // Prepared at master as it is now, which holds every landed change, whatever order they
+    // landed in; the last landed commit only when the state cannot say.
+    let Some(last) = last else {
+        return AheadLanding::Nothing;
+    };
+    let verified = repo
+        .state()
+        .and_then(|state| state.read(|read| read.verified_commit()).ok().flatten());
+    AheadLanding::Landed {
+        commit: verified.unwrap_or(last),
+    }
 }
 
 impl ProjectLanesHost {
+    /// The verified commit the project's state records.
+    fn verified_commit(&self) -> Option<String> {
+        self.repo
+            .state()
+            .and_then(|state| state.read(|read| read.verified_commit()).ok().flatten())
+    }
+
     /// The work `job` left on `lane`, its last run branch not looked up yet (that needs git).
     fn left_work_without_branch(
         &self,
@@ -494,10 +655,7 @@ impl ProjectLanesHost {
     ) -> Option<LeftWork> {
         let inputs = LocationInputs::from_app(&self.project_id(), cx).ok()?;
         let (repo_name, repository, branch) = self.task_repository(job, &inputs, cx)?;
-        let verified = self
-            .repo
-            .state()
-            .and_then(|state| state.read(|read| read.verified_commit()).ok().flatten())?;
+        let verified = self.verified_commit()?;
         let table = self.lane_table(&verified).ok()?;
         let profile = LaneProfiles::source(cx);
         let ids = crate::locations::table_lane_ids(&table, &self.project_id(), profile.as_deref());

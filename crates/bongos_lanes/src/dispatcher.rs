@@ -29,12 +29,14 @@ use anyhow::{Context as _, Result};
 use bongos_lanes_model::{
     AssignedWork, Assignment, Author, JobRecord, LaneId, LaneRecord, LaneState, LaneTable,
     LanesState, OwnerChange, OwnerRecord, OwnerState, PickBound, PickGraph, PickOptions,
-    PickOutcome, Problem, RunSubject, StampFile, StopCause, TaskId, WaitReason, owner_after_stop,
-    pick, reconcile_counts, stop_at_job_boundary,
+    PickOutcome, Problem, Refresh, RunSubject, StampFile, StopCause, TaskId, WaitReason,
+    owner_after_stop, pick, reconcile_counts, stop_at_job_boundary,
 };
 use bongos_project_repo::{CommitId, RepoEvent, StateTx, StateWriter};
 use bongos_workflow::lifecycle::RefusalKind;
-use bongos_workflow::{Refusal, RunId, RunTree, StartRequest, WorkflowEngine, WorkflowEvent};
+use bongos_workflow::{
+    Refusal, RunId, RunStatus, RunTree, StartRequest, WorkflowEngine, WorkflowEvent,
+};
 use bongos_workflow_model::record::StartedBy;
 use bongos_workflow_model::{EnvEdit, UnattendedChoice, UnattendedSource};
 use futures::StreamExt as _;
@@ -52,6 +54,7 @@ use crate::pick_extension::{
     extension_pick, instance_use, lane_after_unstarted, with_engine,
 };
 use crate::profile::LaneProfiles;
+use crate::staleness::{PinnedTree, Staleness, StalenessCheck};
 use crate::store::{LANES_NAMESPACE, delete_lane, put_lane, put_owner, read_state_in};
 use crate::task_trees::LaneTreeSetup;
 
@@ -104,6 +107,12 @@ pub struct DispatcherRecord {
     pub unattended: Option<UnattendedChoice>,
     #[serde(default)]
     pub definition_commit: Option<String>,
+    /// The commit the lane table (counts, bindings, rules, the stamp) is read at.
+    #[serde(default)]
+    pub table_commit: Option<String>,
+    /// Why a newer lane table was not adopted, while the definition policy says to wait.
+    #[serde(default)]
+    pub table_wait: Option<String>,
     /// Who asked every lane to stop.
     #[serde(default)]
     pub stopped_by: Option<Author>,
@@ -245,6 +254,58 @@ pub trait LanesHost {
     fn stamp(&self, _commit: &str) -> Result<Option<StampFile>, String> {
         Ok(None)
     }
+
+    /// A pinned, read-only copy of the project's files at `commit` (`ProjectRepo::materialize`),
+    /// or at the verified commit when `None`. An error says why there is none.
+    fn materialize(
+        &self,
+        _commit: Option<&str>,
+        _cx: &mut App,
+    ) -> Task<Result<PinnedTree, String>> {
+        Task::ready(Err("this project has no repository to pin".to_string()))
+    }
+
+    /// Runs the staleness script of a prepared task's first job. By default the job's definitions
+    /// commit is pinned ([`Self::materialize`]) and [`crate::run_staleness_script`] runs the script
+    /// from that copy, with `lanes.staleness_timeout_seconds`. An error is the text the lane halts
+    /// with, after "staleness script failed: ".
+    fn staleness(&self, check: StalenessCheck, cx: &mut App) -> Task<Result<Staleness, String>> {
+        use settings::Settings as _;
+        let timeout = crate::LanesSettings::get_global(cx).staleness_timeout;
+        let pinning = self.materialize(check.definition_commit.as_deref(), cx);
+        cx.spawn(async move |cx| {
+            let pinned = pinning
+                .await
+                .map_err(|error| format!("pinning the definitions: {error}"))?;
+            cx.update(|cx| crate::run_staleness_script(check, pinned, timeout, cx))
+                .await
+        })
+    }
+
+    /// What the landings that `run`, an ahead lane's job that succeeded, asked for came to, once
+    /// every one resolved (`ProjectRepo::landing_result`). Until then the job's owner stays
+    /// `Ahead`. By default there is nothing to wait for.
+    fn ahead_landing(&self, _run: &str, _cx: &mut App) -> Task<AheadLanding> {
+        Task::ready(AheadLanding::Nothing)
+    }
+
+    /// Called after every job end (the job's run succeeded, failed, halted or was cancelled,
+    /// `status`). The run engine already takes a job-end snapshot when it exports a run that
+    /// succeeded, failed or was cancelled, so the app's host takes one here only for a halted
+    /// run, which the engine does not snapshot.
+    fn snapshot_after_job(&self, _lane: &LaneId, _run: &str, _status: RunStatus, _cx: &mut App) {}
+}
+
+/// What the landings of an ahead job's run came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AheadLanding {
+    /// The run asked for no landing that was still to resolve: its task is prepared at the
+    /// verified commit.
+    Nothing,
+    /// Every landing it asked for landed; the last at `commit`, which its task is prepared at.
+    Landed { commit: String },
+    /// A landing did not land: the ahead lane and its task halt with this text.
+    Refused(String),
 }
 
 /// The run engine as the dispatcher uses it: [`WorkflowEngine`] in the app.
@@ -257,6 +318,8 @@ pub trait JobEngine {
     /// its record. When it cannot be told this is `true`, so a job is never taken for unstarted
     /// on doubt.
     fn has_record(&self, run: &str, cx: &App) -> bool;
+    /// The status of a run the engine loaded; `None` for one it did not.
+    fn run_status(&self, run: &str) -> Option<RunStatus>;
     /// The active runs of the workflow definition `workflow`.
     fn active_runs_of(&self, workflow: &str) -> Vec<RunId>;
     /// The definition's `instances`; `None` is unlimited.
@@ -281,6 +344,10 @@ impl JobEngine for WorkflowEngine {
 
     fn has_record(&self, run: &str, cx: &App) -> bool {
         self.run_recorded(run, cx).unwrap_or(true)
+    }
+
+    fn run_status(&self, run: &str) -> Option<RunStatus> {
+        self.lifecycle().status(run)
     }
 
     fn active_runs_of(&self, workflow: &str) -> Vec<RunId> {
@@ -340,10 +407,16 @@ pub enum JobCommit {
     StopFirst(String),
 }
 
-/// Decides the definition commit of a lane's next job. A rollout registers its own; the default
-/// always uses the verified commit.
+/// Decides the definition commit of a lane's next job, and with `lane = None` the commit the
+/// lane table is read at. A rollout registers its own; the default always uses the verified
+/// commit `master`.
+///
+/// For a lane: `Use(c)` starts the job on `c`'s definitions, `Wait` leaves the lane idle with the
+/// reason, `StopFirst` stops the lane. For the lane table: `Use(c)` adopts `c`, `Wait` keeps the
+/// lane table read now and shows the reason in `status`; `StopFirst` is not a valid answer there
+/// and counts as `Wait`.
 pub trait JobDefinitionPolicy {
-    fn commit_for_job(&self, _lane: &LaneId, master: &str) -> JobCommit {
+    fn commit_for_job(&self, _lane: Option<&LaneId>, master: &str) -> JobCommit {
         JobCommit::Use(master.to_string())
     }
 }
@@ -472,15 +545,22 @@ fn start_verified(
         .read(|read| read.verified_commit())
         .map_err(store_error)?
         .ok_or(StartRefusal::NoVerifiedCommit)?;
-    let table = host.lane_table(&verified).map_err(StartRefusal::Table)?;
-    let lanes = table_lane_ids(&table, &project, profile.as_deref());
-    host.check_locations(&table, &lanes, cx)
-        .map_err(StartRefusal::Locations)?;
-
     let existing = parts
         .writer
         .transact(dispatcher_record)
         .map_err(store_error)?;
+    let kept = existing
+        .as_ref()
+        .and_then(|record| record.table_commit.clone());
+    let (table_commit, table_wait) =
+        table_decision(parts.policy.as_ref(), kept.as_deref(), &verified);
+    let table = host
+        .lane_table(&table_commit)
+        .map_err(StartRefusal::Table)?;
+    let lanes = table_lane_ids(&table, &project, profile.as_deref());
+    host.check_locations(&table, &lanes, cx)
+        .map_err(StartRefusal::Locations)?;
+
     if let Some(record) = existing
         && host.host_live(&record.host)
     {
@@ -514,7 +594,7 @@ fn start_verified(
         .map_err(StartRefusal::Engine)?;
 
     let counts = effective_counts(&table, &project, profile.as_deref());
-    let stamp = read_stamp(host.as_ref(), &verified);
+    let stamp = read_stamp(host.as_ref(), &table_commit);
     let now = host.now();
     let record = DispatcherRecord {
         run_id: run_id.clone(),
@@ -524,6 +604,8 @@ fn start_verified(
         bound: request.bound.as_ref().map(RecordedBound::from),
         unattended,
         definition_commit: Some(verified.clone()),
+        table_commit: Some(table_commit.clone()),
+        table_wait,
         stopped_by: None,
         ended: None,
     };
@@ -548,10 +630,12 @@ fn start_verified(
         max_jobs: request.max_jobs,
         unattended,
         verified,
+        table_commit,
         stamp,
         events,
     });
     dispatcher.run(cx);
+    dispatcher.resume_ahead_landings(cx);
     dispatcher.evaluate(true, cx);
     Ok(LanesStarted {
         run_id,
@@ -576,6 +660,37 @@ fn effective_counts(
             (kind.name.clone(), count)
         })
         .collect()
+}
+
+/// The commit the lane table is read at, from the policy's answer for `lane = None`, and the
+/// reason a newer one is not adopted. `current` is the commit read now; with none, `master` is
+/// read, since there is nothing to keep.
+fn table_decision(
+    policy: &dyn JobDefinitionPolicy,
+    current: Option<&str>,
+    master: &str,
+) -> (String, Option<String>) {
+    let reason = match policy.commit_for_job(None, master) {
+        JobCommit::Use(commit) => return (commit, None),
+        JobCommit::Wait(reason) => reason,
+        JobCommit::StopFirst(reason) => {
+            log::warn!(
+                "lanes: the definition policy answered stop first for the lane table, which \
+                 counts as wait: {reason}"
+            );
+            reason
+        }
+    };
+    match current {
+        Some(current) => (current.to_string(), Some(reason)),
+        None => {
+            log::warn!(
+                "lanes: the definition policy waits on the lane table ({reason}), but none was \
+                 read yet, so {master}'s is"
+            );
+            (master.to_string(), None)
+        }
+    }
 }
 
 /// The recorded stamp at `commit`; one that cannot be read turns the check off, logged.
@@ -691,7 +806,9 @@ pub struct DispatcherConfig {
     /// The start's unattended choice.
     pub unattended: Option<UnattendedChoice>,
     pub verified: String,
-    /// The recorded graph stamp at `verified`.
+    /// The commit `table` was read at.
+    pub table_commit: String,
+    /// The recorded graph stamp at `table_commit`.
     pub stamp: Option<StampFile>,
     pub events: LaneEvents,
 }
@@ -703,6 +820,7 @@ pub struct Dispatcher(pub(crate) Rc<Inner>);
 pub(crate) struct Inner {
     pub(crate) config: DispatcherConfig,
     table: RefCell<LaneTable>,
+    table_commit: RefCell<String>,
     verified: RefCell<String>,
     /// The effective lane count of each kind, changed at a profile or table change.
     counts: RefCell<BTreeMap<String, u32>>,
@@ -728,6 +846,9 @@ pub(crate) struct Inner {
     /// and no hook gets its `after_job`. Whoever holds the dispatcher keeps it until its run
     /// ended, which is after every job here was settled.
     pub(crate) hooked: RefCell<BTreeMap<LaneId, HookedJob>>,
+    /// The ahead jobs whose run succeeded, by run, waiting for the landings it asked for.
+    /// Dropping the dispatcher drops the waits; the next one waits again on its start.
+    pub(crate) ahead_landings: RefCell<BTreeMap<String, Task<()>>>,
 }
 
 /// What one lane's transaction decided.
@@ -745,12 +866,25 @@ pub(crate) struct PendingJob {
     pub(crate) job: JobRecord,
     pub(crate) work: AssignedWork,
     pub(crate) inputs: Vec<(String, String)>,
+    /// The staleness script runs before the job's run, on a prepared task's first job.
+    pub(crate) refresh: Option<RefreshFirst>,
+}
+
+/// What a prepared task's first job checks before it starts (pick rule 8).
+#[derive(Debug, Clone)]
+pub(crate) struct RefreshFirst {
+    /// The prepared top-level task.
+    pub(crate) task: TaskId,
+    /// The commit its preparation left.
+    pub(crate) prepared_commit: Option<String>,
+    pub(crate) refresh: Refresh,
 }
 
 impl Dispatcher {
     pub fn new(config: DispatcherConfig) -> Self {
         Self(Rc::new(Inner {
             table: RefCell::new(config.table.clone()),
+            table_commit: RefCell::new(config.table_commit.clone()),
             verified: RefCell::new(config.verified.clone()),
             counts: RefCell::new(config.counts.clone()),
             stamp: RefCell::new(config.stamp.clone()),
@@ -765,6 +899,7 @@ impl Dispatcher {
             triggers: RefCell::new(Vec::new()),
             subscriptions: RefCell::new(Vec::new()),
             hooked: RefCell::new(BTreeMap::new()),
+            ahead_landings: RefCell::new(BTreeMap::new()),
         }))
     }
 
@@ -868,15 +1003,59 @@ impl Dispatcher {
         self.0.subscriptions.borrow_mut().push(profile_changed);
     }
 
-    /// A new verified commit: its lane table, its stamp and the counts they give, then a full
-    /// pass.
+    /// The verified commit the dispatcher knows now.
+    pub(crate) fn verified(&self) -> String {
+        self.0.verified.borrow().clone()
+    }
+
+    /// The commit the lane table is read at now.
+    pub fn table_commit(&self) -> String {
+        self.0.table_commit.borrow().clone()
+    }
+
+    /// A new verified commit. The definition policy, asked for `lane = None`, decides whether its
+    /// lane table is adopted: then its table, its stamp and the counts they give apply. Either
+    /// way the record says which table is read and why a newer one waits; then a full pass.
     pub fn verified_commit_changed(&self, commit: String, cx: &mut App) {
-        match self.parts().host.lane_table(&commit) {
-            Ok(table) => *self.0.table.borrow_mut() = table,
-            Err(error) => log::error!("lanes: the lane table at {commit} cannot be read: {error}"),
-        }
-        *self.0.stamp.borrow_mut() = read_stamp(self.parts().host.as_ref(), &commit);
+        let parts = self.parts().clone();
+        let current = self.table_commit();
+        let (adopt, mut wait) = table_decision(parts.policy.as_ref(), Some(&current), &commit);
         *self.0.verified.borrow_mut() = commit;
+        let table_commit = if adopt == current {
+            current
+        } else {
+            match parts.host.lane_table(&adopt) {
+                Ok(table) => {
+                    *self.0.table.borrow_mut() = table;
+                    *self.0.stamp.borrow_mut() = read_stamp(parts.host.as_ref(), &adopt);
+                    *self.0.table_commit.borrow_mut() = adopt.clone();
+                    adopt
+                }
+                Err(error) => {
+                    log::error!("lanes: the lane table at {adopt} cannot be read: {error}");
+                    wait = Some(format!("the lane table at {adopt} cannot be read: {error}"));
+                    current
+                }
+            }
+        };
+        let recorded = parts.writer.transact(|tx| {
+            let Some(mut record) = dispatcher_record(tx)? else {
+                return Ok(());
+            };
+            if record.run_id != self.0.config.run_id {
+                return Ok(());
+            }
+            let table_commit = Some(table_commit.clone());
+            if record.table_commit != table_commit || record.table_wait != wait {
+                record.table_commit = table_commit;
+                record.table_wait = wait.clone();
+                put_dispatcher(tx, &record)?;
+            }
+            Ok(())
+        });
+        if let Err(error) = recorded {
+            log::error!("lanes: recording the lane table commit: {error:#}");
+        }
         self.apply_counts(cx);
         self.evaluate(true, cx);
     }
@@ -1022,7 +1201,7 @@ impl Dispatcher {
         let extensions = PickExtensions::extensions(cx);
         for _ in 0..MAX_RESTARTS {
             let master = self.0.verified.borrow().clone();
-            let commit = parts.policy.commit_for_job(lane, &master);
+            let commit = parts.policy.commit_for_job(Some(lane), &master);
             let generation = parts.writer.generation()?;
             let Some(graph) = parts.host.graph(cx) else {
                 return Ok(());
@@ -1475,6 +1654,23 @@ fn assign_job(
     now: &str,
 ) -> Result<LaneStep> {
     apply_owner_changes(tx, state, &assignment.owner_change, lane, now)?;
+    let refresh = assignment.refresh.clone().and_then(|refresh| {
+        let task = assignment
+            .owner_change
+            .iter()
+            .find(|change| change.from == Some(OwnerState::Prepared))?
+            .task
+            .clone();
+        let prepared_commit = state
+            .owners
+            .get(&task)
+            .and_then(|owner| owner.prepared_commit.clone());
+        Some(RefreshFirst {
+            task,
+            prepared_commit,
+            refresh,
+        })
+    });
     let extension = match &assignment.work {
         AssignedWork::Extension { kind, .. } => Some(kind.clone()),
         AssignedWork::Leaf { .. } => None,
@@ -1499,6 +1695,7 @@ fn assign_job(
         job,
         work: assignment.work,
         inputs: assignment.inputs,
+        refresh,
     }))
 }
 

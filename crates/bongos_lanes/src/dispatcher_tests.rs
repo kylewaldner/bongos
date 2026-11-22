@@ -19,10 +19,12 @@ use gpui::{App, TestAppContext};
 use tempfile::TempDir;
 
 use crate::dispatcher::{
-    DispatcherRecord, JobCommit, JobDefinitionPolicy, JobEngine, JobSetup, Lanes, LanesHost,
-    LanesParts, LanesStarted, NOTHING_READY, StartLanes, VerifiedCommitPolicy, put_dispatcher,
+    AheadLanding, DispatcherRecord, JobCommit, JobDefinitionPolicy, JobEngine, JobSetup, Lanes,
+    LanesHost, LanesParts, LanesStarted, NOTHING_READY, StartLanes, VerifiedCommitPolicy,
+    put_dispatcher,
 };
 use crate::lane_control::RunEnd;
+use crate::staleness::{Staleness, StalenessCheck};
 use crate::store::{put_lane, put_owner, read_state};
 use crate::task_trees::LaneTreeSetup;
 use crate::test_support::{SINCE, tree, writer};
@@ -48,14 +50,28 @@ pub(crate) struct TestHost {
     stamp: RefCell<Option<bongos_lanes_model::StampFile>>,
     /// What every job's preparation offers of the lane's trees outside the job.
     pub(crate) lane_trees: RefCell<Option<LaneTreeSetup>>,
+    /// The lane table at a commit, where it differs from `table`.
+    tables: RefCell<BTreeMap<String, String>>,
+    /// Every staleness check asked for, in order.
+    staleness_checks: RefCell<Vec<StalenessCheck>>,
+    /// What every staleness script answers.
+    staleness: RefCell<Result<Staleness, String>>,
+    /// Every snapshot after a job end: the lane, the job's run and how it ended.
+    snapshots: RefCell<Vec<(LaneId, String, RunStatus)>>,
+    /// An ahead job's landings resolve only when the test sends what they came to.
+    pub(crate) landing_gated: Cell<bool>,
+    landing_gates: RefCell<Vec<(String, oneshot::Sender<AheadLanding>)>>,
 }
 
 /// A policy that answers every job with one commit decision.
 struct FixedPolicy(JobCommit);
 
 impl JobDefinitionPolicy for FixedPolicy {
-    fn commit_for_job(&self, _lane: &LaneId, _master: &str) -> JobCommit {
-        self.0.clone()
+    fn commit_for_job(&self, lane: Option<&LaneId>, master: &str) -> JobCommit {
+        match lane {
+            Some(_) => self.0.clone(),
+            None => JobCommit::Use(master.to_string()),
+        }
     }
 }
 
@@ -68,8 +84,42 @@ impl LanesHost for TestHost {
         true
     }
 
-    fn lane_table(&self, _commit: &str) -> Result<LaneTable, String> {
-        parse(&self.table).map_err(|error| error.message)
+    fn lane_table(&self, commit: &str) -> Result<LaneTable, String> {
+        let table = match self.tables.borrow().get(commit) {
+            Some(table) => format!("schema = 1\n{table}"),
+            None => self.table.clone(),
+        };
+        parse(&table).map_err(|error| error.message)
+    }
+
+    fn staleness(
+        &self,
+        check: StalenessCheck,
+        _cx: &mut App,
+    ) -> gpui::Task<Result<Staleness, String>> {
+        self.staleness_checks.borrow_mut().push(check);
+        gpui::Task::ready(self.staleness.borrow().clone())
+    }
+
+    fn snapshot_after_job(&self, lane: &LaneId, run: &str, status: RunStatus, _cx: &mut App) {
+        self.snapshots
+            .borrow_mut()
+            .push((lane.clone(), run.to_string(), status));
+    }
+
+    fn ahead_landing(&self, run: &str, cx: &mut App) -> gpui::Task<AheadLanding> {
+        if !self.landing_gated.get() {
+            return gpui::Task::ready(AheadLanding::Nothing);
+        }
+        let (sender, receiver) = oneshot::channel();
+        self.landing_gates
+            .borrow_mut()
+            .push((run.to_string(), sender));
+        cx.foreground_executor().spawn(async move {
+            receiver
+                .await
+                .unwrap_or_else(|_| AheadLanding::Refused("gate dropped".to_string()))
+        })
     }
 
     fn check_locations(
@@ -144,6 +194,29 @@ impl LanesHost for TestHost {
 }
 
 impl TestHost {
+    /// Resolves the landings of every ahead run waiting on them with `landing`; returns their
+    /// runs.
+    pub(crate) fn resolve_landings(&self, landing: AheadLanding) -> Vec<String> {
+        self.landing_gates
+            .borrow_mut()
+            .drain(..)
+            .map(|(run, gate)| {
+                gate.send(landing.clone()).ok();
+                run
+            })
+            .collect()
+    }
+
+    /// The runs whose landing wait is still listening, in order.
+    pub(crate) fn listening_landings(&self) -> Vec<String> {
+        self.landing_gates
+            .borrow()
+            .iter()
+            .filter(|(_, gate)| !gate.is_canceled())
+            .map(|(run, _)| run.clone())
+            .collect()
+    }
+
     fn release(&self) {
         for gate in self.gates.borrow_mut().drain(..) {
             gate.send(Ok(JobSetup::default())).ok();
@@ -199,6 +272,10 @@ impl JobEngine for FakeEngine {
 
     fn has_record(&self, run: &str, _cx: &App) -> bool {
         self.knows(run) || self.unloaded.borrow().contains(run)
+    }
+
+    fn run_status(&self, run: &str) -> Option<RunStatus> {
+        self.status.borrow().get(run).map(|(_, status)| *status)
     }
 
     fn active_runs_of(&self, workflow: &str) -> Vec<RunId> {
@@ -332,6 +409,12 @@ fn harness_of(
         overlap: RefCell::new(None),
         stamp: RefCell::new(None),
         lane_trees: RefCell::new(None),
+        tables: RefCell::new(BTreeMap::new()),
+        staleness_checks: RefCell::new(Vec::new()),
+        staleness: RefCell::new(Ok(Staleness::Fresh)),
+        snapshots: RefCell::new(Vec::new()),
+        landing_gated: Cell::new(false),
+        landing_gates: RefCell::new(Vec::new()),
     });
     let engine = fake_engine(&writer, limits);
     let lanes = Lanes::new(LanesParts {
@@ -520,6 +603,8 @@ async fn start_attaches_to_the_dispatcher_of_a_live_host(cx: &mut TestAppContext
                     bound: None,
                     unattended: None,
                     definition_commit: None,
+                    table_commit: None,
+                    table_wait: None,
                     stopped_by: None,
                     ended: None,
                 },
@@ -1279,3 +1364,6 @@ mod job_hooks_tests;
 
 #[path = "pick_extension_tests.rs"]
 mod pick_extension_tests;
+
+#[path = "definition_policy_tests.rs"]
+mod definition_policy_tests;

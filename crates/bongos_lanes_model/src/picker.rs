@@ -150,10 +150,23 @@ pub struct Assignment {
     /// Run the staleness script first, and the rule's refresh workflow when it says stale
     /// (rule 8).
     pub refresh_first: bool,
+    /// The matched rule's staleness script and refresh workflow, set with `refresh_first`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<Refresh>,
     /// The run id the job's run gets. A pick extension that already wrote it into its own claim
     /// sets it; `None` has the dispatcher reserve a new one. The picker never sets it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
+}
+
+/// What a stale prepared task runs first (rule 8): the rule's staleness script decides, and on
+/// `stale` the rule's refresh workflow runs on the leaf instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Refresh {
+    /// The staleness script, a project path.
+    pub staleness: String,
+    /// The refresh workflow.
+    pub workflow: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -199,15 +212,15 @@ struct Choice {
     workflow: String,
     inputs: Vec<(String, String)>,
     owner_change: Option<OwnerChange>,
-    refresh_first: bool,
+    refresh: Option<Refresh>,
 }
 
 /// The workflow a dispatch rule (or the open todo) gives a leaf.
 struct Matched {
     workflow: String,
     inputs: Vec<(String, String)>,
-    /// The matched rule sets `staleness`.
-    staleness: bool,
+    /// The matched rule's `staleness` and `refresh`, when it sets them.
+    staleness: Option<Refresh>,
 }
 
 /// Where a unit is in flight, for the area rule.
@@ -583,7 +596,8 @@ impl<'a> Picker<'a> {
                     reason: best.rank.reason(),
                     rank: best.rank,
                     owner_change,
-                    refresh_first: best.value.refresh_first,
+                    refresh_first: best.value.refresh.is_some(),
+                    refresh: best.value.refresh,
                     run_id: None,
                 })
             }
@@ -923,19 +937,18 @@ impl<'a> Picker<'a> {
             }
         }
         // Rule 8: the first job on a prepared owner that was never refreshed.
-        let refresh_first = matched.staleness
-            && owner_change.as_ref().is_some_and(|change| {
-                change.from == Some(OwnerState::Prepared)
-                    && state
-                        .owners
-                        .get(&change.task)
-                        .is_some_and(|owner| !owner.refreshed)
-            });
+        let refresh_first = owner_change.as_ref().is_some_and(|change| {
+            change.from == Some(OwnerState::Prepared)
+                && state
+                    .owners
+                    .get(&change.task)
+                    .is_some_and(|owner| !owner.refreshed)
+        });
         Ok(Choice {
             workflow: matched.workflow,
             inputs: matched.inputs,
             owner_change,
-            refresh_first,
+            refresh: matched.staleness.filter(|_| refresh_first),
         })
     }
 
@@ -1122,7 +1135,7 @@ impl<'a> Picker<'a> {
             return todo_workflow().map(|workflow| Matched {
                 workflow,
                 inputs: Vec::new(),
-                staleness: false,
+                staleness: None,
             });
         }
         let rule = kind
@@ -1143,7 +1156,13 @@ impl<'a> Picker<'a> {
         Some(Matched {
             workflow,
             inputs,
-            staleness: rule.staleness.is_some(),
+            // A rule with staleness and no refresh is refused when the table is checked.
+            staleness: rule.staleness.as_ref().zip(rule.refresh.as_ref()).map(
+                |(staleness, refresh)| Refresh {
+                    staleness: staleness.value.clone(),
+                    workflow: refresh.value.clone(),
+                },
+            ),
         })
     }
 
