@@ -34,6 +34,7 @@ mod locations;
 mod pick_extension;
 mod prepare;
 mod profile;
+mod read_modes;
 mod roots;
 mod runs;
 mod scope;
@@ -87,7 +88,7 @@ pub use job_trees::{
 };
 pub use lane_control::{
     BOUND_REASON, DispatcherPhase, LaneEvent, LaneEvents, LaneStatus, LaneTarget, LanesStatus,
-    RunEnd,
+    RunEnd, status_from_read,
 };
 pub use lane_tree::{
     Forbidden, LaneMerge, LaneMergeError, LaneMerged, LastEnd, LastRun, MergeTarget, ResetOutcome,
@@ -157,6 +158,7 @@ pub fn init(cx: &mut App) {
     trees.register(cx);
     register_needs_you(cx);
     register_host(cx);
+    read_modes::register(cx);
 }
 
 #[cfg(test)]

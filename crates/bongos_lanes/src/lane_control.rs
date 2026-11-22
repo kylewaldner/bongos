@@ -8,6 +8,7 @@
 //! asked for it, succeeded when the lanes stopped for a bound.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use anyhow::{Result, bail};
@@ -15,16 +16,17 @@ use bongos_lanes_model::{
     Author, JobRecord, LaneId, LaneRecord, LaneState, LanesState, StopCause, TaskId, WaitReason,
     stop_at_job_boundary,
 };
-use bongos_project_repo::StateTx;
+use bongos_project_repo::{StateRead, StateTx};
 use futures::channel::mpsc;
 use gpui::App;
 use serde::{Deserialize, Serialize};
 
 use crate::dispatcher::{
     Dispatcher, DispatcherRecord, Lanes, LanesParts, dispatcher_record, held_task, put_dispatcher,
+    read_dispatcher_record,
 };
-use crate::lane_waits::{ask_in, asked_text, asks_in, delete_ask, publish_asks};
-use crate::store::{put_lane, put_owner, read_state_in};
+use crate::lane_waits::{LaneAsk, ask_in, asked_text, asks_in, delete_ask, publish_asks, read_asks};
+use crate::store::{put_lane, put_owner, read_state, read_state_in};
 
 /// The reason of a lane that stopped for the bound of the start.
 pub const BOUND_REASON: &str = "bound";
@@ -341,6 +343,23 @@ fn status(parts: &LanesParts) -> Result<LanesStatus> {
     let (state, record, asks) = parts
         .writer
         .transact(|tx| Ok((read_state_in(tx)?, dispatcher_record(tx)?, asks_in(tx)?)))?;
+    Ok(status_of(&state, record, &asks))
+}
+
+/// The status as the store records it, for a process that reads the store beside the writer of
+/// another (`bongos lanes status` with no lanes running). It shows the state at the last write.
+pub fn status_from_read(read: &StateRead) -> Result<LanesStatus> {
+    let state = read_state(read)?;
+    let record = read_dispatcher_record(read)?;
+    let asks = read_asks(read)?;
+    Ok(status_of(&state, record, &asks))
+}
+
+fn status_of(
+    state: &LanesState,
+    record: Option<DispatcherRecord>,
+    asks: &BTreeMap<LaneId, LaneAsk>,
+) -> LanesStatus {
     let phase = record
         .as_ref()
         .map(|record| match (&record.ended, &record.stopped_by) {
@@ -361,17 +380,17 @@ fn status(parts: &LanesParts) -> Result<LanesStatus> {
             task: state.task_of(&lane.id()).cloned(),
             pause_requested: lane.pause_requested,
             stop_requested: lane.stop_requested.is_some(),
-            asked: asked_text(&state, &asks, &lane.id()),
+            asked: asked_text(state, asks, &lane.id()),
             job: lane.job.clone(),
             jobs_done: lane.jobs_done,
         })
         .collect();
-    Ok(LanesStatus {
+    LanesStatus {
         phase,
         table_commit,
         table_wait,
         lanes,
-    })
+    }
 }
 
 /// How the dispatcher's run ends with the lanes in `state`, or `None` while a lane is not at
