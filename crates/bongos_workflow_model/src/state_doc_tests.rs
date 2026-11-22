@@ -71,10 +71,10 @@ fn doc() -> StateDoc {
         RunIdentity {
             id: "01928c4e-7b3a-7c2d-9e4f-0123456789ab".to_string(),
             workflow: "pr-ship".to_string(),
-            todo: TodoRef {
+            todo: Some(TodoRef {
                 index: 0,
                 name: "implement".to_string(),
-            },
+            }),
             task_id: "task-1".to_string(),
             task_dir: PathBuf::from(TASK_DIR),
             branch: "feature/parser".to_string(),
@@ -128,10 +128,10 @@ fn doc_of(events: &[Event]) -> Value {
         RunIdentity {
             id: "run".to_string(),
             workflow: "w".to_string(),
-            todo: TodoRef {
+            todo: Some(TodoRef {
                 index: 0,
                 name: "implement".to_string(),
-            },
+            }),
             task_id: "task-1".to_string(),
             task_dir: PathBuf::from(TASK_DIR),
             branch: "b".to_string(),

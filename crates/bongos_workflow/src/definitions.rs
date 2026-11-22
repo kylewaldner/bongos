@@ -363,6 +363,16 @@ pub fn check_definition_in(
     base: ValidationContext,
     adjust: impl FnOnce(&Definition, &mut ValidationContext),
 ) -> DefinitionReport {
+    check_parsed_in(resolved, base, adjust).0
+}
+
+/// [`check_definition_in`] that also hands back the parsed definition, `None` when it could not
+/// be read or parsed.
+pub fn check_parsed_in(
+    resolved: &Resolved,
+    base: ValidationContext,
+    adjust: impl FnOnce(&Definition, &mut ValidationContext),
+) -> (DefinitionReport, Option<Definition>) {
     let mut report = DefinitionReport {
         name: resolved.name.clone(),
         layer: resolved.layer,
@@ -376,14 +386,14 @@ pub fn check_definition_in(
         Ok(text) => text,
         Err(error) => {
             report.load_error = Some(format!("cannot read {}: {error}", file.display()));
-            return report;
+            return (report, None);
         }
     };
     let definition = match parse(&text) {
         Ok(definition) => definition,
         Err(error) => {
             report.load_error = Some(error.to_string());
-            return report;
+            return (report, None);
         }
     };
     let mut context = ValidationContext {
@@ -393,7 +403,42 @@ pub fn check_definition_in(
     adjust(&definition, &mut context);
     report.warnings = definition.warnings();
     report.diagnostics = validate(&definition, &context);
-    report
+    (report, Some(definition))
+}
+
+/// A check another crate adds to `workflow: validate`: given a parsed definition and its
+/// directory, the problems it finds.
+pub type ValidationHook = fn(&Definition, &Path) -> Vec<Diagnostic>;
+
+static HOOKS: std::sync::Mutex<Vec<ValidationHook>> = std::sync::Mutex::new(Vec::new());
+
+/// The checks other crates add to the workflow validation entry point ([`validate_definitions`],
+/// which `workflow: validate` runs): each registered hook runs on every definition that parsed,
+/// and its diagnostics join the definition's own, in line order.
+pub struct ValidationHooks;
+
+impl ValidationHooks {
+    /// Adds `hook`; registering the same hook twice runs it once.
+    pub fn register(hook: ValidationHook) {
+        let mut hooks = HOOKS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !hooks.iter().any(|known| std::ptr::fn_addr_eq(*known, hook)) {
+            hooks.push(hook);
+        }
+    }
+
+    /// The diagnostics every registered hook reports on `definition` in `dir`.
+    pub fn run(definition: &Definition, dir: &Path) -> Vec<Diagnostic> {
+        let hooks = HOOKS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        hooks
+            .iter()
+            .flat_map(|hook| hook(definition, dir))
+            .collect()
+    }
 }
 
 /// Resolves the layers fresh and checks the definition named `name`, or every resolved definition
@@ -411,7 +456,16 @@ pub fn validate_definitions_in(
     name: Option<&str>,
     context: &ValidationContext,
 ) -> Result<Report, DefinitionError> {
-    let check = |resolved: &Resolved| check_definition_in(resolved, context.clone(), |_, _| {});
+    let check = |resolved: &Resolved| {
+        let (mut report, definition) = check_parsed_in(resolved, context.clone(), |_, _| {});
+        if let Some(definition) = definition {
+            report
+                .diagnostics
+                .extend(ValidationHooks::run(&definition, &resolved.dir));
+            report.diagnostics.sort_by_key(|diagnostic| diagnostic.line);
+        }
+        report
+    };
     let resolution = layers::resolve(dirs);
     let mut report = Report::default();
     match name {

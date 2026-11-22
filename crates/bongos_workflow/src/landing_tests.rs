@@ -967,3 +967,33 @@ async fn a_restore_that_starts_while_a_run_starts_cancels_the_run(cx: &mut TestA
     );
     assert!(engine.activity_source().activity("project-1").is_empty());
 }
+
+#[gpui::test]
+async fn a_start_with_a_definition_commit_reads_that_commits_prompt(cx: &mut TestAppContext) {
+    let setup = setup(cx, "the old prompt\n").await;
+    let before = main_commit(&setup.repo);
+    let change = copy_with(
+        &setup.repo,
+        "newer-prompt",
+        &[("workflows/review/work.md", "the new prompt\n")],
+    )
+    .await;
+    let landed = setup
+        .repo
+        .land_as_person(&change, request(LandMode::Land), person(), at())
+        .await
+        .unwrap();
+    let LandingResult::Landed { commit } = landed else {
+        panic!("expected a landing, got {landed:?}");
+    };
+    assert_ne!(commit, before);
+
+    // The verified commit has the new prompt; the request names the commit before the landing.
+    let request = StartRequest {
+        definition_commit: Some(bongos_project_repo::CommitId(before.clone())),
+        ..review_request()
+    };
+    let run = setup.linked.start(request, cx);
+    assert_eq!(attempt_prompt(&setup.linked, &run, 1), "the old prompt\n");
+    assert_eq!(attempt_commits(&setup.linked, &run), [Some(before)]);
+}

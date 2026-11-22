@@ -133,7 +133,7 @@ impl NodeKind for ProgramNodes {
             RunIdentity {
                 id: node.run.to_string(),
                 workflow: binding.workflow.clone(),
-                todo: todo_of(binding),
+                todo: Some(todo_of(binding)),
                 task_id: binding.task_id.clone(),
                 task_dir: binding.task_dir.clone(),
                 branch: binding.checkout.branch.clone().unwrap_or_default(),

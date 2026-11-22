@@ -90,7 +90,11 @@ impl RunRow {
                 .map(project_of)
                 .unwrap_or_default(),
             workflow: record.workflow.clone(),
-            todo: record.todo.name.clone(),
+            todo: record
+                .todo
+                .as_ref()
+                .map(|todo| todo.name.clone())
+                .unwrap_or_default(),
             status: RunStatus::of(&state),
             nodes,
             elapsed_ms: state.finished.iter().map(|f| f.elapsed_ms).sum(),

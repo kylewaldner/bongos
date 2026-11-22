@@ -98,7 +98,11 @@ impl RunData {
             run: run.to_string(),
             workflow: record.workflow.clone(),
             layer: record.layer.clone(),
-            todo: record.todo.name.clone(),
+            todo: record
+                .todo
+                .as_ref()
+                .map(|todo| todo.name.clone())
+                .unwrap_or_default(),
             definition,
             state,
             worktree: lifecycle
