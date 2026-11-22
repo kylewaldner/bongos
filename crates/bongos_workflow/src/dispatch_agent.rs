@@ -1,15 +1,19 @@
 //! The agent node kind of the app runner: turns a node start into a [`ClaudeNode`] (caps, rendered
-//! prompt, system text, try directory, branch worktree) and hands it to one [`ClaudeRunner`].
+//! prompt, system text, try directory, branch worktree and, while `confinement.agent_steps` is
+//! on, what it may write) and hands it to one [`ClaudeRunner`].
 
 use std::fs;
 
+use bongos_confine::TreeAccess;
 use bongos_work_model::artifacts::session_context;
 use bongos_work_model::new_id;
 use bongos_workflow_model::record::TodoRef;
 use bongos_workflow_model::template::{Scope, render};
 use bongos_workflow_model::{Failure, FailureReason, NodeKey, RunState};
 
+use crate::agent_confinement::AgentJob;
 use crate::dispatch::{NodeKind, RunnerSnapshot};
+use crate::dispatch_program::{host_git, scratch_dir};
 use crate::lifecycle::{definition_copy_dir, prompt_with_revision};
 use crate::process::ProcessRecord;
 use crate::run_view::try_dir;
@@ -82,6 +86,20 @@ impl NodeKind for AgentNodes {
         let worktree = node_worktree(key, binding)
             .map_err(|detail| fail(FailureReason::WorktreeUnavailable, detail))?;
         let try_dir = try_dir(&binding.attempt_dir, key, node.try_number);
+        let confinement = if inputs.agent_confinement.agent_steps {
+            let (host_git, tree_git) = host_git(binding, &worktree)
+                .map_err(|detail| fail(FailureReason::WorktreeUnavailable, detail))?;
+            Some(AgentJob {
+                scratch: scratch_dir(binding, key, node.try_number),
+                declared_dirs: vec![],
+                tree_access: TreeAccess::Writable,
+                tree_git,
+                host_git,
+                state_paths: inputs.agent_confinement.claude_state_paths.clone(),
+            })
+        } else {
+            None
+        };
         let claude_node = ClaudeNode {
             caps,
             output: definition_node.output.clone(),
@@ -99,6 +117,7 @@ impl NodeKind for AgentNodes {
             task_id: binding.task_id.clone(),
             task_dir: binding.task_dir.clone(),
             session_id: new_id(),
+            confinement,
         };
         self.runner_for(cli, inputs)
             .start(node.run, key, node.try_number, claude_node)

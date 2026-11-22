@@ -25,6 +25,7 @@ fn finished(key: NodeKey, try_number: u32, result: Option<Value>) -> Event {
         turns: None,
         elapsed_ms: 0,
         session_id: None,
+        confinement_refusals: Vec::new(),
     }
 }
 

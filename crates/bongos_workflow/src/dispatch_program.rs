@@ -304,7 +304,7 @@ fn branch_git_dir(common: &Path, worktree: &Path) -> Option<PathBuf> {
 }
 
 /// The node's scratch directory, beside the run's worktrees and outside the record.
-fn scratch_dir(binding: &RunBinding, key: &NodeKey, try_number: u32) -> PathBuf {
+pub(crate) fn scratch_dir(binding: &RunBinding, key: &NodeKey, try_number: u32) -> PathBuf {
     binding
         .worktree
         .run_dir

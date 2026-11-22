@@ -302,6 +302,7 @@ impl FakeRunner {
             turns: None,
             elapsed_ms: 0,
             session_id: None,
+            confinement_refusals: Vec::new(),
         });
     }
 

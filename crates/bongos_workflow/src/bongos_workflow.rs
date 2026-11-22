@@ -6,6 +6,7 @@
 //! written and no run starts.
 
 mod actions;
+pub mod agent_confinement;
 pub mod builtin_merge;
 pub mod builtin_nodes;
 pub mod builtin_run;

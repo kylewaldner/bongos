@@ -29,6 +29,7 @@ fn finished(key: &NodeKey, try_number: u32, result: serde_json::Value, cost: f64
         turns: Some(3),
         elapsed_ms: 1500,
         session_id: Some("session-1".to_string()),
+        confinement_refusals: Vec::new(),
     }
 }
 
@@ -42,6 +43,7 @@ fn failed(key: &NodeKey, try_number: u32, reason: FailureReason) -> Event {
         turns: None,
         elapsed_ms: 10,
         session_id: None,
+        confinement_refusals: Vec::new(),
     }
 }
 
