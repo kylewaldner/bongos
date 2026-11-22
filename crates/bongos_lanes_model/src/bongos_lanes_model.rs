@@ -5,11 +5,19 @@
 
 pub mod binding;
 pub mod problem;
+pub mod state;
 pub mod table;
 
 pub use binding::{TokenError, TokenValues, check_tokens, expand_tokens};
 pub use bongos_workflow_model::EnvEdit;
 pub use problem::Problem;
+pub use state::{
+    AdoptOutcome, AdoptRefusal, AdoptRequest, Author, Bound, CountPlan, JobEnd, JobEndInput,
+    JobRecord, LaneId, LaneRecord, LaneState, LanesState, OwnerRecord, OwnerState, PinTarget,
+    RunSubject, StopCause, TaskId, Transition, WaitReason, adopt, lane_after_retry,
+    owner_adoptable_by, owner_after_job_end, owner_after_stop, reconcile_counts, short_run,
+    stop_at_job_boundary, stop_lane,
+};
 pub use table::{
     Binding, Diagnostic, DispatchRule, Exemption, LaneKind, LaneTable, ParseError, Pin, TreeSpec,
     ValidationContext, names_lane_instance, parse, prompt_lane_problems, validate_lane_table,
@@ -19,5 +27,7 @@ pub use table::{
 mod binding_tests;
 #[cfg(test)]
 mod problem_tests;
+#[cfg(test)]
+mod state_tests;
 #[cfg(test)]
 mod table_tests;
