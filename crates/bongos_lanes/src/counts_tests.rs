@@ -64,7 +64,7 @@ fn lane_ids(harness: &Harness) -> Vec<String> {
         .collect()
 }
 
-// PRD 3: a count raised by the profile makes the lane and it works at once; a count lowered stops
+// A count raised by the profile makes the lane and it works at once; a count lowered stops
 // the running lane above it only after its job, never mid-job, with no restart.
 #[gpui::test]
 async fn a_profile_count_change_applies_at_the_job_boundary_with_no_restart(
@@ -139,7 +139,7 @@ async fn a_count_change_stops_only_lanes_above_the_count(cx: &mut TestAppContext
     assert_eq!(harness.lane("build", 1).stop_requested, None);
 }
 
-// PRD 4: the overlap check runs again on a count change; a new lane whose locations overlap
+// The overlap check runs again on a count change; a new lane whose locations overlap
 // another's waits naming the pair, and takes no job, until a change clears it.
 #[gpui::test]
 async fn a_new_lane_whose_locations_overlap_waits_naming_the_pair(cx: &mut TestAppContext) {
@@ -174,7 +174,7 @@ fn stamp_of(tasks: Vec<bongos_lanes_model::PickTask>, table: &str) -> StampFile 
     StampFile::from_stamp(&stamp::compute(&graph(tasks), &table))
 }
 
-// PRD 18: with a recorded stamp the graph no longer matches, the lanes wait naming the change;
+// With a recorded stamp the graph no longer matches, the lanes wait naming the change;
 // once the accepted stamp is at the verified commit, the next pick proceeds. Without a stamp the
 // check is off.
 #[gpui::test]

@@ -89,7 +89,7 @@ fn main_commit(repo: &ProjectRepo) -> String {
     .unwrap()
 }
 
-// PRD 18: with no stamp.toml the check is off; accept graph lands the stamp of master as the
+// With no stamp.toml the check is off; accept graph lands the stamp of master as the
 // person's own change, and the stamp at the new master matches its graph; a second accept makes
 // nothing.
 #[gpui::test]

@@ -374,7 +374,7 @@ fn subject(app: &Path, commit: &str) -> String {
     git(app, &["log", "-1", "--format=%s", commit])
 }
 
-// PRD 12: adopting a halted task saves the work its failed run left, then cancels that run with
+// Adopting a halted task saves the work its failed run left, then cancels that run with
 // the history line, moves the owner in one transaction, and the next job of the leaf starts on the
 // adopting lane, in its own tree, from the task branch head.
 #[gpui::test]
@@ -452,7 +452,7 @@ async fn adopting_a_halted_task_cancels_its_run_and_starts_it_on_the_adopting_la
     assert!(!tip.join("work.txt").exists());
 }
 
-// PRD 12: the cancelled run cannot bring the old lane back: a retry is refused by the engine (only
+// The cancelled run cannot bring the old lane back: a retry is refused by the engine (only
 // a failed run is retried), and a status change of that run reaches no lane.
 #[gpui::test]
 async fn the_cancelled_run_never_gives_the_old_lane_its_task_back(cx: &mut TestAppContext) {
@@ -479,7 +479,7 @@ async fn the_cancelled_run_never_gives_the_old_lane_its_task_back(cx: &mut TestA
     );
 }
 
-// PRD 12: a file the failed run left uncommitted survives the source lane's next job, committed
+// A file the failed run left uncommitted survives the source lane's next job, committed
 // on the old run branch the history names.
 #[gpui::test]
 async fn work_left_in_the_source_tree_survives_its_next_job_on_the_old_run_branch(
@@ -553,7 +553,7 @@ async fn a_clean_source_tree_saves_nothing(cx: &mut TestAppContext) {
     assert_eq!(harness.state().lanes[&build(2)].state, LaneState::Running);
 }
 
-// PRD 12: with the old tree's directory missing, the adopt is refused unless the person confirms
+// With the old tree's directory missing, the adopt is refused unless the person confirms
 // dropping its work; the confirmed drop is in the history.
 #[gpui::test]
 async fn a_missing_old_tree_refuses_the_adopt_unless_the_drop_is_confirmed(
@@ -689,7 +689,7 @@ async fn refused(
     }
 }
 
-// PRD 12: the refusals, each before anything is written or cancelled.
+// The refusals, each before anything is written or cancelled.
 #[gpui::test]
 async fn adopt_refuses_a_running_owner_a_pin_a_busy_lane_and_no_reason(cx: &mut TestAppContext) {
     let table = format!(
