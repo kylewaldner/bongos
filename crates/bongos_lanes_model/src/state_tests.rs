@@ -17,6 +17,7 @@ fn job(run: &str) -> JobRecord {
         workflow: "build".to_string(),
         started: "t0".to_string(),
         definition_commit: None,
+        extension: None,
     }
 }
 

@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use bongos_lanes_model::{
-    AssignedWork, Author, InstanceUse, JobRecord, LaneId, LaneRecord, LaneState, LaneTable,
+    AssignedWork, Assignment, Author, JobRecord, LaneId, LaneRecord, LaneState, LaneTable,
     LanesState, OwnerChange, OwnerRecord, OwnerState, PickBound, PickGraph, PickOptions,
     PickOutcome, Problem, RunSubject, StopCause, TaskId, WaitReason, pick, reconcile_counts,
     stop_at_job_boundary,
@@ -46,6 +46,10 @@ use crate::dispatch_job::HookedJob;
 use crate::job_trees::JobTrees;
 use crate::lane_control::{BOUND_REASON, LaneEvents, RunEnd, paused_reason};
 use crate::locations::table_lane_ids;
+use crate::pick_extension::{
+    ExtensionPick, JobChange, PickExtension, PickExtensions, PickPoint, extension_job_changed,
+    extension_pick, instance_use, lane_after_unstarted, with_engine,
+};
 use crate::profile::LaneProfiles;
 use crate::store::{LANES_NAMESPACE, delete_lane, put_lane, put_owner, read_state_in};
 use crate::task_trees::LaneTreeSetup;
@@ -479,10 +483,11 @@ fn start_verified(
             (kind.name.clone(), count)
         })
         .collect();
+    let now = host.now();
     let record = DispatcherRecord {
         run_id: run_id.clone(),
         host: host.host_id(),
-        started: host.now(),
+        started: now.clone(),
         by: request.by.clone(),
         bound: request.bound.as_ref().map(RecordedBound::from),
         unattended,
@@ -490,13 +495,15 @@ fn start_verified(
         stopped_by: None,
         ended: None,
     };
-    parts
-        .writer
-        .transact(|tx| {
+    let extensions = PickExtensions::extensions(cx);
+    with_engine(&parts.engine, || {
+        parts.writer.transact(|tx| {
             put_dispatcher(tx, &record)?;
+            clear_unstarted(tx, &*parts.engine, &extensions, &now)?;
             reconcile(tx, &counts)
         })
-        .map_err(store_error)?;
+    })
+    .map_err(store_error)?;
 
     let dispatcher = Dispatcher::new(DispatcherConfig {
         parts,
@@ -524,6 +531,44 @@ pub const PROJECT_UNATTENDED: UnattendedChoice = UnattendedChoice {
     value: true,
     source: UnattendedSource::Project,
 };
+
+/// The reason an extension hears for a job a crash left with no run.
+pub const NOT_STARTED_BEFORE_A_CRASH: &str = "not started before a crash";
+
+/// Clears every lane job whose reserved run never started (a crash came between the pick and the
+/// start): the lane is idle again and its owner record stays, so the same lane continues the
+/// task. An extension job's extensions hear [`JobChange::NotStarted`] first and may decide the
+/// lane instead. Only called when no live host runs a dispatcher, so no start is in flight.
+fn clear_unstarted(
+    tx: &mut StateTx,
+    engine: &dyn JobEngine,
+    extensions: &[Arc<dyn PickExtension>],
+    now: &str,
+) -> Result<()> {
+    let state = read_state_in(tx)?;
+    for (id, lane) in &state.lanes {
+        let Some(job) = &lane.job else {
+            continue;
+        };
+        if engine.knows(&job.run_id) {
+            continue;
+        }
+        log::info!("lanes: {id} reserved run {} that never started", job.run_id);
+        let change = JobChange::NotStarted {
+            reason: NOT_STARTED_BEFORE_A_CRASH.to_string(),
+        };
+        if let Some(after) = extension_job_changed(extensions, tx, id, job, change) {
+            lane_after_unstarted(tx, id, &job.run_id, after, now)?;
+            continue;
+        }
+        let mut updated = lane.clone();
+        updated.job = None;
+        updated.state = LaneState::Idle;
+        updated.reason = None;
+        put_lane(tx, &updated)?;
+    }
+    Ok(())
+}
 
 /// Creates the lane records up to `counts`, removes the free lanes above them and asks the
 /// running ones above them to stop after their job.
@@ -810,6 +855,7 @@ impl Dispatcher {
             return Ok(());
         }
         let parts = self.parts().clone();
+        let extensions = PickExtensions::extensions(cx);
         for _ in 0..MAX_RESTARTS {
             let master = self.0.verified.borrow().clone();
             let commit = parts.policy.commit_for_job(lane, &master);
@@ -818,8 +864,19 @@ impl Dispatcher {
                 return Ok(());
             };
             let now = parts.host.now();
-            let step = parts.writer.transact(|tx| {
-                self.lane_transaction(tx, lane, full, generation, &graph, &commit, &now)
+            let step = with_engine(&parts.engine, || {
+                parts.writer.transact(|tx| {
+                    self.lane_transaction(
+                        tx,
+                        lane,
+                        full,
+                        generation,
+                        &graph,
+                        &commit,
+                        &now,
+                        &extensions,
+                    )
+                })
             })?;
             match step {
                 LaneStep::Restart => self.0.restarts.set(self.0.restarts.get() + 1),
@@ -844,6 +901,7 @@ impl Dispatcher {
         graph: &PickGraph,
         commit: &JobCommit,
         now: &str,
+        extensions: &[Arc<dyn PickExtension>],
     ) -> Result<LaneStep> {
         if tx.generation()? != generation {
             return Ok(LaneStep::Restart);
@@ -897,36 +955,39 @@ impl Dispatcher {
             }
         };
 
+        let after_extensions;
+        let state = if extensions.is_empty() {
+            &state
+        } else {
+            match extension_pick(extensions, PickPoint::Before, tx, lane) {
+                ExtensionPick::Pass => {}
+                decided => return self.extension_decided(tx, lane, updated, decided, commit, now),
+            }
+            // An extension may have written in this transaction; the picker reads after it.
+            after_extensions = read_state_in(tx)?;
+            &after_extensions
+        };
         let table = self.0.table.borrow();
-        let options = self.pick_options(&state, graph, &table);
-        match pick(graph, &state, &table, lane, &options) {
+        let options = self.pick_options(state, graph, &table);
+        match pick(graph, state, &table, lane, &options) {
             PickOutcome::Assign(assignment) => {
-                apply_owner_changes(tx, &state, &assignment.owner_change, lane, now)?;
-                let job = JobRecord {
-                    run_id: bongos_work_model::new_id(),
-                    subject: job_subject(&assignment.work),
-                    workflow: assignment.workflow.clone(),
-                    started: now.to_string(),
-                    definition_commit: Some(commit),
-                };
-                updated.state = LaneState::Running;
-                updated.reason = None;
-                updated.job = Some(job.clone());
-                put_lane(tx, &updated)?;
-                Ok(LaneStep::Start(PendingJob {
-                    lane: lane.clone(),
-                    job,
-                    work: assignment.work,
-                    inputs: assignment.inputs,
-                }))
+                assign_job(tx, state, lane, updated, assignment, commit, now)
             }
             PickOutcome::Nothing {
                 reasons,
                 owner_change,
             } => {
-                apply_owner_changes(tx, &state, &owner_change, lane, now)?;
+                apply_owner_changes(tx, state, &owner_change, lane, now)?;
+                if !extensions.is_empty() {
+                    match extension_pick(extensions, PickPoint::After, tx, lane) {
+                        ExtensionPick::Pass => {}
+                        decided => {
+                            return self.extension_decided(tx, lane, updated, decided, commit, now);
+                        }
+                    }
+                }
                 if self.0.config.bound.is_some() && only_bound(&reasons) {
-                    self.stop_for_bound(tx, &state, updated, now)?;
+                    self.stop_for_bound(tx, state, updated, now)?;
                     return Ok(LaneStep::Nothing);
                 }
                 updated.state = LaneState::Idle;
@@ -942,6 +1003,32 @@ impl Dispatcher {
                 write_lane_if_changed(tx, record, &updated)?;
                 Ok(LaneStep::Nothing)
             }
+        }
+    }
+
+    /// Applies an extension's answer other than `Pass` to the free lane `updated`.
+    fn extension_decided(
+        &self,
+        tx: &mut StateTx,
+        lane: &LaneId,
+        mut updated: LaneRecord,
+        decided: ExtensionPick,
+        commit: String,
+        now: &str,
+    ) -> Result<LaneStep> {
+        // The extension may have written in this transaction.
+        let state = read_state_in(tx)?;
+        match decided {
+            ExtensionPick::Assign(assignment) => {
+                assign_job(tx, &state, lane, updated, assignment, commit, now)
+            }
+            ExtensionPick::StopLane(text) => {
+                updated.state = LaneState::Idle;
+                updated.stop_requested = Some(StopCause::Extension { text });
+                self.stop_at_boundary(tx, &state, &updated, now)?;
+                Ok(LaneStep::Nothing)
+            }
+            ExtensionPick::Pass => Ok(LaneStep::Nothing),
         }
     }
 
@@ -1016,17 +1103,7 @@ impl Dispatcher {
         let instances = workflows
             .into_iter()
             .map(|workflow| {
-                let reserved = state
-                    .lanes
-                    .values()
-                    .filter_map(|lane| lane.job.as_ref())
-                    .filter(|job| job.workflow == workflow && !engine.knows(&job.run_id))
-                    .count() as u32;
-                let usage = InstanceUse {
-                    limit: engine.instance_limit(&workflow),
-                    active_runs: engine.active_runs_of(&workflow),
-                    reserved,
-                };
+                let usage = instance_use(&**engine, state, &workflow);
                 (workflow, usage)
             })
             .collect();
@@ -1151,6 +1228,45 @@ fn apply_owner_changes(
         }
     }
     Ok(())
+}
+
+/// Makes `assignment` the job of the free lane `updated` and reserves its run id, the
+/// assignment's own when an extension gave one.
+fn assign_job(
+    tx: &mut StateTx,
+    state: &LanesState,
+    lane: &LaneId,
+    mut updated: LaneRecord,
+    assignment: Assignment,
+    commit: String,
+    now: &str,
+) -> Result<LaneStep> {
+    apply_owner_changes(tx, state, &assignment.owner_change, lane, now)?;
+    let extension = match &assignment.work {
+        AssignedWork::Extension { kind, .. } => Some(kind.clone()),
+        AssignedWork::Leaf { .. } => None,
+    };
+    let job = JobRecord {
+        run_id: assignment
+            .run_id
+            .clone()
+            .unwrap_or_else(bongos_work_model::new_id),
+        subject: job_subject(&assignment.work),
+        workflow: assignment.workflow.clone(),
+        started: now.to_string(),
+        definition_commit: Some(commit),
+        extension,
+    };
+    updated.state = LaneState::Running;
+    updated.reason = None;
+    updated.job = Some(job.clone());
+    put_lane(tx, &updated)?;
+    Ok(LaneStep::Start(PendingJob {
+        lane: lane.clone(),
+        job,
+        work: assignment.work,
+        inputs: assignment.inputs,
+    }))
 }
 
 fn job_subject(work: &AssignedWork) -> RunSubject {

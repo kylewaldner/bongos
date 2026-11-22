@@ -1106,6 +1106,7 @@ async fn a_failed_job_with_no_task_leaves_an_unrelated_owner_alone(cx: &mut Test
                 workflow: "w".to_string(),
                 started: SINCE.to_string(),
                 definition_commit: None,
+                extension: None,
             });
             put_lane(tx, &lane)?;
             put_owner(tx, &TaskId::new("z"), &owner)
@@ -1173,6 +1174,7 @@ async fn a_task_less_job_resumes_on_retry_and_ends(cx: &mut TestAppContext) {
                 workflow: "w".to_string(),
                 started: SINCE.to_string(),
                 definition_commit: None,
+                extension: None,
             });
             put_lane(tx, &lane)
         })
@@ -1229,3 +1231,6 @@ mod lane_control_tests;
 
 #[path = "job_hooks_tests.rs"]
 mod job_hooks_tests;
+
+#[path = "pick_extension_tests.rs"]
+mod pick_extension_tests;

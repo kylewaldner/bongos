@@ -36,6 +36,7 @@ fn job() -> JobRecord {
         workflow: "build".to_string(),
         started: "2026-03-01T10:00:00Z".to_string(),
         definition_commit: None,
+        extension: None,
     }
 }
 
