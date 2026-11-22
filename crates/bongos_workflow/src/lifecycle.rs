@@ -131,6 +131,10 @@ pub struct StartRequest {
     /// the verified commit. The caller reads the layers at it ([`StartContext::definition_commit`]
     /// must be this commit).
     pub definition_commit: Option<CommitId>,
+    /// When the workflow already runs its `instances` in the project: queue the run (Queued until
+    /// a run of that workflow ends) instead of refusing. Only a hand start may queue; a lane's or
+    /// a landing check's start at the limit is always refused.
+    pub queue: bool,
 }
 
 impl StartRequest {
@@ -162,6 +166,7 @@ impl StartRequest {
             env: Vec::new(),
             unattended: None,
             definition_commit: None,
+            queue: false,
         }
     }
 
@@ -188,6 +193,8 @@ pub enum RefusalKind {
     NoOpenTodo,
     ActiveRun,
     UnknownWorkflow,
+    /// The workflow already runs its `instances` in the project.
+    InstanceLimit,
     Invalid,
     MissingInput,
     AgentUnavailable,
@@ -215,6 +222,8 @@ pub enum RefusalKind {
 pub enum Offer {
     Resume(RunId),
     Cancel(RunId),
+    /// Start again with [`StartRequest::queue`] set.
+    Queue,
 }
 
 /// A refused command: what is wrong and what to do about it.
@@ -579,6 +588,8 @@ fn skip(report: &mut LoadReport, path: &Path, reason: String) {
 struct RunEntry {
     id: RunId,
     task_id: String,
+    /// The slug of the project holding the task; `None` for a one-off.
+    project: Option<String>,
     task: TaskCheckout,
     /// `<task dir>/runs/<id>`.
     dir: PathBuf,
@@ -683,7 +694,12 @@ impl<R: Runner> Lifecycle<R> {
 
     /// One pass of the run loop ([`Runtime::tick`]); whether anything changed.
     pub fn tick(&mut self) -> bool {
-        let changed = self.runtime.tick();
+        let mut changed = self.runtime.tick();
+        // A run that ended may free an instance for a queued run of its workflow.
+        if self.release_instances() {
+            self.runtime.tick();
+            changed = true;
+        }
         if changed {
             self.note_all();
         }
@@ -807,7 +823,9 @@ impl<R: Runner> Lifecycle<R> {
     /// [`Self::start_project`]. Then refused, in this order: a group, no open
     /// todo, an active run, an unknown workflow, a definition with errors, a missing required
     /// input, an agent CLI that cannot run, a missing interpreter, an allowed MCP server not
-    /// installed, too little free space, no task worktree. Nothing is written before every check
+    /// installed, the workflow at its `instances` in the project (a hand start that asks to queue
+    /// is let through and waits Queued until a run of the workflow ends), too little free space,
+    /// no task worktree. Nothing is written before every check
     /// passed but the last two, which the worktree creation makes.
     pub fn start(
         &mut self,
@@ -876,6 +894,8 @@ impl<R: Runner> Lifecycle<R> {
             &request.overrides,
         )?;
         check_machine(&definition, context.checks)?;
+        let project = project_of(tree, &task_id);
+        let held_back = self.check_instances(&name, &definition, project.as_deref(), &request)?;
 
         let file = task.file.as_ref().ok_or_else(|| {
             Refusal::new(
@@ -920,6 +940,7 @@ impl<R: Runner> Lifecycle<R> {
         let mut entry = RunEntry {
             id: id.clone(),
             task_id,
+            project,
             task: checkout,
             dir,
             record,
@@ -931,9 +952,101 @@ impl<R: Runner> Lifecycle<R> {
             .clone()
             .filter(|_| resolved.layer == Layer::Project);
         self.begin_attempt(&mut entry, 1, &resolved.dir, definition, created, commit)?;
+        if held_back {
+            self.runtime.hold_back(&id);
+        }
         self.runs.push(entry);
         self.note(&id);
         Ok(id)
+    }
+
+    /// The active runs of workflow `name` in `project`, in start order. Active is what holds a
+    /// task ([`RunStatus::is_active`]): queued, running, pausing, paused, halted, waiting on you
+    /// or failed.
+    fn active_instances(&self, name: &str, project: Option<&str>) -> Vec<&RunEntry> {
+        self.runs
+            .iter()
+            .filter(|entry| entry.record.workflow == name && entry.project.as_deref() == project)
+            .filter(|entry| self.status(&entry.id).is_some_and(RunStatus::is_active))
+            .collect()
+    }
+
+    /// The instance limit of a start: a definition with no `instances` has none. At the limit a
+    /// hand start that asks to queue is let through held back (`Ok(true)`); any other start is
+    /// refused naming an active run (one already let start first).
+    fn check_instances(
+        &self,
+        name: &str,
+        definition: &Definition,
+        project: Option<&str>,
+        request: &StartRequest,
+    ) -> Result<bool, Refusal> {
+        let Some(limit) = definition.instances else {
+            return Ok(false);
+        };
+        let active = self.active_instances(name, project);
+        if active.len() < limit as usize {
+            return Ok(false);
+        }
+        let by_hand = request.started_by.counts_toward_run_limit();
+        if by_hand && request.queue {
+            return Ok(true);
+        }
+        let named = active
+            .iter()
+            .find(|entry| !self.runtime.is_held_back(&entry.id))
+            .or(active.first());
+        let (run, task) = named.map_or((String::new(), String::new()), |entry| {
+            (worktrees::short_id(&entry.id), entry.task.slug.clone())
+        });
+        let mut refusal = Refusal::new(
+            RefusalKind::InstanceLimit,
+            format!(
+                "Workflow '{name}' already runs {} of its {limit} allowed in this project: run \
+                 {run} on task {task}.",
+                active.len()
+            ),
+            if by_hand {
+                "Queue this run to start when one ends, or cancel that run first."
+            } else {
+                "Start it again once a run of it ends."
+            },
+        );
+        if by_hand && let Some(entry) = named {
+            refusal.offers = vec![Offer::Queue, Offer::Cancel(entry.id.clone())];
+        }
+        Err(refusal)
+    }
+
+    /// Lets each held-back run start while its workflow runs fewer than its `instances` in its
+    /// project, oldest first. Whether any was let start.
+    fn release_instances(&mut self) -> bool {
+        let mut released = false;
+        let waiting: Vec<RunId> = self
+            .runs
+            .iter()
+            .filter(|entry| self.runtime.is_held_back(&entry.id))
+            .map(|entry| entry.id.clone())
+            .collect();
+        for id in waiting {
+            let Ok(entry) = self.entry(&id) else {
+                continue;
+            };
+            let limit = self
+                .runtime
+                .definition(&id)
+                .and_then(|definition| definition.instances);
+            let running = self
+                .active_instances(&entry.record.workflow, entry.project.as_deref())
+                .iter()
+                .filter(|other| !self.runtime.is_held_back(&other.id))
+                .count();
+            if limit.is_none_or(|limit| running < limit as usize) {
+                self.runtime.let_start(&id);
+                released = true;
+            }
+        }
+        released
     }
 
     /// The checks of a request's own fields, before anything is read: a tree this version cannot
@@ -1083,8 +1196,9 @@ impl<R: Runner> Lifecycle<R> {
                 }
             }
             dirs.sort();
+            let project = task.id().and_then(|id| project_of(tree, id));
             for dir in dirs {
-                match self.read_run(task, &dir) {
+                match self.read_run(task, project.clone(), &dir) {
                     Ok(Some((entry, _))) if seen.contains(&entry.id) => skip(
                         &mut report,
                         &dir,
@@ -1112,17 +1226,36 @@ impl<R: Runner> Lifecycle<R> {
                     continue;
                 }
             };
+            self.runtime
+                .set_started_by(&entry.id, entry.record.started_by);
             self.runtime.bind(&entry.id, entry.binding());
             report.loaded.push(entry.id.clone());
             report.orphans.push((entry.id.clone(), orphans));
             self.runs.push(entry);
         }
+        // A run queued at its workflow's instance limit waits again: every loaded run that has
+        // not begun is held back, then let start while its workflow has room, oldest first.
+        for id in &report.loaded {
+            let limited = self
+                .runtime
+                .definition(id)
+                .is_some_and(|definition| definition.instances.is_some());
+            if limited && !self.runtime.has_begun(id) && self.runtime.is_queued(id) {
+                self.runtime.hold_back(id);
+            }
+        }
+        self.release_instances();
         self.note_all();
         Ok(report)
     }
 
     /// One run directory: `Ok(None)` for a cleared run.
-    fn read_run(&self, task: &Task, dir: &Path) -> Result<Option<(RunEntry, RunSpec)>, String> {
+    fn read_run(
+        &self,
+        task: &Task,
+        project: Option<String>,
+        dir: &Path,
+    ) -> Result<Option<(RunEntry, RunSpec)>, String> {
         if dir.join(CLEARED_FILE).exists() {
             return Ok(None);
         }
@@ -1181,6 +1314,7 @@ impl<R: Runner> Lifecycle<R> {
         let entry = RunEntry {
             id: record.id.clone(),
             task_id: record.task_id.clone(),
+            project,
             task: checkout,
             dir: dir.to_path_buf(),
             record,
@@ -1555,6 +1689,7 @@ impl<R: Runner> Lifecycle<R> {
                         loop_bound: old_loop_bound,
                     })
                     .ok();
+                self.runtime.set_started_by(run, entry.record.started_by);
                 self.runtime.bind(run, entry.binding());
             }
         }
@@ -1733,6 +1868,8 @@ impl<R: Runner> Lifecycle<R> {
                 loop_bound,
             })
             .map_err(Refusal::runtime)?;
+        self.runtime
+            .set_started_by(&entry.id, entry.record.started_by);
         self.runtime.bind(&entry.id, entry.binding());
         Ok(())
     }
@@ -1941,6 +2078,21 @@ fn project_task<'a>(tree: &'a WorkTree, id: &str) -> Option<&'a Task> {
         .iter()
         .map(|project| &project.task)
         .find(|task| task.id() == Some(id))
+}
+
+/// The slug of the project whose tree holds task `task_id`; `None` for a one-off or an unknown
+/// task.
+fn project_of(tree: &WorkTree, task_id: &str) -> Option<String> {
+    tree.projects
+        .iter()
+        .find(|project| {
+            project
+                .task
+                .walk()
+                .iter()
+                .any(|task| task.id() == Some(task_id))
+        })
+        .map(|project| project.slug.clone())
 }
 
 /// A dispatcher is never started as a run: it has no nodes for the scheduler to drive.

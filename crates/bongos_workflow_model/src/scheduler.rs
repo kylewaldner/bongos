@@ -66,10 +66,12 @@ const ON_BOUND_FAIL: &str = "fail";
 /// The engine's limits, all settings (D19).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Limits {
-    /// `workflows.max_concurrent_runs`: runs executing at once; the rest are Queued.
+    /// `workflows.max_concurrent_runs`: hand-started runs executing at once; the rest are
+    /// Queued. Lane and landing runs are not counted and never wait for it
+    /// ([`crate::record::StartedBy::counts_toward_run_limit`]).
     pub max_concurrent_runs: u32,
     /// `workflows.max_concurrent_sessions`: agent sessions plus programs executing across all
-    /// runs; `None` is twice the run limit.
+    /// runs, lane and landing runs included; `None` is twice the run limit.
     pub max_concurrent_sessions: Option<u32>,
     /// `workflows.max_parallel_branches`: branches of one run executing at once.
     pub max_parallel_branches: u32,
@@ -173,7 +175,8 @@ impl Limits {
         self.session_limit().saturating_sub(running)
     }
 
-    /// Whether one more run may start executing while `executing` runs do; otherwise it is Queued.
+    /// Whether one more hand-started run may start executing while `executing` hand-started runs
+    /// do; otherwise it is Queued.
     pub fn admits_run(&self, executing: usize) -> bool {
         executing < self.max_concurrent_runs as usize
     }
