@@ -169,6 +169,61 @@ async fn a_new_lane_whose_locations_overlap_waits_naming_the_pair(cx: &mut TestA
     assert_eq!(harness.engine.job_tasks(), ["a", "b"]);
 }
 
+fn overlap(pair: &str) -> Option<Vec<Problem>> {
+    Some(vec![Problem {
+        requirement: "lane locations do not overlap".to_string(),
+        message: pair.to_string(),
+        hint: None,
+    }])
+}
+
+// The overlap check runs again on every profile change, even with the counts unchanged: a lane
+// held for overlapping locations is released once the person fixes them and picks work, and a
+// new overlap holds the free lane it names, with no restart of the running one.
+#[gpui::test]
+async fn fixed_locations_release_a_held_lane_with_the_counts_unchanged(cx: &mut TestAppContext) {
+    let harness = harness(
+        &builds(1),
+        graph(vec![leaf("a"), leaf("b"), leaf("c")]),
+        &[],
+    );
+    let profile = profile(&[("build", 1)], cx);
+    let _started = start(&harness, start_request(), cx).await;
+    let pair = "build-1 target and build-2 target resolve to /x/target";
+    *harness.host.overlap.borrow_mut() = overlap(pair);
+    set_count(&profile, "build", 2, cx);
+    let held = harness.lane("build", 2);
+    assert_eq!(held.state, LaneState::Waiting);
+    assert_eq!(held.reason, Some(WaitReason::Environment(pair.to_string())));
+    assert_eq!(harness.engine.job_tasks(), ["a"]);
+
+    // The locations are fixed; the profile changes with the same counts.
+    *harness.host.overlap.borrow_mut() = None;
+    cx.update(LaneProfiles::changed);
+    cx.run_until_parked();
+    let released = harness.lane("build", 2);
+    assert_eq!(released.state, LaneState::Running);
+    assert_eq!(released.reason, None);
+    assert_eq!(harness.engine.job_tasks(), ["a", "b"]);
+    assert_eq!(harness.engine.dispatcher_starts.borrow().len(), 1);
+
+    // A new overlap naming build-2 leaves its running job alone and holds it after the job.
+    let job = harness.lane("build", 2).job;
+    let pair = "build-2 cache and build-3 cache resolve to /x/cache";
+    *harness.host.overlap.borrow_mut() = overlap(pair);
+    cx.update(LaneProfiles::changed);
+    cx.run_until_parked();
+    assert_eq!(harness.lane("build", 2).job, job);
+    assert_eq!(harness.lane("build", 2).state, LaneState::Running);
+    harness.set_run("b", RunStatus::Succeeded, cx);
+    let held = harness.lane("build", 2);
+    assert_eq!(held.state, LaneState::Waiting);
+    assert_eq!(held.reason, Some(WaitReason::Environment(pair.to_string())));
+    assert_eq!(harness.lane("build", 1).state, LaneState::Running);
+    assert_eq!(harness.engine.job_tasks(), ["a", "b"]);
+    assert_eq!(harness.engine.dispatcher_starts.borrow().len(), 1);
+}
+
 fn stamp_of(tasks: Vec<bongos_lanes_model::PickTask>, table: &str) -> StampFile {
     let table = parse(&format!("schema = 1\n{table}")).unwrap();
     StampFile::from_stamp(&stamp::compute(&graph(tasks), &table))
