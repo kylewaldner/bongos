@@ -3026,7 +3026,7 @@ fn appearance_page() -> SettingsPage {
             // todo(settings ui): add units to this number input
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Avy Timeout",
-                description: "Time in milliseconds the Avy jump waits for another key before it jumps to the only candidate left.",
+                description: "Time in milliseconds Avy jump waits after the last typed character before it shows the labels.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("emacs.avy_timeout"),

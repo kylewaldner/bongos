@@ -42,7 +42,9 @@ step "Avy jump: char timer with labels, cancel keeps point, line labels"
 mkdir -p "$RUN/config-backup"
 cp "$GLOBAL_FILE" "$RUN/config-backup/global-15.json"
 cp "$MAIN" "$RUN/config-backup/Main-15.kt"
-grep -v '"base_keymap"' "$RUN/config-backup/global-15.json" >"$GLOBAL_FILE"
+# A huge avy_timeout keeps the char timer from firing on a slow machine; Return labels at once.
+grep -v '"base_keymap"' "$RUN/config-backup/global-15.json" |
+  sed '0,/{/s//{ "emacs": { "avy_timeout": 60000 },/' >"$GLOBAL_FILE"
 printf 'fun %s() {}\n' "$WORD" >"$OTHER"
 
 launch
@@ -65,8 +67,7 @@ sleep 1
 
 # 1. M-; the word, RET shows the labels at once, and `a` jumps to the word.
 act keys alt+semicolon
-# No pause before Return: the 500 ms char timer would show the labels first, and Return would
-# then cancel the labelled jump.
+# avy_timeout is 60000 here, so the timer never shows the labels before Return does.
 act keys z e b r a q u u x Return
 act keys a
 type_text MARK

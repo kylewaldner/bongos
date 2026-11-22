@@ -821,6 +821,7 @@ the minibuffer or other small editors. Three commands, each in the command palet
 
 - **M-;** (avy-goto-char-timer): type the characters to look for, then pause. Labels appear on
   every visible match. Press **Enter** to show the labels at once, without waiting for the pause.
+  The pause is `emacs.avy_timeout` in milliseconds (default 500), editable in Settings.
 - **C-;** (avy-goto-word-1): type one character; labels appear on the visible words that start with it.
 - **C-M-;** (avy-goto-line): labels appear on the start of every visible line.
 
