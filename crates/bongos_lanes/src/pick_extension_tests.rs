@@ -1,10 +1,9 @@
 //! Pick extensions in the dispatcher's picks and in the settling of the jobs they assign, over
 //! the fake host and engine of the dispatcher tests, with a fake extension.
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
 use bongos_lanes_model::{
     AssignedWork, Assignment, JobRecord, LaneId, LaneRecord, LaneState, RankKey, RunSubject,
@@ -44,22 +43,22 @@ enum Call {
 #[derive(Default)]
 struct FakeExtension {
     /// What `before_pick` answers for a lane, once; then `Pass`.
-    before: RefCell<BTreeMap<LaneId, ExtensionPick>>,
+    before: Mutex<BTreeMap<LaneId, ExtensionPick>>,
     /// What `after_pick` answers for a lane, once; then `Pass`.
-    after: RefCell<BTreeMap<LaneId, ExtensionPick>>,
+    after: Mutex<BTreeMap<LaneId, ExtensionPick>>,
     /// In `before_pick`, asks `instance_room` for this workflow and assigns a job of it when
     /// there is room, once per lane.
-    assign_with_room: RefCell<Option<String>>,
+    assign_with_room: Mutex<Option<String>>,
     /// Every answer of `instance_room`, by lane.
-    rooms: RefCell<Vec<(LaneId, Result<(), WaitReason>)>>,
+    rooms: Mutex<Vec<(LaneId, Result<(), WaitReason>)>>,
     /// What `job_changed` answers.
-    answer: RefCell<Option<LaneAfterJob>>,
-    calls: RefCell<Vec<Call>>,
+    answer: Mutex<Option<LaneAfterJob>>,
+    calls: Mutex<Vec<Call>>,
 }
 
 impl FakeExtension {
     fn calls(&self) -> Vec<Call> {
-        self.calls.borrow().clone()
+        self.calls.lock().unwrap().clone()
     }
 
     fn changes(&self) -> Vec<(LaneId, String, JobChange)> {
@@ -75,7 +74,8 @@ impl FakeExtension {
     /// `before_pick` assigns a queue job (with `run_id`, when given) to `lane` once.
     fn assign_before(&self, lane: &LaneId, run_id: Option<&str>) {
         self.before
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .insert(lane.clone(), ExtensionPick::Assign(queue_job(run_id)));
     }
 }
@@ -92,19 +92,30 @@ fn claim(tx: &mut StateTx, lane: &LaneId, pick: &ExtensionPick) {
 
 impl PickExtension for FakeExtension {
     fn before_pick(&self, tx: &mut StateTx, lane: &LaneId) -> ExtensionPick {
-        self.calls.borrow_mut().push(Call::Before(lane.clone()));
-        if let Some(workflow) = self.assign_with_room.borrow().clone()
-            && !self.rooms.borrow().iter().any(|(seen, _)| seen == lane)
+        self.calls.lock().unwrap().push(Call::Before(lane.clone()));
+        let with_room = self.assign_with_room.lock().unwrap().clone();
+        let asked = self
+            .rooms
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(seen, _)| seen == lane);
+        if let Some(workflow) = with_room
+            && !asked
         {
             let room = instance_room(tx, &workflow);
-            self.rooms.borrow_mut().push((lane.clone(), room.clone()));
+            self.rooms
+                .lock()
+                .unwrap()
+                .push((lane.clone(), room.clone()));
             if room.is_ok() {
                 return ExtensionPick::Assign(queue_job(None));
             }
         }
         let pick = self
             .before
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .remove(lane)
             .unwrap_or(ExtensionPick::Pass);
         claim(tx, lane, &pick);
@@ -112,10 +123,11 @@ impl PickExtension for FakeExtension {
     }
 
     fn after_pick(&self, tx: &mut StateTx, lane: &LaneId) -> ExtensionPick {
-        self.calls.borrow_mut().push(Call::After(lane.clone()));
+        self.calls.lock().unwrap().push(Call::After(lane.clone()));
         let pick = self
             .after
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .remove(lane)
             .unwrap_or(ExtensionPick::Pass);
         claim(tx, lane, &pick);
@@ -130,9 +142,10 @@ impl PickExtension for FakeExtension {
         change: JobChange,
     ) -> Option<LaneAfterJob> {
         self.calls
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .push(Call::Changed(lane.clone(), job.run_id.clone(), change));
-        self.answer.borrow().clone()
+        self.answer.lock().unwrap().clone()
     }
 }
 
@@ -284,7 +297,7 @@ async fn after_pick_is_called_only_after_the_picker_found_nothing(cx: &mut TestA
 async fn after_pick_assigns_when_the_picker_found_nothing(cx: &mut TestAppContext) {
     let harness = harness(&builds(1), graph(vec![]), &[]);
     let extension = Arc::new(FakeExtension::default());
-    extension.after.borrow_mut().insert(
+    extension.after.lock().unwrap().insert(
         build(1),
         ExtensionPick::Assign(queue_job(Some("0190after"))),
     );
@@ -304,7 +317,7 @@ async fn after_pick_assigns_when_the_picker_found_nothing(cx: &mut TestAppContex
 async fn stop_lane_stops_the_lane_with_the_extension_text(cx: &mut TestAppContext) {
     let harness = harness(&builds(2), graph(vec![leaf("a")]), &[]);
     let extension = Arc::new(FakeExtension::default());
-    extension.before.borrow_mut().insert(
+    extension.before.lock().unwrap().insert(
         build(1),
         ExtensionPick::StopLane("queue fixes: item exhausted".to_string()),
     );
@@ -330,12 +343,12 @@ async fn instance_room_counts_an_assignment_made_earlier_in_the_pass(cx: &mut Te
     let harness = harness(&builds(2), graph(vec![]), &[("w", 1)]);
     harness.host.gated.set(true);
     let extension = Arc::new(FakeExtension::default());
-    *extension.assign_with_room.borrow_mut() = Some("w".to_string());
+    *extension.assign_with_room.lock().unwrap() = Some("w".to_string());
     register(cx, &extension);
 
     let _started = start(&harness, start_request(), cx).await;
 
-    let rooms = extension.rooms.borrow().clone();
+    let rooms = extension.rooms.lock().unwrap().clone();
     assert_eq!(rooms.len(), 2, "{rooms:?}");
     assert_eq!(rooms[0], (build(1), Ok(())));
     assert_eq!(rooms[1].0, build(2));
@@ -396,7 +409,7 @@ async fn a_job_pending_in_before_job_holds_its_instance(cx: &mut TestAppContext)
     let started = start(&harness, start_request(), cx).await;
     assert!(harness.lane("build", 1).job.is_some());
     assert!(harness.engine.job_tasks().is_empty());
-    *extension.assign_with_room.borrow_mut() = Some("w".to_string());
+    *extension.assign_with_room.lock().unwrap() = Some("w".to_string());
 
     cx.update(|cx| started.dispatcher.as_ref().unwrap().pick_now(cx));
     cx.run_until_parked();
@@ -415,7 +428,7 @@ async fn a_job_pending_in_before_job_holds_its_instance(cx: &mut TestAppContext)
         "{:?}",
         second.reason
     );
-    let rooms = extension.rooms.borrow().clone();
+    let rooms = extension.rooms.lock().unwrap().clone();
     assert_eq!(rooms.len(), 1, "{rooms:?}");
     assert_eq!(rooms[0].0, build(2));
     assert!(
@@ -460,7 +473,7 @@ async fn a_preparation_failure_tells_the_extension_not_started(cx: &mut TestAppC
     let harness = harness(&builds(1), graph(vec![]), &[]);
     *harness.host.setup_error.borrow_mut() = Some(WaitReason::Environment("no space".to_string()));
     let extension = assigning(cx);
-    *extension.answer.borrow_mut() = Some(LaneAfterJob::Idle);
+    *extension.answer.lock().unwrap() = Some(LaneAfterJob::Idle);
 
     let _started = start(&harness, start_request(), cx).await;
 
@@ -535,7 +548,7 @@ async fn after_trouble(
     }
     let extension = Arc::new(FakeExtension::default());
     extension.assign_before(&build(1), Some("0190trouble"));
-    *extension.answer.borrow_mut() = Some(answer);
+    *extension.answer.lock().unwrap() = Some(answer);
     register(cx, &extension);
 
     let _started = start(&harness, start_request(), cx).await;
@@ -678,9 +691,9 @@ async fn the_first_extension_that_answers_decides(cx: &mut TestAppContext) {
     let silent = Arc::new(FakeExtension::default());
     silent.assign_before(&build(1), Some("0190first"));
     let halting = Arc::new(FakeExtension::default());
-    *halting.answer.borrow_mut() = Some(LaneAfterJob::Halt("second decides".to_string()));
+    *halting.answer.lock().unwrap() = Some(LaneAfterJob::Halt("second decides".to_string()));
     let idling = Arc::new(FakeExtension::default());
-    *idling.answer.borrow_mut() = Some(LaneAfterJob::Idle);
+    *idling.answer.lock().unwrap() = Some(LaneAfterJob::Idle);
     for extension in [&silent, &halting, &idling] {
         register(cx, extension);
     }
