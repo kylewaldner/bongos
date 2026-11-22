@@ -2417,6 +2417,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "bongos_engine_host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bongos_checks",
+ "bongos_project_repo",
+ "bongos_project_repo_model",
+ "bongos_work_model",
+ "bongos_workflow",
+ "chrono",
+ "futures 0.3.32",
+ "gpui",
+ "libc",
+ "log",
+ "parking_lot",
+ "paths",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "bongos_extensions"
 version = "0.1.0"
 dependencies = [
