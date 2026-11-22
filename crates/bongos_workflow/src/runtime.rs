@@ -806,7 +806,13 @@ impl<R: Runner> Runtime<R> {
         if !run.state().halted {
             run.append(Event::Halted);
         }
+        // A run held back at its workflow's instance limit stays held back while halted, so a
+        // resume does not start it past the limit.
+        let held_back = self.held_back.contains(id);
         self.hold(index);
+        if held_back {
+            self.held_back.insert(id.to_string());
+        }
         self.notify_drained();
         Ok(())
     }

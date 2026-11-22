@@ -308,6 +308,99 @@ fn a_queued_start_runs_when_the_active_one_ends() {
 }
 
 #[test]
+fn halting_and_resuming_a_queued_start_keeps_it_waiting_for_the_limit() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    let first = world.start(&mut lifecycle, request(1, "limited")).unwrap();
+    lifecycle.tick();
+    let second = world.start(&mut lifecycle, queued(2, "limited")).unwrap();
+    lifecycle.tick();
+
+    lifecycle.halt(&second).unwrap();
+    lifecycle.tick();
+    assert_eq!(lifecycle.status(&second), Some(RunStatus::Halted));
+    lifecycle.resume(&second).unwrap();
+    lifecycle.tick();
+    assert_eq!(lifecycle.status(&second), Some(RunStatus::Queued));
+    assert!(lifecycle.runtime().is_held_back(&second));
+    assert_eq!(started_runs(&lifecycle), vec![first.clone()]);
+
+    lifecycle.runtime_mut().runner_mut().release(&first);
+    lifecycle.tick();
+    assert_eq!(started_runs(&lifecycle), vec![first, second.clone()]);
+    assert_eq!(lifecycle.status(&second), Some(RunStatus::Running));
+}
+
+#[test]
+fn a_halted_start_that_never_began_does_not_count_toward_the_limit() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    let first = world.start(&mut lifecycle, request(1, "limited")).unwrap();
+    lifecycle.tick();
+    let second = world.start(&mut lifecycle, queued(2, "limited")).unwrap();
+    let third = world.start(&mut lifecycle, queued(3, "limited")).unwrap();
+    lifecycle.tick();
+    lifecycle.halt(&second).unwrap();
+    lifecycle.tick();
+
+    lifecycle.runtime_mut().runner_mut().release(&first);
+    lifecycle.tick();
+    assert_eq!(started_runs(&lifecycle), vec![first, third]);
+    assert_eq!(lifecycle.status(&second), Some(RunStatus::Halted));
+}
+
+#[test]
+fn a_relaunch_holds_back_a_queued_start_again() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    let first = world.start(&mut lifecycle, request(1, "limited")).unwrap();
+    lifecycle.tick();
+    let second = world.start(&mut lifecycle, queued(2, "limited")).unwrap();
+    lifecycle.tick();
+
+    let mut fresh = world.lifecycle();
+    let report = fresh.load_runs(&world.tree).unwrap();
+    assert!(report.skipped.is_empty(), "{report:?}");
+    fresh.tick();
+    assert_eq!(fresh.status(&second), Some(RunStatus::Queued));
+    assert!(fresh.runtime().is_held_back(&second));
+    assert!(!fresh.runtime().is_held_back(&first));
+
+    fresh.resume(&first).unwrap();
+    fresh.tick();
+    assert_eq!(started_runs(&fresh), vec![first.clone()]);
+    fresh.runtime_mut().runner_mut().release(&first);
+    fresh.tick();
+    assert_eq!(started_runs(&fresh), vec![first, second.clone()]);
+    assert_eq!(fresh.status(&second), Some(RunStatus::Running));
+}
+
+#[test]
+fn a_relaunch_keeps_a_halted_start_that_never_began_waiting_for_the_limit() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    let first = world.start(&mut lifecycle, request(1, "limited")).unwrap();
+    lifecycle.tick();
+    let second = world.start(&mut lifecycle, queued(2, "limited")).unwrap();
+    lifecycle.tick();
+    lifecycle.halt(&second).unwrap();
+    lifecycle.tick();
+
+    let mut fresh = world.lifecycle();
+    fresh.load_runs(&world.tree).unwrap();
+    fresh.resume(&first).unwrap();
+    fresh.tick();
+    fresh.resume(&second).unwrap();
+    fresh.tick();
+    assert_eq!(fresh.status(&second), Some(RunStatus::Queued));
+    assert_eq!(started_runs(&fresh), vec![first.clone()]);
+
+    fresh.runtime_mut().runner_mut().release(&first);
+    fresh.tick();
+    assert_eq!(started_runs(&fresh), vec![first, second.clone()]);
+}
+
+#[test]
 fn a_lane_start_racing_at_the_limit_is_refused() {
     let world = World::new();
     let mut lifecycle = world.lifecycle();

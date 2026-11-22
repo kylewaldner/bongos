@@ -1019,15 +1019,19 @@ impl<R: Runner> Lifecycle<R> {
     }
 
     /// Lets each held-back run start while its workflow runs fewer than its `instances` in its
-    /// project, oldest first. Whether any was let start.
+    /// project, oldest first (run ids are UUID v7, so time-ordered). A halted held-back run keeps
+    /// waiting until it is resumed. Whether any was let start.
     fn release_instances(&mut self) -> bool {
         let mut released = false;
-        let waiting: Vec<RunId> = self
+        let mut waiting: Vec<RunId> = self
             .runs
             .iter()
-            .filter(|entry| self.runtime.is_held_back(&entry.id))
+            .filter(|entry| {
+                self.runtime.is_held_back(&entry.id) && self.runtime.is_queued(&entry.id)
+            })
             .map(|entry| entry.id.clone())
             .collect();
+        waiting.sort();
         for id in waiting {
             let Ok(entry) = self.entry(&id) else {
                 continue;
@@ -1233,14 +1237,11 @@ impl<R: Runner> Lifecycle<R> {
             report.orphans.push((entry.id.clone(), orphans));
             self.runs.push(entry);
         }
-        // A run queued at its workflow's instance limit waits again: every loaded run that has
-        // not begun is held back, then let start while its workflow has room, oldest first.
+        // A run queued at its workflow's instance limit waits again: every active loaded run that
+        // has not begun (queued, or halted before it began) is held back, then the queued ones
+        // are let start while their workflow has room, oldest first.
         for id in &report.loaded {
-            let limited = self
-                .runtime
-                .definition(id)
-                .is_some_and(|definition| definition.instances.is_some());
-            if limited && !self.runtime.has_begun(id) && self.runtime.is_queued(id) {
+            if self.limited_before_begun(id) && self.status(id).is_some_and(RunStatus::is_active) {
                 self.runtime.hold_back(id);
             }
         }
@@ -1546,9 +1547,22 @@ impl<R: Runner> Lifecycle<R> {
         if !resumable || !status.is_active() {
             return Err(wrong_state(status, "resume"));
         }
+        // A run that has not begun waits for its workflow's instance limit like a new start.
+        if self.limited_before_begun(run) {
+            self.runtime.hold_back(run);
+        }
         self.runtime.resume(run).map_err(Refusal::runtime)?;
+        self.release_instances();
         self.note(run);
         Ok(())
+    }
+
+    /// Whether run `run` has not begun and its definition limits its `instances`.
+    fn limited_before_begun(&self, run: &str) -> bool {
+        self.runtime
+            .definition(run)
+            .is_some_and(|definition| definition.instances.is_some())
+            && !self.runtime.has_begun(run)
     }
 
     /// Cancels `run`: stops every process within 5 s and marks it Cancelled. On a Failed run it
