@@ -317,7 +317,10 @@ async fn typing_past_the_group_interval_starts_a_new_undo_step(cx: &mut TestAppC
     type_text(&editor, "y", cx);
     act(Undo, cx);
     let after_undo = text(&editor, cx);
-    assert_ne!(after_undo, THREE, "the first keystroke is its own undo step");
+    assert_ne!(
+        after_undo, THREE,
+        "the first keystroke is its own undo step"
+    );
     act(Undo, cx);
     assert_eq!(text(&editor, cx), THREE);
 }
