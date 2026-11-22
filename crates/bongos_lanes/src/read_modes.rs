@@ -135,13 +135,13 @@ fn picking(
 }
 
 /// What the picker reads besides the run state, at the commit the project shows.
-struct Loaded {
-    graph: bongos_lanes_model::PickGraph,
-    table: bongos_lanes_model::LaneTable,
-    options: PickOptions,
+pub(crate) struct Loaded {
+    pub(crate) graph: bongos_lanes_model::PickGraph,
+    pub(crate) table: bongos_lanes_model::LaneTable,
+    pub(crate) options: PickOptions,
 }
 
-async fn load(location: &Location, waiting_limit: usize) -> Result<Loaded> {
+pub(crate) async fn load(location: &Location, waiting_limit: usize) -> Result<Loaded> {
     let repo = read_only_repo(location)?;
     let commit = repo.shown_commit().await?.0;
     let tree = repo

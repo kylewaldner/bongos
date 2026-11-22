@@ -52,6 +52,38 @@ pub struct RepositoryRow {
     pub old_root: Vec<(String, String)>,
 }
 
+/// Decides a repository's worktree root layer above the user's settings: the project's lane
+/// table, the project profile, a lane's own location. Gives the layer for the repository named,
+/// or `None` when it does not decide that repository's root.
+pub type RootLayerSource = fn(&str, &gpui::App) -> Option<RootSource>;
+
+/// The registered [`RootLayerSource`]s, last registered first asked.
+#[derive(Clone, Default)]
+pub struct RootLayers(Vec<RootLayerSource>);
+
+impl gpui::Global for RootLayers {}
+
+impl RootLayers {
+    pub fn register(source: RootLayerSource, cx: &mut gpui::App) {
+        cx.default_global::<Self>().0.push(source);
+    }
+
+    /// The layer that won for `row`: the last registered source that answers, else the layer of
+    /// the user's settings the row was computed with. The Repositories screen labels the root
+    /// with it.
+    pub fn winning(row: &RepositoryRow, cx: &gpui::App) -> RootSource {
+        cx.try_global::<Self>()
+            .and_then(|layers| {
+                layers
+                    .0
+                    .iter()
+                    .rev()
+                    .find_map(|source| source(&row.name, cx))
+            })
+            .unwrap_or_else(|| row.root_source.clone())
+    }
+}
+
 /// What is wrong with a repository's worktree root.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RootProblem {

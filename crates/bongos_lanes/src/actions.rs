@@ -132,7 +132,7 @@ pub const OFF_MESSAGE: &str = "Lanes are off (lanes.enabled)";
 pub const ENGINE_HOST_MESSAGE: &str =
     "Lanes run in the engine host, which this window does not reach yet";
 
-fn show_toast(workspace: &mut Workspace, message: &str, cx: &mut Context<Workspace>) {
+pub(crate) fn show_toast(workspace: &mut Workspace, message: &str, cx: &mut Context<Workspace>) {
     #[cfg(test)]
     cx.set_global(LastToast(message.to_string()));
     workspace.show_toast(
@@ -462,7 +462,7 @@ pub fn adopted_message(result: &Result<Adopted>) -> String {
     }
 }
 
-fn pick(
+pub(crate) fn pick(
     workspace: &mut Workspace,
     placeholder: String,
     choices: Vec<String>,
@@ -750,6 +750,34 @@ fn start_action(
         show_toast(workspace, ENGINE_HOST_MESSAGE, cx);
         return;
     };
+    let window_mode = access.is_local() && !EngineHostProcess::is_running(cx);
+    let runs_in_progress = if window_mode {
+        EngineRuns
+            .live_runs(&repo, cx)
+            .map(|runs| EngineRuns.in_flight(&runs, cx))
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let handover = crate::summary::HandoverNote {
+        window_mode,
+        runs_in_progress,
+    };
+    crate::surfaces::summarize_then_start(
+        repo,
+        handover,
+        Box::new(move |workspace, window, cx| start_confirmed(workspace, window, cx)),
+        window,
+        cx,
+    );
+}
+
+/// What `lanes: start` does once the person confirmed the summary.
+fn start_confirmed(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let Some((repo, access)) = sole_project(cx) else {
+        show_toast(workspace, ENGINE_HOST_MESSAGE, cx);
+        return;
+    };
     let ctx = WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx));
     let person = ctx.author.name;
     if !access.is_local() || EngineHostProcess::is_running(cx) {
@@ -895,12 +923,12 @@ fn run_alias_action(
 
 /// Registers the handlers of the actions of lanes on `workspace`. None is bound to a key.
 pub fn register(workspace: &mut Workspace) {
-    register_host_command::<lanes::Show>(workspace, LanesVerb::Status);
+    workspace.register_action(crate::surfaces::show_action);
     workspace.register_action(start_action);
     register_host_command::<lanes::Stop>(workspace, LanesVerb::Stop);
     register_host_command::<lanes::Pause>(workspace, LanesVerb::Pause);
     register_host_command::<lanes::Resume>(workspace, LanesVerb::Resume);
-    register_host_command::<lanes::DryRun>(workspace, LanesVerb::DryRun);
+    workspace.register_action(crate::surfaces::dry_run_action);
     register_host_command::<lanes::Pick>(workspace, LanesVerb::Pick);
     workspace.register_action(run_alias_action);
     workspace.register_action(adopt_action);

@@ -14,7 +14,9 @@ use settings::{SettingsStore, WorkRepositoryContent};
 use tempfile::TempDir;
 
 use crate::command_tests::{harness, seed, wait_until};
-use crate::overview::{RepositoryRow, RootProblem, RootSource, dump_text, old_root_tasks, row};
+use crate::overview::{
+    RepositoryRow, RootLayers, RootProblem, RootSource, dump_text, old_root_tasks, row,
+};
 use crate::worktree_tests::{init_repository, leaf, test_repository};
 use crate::worktrees::Layout;
 use crate::{Repository, Stats};
@@ -437,4 +439,27 @@ async fn the_old_worktree_notice_stays_hidden_once_dismissed(cx: &mut TestAppCon
     })
     .await;
     assert!(!shows(&restarted, cx), "it stays hidden after a restart");
+}
+
+fn profile_layer(repository: &str, _cx: &gpui::App) -> Option<RootSource> {
+    (repository == "invoicing").then(|| RootSource::Profile {
+        name: "build-box".to_string(),
+    })
+}
+
+#[gpui::test]
+fn the_screen_labels_the_layer_that_won(cx: &mut TestAppContext) {
+    let (_temp, base) = base();
+    let layout = layout_in(&base, Some("~/trees/{repo}"));
+    let invoicing = row_of(&invoicing(&base, None), &layout);
+    let other = row_of(&test_repository("other", "/nowhere", None), &layout);
+    cx.update(|cx| {
+        // With nothing registered the settings layer shows.
+        assert_eq!(RootLayers::winning(&invoicing, cx), RootSource::Default);
+        RootLayers::register(profile_layer, cx);
+        let winner = RootLayers::winning(&invoicing, cx);
+        assert_eq!(winner.label(), "from project profile build-box");
+        // A repository no source decides keeps the settings layer.
+        assert_eq!(RootLayers::winning(&other, cx), RootSource::Default);
+    });
 }

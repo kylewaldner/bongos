@@ -25,6 +25,7 @@ mod done_owners;
 mod dry_run;
 mod env;
 mod exporter;
+mod gate_notify;
 mod hooks;
 mod host;
 mod job_trees;
@@ -32,6 +33,7 @@ mod lane_control;
 mod lane_tree;
 mod lane_waits;
 mod lanes_rows;
+mod lanes_view;
 mod locations;
 pub mod notify;
 mod pick_extension;
@@ -46,6 +48,7 @@ mod staleness;
 mod status_doc;
 mod store;
 mod summary;
+mod surfaces;
 mod task_trees;
 mod wait_text;
 
@@ -85,6 +88,7 @@ pub use dry_run::{
 };
 pub use env::{apply_env, second_tree_env, tip_env};
 pub use exporter::{EXPORT_NAMESPACE, LanesExporter, STATE_FILE};
+pub use gate_notify::{notify_open_gates, observe_gates};
 pub use hooks::{AFTER_TREE_CREATED, BEFORE_JOB, BeforeJob, JobEnd, JobHook, JobHookCx, JobHooks};
 pub use host::{
     HOST_PREFIX, HostDispatcher, LanesPayload, ProjectLanesHost, WINDOW_PREFIX, dispatcher_running,
@@ -108,6 +112,10 @@ pub use lane_waits::{
     read_asks, register_needs_you,
 };
 pub use lanes_rows::{LaneRow, LanesViewRows, NeedsYouRow, RowFacts, lanes_view_rows};
+pub use lanes_view::{
+    LanesSource, LanesView, LanesViewSection, LanesViewSections, PointRow, StoreLanes,
+    show_lanes_view,
+};
 pub use locations::{
     Fallback, LaneLocation, LaneLocations, Layer, LocationInputs, Place, RepositoryPlace,
     binding_of, check_lanes, check_overlap, resolve_lane, table_lane_ids, tree_name, tree_slug,
@@ -136,6 +144,10 @@ pub use store::{
 pub use summary::{
     HandoverNote, KindCount, SummaryInputs, SummarySection, SummarySections, UnattendedChoice,
     WorkflowSummary, summary_text,
+};
+pub use surfaces::{
+    DRY_RUN_TITLE, START_CHOICES, SUMMARY_TITLE, open_text_buffer, summarize_then_start,
+    summary_inputs,
 };
 pub use task_trees::{
     LaneLease, LaneTaskTrees, LaneTreeSetup, OwedTasks, ProcessEnv, SecondTreeLeases, TopLevelOf,
@@ -173,6 +185,7 @@ pub fn init(cx: &mut App) {
     register_needs_you(cx);
     register_host(cx);
     read_modes::register(cx);
+    observe_gates(notify::GateNotifier::system(), cx);
 }
 
 #[cfg(test)]
@@ -197,6 +210,8 @@ mod host_tests;
 mod job_trees_tests;
 #[cfg(test)]
 mod lane_tree_tests;
+#[cfg(test)]
+mod lanes_view_surface_tests;
 #[cfg(test)]
 mod lanes_view_tests;
 #[cfg(test)]

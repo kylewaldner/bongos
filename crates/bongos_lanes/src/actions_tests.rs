@@ -184,13 +184,13 @@ async fn lanes_dispatch_by_name_shows_the_off_toast_while_off(cx: &mut TestAppCo
     assert_eq!(OFF_MESSAGE, "Lanes are off (lanes.enabled)");
     assert_eq!(toasts(&workspace, cx), vec![OFF_MESSAGE; NAMES.len()]);
 
-    // While on, the commands of the engine host say this window does not reach it; accept graph
-    // runs here and needs the one project repository open in it.
+    // While on, the commands of the engine host say this window does not reach it; accept graph,
+    // show and dry run read the project here and need the one project repository open in it.
     cx.update(|_, cx| set_enabled(cx, true));
     let expected: Vec<&str> = NAMES
         .iter()
         .map(|name| match *name {
-            "lanes::AcceptGraph" => ONE_PROJECT_MESSAGE,
+            "lanes::AcceptGraph" | "lanes::Show" | "lanes::DryRun" => ONE_PROJECT_MESSAGE,
             _ => ENGINE_HOST_MESSAGE,
         })
         .collect();
