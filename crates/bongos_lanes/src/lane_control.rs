@@ -3,8 +3,9 @@
 //!
 //! A pause or a stop of a running lane is a request the lane applies at its job boundary. A lane
 //! with no job boundary (halted, paused) keeps its state, task and reason when a stop is asked
-//! for. The dispatcher's run ends when every lane is at rest (stopped, halted or paused): cancelled
-//! when `stop` with no lane asked for it, succeeded when the lanes stopped for a bound.
+//! for. The dispatcher's run ends when every lane is at rest (stopped, halted or paused) and every
+//! job that went through the job hooks got its `after_job`: cancelled when `stop` with no lane
+//! asked for it, succeeded when the lanes stopped for a bound.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -118,7 +119,17 @@ impl Lanes {
 
     /// Asks `target` to stop. See [`LaneTarget`] and the module documentation.
     pub fn stop(&self, target: LaneTarget, by: Author, cx: &mut App) -> Result<()> {
-        stop(&self.parts, &self.events, target, by, cx)
+        stop(&self.parts, target, by)?;
+        // The dispatcher this handle runs decides its own end, since it knows its hooked jobs.
+        match self.dispatcher() {
+            Some(dispatcher) => {
+                dispatcher.end_if_at_rest(cx);
+            }
+            None => {
+                end_if_at_rest(&self.parts, &self.events, cx)?;
+            }
+        }
+        Ok(())
     }
 
     /// Pauses `lane`: at once when idle, at its job boundary when running.
@@ -142,7 +153,9 @@ impl Dispatcher {
     }
 
     pub fn stop(&self, target: LaneTarget, by: Author, cx: &mut App) -> Result<()> {
-        stop(self.parts(), &self.0.config.events, target, by, cx)
+        stop(self.parts(), target, by)?;
+        self.end_if_at_rest(cx);
+        Ok(())
     }
 
     pub fn pause(&self, lane: &LaneId, by: &Author) -> Result<String> {
@@ -157,8 +170,12 @@ impl Dispatcher {
         status(self.parts())
     }
 
-    /// Ends the dispatcher's run when every lane is at rest. Returns whether it ended.
+    /// Ends the dispatcher's run when every lane is at rest and no job is in the job hooks (one
+    /// still owed its `after_job`, or still in `before_job`). Returns whether it ended.
     pub(crate) fn end_if_at_rest(&self, cx: &mut App) -> bool {
+        if !self.0.hooked.borrow().is_empty() {
+            return false;
+        }
         match end_if_at_rest(self.parts(), &self.0.config.events, cx) {
             Ok(ended) => ended,
             Err(error) => {
@@ -169,13 +186,8 @@ impl Dispatcher {
     }
 }
 
-fn stop(
-    parts: &LanesParts,
-    events: &LaneEvents,
-    target: LaneTarget,
-    by: Author,
-    cx: &mut App,
-) -> Result<()> {
+/// Records the stop of `target`; the caller then ends the dispatcher's run when it is at rest.
+fn stop(parts: &LanesParts, target: LaneTarget, by: Author) -> Result<()> {
     let now = parts.host.now();
     parts.writer.transact(|tx| {
         let state = read_state_in(tx)?;
@@ -191,14 +203,13 @@ fn stop(
             put_dispatcher(tx, &record)?;
         }
         Ok(())
-    })?;
-    end_if_at_rest(parts, events, cx)?;
-    Ok(())
+    })
 }
 
 /// A stop of one lane. A running lane, and a waiting lane that holds a reserved job, finish the
-/// job first; an idle lane or a waiting lane with no job stops at once; a halted or paused lane
-/// records the request and stays as it is.
+/// job first (a job still in its hooks' `before_job` is dropped by the next pass instead); an
+/// idle lane or a waiting lane with no job stops at once; a halted or paused lane records the
+/// request and stays as it is.
 fn stop_one(tx: &mut StateTx, state: &LanesState, lane: &LaneRecord, now: &str) -> Result<()> {
     let mut updated = lane.clone();
     match lane.state {

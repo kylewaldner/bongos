@@ -43,6 +43,7 @@ use gpui::{App, Task};
 use serde::{Deserialize, Serialize};
 
 use crate::adopt::LeftWork;
+use crate::dispatch_job::HookedJob;
 use crate::job_trees::JobTrees;
 use crate::lane_control::{BOUND_REASON, LaneEvents, RunEnd, paused_reason};
 use crate::locations::table_lane_ids;
@@ -383,6 +384,8 @@ pub struct LanesStarted {
 pub struct Lanes {
     pub parts: LanesParts,
     pub(crate) events: LaneEvents,
+    /// The dispatcher this handle last started, while it lives.
+    pub(crate) started: Rc<RefCell<Weak<Inner>>>,
 }
 
 impl Lanes {
@@ -390,13 +393,20 @@ impl Lanes {
         Self {
             parts,
             events: LaneEvents::default(),
+            started: Rc::default(),
         }
+    }
+
+    /// The live dispatcher this handle started, if any.
+    pub(crate) fn dispatcher(&self) -> Option<Dispatcher> {
+        self.started.borrow().upgrade().map(Dispatcher)
     }
 
     /// Starts the lanes, or attaches to the dispatcher a live host runs.
     pub fn start(&self, request: StartLanes, cx: &mut App) -> Task<Result<LanesStarted>> {
         let parts = self.parts.clone();
         let events = self.events.clone();
+        let started = self.started.clone();
         let host = parts.host.clone();
         if !host.is_repository_project() {
             return Task::ready(Err(StartRefusal::NotRepositoryProject.into()));
@@ -410,8 +420,15 @@ impl Lanes {
             if let Some(verify) = verify {
                 verify.await.map_err(StartRefusal::Profile)?;
             }
-            cx.update(|cx| start_verified(parts, events, project, request, cx))
-                .map_err(Into::into)
+            let result = cx.update(|cx| start_verified(parts, events, project, request, cx));
+            if let Ok(LanesStarted {
+                dispatcher: Some(dispatcher),
+                ..
+            }) = &result
+            {
+                *started.borrow_mut() = dispatcher.downgrade();
+            }
+            result.map_err(Into::into)
         })
     }
 }
@@ -632,6 +649,13 @@ pub(crate) struct Inner {
     baseline: RefCell<BTreeMap<LaneId, u32>>,
     triggers: RefCell<Vec<Task<()>>>,
     subscriptions: RefCell<Vec<gpui::Subscription>>,
+    /// The jobs that passed the job hooks, by lane, until their `after_job` resolved. A lane
+    /// listed here is not evaluated, and the dispatcher's run does not end while any is listed.
+    ///
+    /// Dropping the dispatcher drops these as they are: a pending `before_job` future is dropped
+    /// and no hook gets its `after_job`. Whoever holds the dispatcher keeps it until its run
+    /// ended, which is after every job here was settled.
+    pub(crate) hooked: RefCell<BTreeMap<LaneId, HookedJob>>,
 }
 
 /// What one lane's transaction decided.
@@ -668,6 +692,7 @@ impl Dispatcher {
             baseline: RefCell::new(BTreeMap::new()),
             triggers: RefCell::new(Vec::new()),
             subscriptions: RefCell::new(Vec::new()),
+            hooked: RefCell::new(BTreeMap::new()),
         }))
     }
 
@@ -891,7 +916,10 @@ impl Dispatcher {
             log::error!("lanes: removing the stopped lanes above their count: {error:#}");
         }
         let lanes = match self.begin_pass(cx) {
-            Ok(state) => state.lanes.into_keys().collect::<Vec<_>>(),
+            Ok(state) => {
+                self.sweep_hooked(&state, cx);
+                state.lanes.into_keys().collect::<Vec<_>>()
+            }
             Err(error) => {
                 log::error!("lanes: reading the lanes state: {error:#}");
                 return;
@@ -905,6 +933,10 @@ impl Dispatcher {
     }
 
     fn evaluate_lane(&self, lane: &LaneId, full: bool, cx: &mut App) -> Result<()> {
+        // A job in the job hooks keeps its lane until the hooks' `after_job` resolved.
+        if self.0.hooked.borrow().contains_key(lane) {
+            return Ok(());
+        }
         let parts = self.parts().clone();
         for _ in 0..MAX_RESTARTS {
             let master = self.0.verified.borrow().clone();

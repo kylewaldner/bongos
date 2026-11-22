@@ -1857,6 +1857,7 @@ fn reason_kind(reason: &WaitReason) -> &'static str {
         WaitReason::Finished => "finished",
         WaitReason::Environment(_) => "environment",
         WaitReason::Hook { .. } => "hook",
+        WaitReason::Pool { .. } => "pool",
         WaitReason::Failed(_) => "failed",
         WaitReason::Other(_) => "other",
     }

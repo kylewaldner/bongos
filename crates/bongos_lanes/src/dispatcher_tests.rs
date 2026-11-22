@@ -1265,3 +1265,5 @@ pub(crate) mod adopt_tests;
 
 #[path = "counts_tests.rs"]
 mod counts_tests;
+#[path = "job_hooks_tests.rs"]
+mod job_hooks_tests;
