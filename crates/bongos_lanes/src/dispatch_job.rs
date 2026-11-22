@@ -5,9 +5,9 @@
 
 use anyhow::Result;
 use bongos_lanes_model::{
-    AssignedWork, Author, JobEnd, JobEndInput, LaneId, LaneState, LaneTable, OwnerRecord,
-    OwnerState, PickGraph, TaskId, WaitReason, lane_after_retry, owner_after_job_end, short_run,
-    stop_at_job_boundary,
+    AssignedWork, Author, JobEnd, JobEndInput, LaneId, LaneRecord, LaneState, LaneTable,
+    LanesState, OwnerRecord, OwnerState, PickGraph, RunSubject, TaskId, WaitReason,
+    lane_after_retry, owner_after_job_end, short_run, stop_at_job_boundary,
 };
 use bongos_project_repo::{CommitId, StateTx};
 use bongos_work_model::HistoryEntry;
@@ -16,9 +16,9 @@ use bongos_workflow_model::InputValue;
 use bongos_workflow_model::record::{LaneRef, StartedBy};
 use gpui::App;
 
-use crate::dispatcher::{Dispatcher, JobSetup, PendingJob, environment_refusal, held_task};
+use crate::dispatcher::{Dispatcher, JobSetup, PendingJob, environment_refusal};
 use crate::job_trees::CurrentJobTrees;
-use crate::store::{put_lane, put_owner, read_state_in};
+use crate::store::{put_lane, put_owner, read_state, read_state_in};
 
 /// Who the history entries of lanes are written by.
 pub const HISTORY_BY: &str = "lanes";
@@ -50,6 +50,26 @@ impl Dispatcher {
         let cleared = match setup {
             Err(reason) => Some(Cleared::Wait(reason)),
             Ok(setup) => {
+                let holds = self
+                    .parts()
+                    .writer
+                    .read(read_state)
+                    .map(|state| lane_holds(&state, &pending.lane, &pending.job.run_id));
+                match holds {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        log::info!(
+                            "lanes: {} no longer holds run {}, not starting it",
+                            pending.lane,
+                            pending.job.run_id
+                        );
+                        return;
+                    }
+                    Err(error) => {
+                        log::error!("lanes: reading the state before a start: {error:#}");
+                        return;
+                    }
+                }
                 let trees = setup.trees.clone();
                 let request = self.start_request(&pending, setup);
                 match self.parts().engine.start(request, cx) {
@@ -160,6 +180,7 @@ fn clear_job(tx: &mut StateTx, pending: &PendingJob, cleared: &Cleared, now: &st
     if !holds {
         return Ok(());
     }
+    let owner = job_owner(&state, lane);
     let mut lane = lane.clone();
     lane.job = None;
     match cleared {
@@ -170,7 +191,7 @@ fn clear_job(tx: &mut StateTx, pending: &PendingJob, cleared: &Cleared, now: &st
         Cleared::Halt(text) => {
             lane.state = LaneState::Halted;
             lane.reason = Some(WaitReason::Failed(text.clone()));
-            if let Some((task, owner)) = held_task(&state, &pending.lane) {
+            if let Some((task, owner)) = &owner {
                 let mut owner = owner.clone();
                 owner.state = OwnerState::Halted;
                 owner.reason = Some(text.clone());
@@ -203,7 +224,7 @@ fn job_changed(
         return Ok(None);
     };
     let id = lane.id();
-    let held = held_task(&state, &id).map(|(task, owner)| (task.clone(), owner.clone()));
+    let held = job_owner(&state, &lane);
     let short = short_run(run);
     let outcome = match status {
         RunStatus::Succeeded => JobEnd::Succeeded,
@@ -230,6 +251,10 @@ fn job_changed(
             return Ok(Some(id));
         }
     };
+    // An end applies once, to a running lane: a repeated or out-of-order end changes nothing.
+    if lane.state != LaneState::Running {
+        return Ok(None);
+    }
     let lane_kind_is_ahead = table
         .kinds
         .iter()
@@ -266,6 +291,24 @@ fn job_changed(
         }
     }
     Ok(Some(id))
+}
+
+/// Whether `lane` still holds the job with `run_id`.
+fn lane_holds(state: &LanesState, lane: &LaneId, run_id: &str) -> bool {
+    state
+        .lanes
+        .get(lane)
+        .and_then(|lane| lane.job.as_ref())
+        .is_some_and(|job| job.run_id == run_id)
+}
+
+/// The task of a lane's job and its owner record; none for a job with no task.
+fn job_owner(state: &LanesState, lane: &LaneRecord) -> Option<(TaskId, OwnerRecord)> {
+    let RunSubject::Task(task) = &lane.job.as_ref()?.subject else {
+        return None;
+    };
+    let owner = state.owners.get(task)?;
+    Some((task.clone(), owner.clone()))
 }
 
 /// Whether every leaf under `task` is finished; `false` when the graph does not have it.

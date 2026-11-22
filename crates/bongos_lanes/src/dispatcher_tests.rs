@@ -5,8 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bongos_lanes_model::{
-    Author, EdgeKind, JobRecord, LaneId, LaneState, LaneTable, LanesState, OpenTodo, OwnerState,
-    PickEdge, PickGraph, PickTask, Problem, TaskId, TaskState, WaitReason, parse,
+    Author, EdgeKind, JobRecord, LaneId, LaneState, LaneTable, LanesState, OpenTodo, OwnerRecord,
+    OwnerState, PickEdge, PickGraph, PickTask, Problem, RunSubject, TaskId, TaskState, WaitReason,
+    parse,
 };
 use bongos_project_repo::StateWriter;
 use bongos_workflow::lifecycle::RefusalKind;
@@ -18,10 +19,10 @@ use gpui::{App, TestAppContext};
 use tempfile::TempDir;
 
 use crate::dispatcher::{
-    DispatcherRecord, JobEngine, JobSetup, Lanes, LanesHost, LanesParts, LanesStarted, StartLanes,
-    VerifiedCommitPolicy, put_dispatcher,
+    DispatcherRecord, JobCommit, JobDefinitionPolicy, JobEngine, JobSetup, Lanes, LanesHost,
+    LanesParts, LanesStarted, NOTHING_READY, StartLanes, VerifiedCommitPolicy, put_dispatcher,
 };
-use crate::store::read_state;
+use crate::store::{put_lane, put_owner, read_state};
 use crate::test_support::{SINCE, tree, writer};
 
 const DISPATCHER_RUN: &str = "0190dispatcher";
@@ -36,6 +37,17 @@ struct TestHost {
     /// Job preparations wait until released.
     gated: Cell<bool>,
     gates: RefCell<Vec<oneshot::Sender<Result<JobSetup, WaitReason>>>>,
+    /// Job preparations fail with this.
+    setup_error: RefCell<Option<WaitReason>>,
+}
+
+/// A policy that answers every job with one commit decision.
+struct FixedPolicy(JobCommit);
+
+impl JobDefinitionPolicy for FixedPolicy {
+    fn commit_for_job(&self, _lane: &LaneId, _master: &str) -> JobCommit {
+        self.0.clone()
+    }
 }
 
 impl LanesHost for TestHost {
@@ -96,6 +108,9 @@ impl LanesHost for TestHost {
         _job: &JobRecord,
         cx: &mut App,
     ) -> gpui::Task<Result<JobSetup, WaitReason>> {
+        if let Some(reason) = self.setup_error.borrow().clone() {
+            return gpui::Task::ready(Err(reason));
+        }
         if !self.gated.get() {
             return gpui::Task::ready(Ok(JobSetup::default()));
         }
@@ -209,6 +224,15 @@ struct Harness {
 }
 
 fn harness(table: &str, graph: PickGraph, limits: &[(&str, u32)]) -> Harness {
+    harness_with(table, graph, limits, Rc::new(VerifiedCommitPolicy))
+}
+
+fn harness_with(
+    table: &str,
+    graph: PickGraph,
+    limits: &[(&str, u32)],
+    policy: Rc<dyn JobDefinitionPolicy>,
+) -> Harness {
     let root = TempDir::new().unwrap();
     let writer = writer(&root);
     writer
@@ -222,6 +246,7 @@ fn harness(table: &str, graph: PickGraph, limits: &[(&str, u32)]) -> Harness {
         live_hosts: RefCell::new(BTreeSet::new()),
         gated: Cell::new(false),
         gates: RefCell::new(Vec::new()),
+        setup_error: RefCell::new(None),
     });
     let engine = Rc::new(FakeEngine {
         writer: writer.clone(),
@@ -238,7 +263,7 @@ fn harness(table: &str, graph: PickGraph, limits: &[(&str, u32)]) -> Harness {
     let lanes = Lanes::new(LanesParts {
         host: host.clone(),
         engine: engine.clone(),
-        policy: Rc::new(VerifiedCommitPolicy),
+        policy,
         writer: writer.clone(),
     });
     Harness {
@@ -865,4 +890,210 @@ async fn waiting_on_you_keeps_the_lane_and_a_cancel_pauses_it(cx: &mut TestAppCo
     assert_eq!(owner.state, OwnerState::Active);
     assert_eq!(owner.lane, Some(LaneId::new("build", 1)));
     assert_eq!(harness.engine.job_tasks(), ["a"]);
+}
+
+fn history_of(harness: &Harness, task: &str) -> Vec<String> {
+    harness
+        .writer
+        .read(|read| read.task(task))
+        .unwrap()
+        .unwrap()
+        .history
+        .into_iter()
+        .map(|entry| entry.event)
+        .collect()
+}
+
+// A rollout that says wait leaves the lane idle with its reason and picks nothing.
+#[gpui::test]
+async fn a_policy_that_waits_leaves_the_lane_idle_with_its_reason(cx: &mut TestAppContext) {
+    let harness = harness_with(
+        &builds(1),
+        graph(vec![leaf("a")]),
+        &[],
+        Rc::new(FixedPolicy(JobCommit::Wait("rolling out".to_string()))),
+    );
+    let _started = start(&harness, start_request(), cx).await;
+
+    let lane = harness.lane("build", 1);
+    assert_eq!(lane.state, LaneState::Idle);
+    assert_eq!(lane.job, None);
+    assert_eq!(
+        lane.reason,
+        Some(WaitReason::Other("rolling out".to_string()))
+    );
+    assert!(harness.engine.job_tasks().is_empty());
+    assert!(!harness.state().owners.contains_key(&TaskId::new("a")));
+}
+
+// A rollout that says stop first stops the lane at once, since it holds no job.
+#[gpui::test]
+async fn a_policy_that_stops_first_stops_the_idle_lane(cx: &mut TestAppContext) {
+    let harness = harness_with(
+        &builds(1),
+        graph(vec![leaf("a")]),
+        &[],
+        Rc::new(FixedPolicy(JobCommit::StopFirst("rollout".to_string()))),
+    );
+    let _started = start(&harness, start_request(), cx).await;
+
+    let lane = harness.lane("build", 1);
+    assert_eq!(lane.state, LaneState::Stopped);
+    assert_eq!(lane.job, None);
+    assert_eq!(lane.stop_requested, None);
+    assert!(harness.engine.job_tasks().is_empty());
+}
+
+// A job whose preparation fails leaves the lane waiting with that reason and starts no run.
+#[gpui::test]
+async fn a_failed_preparation_leaves_the_lane_waiting(cx: &mut TestAppContext) {
+    let harness = harness(&builds(1), graph(vec![leaf("a")]), &[]);
+    *harness.host.setup_error.borrow_mut() = Some(WaitReason::Other("no tree".to_string()));
+
+    let _started = start(&harness, start_request(), cx).await;
+
+    let lane = harness.lane("build", 1);
+    assert_eq!(lane.state, LaneState::Waiting);
+    assert_eq!(lane.job, None);
+    assert_eq!(lane.reason, Some(WaitReason::Other("no tree".to_string())));
+    assert!(harness.engine.job_tasks().is_empty());
+    assert_eq!(
+        harness.state().owners[&TaskId::new("a")].state,
+        OwnerState::Active
+    );
+}
+
+// With nothing in the graph an idle lane says nothing is ready.
+#[gpui::test]
+async fn an_empty_graph_leaves_the_lane_idle_with_nothing_ready(cx: &mut TestAppContext) {
+    let harness = harness(&builds(1), graph(vec![]), &[]);
+    let _started = start(&harness, start_request(), cx).await;
+
+    let lane = harness.lane("build", 1);
+    assert_eq!(lane.state, LaneState::Idle);
+    assert_eq!(
+        lane.reason,
+        Some(WaitReason::Other(NOTHING_READY.to_string()))
+    );
+}
+
+// A workflow that halts halts its lane and its task.
+#[gpui::test]
+async fn a_halted_run_halts_its_lane_and_task(cx: &mut TestAppContext) {
+    let harness = harness(&builds(1), graph(vec![leaf("a")]), &[]);
+    let _started = start(&harness, start_request(), cx).await;
+    let run = harness.run_of("a");
+
+    harness.set_run("a", RunStatus::Halted, cx);
+
+    let lane = harness.lane("build", 1);
+    assert_eq!(lane.state, LaneState::Halted);
+    assert_eq!(
+        lane.reason,
+        Some(WaitReason::Failed(format!(
+            "run {} halted",
+            bongos_lanes_model::short_run(&run)
+        )))
+    );
+    assert_eq!(
+        harness.state().owners[&TaskId::new("a")].state,
+        OwnerState::Halted
+    );
+}
+
+// A second end for a run whose end was applied changes nothing, and a success counts once.
+#[gpui::test]
+async fn a_repeated_end_changes_nothing(cx: &mut TestAppContext) {
+    let harness = harness(&builds(2), graph(vec![leaf("a"), leaf("c")]), &[]);
+    let _started = start(&harness, start_request(), cx).await;
+    let run_a = harness.run_of("a");
+    let run_c = harness.run_of("c");
+
+    cx.update(|cx| harness.engine.set(&run_a, RunStatus::Failed, cx));
+    cx.run_until_parked();
+    let halted = harness.state();
+    let events = history_of(&harness, "a");
+    assert_eq!(events.len(), 1);
+
+    cx.update(|cx| harness.engine.set(&run_a, RunStatus::Halted, cx));
+    cx.run_until_parked();
+    cx.update(|cx| harness.engine.set(&run_a, RunStatus::Succeeded, cx));
+    cx.run_until_parked();
+    assert_eq!(harness.state(), halted);
+    assert_eq!(history_of(&harness, "a"), events);
+
+    harness.update_graph(|tasks| finish(tasks, "c"));
+    cx.update(|cx| harness.engine.set(&run_c, RunStatus::Succeeded, cx));
+    cx.run_until_parked();
+    assert_eq!(harness.lane("build", 2).jobs_done, 1);
+    let ended = harness.state();
+
+    cx.update(|cx| harness.engine.set(&run_c, RunStatus::Succeeded, cx));
+    cx.run_until_parked();
+    cx.update(|cx| harness.engine.set(&run_c, RunStatus::Failed, cx));
+    cx.run_until_parked();
+    assert_eq!(harness.state(), ended);
+    assert_eq!(harness.lane("build", 2).jobs_done, 1);
+}
+
+// A task-less job failing halts its lane and leaves an unrelated owner on that lane alone.
+#[gpui::test]
+async fn a_failed_job_with_no_task_leaves_an_unrelated_owner_alone(cx: &mut TestAppContext) {
+    let harness = harness(&builds(1), graph(vec![]), &[]);
+    let _started = start(&harness, start_request(), cx).await;
+    let lane_id = LaneId::new("build", 1);
+    let owner = OwnerRecord {
+        lane: Some(lane_id),
+        state: OwnerState::Ahead,
+        since: SINCE.to_string(),
+        by: Author::System,
+        reason: None,
+        prepared_commit: None,
+        refreshed: false,
+    };
+    let mut lane = harness.lane("build", 1);
+    harness
+        .writer
+        .transact(|tx| {
+            lane.state = LaneState::Running;
+            lane.job = Some(JobRecord {
+                run_id: "0190extension".to_string(),
+                subject: RunSubject::Other("project-1".to_string()),
+                workflow: "w".to_string(),
+                started: SINCE.to_string(),
+                definition_commit: None,
+            });
+            put_lane(tx, &lane)?;
+            put_owner(tx, &TaskId::new("z"), &owner)
+        })
+        .unwrap();
+
+    cx.update(|cx| harness.engine.set("0190extension", RunStatus::Failed, cx));
+    cx.run_until_parked();
+
+    assert_eq!(harness.lane("build", 1).state, LaneState::Halted);
+    assert_eq!(harness.state().owners[&TaskId::new("z")], owner);
+}
+
+// A start whose lane lost its job while the job was prepared starts no run.
+#[gpui::test]
+async fn a_start_is_skipped_when_the_lane_no_longer_holds_the_run(cx: &mut TestAppContext) {
+    let harness = harness(&builds(1), graph(vec![leaf("a")]), &[]);
+    harness.host.gated.set(true);
+    let _started = start(&harness, start_request(), cx).await;
+    assert_eq!(harness.lane("build", 1).state, LaneState::Running);
+
+    let mut lane = harness.lane("build", 1);
+    harness
+        .writer
+        .transact(|tx| {
+            lane.state = LaneState::Idle;
+            lane.job = None;
+            put_lane(tx, &lane)
+        })
+        .unwrap();
+    harness.host.release();
+    cx.run_until_parked();
+
+    assert!(harness.engine.job_tasks().is_empty());
 }
