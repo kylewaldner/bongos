@@ -67,8 +67,7 @@ sleep 1
 act keys alt+semicolon
 # No pause before Return: the 500 ms char timer would show the labels first, and Return would
 # then cancel the labelled jump.
-type_text "$WORD"
-act keys Return
+act keys z e b r a q u u x Return
 act keys a
 type_text MARK
 save_and_expect "fun MARK${WORD}() {}"
