@@ -417,9 +417,9 @@ impl JobEngine for WorkflowEngine {
     }
 
     fn interrupted(&self, run: &str) -> bool {
-        self.lifecycle().state(run).is_some_and(|state| {
-            !state.interrupted.is_empty() && RunStatus::of(&state).is_active()
-        })
+        self.lifecycle()
+            .state(run)
+            .is_some_and(|state| !state.interrupted.is_empty() && RunStatus::of(&state).is_active())
     }
 
     fn resume_run(&self, run: &str, cx: &mut App) -> Result<(), String> {
