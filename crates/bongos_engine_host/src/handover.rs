@@ -1004,7 +1004,7 @@ pub fn start_handover(
         // The timeout first: a host that asked by then is found below all the same.
         let heard = futures::select_biased! {
             _ = timeout => None,
-            heard = (&mut began) => Some(heard.is_ok()),
+            heard = &mut began => Some(heard.is_ok()),
         };
         let exited = child.try_exit();
         let pid = child.pid();
