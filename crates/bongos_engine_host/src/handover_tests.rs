@@ -1072,7 +1072,7 @@ async fn after_both_die_mid_handover_one_opener_clears_the_move_and_recovers(
     assert_eq!(read_host_file(&location).unwrap().moving, None);
     assert_eq!(*recovered.borrow(), [format!("recovery started {id}")]);
 
-    let second_location = location.clone();
+    let second_location = location;
     let options = options_as(&fixture, 2);
     let executor = cx.executor();
     let (sender, opened) = mpsc::channel();
