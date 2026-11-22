@@ -545,6 +545,29 @@ fn an_own_task_missing_from_the_graph_is_not_released() {
     }
 }
 
+#[test]
+fn an_own_group_without_leaves_is_not_released() {
+    let table = builds(1);
+    let state = owners(&[("g", OwnerState::Active, Some(lane("build", 1)))]);
+    // Both copies of the duplicated id are dropped, leaving the group without a leaf.
+    let graph = graph(&["g"], vec![PickTask::group("g", &["d"]), w("d"), w("d")]);
+    match pick_on(&graph, &state, &table, &lane("build", 1)) {
+        PickOutcome::Nothing {
+            reasons,
+            owner_change,
+        } => {
+            assert!(owner_change.is_empty());
+            assert_eq!(reasons.len(), 1);
+            assert_eq!(reasons[0].task, id("g"));
+            assert_eq!(
+                reasons[0].reason.to_string(),
+                "task has no leaves in the graph"
+            );
+        }
+        other => panic!("expected nothing, got {other:?}"),
+    }
+}
+
 // A stopped task only for its lane, or once that lane no longer exists; halted never.
 #[test]
 fn a_stopped_task_is_resumed_only_by_its_lane() {

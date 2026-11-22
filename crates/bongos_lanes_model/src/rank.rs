@@ -20,7 +20,8 @@ pub struct Chains {
 impl Chains {
     /// `remaining(leaf) = size` (default 1) unless finished; `remaining(group)` is the sum over
     /// its children. `chain(t) = remaining(t) + max(chain(d))` over the not finished dependents
-    /// `d` of `t` (siblings with an edge to `t`). A cycle of edges is cut at its back edge, which counts 0.
+    /// `d` of `t` (siblings with an edge to `t`). A cycle of edges is cut at its back edge, which
+    /// counts 0.
     pub fn compute(graph: &PickGraph) -> Self {
         let mut chains = Self::default();
         for task in graph.walk() {

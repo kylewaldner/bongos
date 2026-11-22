@@ -511,6 +511,18 @@ impl<'a> Picker<'a> {
                 });
             }
             let leaves = self.graph.leaves_under(task);
+            // No leaves at all would be vacuously finished: wait instead of freeing the lane.
+            if leaves.is_empty() {
+                return Ok(Evaluation {
+                    eligible: Vec::new(),
+                    waiting: vec![Ranked {
+                        rank: RankKey { levels: Vec::new() },
+                        task: task.clone(),
+                        value: WaitReason::Other("task has no leaves in the graph".to_string()),
+                    }],
+                    released: Vec::new(),
+                });
+            }
             if leaves.iter().all(|leaf| leaf.is_finished()) {
                 let change = OwnerChange {
                     task: task.clone(),
