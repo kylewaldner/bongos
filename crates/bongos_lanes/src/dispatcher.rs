@@ -343,6 +343,14 @@ pub trait JobEngine {
     fn end_dispatcher(&self, run: &str, end: RunEnd, note: &str, cx: &mut App);
     /// Cancels the run of a lane's job (`lanes: adopt` closes out a halted job's failed run).
     fn cancel_run(&self, run: &str, cx: &mut App) -> Result<(), String>;
+    /// Whether the run waits on a person because an interruption stopped it (a crash, a quit,
+    /// "Interrupt them now"), and a resume would continue it.
+    fn interrupted(&self, run: &str) -> bool;
+    /// Resumes a run an interruption stopped.
+    fn resume_run(&self, run: &str, cx: &mut App) -> Result<(), String>;
+    /// Stops the processes of the run and records the nodes in flight interrupted (recovery
+    /// closes a dead host's dispatcher run with this before it cancels it).
+    fn interrupt_run(&self, run: &str, cx: &mut App);
 }
 
 impl JobEngine for WorkflowEngine {
@@ -394,6 +402,8 @@ impl JobEngine for WorkflowEngine {
     fn end_dispatcher(&self, run: &str, end: RunEnd, note: &str, cx: &mut App) {
         match end {
             RunEnd::Cancelled => {
+                // `WorkflowEngine::cancel` takes no note, so `note` (such as "host stopped") is
+                // only logged here; the run's log does not carry it.
                 log::info!("lanes: cancelling the dispatcher run {run}: {note}");
                 if let Err(refusal) = self.cancel(&run.to_string(), cx) {
                     log::error!("lanes: cancelling the dispatcher run {run}: {refusal}");
@@ -406,6 +416,20 @@ impl JobEngine for WorkflowEngine {
 
     fn cancel_run(&self, run: &str, cx: &mut App) -> Result<(), String> {
         WorkflowEngine::cancel(self, &run.to_string(), cx).map_err(|refusal| refusal.to_string())
+    }
+
+    fn interrupted(&self, run: &str) -> bool {
+        self.lifecycle()
+            .state(run)
+            .is_some_and(|state| !state.interrupted.is_empty() && RunStatus::of(&state).is_active())
+    }
+
+    fn resume_run(&self, run: &str, cx: &mut App) -> Result<(), String> {
+        WorkflowEngine::resume(self, &run.to_string(), cx).map_err(|refusal| refusal.to_string())
+    }
+
+    fn interrupt_run(&self, run: &str, cx: &mut App) {
+        self.interrupt_runs(&[run.to_string()], cx);
     }
 }
 
@@ -582,6 +606,9 @@ fn start_verified(
             dispatcher: None,
         });
     }
+    // Recovery (the run engine loaded the runs before): a dead host's dispatcher run is closed
+    // before the new one starts.
+    crate::recovery::close_dead_dispatcher(&parts, cx).map_err(store_error)?;
 
     let unattended = request.unattended.map(|value| UnattendedChoice {
         value,
@@ -631,6 +658,12 @@ fn start_verified(
         })
     })
     .map_err(store_error)?;
+    let policy = crate::recovery::interruption_policy(Some(&table), crate::recovery::setting(cx));
+    // The dispatcher's run is recorded already: a failure here leaves the runs waiting on a
+    // person, which the next start tries again.
+    if let Err(error) = crate::recovery::apply_interruption_policy(&parts, policy, cx) {
+        log::error!("lanes: the interruption policy at start: {error:#}");
+    }
 
     let dispatcher = Dispatcher::new(DispatcherConfig {
         parts,
@@ -732,14 +765,15 @@ pub const NOT_STARTED_BEFORE_A_CRASH: &str = "not started before a crash";
 /// A job is unstarted only when its run has no record on disk ([`JobEngine::has_record`]), never
 /// merely because the engine did not load the run: a started run the engine skipped (a damaged
 /// log) keeps its job, so an extension never hands out the same work twice.
-fn clear_unstarted(
+pub(crate) fn clear_unstarted(
     tx: &mut StateTx,
     engine: &dyn JobEngine,
     extensions: &[Arc<dyn PickExtension>],
     now: &str,
     cx: &App,
-) -> Result<()> {
+) -> Result<Vec<LaneId>> {
     let state = read_state_in(tx)?;
+    let mut cleared = Vec::new();
     for (id, lane) in &state.lanes {
         let Some(job) = &lane.job else {
             continue;
@@ -748,6 +782,7 @@ fn clear_unstarted(
             continue;
         }
         log::info!("lanes: {id} reserved run {} that never started", job.run_id);
+        cleared.push(id.clone());
         let change = JobChange::NotStarted {
             reason: NOT_STARTED_BEFORE_A_CRASH.to_string(),
         };
@@ -761,7 +796,7 @@ fn clear_unstarted(
         updated.reason = None;
         put_lane(tx, &updated)?;
     }
-    Ok(())
+    Ok(cleared)
 }
 
 /// Creates the lane records up to `counts`, removes the free lanes above them and asks the

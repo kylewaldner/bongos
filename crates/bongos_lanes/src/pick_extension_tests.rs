@@ -524,6 +524,44 @@ async fn a_job_left_unstarted_by_a_crash_is_cleared_at_the_next_start(cx: &mut T
     assert!(harness.engine.jobs.borrow().is_empty());
 }
 
+// The same crash found by recovery when a process becomes the writer, before any `lanes: start`:
+// the extension hears `NotStarted` in the transaction that clears the lane, once, even when
+// recovery runs again.
+#[gpui::test]
+async fn a_job_left_unstarted_by_a_crash_is_cleared_by_recovery_at_writer_start(
+    cx: &mut TestAppContext,
+) {
+    let harness = harness(&builds(1), graph(vec![]), &[]);
+    let mut lane = LaneRecord::new(&build(1), LaneState::Running);
+    lane.job = Some(extension_job("0190crashed"));
+    harness.writer.transact(|tx| put_lane(tx, &lane)).unwrap();
+    let extension = Arc::new(FakeExtension::default());
+    register(cx, &extension);
+
+    for _ in 0..2 {
+        cx.update(|cx| {
+            crate::recovery::recover(
+                &harness.lanes.parts,
+                crate::settings::LanesOnInterruption::Ask,
+                cx,
+            )
+            .unwrap()
+        });
+    }
+
+    assert_eq!(
+        extension.changes(),
+        [(
+            build(1),
+            "0190crashed".to_string(),
+            not_started(NOT_STARTED_BEFORE_A_CRASH)
+        )]
+    );
+    let lane = harness.lane("build", 1);
+    assert_eq!((lane.state, lane.job), (LaneState::Idle, None));
+    assert!(harness.engine.jobs.borrow().is_empty());
+}
+
 /// A queue extension job with the run `run`.
 fn extension_job(run: &str) -> JobRecord {
     JobRecord {
