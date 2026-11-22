@@ -123,6 +123,29 @@ impl LaneRuns {
         })
     }
 
+    /// The lane whose current job is on the task `task_id`, in any project.
+    pub fn job_lane(&self, task_id: &str) -> Option<LaneId> {
+        self.read().projects.values().find_map(|state| {
+            state.lanes.values().find_map(|lane| {
+                let job = lane.job.as_ref()?;
+                matches!(&job.subject, RunSubject::Task(task) if task.0 == task_id)
+                    .then(|| lane.id())
+            })
+        })
+    }
+
+    /// The lane the owner record of the top-level task `top` names, with the record's state and
+    /// whether that lane still has a record in its project. `None` when no record of `top` names
+    /// a lane.
+    pub fn owner_lane(&self, top: &TaskId) -> Option<(LaneId, OwnerState, bool)> {
+        self.read().projects.values().find_map(|state| {
+            let owner = state.owners.get(top)?;
+            let lane = owner.lane.clone()?;
+            let exists = state.lanes.contains_key(&lane);
+            Some((lane, owner.state, exists))
+        })
+    }
+
     /// Whether a restore holds new lane work back in `project_id`.
     pub fn is_held(&self, project_id: &str) -> bool {
         self.read().holds.contains_key(project_id)
