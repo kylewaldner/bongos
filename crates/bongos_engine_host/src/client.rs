@@ -100,7 +100,8 @@ type Subscribers = Mutex<Vec<(Option<Vec<HostTopic>>, mpsc::UnboundedSender<Host
 #[derive(Default)]
 struct ClientShared {
     subscribers: Subscribers,
-    /// Set when the writer said it moves to another process.
+    /// Set when the writer announced that it moves to another process (`WriterMoving`): it
+    /// stops serving then, so this holds until the next connection.
     moving: AtomicBool,
 }
 
@@ -111,6 +112,41 @@ struct ConnectionState {
     /// Set when a request timed out; cleared when the writer is heard from.
     not_answering: AtomicBool,
     closed: AtomicBool,
+    /// What the answers on this connection said about a move.
+    refusals: Mutex<MovingRefusals>,
+}
+
+/// The answers of one connection as they bear on a move: a writer that drains refuses every
+/// request as moving, and answers again once the move is cancelled. Requests are numbered in
+/// the order they are sent, so the latest of each says which came last.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct MovingRefusals {
+    last_refused: Option<u64>,
+    last_answered: Option<u64>,
+}
+
+impl MovingRefusals {
+    /// Records the answer to request `id`: refused as moving, or anything else.
+    pub(crate) fn heard(&mut self, id: u64, refused_as_moving: bool) {
+        let last = if refused_as_moving {
+            &mut self.last_refused
+        } else {
+            &mut self.last_answered
+        };
+        *last = Some(last.map_or(id, |last| last.max(id)));
+    }
+
+    /// Whether the writer says it moves now: its latest answer by request order refused a
+    /// request as moving (an answer to a later request ends that, as the move was cancelled).
+    pub(crate) fn moving(&self) -> bool {
+        self.last_refused
+            .is_some_and(|refused| self.last_answered.is_none_or(|answered| refused > answered))
+    }
+}
+
+/// Whether the writer told this client, on `connection`, that it moves.
+fn says_moving(connection: &ConnectionState, shared: &ClientShared) -> bool {
+    shared.moving.load(Ordering::SeqCst) || connection.refusals.lock().moving()
 }
 
 struct Connection {
@@ -216,11 +252,9 @@ impl HostClient {
                     }
                     Err(error) => Err(anyhow::Error::new(NotApplied(format!("{error:#}")))),
                 };
+                let moving = says_moving(&inner.connection.lock().state, &inner.shared);
                 match answer {
-                    Err(error)
-                        if is_moving(&error, inner.shared.moving.load(Ordering::SeqCst))
-                            && executor.now() < deadline =>
-                    {
+                    Err(error) if is_moving(&error, moving) && executor.now() < deadline => {
                         executor.timer(MOVING_RETRY).await;
                     }
                     answer => return answer,
@@ -274,7 +308,7 @@ impl HostClient {
 fn current_connection(inner: &Inner) -> Result<Arc<Connection>> {
     let mut current = inner.connection.lock();
     let closed = current.state.closed.load(Ordering::SeqCst);
-    if !closed || !inner.shared.moving.load(Ordering::SeqCst) {
+    if !closed || !says_moving(&current.state, &inner.shared) {
         return Ok(current.clone());
     }
     let connection = Arc::new(open_connection(
@@ -322,7 +356,7 @@ async fn ask(
 ) -> Result<serde_json::Value> {
     let log = &inner.options.log;
     // Sent after the writer said it moves: it refuses the request, never applies it.
-    let sent_while_moving = inner.shared.moving.load(Ordering::SeqCst);
+    let sent_while_moving = says_moving(&connection.state, &inner.shared);
     let (id, answer) = send_request(connection, command, log)?;
     let mut answer = answer.fuse();
     let answered = if timed {
@@ -340,12 +374,18 @@ async fn ask(
         answer.await
     };
     match answered {
-        Ok(HostResult::Ok(value)) => Ok(value),
+        Ok(HostResult::Ok(value)) => {
+            connection.state.refusals.lock().heard(id, false);
+            Ok(value)
+        }
         Ok(HostResult::Refused(text)) => {
-            if text == MOVING_REFUSAL {
-                // A client that subscribed to nothing hears of the move only here.
-                inner.shared.moving.store(true, Ordering::SeqCst);
-            }
+            // A client that subscribed to nothing hears of the move only here, and of a
+            // cancelled move only from a later answer.
+            connection
+                .state
+                .refusals
+                .lock()
+                .heard(id, text == MOVING_REFUSAL);
             Err(anyhow!(text))
         }
         Err(_) if sent_while_moving => Err(anyhow::Error::new(NotApplied(closed_message(log)))),
@@ -523,7 +563,7 @@ fn read_messages(
     state.closed.store(true, Ordering::SeqCst);
     // Every waiting request hears that the connection is gone.
     state.pending.lock().clear();
-    if !shared.moving.load(Ordering::SeqCst) {
+    if !says_moving(&state, &shared) {
         // The writer is gone for good: the subscriptions end. Across a move they carry over.
         shared.subscribers.lock().clear();
     }

@@ -28,7 +28,7 @@
 //! they plug in beside [`HandoverRuns::drain`].
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -50,7 +50,7 @@ use serde_json::json;
 use crate::access::{EngineAccess, EngineAccesses};
 use crate::client::{ClientOptions, HostClient};
 use crate::ensure::{HostSpawner, POLL_INTERVAL};
-use crate::host_file::{HostInfo, Moving, move_in_progress, read_host_file};
+use crate::host_file::{HostInfo, Moving, move_in_progress, process_is, read_host_file};
 use crate::protocol::{HostCommand, HostCtl, HostEvent, HostTopic};
 use crate::window::WriterHosts;
 
@@ -196,7 +196,34 @@ struct Handovers {
     done: HashMap<String, Vec<oneshot::Sender<Result<HostClient, String>>>>,
     /// The engine hosts `lanes: start` gave up on (they did not ask in time), by pid: a request
     /// they make late is refused, since the window already told the person they did not start.
-    abandoned: HashSet<u32>,
+    /// Keyed by pid with the process's start time, so a later process given the same pid is not
+    /// refused; entries whose process ended are dropped.
+    abandoned: HashMap<u32, Option<u64>>,
+}
+
+impl Handovers {
+    /// Records that `lanes: start` gave up on engine host `pid`, dropping the hosts that ended.
+    fn abandon(&mut self, pid: u32) {
+        self.abandoned
+            .retain(|pid, start_time| process_is(*pid, *start_time));
+        self.abandoned
+            .insert(pid, bongos_workflow::process::start_time(pid));
+    }
+
+    /// Whether `peer` is a host `lanes: start` gave up on; it is refused once.
+    fn take_abandoned(&mut self, pid: u32) -> bool {
+        self.abandoned
+            .remove(&pid)
+            .is_some_and(|start_time| process_is(pid, start_time))
+    }
+}
+
+/// The pids of the engine hosts `lanes: start` gave up on, for tests.
+#[cfg(test)]
+pub(crate) fn abandoned_hosts(cx: &App) -> Vec<u32> {
+    cx.try_global::<Handovers>()
+        .map(|handovers| handovers.abandoned.keys().copied().collect())
+        .unwrap_or_default()
 }
 
 impl Global for Handovers {}
@@ -217,7 +244,7 @@ pub fn install_handovers(
         requests: HashMap::new(),
         began: HashMap::new(),
         done: HashMap::new(),
-        abandoned: HashSet::new(),
+        abandoned: HashMap::new(),
     });
 }
 
@@ -274,11 +301,7 @@ pub(crate) fn serve_handover(
     cx: &mut App,
 ) -> Task<Result<serde_json::Value>> {
     let id = repo.location().id.clone();
-    if cx
-        .try_global::<Handovers>()
-        .is_some_and(|handovers| handovers.abandoned.contains(&peer.pid()))
-    {
-        cx.global_mut::<Handovers>().abandoned.remove(&peer.pid());
+    if cx.has_global::<Handovers>() && cx.global_mut::<Handovers>().take_abandoned(peer.pid()) {
         return Task::ready(Err(anyhow!(
             "this window gave up on engine host pid {} before it asked for the writer",
             peer.pid()
@@ -528,6 +551,8 @@ impl Move {
             self.id,
             client.welcomed().writer_pid
         );
+        // The writer moved for good: this process's backup timer ends.
+        self.repo.stop_backups();
         // The views that followed this process's writer follow the new one.
         if let Some(writer) = self
             .repo
@@ -975,27 +1000,38 @@ pub fn start_handover(
         };
         let timeout = cx.background_executor().timer(times.start_timeout).fuse();
         futures::pin_mut!(timeout);
-        let mut began = watch.began.fuse();
-        let asked = futures::select! {
-            began = began => began.is_ok(),
-            _ = timeout => false,
+        let mut began = watch.began;
+        // The timeout first: a host that asked by then is found below all the same.
+        let heard = futures::select_biased! {
+            _ = timeout => None,
+            heard = (&mut began) => Some(heard.is_ok()),
         };
         let exited = child.try_exit();
         let pid = child.pid();
         if exited.is_none() {
             child.release();
         }
-        if !asked {
-            cx.update(|cx| {
+        let asked = match heard {
+            Some(asked) => asked,
+            // Checked on the main thread, where the host's request is served: when it asked as
+            // the timeout fired, the move goes on and its outcome is awaited.
+            None => cx.update(|cx| {
+                let asked = matches!(began.try_recv(), Ok(Some(()))) || is_moving(&id, cx);
+                if asked {
+                    return true;
+                }
                 // It may still ask: refuse it then, as the person was told it did not start.
                 if exited.is_none()
                     && let Some(pid) = pid
                     && cx.has_global::<Handovers>()
                 {
-                    cx.global_mut::<Handovers>().abandoned.insert(pid);
+                    cx.global_mut::<Handovers>().abandon(pid);
                 }
-                finish(&id, Err(String::new()), cx)
-            });
+                finish(&id, Err(String::new()), cx);
+                false
+            }),
+        };
+        if !asked {
             let exited = exited
                 .map(|status| format!(" (it exited: {status})"))
                 .unwrap_or_default();

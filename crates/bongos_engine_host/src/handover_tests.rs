@@ -24,7 +24,7 @@ use crate::{
     ClientOptions, DrainChoice, EngineAccess, EngineAccesses, HandoverRequest, HandoverRuns,
     HandoverTimes, HostClient, HostCommand, HostInfo, HostMode, HostSpawner, MOVING_REFUSAL,
     MOVING_RETRY, Moving, OpenedState, SpawnedHost, WriterHost, WriterHosts, WriterOptions,
-    did_not_start, expect_handover, install_handovers, live_host, open_state_with_hooks,
+    did_not_start, expect_handover, install_handovers, is_moving, live_host, open_state_with_hooks,
     read_host_file, start_handover, take_writer_checked, take_writer_from_window, write_host_file,
 };
 
@@ -318,6 +318,8 @@ async fn a_handover_drains_then_moves_the_writer_and_the_window_attaches_to_the_
     assert_eq!(info.mode, HostMode::Host);
     assert_eq!(info.moving, None);
     assert!(cx.update(|cx| cx.global::<WriterHosts>().hosts().is_empty()));
+    // The writer moved for good: the window's backup timer ends instead of waiting.
+    assert!(fixture.repo.backups_stopped() && !fixture.repo.backups_released());
     drop(host);
 }
 
@@ -647,6 +649,116 @@ async fn a_host_asking_after_lanes_start_gave_up_on_it_is_refused(cx: &mut TestA
     assert!(!state.borrow().refusing);
 }
 
+fn lanes_start(
+    fixture: &Fixture,
+    spawner: Arc<dyn HostSpawner>,
+    cx: &mut TestAppContext,
+) -> Task<Result<HostClient>> {
+    cx.update(|cx| {
+        start_handover(
+            &fixture.repo,
+            spawner,
+            fixture.log(),
+            HandoverRequest {
+                choice: DrainChoice::Wait,
+                ask_again: None,
+            },
+            cx,
+        )
+    })
+}
+
+// The host asks for the writer just as `lanes: start`'s start timeout fires: the move it began
+// goes on (starts stay refused), the window is not told the host did not start, and it attaches
+// to the host once the host takes the writer.
+#[gpui::test]
+async fn a_host_asking_as_the_start_timeout_fires_still_takes_the_writer(
+    cx: &mut TestAppContext,
+    host_cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let state = window(&fixture, &["run-1"], 1, LONG, cx);
+    let started = lanes_start(&fixture, Arc::new(SilentSpawner), cx);
+    cx.run_until_parked();
+    // The host's request is served, and the timeout fires before `lanes: start` hears of it.
+    let peer = crate::commands::local_identity().unwrap();
+    let serving = cx.update(|cx| crate::handover::serve_handover(&fixture.repo, &peer, cx));
+    cx.executor().advance_clock(LONG);
+    cx.run_until_parked();
+    let id = fixture.location().id.clone();
+    assert!(cx.update(|cx| is_moving(&id, cx)), "the move goes on");
+    assert!(state.borrow().refusing, "no run starts while it moves");
+    assert!(
+        cx.update(|cx| crate::handover::abandoned_hosts(cx))
+            .is_empty()
+    );
+
+    finish_nodes(&state);
+    let hooks = StateApplyHooks::new();
+    let mut writer = None;
+    wait_for(cx, |_| {
+        if writer.is_none() {
+            writer = StateStore::open_writer_with_hooks(fixture.location(), &hooks).ok();
+        }
+        writer.is_some()
+    });
+    let (_host, _) = serve_host(&fixture, writer.unwrap(), host_cx);
+    let client = started
+        .await
+        .expect("lanes: start ends with the host's client");
+    assert_eq!(client.welcomed().mode, HostMode::Host);
+    assert!(serving.await.is_ok());
+    assert!(!state.borrow().refusing, "runs start again once it moved");
+}
+
+/// A spawner whose host has a pid no process has.
+struct DeadSpawner;
+
+struct DeadChild;
+
+impl SpawnedHost for DeadChild {
+    fn try_exit(&mut self) -> Option<String> {
+        None
+    }
+
+    fn release(self: Box<Self>) {}
+
+    fn pid(&self) -> Option<u32> {
+        Some(dead_pid(3))
+    }
+}
+
+impl HostSpawner for DeadSpawner {
+    fn spawn(&self, _: &str, _: &std::path::Path) -> Result<Box<dyn SpawnedHost>> {
+        Ok(Box::new(DeadChild))
+    }
+}
+
+// A host `lanes: start` gave up on that ended is forgotten: its pid may be given to another
+// process, which is not refused.
+#[gpui::test]
+async fn an_abandoned_host_that_ended_is_forgotten(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let start_timeout = Duration::from_millis(100);
+    let _state = window(&fixture, &["run-1"], 1, start_timeout, cx);
+    for spawner in [
+        Arc::new(DeadSpawner) as Arc<dyn HostSpawner>,
+        Arc::new(SilentSpawner),
+    ] {
+        let started = lanes_start(&fixture, spawner, cx);
+        cx.run_until_parked();
+        cx.executor().advance_clock(start_timeout);
+        assert!(started.await.is_err());
+    }
+    assert_eq!(
+        cx.update(|cx| crate::handover::abandoned_hosts(cx)),
+        vec![std::process::id()],
+        "the ended host was dropped"
+    );
+}
+
 // While the writer moves a request is tried again only when the writer refused it as moving or
 // cannot have applied it (never sent, or sent after the writer said it moves); one whose
 // connection closed while it was in flight before that may have been applied by the old writer,
@@ -662,6 +774,27 @@ fn only_a_moving_refusal_or_a_request_never_applied_is_tried_again() {
     assert!(is_moving(&never_sent, true));
     assert!(!is_moving(&never_sent, false));
     assert!(!is_moving(&in_flight, true));
+}
+
+// A connection says the writer moves only while its latest answer, by request order, refused a
+// request as moving: once a later request is answered the move was cancelled, so a request then
+// lost to a closed connection may have been applied and is not tried again.
+#[test]
+fn a_cancelled_move_ends_the_moving_refusal_of_a_connection() {
+    use crate::client::MovingRefusals;
+    let mut refusals = MovingRefusals::default();
+    assert!(!refusals.moving());
+    refusals.heard(0, false);
+    assert!(!refusals.moving());
+    refusals.heard(3, true);
+    assert!(refusals.moving(), "refused as moving");
+    // An earlier request answered late says nothing of the move.
+    refusals.heard(2, false);
+    assert!(refusals.moving());
+    refusals.heard(4, false);
+    assert!(!refusals.moving(), "answered again: the move was cancelled");
+    refusals.heard(5, true);
+    assert!(refusals.moving(), "a new move");
 }
 
 fn options_as(fixture: &Fixture, own_pid: u32) -> ClientOptions {
