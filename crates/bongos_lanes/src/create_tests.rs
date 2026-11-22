@@ -132,6 +132,70 @@ fn an_unwritable_root_makes_nothing_and_leaves_no_probe() {
 }
 
 #[test]
+fn a_link_below_the_root_is_refused_and_nothing_is_made_through_it() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("drive");
+    let elsewhere = temp.path().join("elsewhere");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, root.join("lanes")).unwrap();
+    let before = listing(temp.path());
+
+    let error = create_below_existing(&root.join("lanes/build-1/target"), &root).unwrap_err();
+    assert_eq!(
+        error,
+        CreateError::LinkBelowRoot {
+            path: root.join("lanes"),
+            root: root.clone()
+        }
+    );
+    // Even a path that is the link itself is refused, though it "exists" as a directory.
+    let error = create_below_existing(&root.join("lanes"), &root).unwrap_err();
+    assert!(
+        matches!(error, CreateError::LinkBelowRoot { .. }),
+        "{error:?}"
+    );
+    assert_eq!(listing(temp.path()), before);
+    assert_eq!(listing(&elsewhere), Vec::<PathBuf>::new());
+}
+
+#[test]
+fn a_root_reached_through_a_link_is_still_used() {
+    let temp = TempDir::new().unwrap();
+    let real = temp.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let root = temp.path().join("drive");
+    std::os::unix::fs::symlink(&real, &root).unwrap();
+    create_below_existing(&root.join("lanes/target"), &root).unwrap();
+    assert_eq!(
+        listing(&real),
+        [PathBuf::from("lanes"), PathBuf::from("lanes/target")]
+    );
+}
+
+#[test]
+fn a_relative_path_or_root_is_refused() {
+    let temp = TempDir::new().unwrap();
+    let before = listing(temp.path());
+    let error = create_below_existing(Path::new("drive/target"), temp.path()).unwrap_err();
+    assert_eq!(
+        error,
+        CreateError::NotAbsolute {
+            path: PathBuf::from("drive/target")
+        }
+    );
+    let error = create_below_existing(&temp.path().join("target"), Path::new("drive")).unwrap_err();
+    assert_eq!(
+        error,
+        CreateError::NotAbsolute {
+            path: PathBuf::from("drive")
+        }
+    );
+    assert_eq!(error.to_string(), "drive is not an absolute path");
+    assert_eq!(listing(temp.path()), before);
+}
+
+#[test]
 fn the_root_check_removes_its_probe_file() {
     let temp = TempDir::new().unwrap();
     check_root(temp.path()).unwrap();

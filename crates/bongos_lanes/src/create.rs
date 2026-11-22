@@ -17,8 +17,12 @@ pub enum CreateError {
     RootNotDirectory { root: PathBuf },
     #[error("{message}")]
     RootNotWritable { root: PathBuf, message: String },
+    #[error("{} is not an absolute path", path.display())]
+    NotAbsolute { path: PathBuf },
     #[error("{} exists and is not a directory", path.display())]
     NotADirectory { path: PathBuf },
+    #[error("{} is a symbolic link below its root {}", path.display(), root.display())]
+    LinkBelowRoot { path: PathBuf, root: PathBuf },
     #[error("creating {}: {message}", path.display())]
     Create { path: PathBuf, message: String },
 }
@@ -74,8 +78,17 @@ pub fn check_root(root: &Path) -> Result<(), CreateError> {
 
 /// Makes the directories of `path` that are below `root` and missing, one component at a time.
 /// `path` must be inside `root` (or be it), and `root` must exist, be a directory and be
-/// writable; `root` and everything above it are never made.
+/// writable; `root` and everything above it are never made. Both must be absolute. No link is
+/// followed below `root`: a component there that is a symbolic link is refused, so nothing is
+/// ever made outside `root` through one (`root` itself may be reached through links).
 pub fn create_below_existing(path: &Path, root: &Path) -> Result<(), CreateError> {
+    for given in [path, root] {
+        if !given.is_absolute() {
+            return Err(CreateError::NotAbsolute {
+                path: given.to_path_buf(),
+            });
+        }
+    }
     let path = lexical(path);
     let root = lexical(root);
     let Ok(below) = path.strip_prefix(&root) else {
@@ -85,7 +98,13 @@ pub fn create_below_existing(path: &Path, root: &Path) -> Result<(), CreateError
     let mut current = root.clone();
     for component in below.components() {
         current.push(component);
-        match std::fs::metadata(&current) {
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(CreateError::LinkBelowRoot {
+                    path: current,
+                    root,
+                });
+            }
             Ok(metadata) if metadata.is_dir() => continue,
             Ok(_) => return Err(CreateError::NotADirectory { path: current }),
             Err(error) if error.kind() == ErrorKind::NotFound => {}
@@ -98,7 +117,11 @@ pub fn create_below_existing(path: &Path, root: &Path) -> Result<(), CreateError
         }
         match std::fs::create_dir(&current) {
             Ok(()) => {}
-            Err(error) if error.kind() == ErrorKind::AlreadyExists && current.is_dir() => {}
+            // Made by someone else meanwhile: fine only as a real directory, not a link.
+            Err(error)
+                if error.kind() == ErrorKind::AlreadyExists
+                    && std::fs::symlink_metadata(&current)
+                        .is_ok_and(|metadata| metadata.file_type().is_dir()) => {}
             Err(error) => {
                 return Err(CreateError::Create {
                     path: current,
