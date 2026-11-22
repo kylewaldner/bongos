@@ -249,6 +249,60 @@ async fn lanes_start_closes_a_dead_hosts_dispatcher_with_host_stopped(cx: &mut T
     assert_eq!(harness.state().owners, before.owners);
 }
 
+// A crash between marking the dead host's dispatcher record cancelled and closing its run left
+// the record ended over an active run: the next recovery closes the run with "host stopped", once.
+#[gpui::test]
+async fn a_cancelled_dispatcher_record_whose_run_is_still_active_is_closed(
+    cx: &mut TestAppContext,
+) {
+    let harness = killed_mid_job(&builds(3), true);
+    harness
+        .writer
+        .transact(|tx| {
+            let mut record = record_of(OLD_DISPATCHER, DEAD_HOST);
+            record.ended = Some(RunEnd::Cancelled);
+            put_dispatcher(tx, &record)
+        })
+        .unwrap();
+
+    let recovered = recover_now(&harness, LanesOnInterruption::Ask, cx);
+
+    assert_eq!(
+        recovered.closed_dispatcher,
+        Some(OLD_DISPATCHER.to_string())
+    );
+    closed_with_host_stopped(&harness);
+    assert_eq!(
+        harness.engine.run_status(OLD_DISPATCHER),
+        Some(RunStatus::Cancelled)
+    );
+    assert_eq!(dispatcher_of(&harness).ended, Some(RunEnd::Cancelled));
+
+    let again = recover_now(&harness, LanesOnInterruption::Ask, cx);
+    assert_eq!(again.closed_dispatcher, None);
+    assert_eq!(harness.engine.closes.borrow().len(), 2);
+}
+
+// A crash after closing the dead host's dispatcher run but before marking its record leaves the
+// record open over a closed run: the next recovery marks it without touching the run again.
+#[gpui::test]
+async fn an_open_dispatcher_record_whose_run_is_closed_is_only_marked(cx: &mut TestAppContext) {
+    let harness = killed_mid_job(&builds(3), true);
+    harness.engine.status.borrow_mut().insert(
+        OLD_DISPATCHER.to_string(),
+        ("lanes".to_string(), RunStatus::Cancelled),
+    );
+
+    let recovered = recover_now(&harness, LanesOnInterruption::Ask, cx);
+
+    assert_eq!(
+        recovered.closed_dispatcher,
+        Some(OLD_DISPATCHER.to_string())
+    );
+    assert!(harness.engine.closes.borrow().is_empty());
+    assert_eq!(dispatcher_of(&harness).ended, Some(RunEnd::Cancelled));
+}
+
 // PRD 32: with `on_interruption = resume` the interrupted run is resumed once, its interruption
 // record written before the resume; a second interruption of the same run waits on you.
 #[gpui::test]

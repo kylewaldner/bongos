@@ -402,6 +402,8 @@ impl JobEngine for WorkflowEngine {
     fn end_dispatcher(&self, run: &str, end: RunEnd, note: &str, cx: &mut App) {
         match end {
             RunEnd::Cancelled => {
+                // `WorkflowEngine::cancel` takes no note, so `note` (such as "host stopped") is
+                // only logged here; the run's log does not carry it.
                 log::info!("lanes: cancelling the dispatcher run {run}: {note}");
                 if let Err(refusal) = self.cancel(&run.to_string(), cx) {
                     log::error!("lanes: cancelling the dispatcher run {run}: {refusal}");

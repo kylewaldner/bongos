@@ -302,6 +302,12 @@ impl JobEngine for FakeEngine {
     }
 
     fn end_dispatcher(&self, run: &str, end: RunEnd, note: &str, _cx: &mut App) {
+        // Like the engine's cancel, a cancelled end closes the run; a succeeded one leaves it active.
+        if end == RunEnd::Cancelled
+            && let Some(entry) = self.status.borrow_mut().get_mut(run)
+        {
+            entry.1 = RunStatus::Cancelled;
+        }
         self.closes.borrow_mut().push(format!("end {run} {note}"));
         self.ends
             .borrow_mut()

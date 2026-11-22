@@ -131,34 +131,48 @@ pub fn recover(parts: &LanesParts, policy: LanesOnInterruption, cx: &mut App) ->
     })
 }
 
-/// Closes the dispatcher record of a dead host, once: the record is marked ended (cancelled) in a
-/// transaction, then its run is interrupted and cancelled with [`HOST_STOPPED`]. `None` when there
-/// is no record, it ended already, or its host lives.
+/// Closes the dispatcher record of a dead host: its run, while active, is interrupted and
+/// cancelled with [`HOST_STOPPED`] first, then the record is marked ended (cancelled) in a
+/// transaction. A crash between the two leaves the record open over a closed run, and the next
+/// recovery only marks it. A record already marked cancelled whose run is still active (a crash
+/// left it so) has its run closed again. `None` when there is no record, its host lives, or it
+/// ended and its run is closed.
 pub(crate) fn close_dead_dispatcher(parts: &LanesParts, cx: &mut App) -> Result<Option<String>> {
-    let host = parts.host.clone();
-    let closed = parts.writer.transact(|tx| {
-        let Some(mut record) = dispatcher_record(tx)? else {
-            return Ok(None);
-        };
-        if record.ended.is_some() || host.host_live(&record.host) {
-            return Ok(None);
-        }
-        record.ended = Some(RunEnd::Cancelled);
-        put_dispatcher(tx, &record)?;
-        Ok(Some((record.run_id, record.host)))
-    })?;
-    let Some((run, dead)) = closed else {
+    let Some(record) = parts.writer.transact(dispatcher_record)? else {
         return Ok(None);
     };
-    log::info!("lanes: the dispatcher host {dead} is gone; closing its run {run}");
+    if parts.host.host_live(&record.host) {
+        return Ok(None);
+    }
     let engine = &parts.engine;
-    if engine
+    let run = record.run_id;
+    let active = engine
         .run_status(&run)
-        .is_some_and(|status| status.is_active())
-    {
+        .is_some_and(|status| status.is_active());
+    match record.ended {
+        None => {}
+        // A succeeded dispatcher's run stays active by design; only a cancelled one is closed.
+        Some(RunEnd::Cancelled) if active => {}
+        Some(_) => return Ok(None),
+    }
+    log::info!(
+        "lanes: the dispatcher host {} is gone; closing its run {run}",
+        record.host
+    );
+    if active {
         engine.interrupt_run(&run, cx);
         engine.end_dispatcher(&run, RunEnd::Cancelled, HOST_STOPPED, cx);
     }
+    parts.writer.transact(|tx| {
+        let Some(mut current) = dispatcher_record(tx)? else {
+            return Ok(());
+        };
+        if current.run_id != run || current.ended.is_some() {
+            return Ok(());
+        }
+        current.ended = Some(RunEnd::Cancelled);
+        put_dispatcher(tx, &current)
+    })?;
     Ok(Some(run))
 }
 
