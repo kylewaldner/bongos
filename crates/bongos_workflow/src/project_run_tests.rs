@@ -209,6 +209,131 @@ fn a_project_run_whose_target_is_checked_out_elsewhere_waits_with_its_branch_and
 }
 
 #[test]
+fn a_project_merge_never_checks_out_its_target_so_a_retry_after_a_crash_finds_the_run_tree_on_its_branch()
+ {
+    use crate::builtin_merge::{ProjectMergeRefusal, ProjectMerged, merge_project_run};
+    let mut world = World::new();
+    let (_lifecycle, git, repo) = git_lifecycle(&mut world);
+    let path = |dir: &Path| dir.to_string_lossy().into_owned();
+    let tree = world.root.join("run-tree");
+    git_out(
+        &git,
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "run-branch",
+            &path(&tree),
+            "main",
+        ],
+    );
+    let work = commit_in(&git, &tree, "feature.txt");
+    // `integration` moved on, held by no worktree, so the merge needs a merge commit.
+    let moved = git_out(
+        &git,
+        &repo,
+        &["commit-tree", "main^{tree}", "-p", "main", "-m", "moved"],
+    );
+    git_out(&git, &repo, &["branch", "integration", &moved]);
+    // `clash` changes the same file, held by no worktree.
+    let clash_tree = world.root.join("clash-tree");
+    git_out(
+        &git,
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "clash",
+            &path(&clash_tree),
+            "main",
+        ],
+    );
+    fs::write(clash_tree.join("feature.txt"), "other\n").unwrap();
+    git_out(&git, &clash_tree, &["add", "feature.txt"]);
+    git_out(&git, &clash_tree, &["commit", "-q", "-m", "clash"]);
+    git_out(&git, &clash_tree, &["checkout", "-q", "--detach"]);
+    let clash_head = git_out(&git, &repo, &["rev-parse", "clash"]);
+    let request = |merge_into: &str| ProjectMergeRequest {
+        run_tree: tree.clone(),
+        run_branch: "run-branch".to_string(),
+        merge_into: merge_into.to_string(),
+        run_id: "run-1".to_string(),
+        workflow: "single".to_string(),
+    };
+    let on_run_branch = || {
+        assert_eq!(
+            git_out(&git, &tree, &["symbolic-ref", "--short", "HEAD"]),
+            "run-branch"
+        );
+        assert_eq!(git_out(&git, &tree, &["status", "--porcelain"]), "");
+        assert_eq!(git_out(&git, &tree, &["rev-parse", "HEAD"]), work);
+    };
+
+    // A conflict writes nothing.
+    assert_eq!(
+        block_on(merge_project_run(&git, &request("clash"))),
+        Err(ProjectMergeRefusal::Conflict(vec![
+            "feature.txt".to_string()
+        ]))
+    );
+    assert_eq!(git_out(&git, &repo, &["rev-parse", "clash"]), clash_head);
+    on_run_branch();
+
+    // The merge commit lands on `integration` while the run tree stays on its branch.
+    let Ok(ProjectMerged::Merged { head }) =
+        block_on(merge_project_run(&git, &request("integration")))
+    else {
+        panic!("not merged");
+    };
+    assert_eq!(git_out(&git, &repo, &["rev-parse", "integration"]), head);
+    assert_eq!(
+        git_out(
+            &git,
+            &repo,
+            &["rev-parse", &format!("{head}^1"), &format!("{head}^2")]
+        ),
+        format!("{moved}\n{work}")
+    );
+    assert_eq!(
+        git_out(&git, &repo, &["show", &format!("{head}:feature.txt")]),
+        "work"
+    );
+    on_run_branch();
+
+    // A retry, as after a crash once the merge landed, finds it done and the tree as it was.
+    assert_eq!(
+        block_on(merge_project_run(&git, &request("integration"))),
+        Ok(ProjectMerged::AlreadyIn)
+    );
+    on_run_branch();
+
+    // So a person can check the target out, and a later merge into it then waits on them.
+    git_out(&git, &repo, &["checkout", "-q", "integration"]);
+    let more = commit_in(&git, &tree, "more.txt");
+    assert_eq!(
+        block_on(merge_project_run(&git, &request("integration"))),
+        Err(ProjectMergeRefusal::CheckedOut {
+            branch: "integration".to_string(),
+            path: repo.clone(),
+        })
+    );
+    assert_eq!(git_out(&git, &repo, &["rev-parse", "integration"]), head);
+    assert_eq!(
+        git_out(
+            &git,
+            &repo,
+            &["status", "--porcelain", "--untracked-files=no"]
+        ),
+        ""
+    );
+    assert_eq!(git_out(&git, &tree, &["rev-parse", "HEAD"]), more);
+}
+
+#[test]
 fn a_project_run_with_no_target_merges_nothing() {
     let end = ProjectEnd {
         merge: None,
@@ -258,6 +383,11 @@ fn a_snapshot_run_works_in_the_snapshot_with_no_tree_or_branch_of_its_own() {
         project_work_dir(&project_dir(&world), &run)
     );
     assert!(binding.setup.snapshot);
+    assert_eq!(
+        lifecycle.halt_worktrees(&run),
+        None,
+        "a snapshot is never offered for editing"
+    );
     assert!(
         !binding.worktree.run_dir.starts_with(&path),
         "the scratch directories are outside the snapshot"
@@ -293,6 +423,49 @@ fn a_snapshot_run_works_in_the_snapshot_with_no_tree_or_branch_of_its_own() {
         .unwrap_err();
     assert_eq!(refusal.kind, RefusalKind::BadRequest, "{refusal}");
     assert!(fresh.all_runs().is_empty());
+}
+
+#[test]
+fn a_snapshot_that_overlaps_a_directory_the_run_may_write_is_refused() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    let inside_project = project_dir(&world).join("documents");
+    fs::create_dir_all(&inside_project).unwrap();
+    let path = snapshot(&world);
+    let lane_dir = path.join("target");
+    let starts = [
+        // Inside the project folder, which holds the run's scratch directory.
+        StartRequest {
+            tree: RunTree::Snapshot {
+                path: inside_project,
+            },
+            ..project_request("single")
+        },
+        // The project folder itself lies inside it.
+        StartRequest {
+            tree: RunTree::Snapshot {
+                path: world.root.clone(),
+            },
+            ..project_request("single")
+        },
+        // It holds a lane directory.
+        StartRequest {
+            tree: RunTree::Snapshot { path: path.clone() },
+            lane: Some(LaneRef {
+                id: "lane-1".to_string(),
+                kind: "build".to_string(),
+            }),
+            lane_dirs: [("target".to_string(), lane_dir)].into(),
+            ..project_request("single")
+        },
+    ];
+    for request in starts {
+        let refusal = world.start(&mut lifecycle, request).unwrap_err();
+        assert_eq!(refusal.kind, RefusalKind::BadRequest, "{refusal}");
+        assert!(refusal.message.contains("overlaps"), "{refusal}");
+    }
+    assert!(lifecycle.all_runs().is_empty());
+    assert!(!path.join("target").exists());
 }
 
 #[test]

@@ -251,6 +251,26 @@ fn merge_branch_joins_each_fan_out_branch_into_the_run_branch() {
 }
 
 #[test]
+fn merge_branch_of_a_snapshot_run_has_nothing_to_merge() {
+    let temp = TempDir::new().unwrap();
+    let mut binding = crate::dispatch_tests::binding(temp.path(), "plain");
+    let snapshot = temp.path().join("snapshot");
+    fs::create_dir_all(&snapshot).unwrap();
+    binding.worktree.path = snapshot.clone();
+    binding.worktree.branch = String::new();
+    binding.setup.snapshot = true;
+    let mut runner = AppRunner::default();
+    runner.bind(RUN, binding);
+
+    // Every key ran in the snapshot, which is no repository: the join merges nothing.
+    assert_eq!(
+        runner.merge_branch(RUN, "test", &branch("plan", 0)),
+        Ok(String::new())
+    );
+    assert_eq!(fs::read_dir(&snapshot).unwrap().count(), 0);
+}
+
+#[test]
 fn merge_branch_fails_a_conflict_naming_the_file_and_leaves_the_run_branch() {
     let repo = repo(&[("shared.txt", "one\ntwo\nthree\n")]);
     for (index, text) in [(0, "one\nFIRST\nthree\n"), (1, "one\nSECOND\nthree\n")] {

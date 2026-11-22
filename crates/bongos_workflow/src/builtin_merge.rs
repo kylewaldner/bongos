@@ -4,7 +4,7 @@
 //! branches and the task worktree as they were.
 //!
 //! A run with no task merges at its success end with [`merge_project_run`] instead: into the
-//! branch its start named, in its own run tree, never into a branch another worktree holds.
+//! branch its start named, with no checkout at all, never into a branch a worktree holds.
 
 use std::path::{Path, PathBuf};
 
@@ -158,8 +158,8 @@ pub async fn merge(git: &Git, request: &MergeRequest) -> Result<Merged, MergeRef
     }
 }
 
-/// The success-end merge of a run with no task: its run branch into `merge_into`, in the run's
-/// own tree.
+/// The success-end merge of a run with no task: its run branch into `merge_into`, read from the
+/// run's own tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectMergeRequest {
     pub run_tree: PathBuf,
@@ -186,7 +186,7 @@ pub enum ProjectMerged {
 }
 
 /// Why a project run's merge did not happen. In every case `merge_into`, the run branch and every
-/// checkout are as they were, and the run tree is back on the run branch.
+/// checkout are as they were, and the run tree is still on the run branch.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ProjectMergeRefusal {
     /// Another worktree, a person's checkout included, has the target checked out.
@@ -204,12 +204,17 @@ pub enum ProjectMergeRefusal {
     Git(#[from] GitError),
 }
 
-/// Merges the run branch into `merge_into` in the run tree: refused, before anything is written,
-/// when `merge_into` is missing, when another worktree has it checked out (so no checkout ever
-/// changes under a person), when the run tree has uncommitted changes or is not on the run
-/// branch. Nothing is merged when `merge_into` already holds the run branch. Otherwise the run
-/// tree checks out `merge_into`, merges fast-forward or with a merge commit (a conflict is
-/// aborted), and checks the run branch out again, so the run tree never keeps `merge_into`.
+/// How many times the merge is made again when `merge_into` moved while it was being made.
+const PROJECT_MERGE_TRIES: usize = 3;
+
+/// Merges the run branch into `merge_into` without checking anything out: refused, before
+/// anything is written, when `merge_into` is missing, when any worktree has it checked out (so no
+/// checkout ever changes under a person), when the run tree has uncommitted changes or is not on
+/// the run branch. Nothing is merged when `merge_into` already holds the run branch. Otherwise
+/// the new head of `merge_into` is the run branch's head (fast-forward) or a merge commit made
+/// from `git merge-tree` (a conflict writes nothing), and the branch is moved to it only if it
+/// still points where it did, so the run tree stays on its run branch whatever happens, a crash
+/// included.
 pub async fn merge_project_run(
     git: &Git,
     request: &ProjectMergeRequest,
@@ -217,32 +222,59 @@ pub async fn merge_project_run(
     let tree = request.run_tree.as_path();
     let target = format!("refs/heads/{}", request.merge_into);
     let run_ref = format!("refs/heads/{}", request.run_branch);
-    if git
-        .run(
-            tree,
-            &[
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                &format!("{target}^{{commit}}"),
-            ],
-        )
-        .await
-        .is_err()
-    {
-        return Err(ProjectMergeRefusal::NoBranch(request.merge_into.clone()));
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        let Ok(old) = commit_of(git, tree, &target).await else {
+            return Err(ProjectMergeRefusal::NoBranch(request.merge_into.clone()));
+        };
+        let run_head = commit_of(git, tree, &run_ref).await?;
+        if is_ancestor(git, tree, &run_head, &old).await? {
+            return Ok(ProjectMerged::AlreadyIn);
+        }
+        refuse_unsafe(git, request).await?;
+        let new = if is_ancestor(git, tree, &old, &run_head).await? {
+            run_head.clone()
+        } else {
+            merge_commit(git, tree, request, &old, &run_head).await?
+        };
+        // Checked once more right before the write, so a checkout made meanwhile is never moved.
+        refuse_unsafe(git, request).await?;
+        let moved = git
+            .run(
+                tree,
+                &[
+                    "update-ref",
+                    "-m",
+                    &request.commit_message(),
+                    &target,
+                    &new,
+                    &old,
+                ],
+            )
+            .await;
+        match moved {
+            Ok(_) => return Ok(ProjectMerged::Merged { head: new }),
+            // `merge_into` moved since it was read: made again from its new head.
+            Err(_) if tries < PROJECT_MERGE_TRIES => continue,
+            Err(error) => return Err(error.into()),
+        }
     }
-    if is_ancestor(git, tree, &run_ref, &target).await? {
-        return Ok(ProjectMerged::AlreadyIn);
-    }
-    let held = |path: Option<PathBuf>| {
-        path.map(|path| ProjectMergeRefusal::CheckedOut {
+}
+
+/// The refusals checked before `merge_into` is written: a worktree holding it, a run tree with
+/// uncommitted changes or not on the run branch.
+async fn refuse_unsafe(
+    git: &Git,
+    request: &ProjectMergeRequest,
+) -> Result<(), ProjectMergeRefusal> {
+    let tree = request.run_tree.as_path();
+    // The run tree is checked too: one on `merge_into` is refused below as on the wrong branch.
+    if let Some(path) = worktree_holding(git, tree, &request.merge_into, tree).await? {
+        return Err(ProjectMergeRefusal::CheckedOut {
             branch: request.merge_into.clone(),
             path,
-        })
-    };
-    if let Some(refusal) = held(worktree_holding(git, tree, &request.merge_into, tree).await?) {
-        return Err(refusal);
+        });
     }
     if git.is_dirty(tree).await? {
         return Err(ProjectMergeRefusal::DirtyRunTree);
@@ -258,72 +290,79 @@ pub async fn merge_project_run(
             },
         });
     }
-    if let Err(error) = git
-        .run(tree, &["checkout", "--quiet", &request.merge_into, "--"])
-        .await
-    {
-        // Taken by another worktree since the check: refused the same way.
-        let holder = worktree_holding(git, tree, &request.merge_into, tree)
-            .await
-            .ok()
-            .flatten();
-        return Err(held(holder).unwrap_or(ProjectMergeRefusal::Git(error)));
-    }
-    let merged = merge_checked_out(git, tree, request).await;
-    let back = git
-        .run(tree, &["checkout", "--quiet", &request.run_branch, "--"])
-        .await;
-    if let Err(error) = &back {
-        log::warn!(
-            "workflows: the run tree {} could not go back to its run branch: {error}",
-            tree.display()
-        );
-    }
-    let merged = merged?;
-    back?;
-    Ok(merged)
+    Ok(())
 }
 
-/// The merge itself, with `merge_into` checked out in the run tree.
-async fn merge_checked_out(
+/// A merge commit of `run_head` into `old`, written to the object store only; a conflict writes
+/// no commit and names the conflicted files.
+async fn merge_commit(
     git: &Git,
     tree: &Path,
     request: &ProjectMergeRequest,
-) -> Result<ProjectMerged, ProjectMergeRefusal> {
-    if can_fast_forward(git, tree, &request.run_branch).await? {
-        git.run(
-            tree,
-            &[
-                "merge",
-                "--ff-only",
-                "--end-of-options",
-                &request.run_branch,
-            ],
-        )
-        .await?;
-    } else {
-        let message = request.commit_message();
-        match git
-            .merge_or_abort(
-                tree,
-                &[
-                    "--no-ff",
-                    "-m",
-                    &message,
-                    "--end-of-options",
-                    &request.run_branch,
-                ],
-            )
-            .await
-        {
-            Ok(()) => {}
-            Err(MergeError::Conflict(files)) => return Err(ProjectMergeRefusal::Conflict(files)),
-            Err(MergeError::Git(error)) => return Err(error.into()),
+    old: &str,
+    run_head: &str,
+) -> Result<String, ProjectMergeRefusal> {
+    let args = [
+        "merge-tree",
+        "--write-tree",
+        "--name-only",
+        "--no-messages",
+        old,
+        run_head,
+    ];
+    let output = git.output(tree, &args).await?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines = stdout.lines();
+    let merged_tree = lines.next().unwrap_or_default().trim().to_string();
+    match output.status.code() {
+        Some(0) if !merged_tree.is_empty() => {}
+        Some(1) => {
+            let mut files: Vec<String> = lines
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect();
+            files.dedup();
+            return Err(ProjectMergeRefusal::Conflict(files));
+        }
+        _ => {
+            return Err(GitError {
+                args: args.join(" "),
+                message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            }
+            .into());
         }
     }
-    Ok(ProjectMerged::Merged {
-        head: head(git, tree).await?,
-    })
+    let message = request.commit_message();
+    Ok(git
+        .run(
+            tree,
+            &[
+                "commit-tree",
+                &merged_tree,
+                "-p",
+                old,
+                "-p",
+                run_head,
+                "-m",
+                &message,
+            ],
+        )
+        .await?)
+}
+
+/// The commit `reference` names.
+async fn commit_of(git: &Git, dir: &Path, reference: &str) -> Result<String, GitError> {
+    git.run(
+        dir,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{reference}^{{commit}}"),
+        ],
+    )
+    .await
 }
 
 /// Whether `ancestor` is an ancestor of `of` (or the same commit).

@@ -1707,9 +1707,10 @@ impl WorkflowEngine {
 }
 
 /// The worktree an outcome path of `key` is relative to: its fan-out branch worktree while that
-/// still holds the file, else the run worktree (where the join merged it).
+/// still holds the file, else the run worktree (where the join merged it). A snapshot, which has
+/// no branch, is the only tree of its run.
 fn source_root(worktree: &RunWorktree, key: &NodeKey, path: &str) -> PathBuf {
-    if let Some((fan, index)) = key.branch.last() {
+    if let Some((fan, index)) = key.branch.last().filter(|_| !worktree.branch.is_empty()) {
         let branch = branch_worktree_path(&worktree.run_dir, fan, *index);
         if branch.join(path).exists() {
             return branch;

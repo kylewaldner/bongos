@@ -254,6 +254,11 @@ impl Runner for AppRunner {
                 format!("join '{join}' was handed an empty branch"),
             ));
         };
+        // A run on a snapshot has no branches: every key ran in the snapshot, so the join has
+        // nothing to merge and no commit to name.
+        if binding.setup.snapshot {
+            return Ok(String::new());
+        }
         merge_into_run(&self.git, &binding.worktree, fan, *index)
     }
 }

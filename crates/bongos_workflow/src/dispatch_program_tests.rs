@@ -1,6 +1,6 @@
 //! Tests of the program node kind: a script run through [`ProgramNodes`] reads its state document
 //! and routes by its result, `@remote` in a node's network list becomes the host of the task
-//! repository's push remote, a program of a snapshot run cannot write the snapshot, and a
+//! repository's push remote, a program of a snapshot run never runs without the OS sandbox, and a
 //! program of a lane run gets the lane's variables and may write its named directories. Each run
 //! test skips when no Python 3.8+ is on `PATH`. The OS sandbox is replaced by a probe that says
 //! it is unavailable; the clock is fake; every directory is a
@@ -282,16 +282,18 @@ open(os.path.join(scratch, 'writes.txt'), 'w').write('\\n'.join(lines))\n\
 with open(os.environ['BONGOS_RESULT'], 'w') as result:\n    \
 json.dump({'status': 'ready'}, result)\n";
 
-/// Runs [`PROBE_SCRIPT`] as the `check` node of `binding` and returns how it finished, what it
-/// saw and what its writes did.
-fn probe(binding: &RunBinding, snapshot: &RunnerSnapshot) -> (Finish, Value, String) {
+/// Starts [`PROBE_SCRIPT`] as the `check` node of `binding`.
+fn start_probe(
+    kind: &mut ProgramNodes,
+    binding: &RunBinding,
+    snapshot: &RunnerSnapshot,
+) -> Result<(), Failure> {
     let definition_dir = binding.attempt_dir.join("definition/0");
     fs::create_dir_all(&definition_dir).unwrap();
     fs::write(definition_dir.join("check.py"), PROBE_SCRIPT).unwrap();
     let definition = parse(PLAIN_FLOW).unwrap();
     let key = NodeKey::new("check", 1);
     let state = RunState::default();
-    let mut kind = kind();
     kind.start(
         &NodeStart {
             run: "run-1",
@@ -305,7 +307,15 @@ fn probe(binding: &RunBinding, snapshot: &RunnerSnapshot) -> (Finish, Value, Str
         binding,
         snapshot,
     )
-    .unwrap();
+    .map(|_| ())
+}
+
+/// Runs [`PROBE_SCRIPT`] as the `check` node of `binding` and returns how it finished, what it
+/// saw and what its writes did.
+fn probe(binding: &RunBinding, snapshot: &RunnerSnapshot) -> (Finish, Value, String) {
+    let mut kind = kind();
+    start_probe(&mut kind, binding, snapshot).unwrap();
+    let key = NodeKey::new("check", 1);
     let deadline = Instant::now() + Duration::from_secs(20);
     let finish = loop {
         if let Some(finish) = kind.poll().pop() {
@@ -334,7 +344,7 @@ fn probe(binding: &RunBinding, snapshot: &RunnerSnapshot) -> (Finish, Value, Str
 }
 
 #[test]
-fn a_program_of_a_snapshot_run_may_write_its_scratch_but_never_the_snapshot() {
+fn a_program_of_a_snapshot_run_never_runs_without_the_os_sandbox() {
     let root = TempDir::new().unwrap();
     let Some(snapshot) = snapshot(root.path()) else {
         return;
@@ -347,25 +357,25 @@ fn a_program_of_a_snapshot_run_may_write_its_scratch_but_never_the_snapshot() {
     binding.worktree.branch = String::new();
     binding.setup.snapshot = true;
 
-    let (finish, seen, writes) = probe(&binding, &snapshot);
-    assert_eq!(seen["env"]["BONGOS_WORKTREE"], json!(tree));
-    assert_eq!(seen["paths"]["worktree"], json!(tree));
-    assert_eq!(seen["paths"]["trees"], json!({}));
-    assert!(
-        seen["env"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .all(|name| !name.starts_with("BONGOS_LANE")),
-        "{seen}"
-    );
-    let failure = finish.outcome.unwrap_err();
+    // The probe says the sandbox is unavailable: the shim alone cannot keep the snapshot
+    // read-only, so the node fails before the script runs.
+    let mut kind = kind();
+    let failure = start_probe(&mut kind, &binding, &snapshot).unwrap_err();
     assert_eq!(failure.reason, FailureReason::PermissionDenied);
-    assert!(failure.detail.contains("changed.txt"), "{}", failure.detail);
+    assert!(
+        failure
+            .detail
+            .starts_with(crate::runner_program::SNAPSHOT_NEEDS_SANDBOX),
+        "{}",
+        failure.detail
+    );
+    assert_eq!(failure.node, Some(NodeKey::new("check", 1)));
+    assert!(kind.poll().is_empty(), "nothing was started");
     assert!(!tree.join("changed.txt").exists());
     assert_eq!(
-        writes,
-        format!("{}: denied", tree.join("changed.txt").display())
+        fs::read_dir(&tree).unwrap().count(),
+        1,
+        "the snapshot is as it was"
     );
 }
 

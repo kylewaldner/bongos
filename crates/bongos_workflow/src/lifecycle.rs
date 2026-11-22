@@ -772,6 +772,40 @@ pub fn project_work_dir(project_dir: &Path, run_id: &str) -> PathBuf {
     project_dir.join(PROJECT_WORK_DIR).join(run_id)
 }
 
+/// The first of `writable` that `snapshot` contains or lies inside, symlinks resolved, so a
+/// read-only snapshot never shares files with a directory its run may write.
+fn snapshot_overlap<'a>(
+    snapshot: &Path,
+    writable: impl IntoIterator<Item = &'a Path>,
+) -> Option<&'a Path> {
+    let snapshot = resolved(snapshot);
+    writable.into_iter().find(|dir| {
+        let dir = resolved(dir);
+        dir.starts_with(&snapshot) || snapshot.starts_with(&dir)
+    })
+}
+
+/// `path` with symlinks resolved as far as it exists; the rest is appended as written.
+fn resolved(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut existing = path;
+    loop {
+        if let Ok(canonical) = existing.canonicalize() {
+            return rest
+                .into_iter()
+                .rev()
+                .fold(canonical, |path, part| path.join(part));
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                existing = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
 /// The directory of a project's files folder holding the per-run work directories.
 pub const PROJECT_WORK_DIR: &str = "work";
 
@@ -1392,13 +1426,28 @@ impl<R: Runner> Lifecycle<R> {
                         "Materialize the snapshot first.",
                     ));
                 }
+                let scratch = project_work_dir(&project_dir, &id);
+                let writable = [project_dir.as_path(), scratch.as_path()]
+                    .into_iter()
+                    .chain(request.lane_dirs.values().map(PathBuf::as_path));
+                if let Some(shared) = snapshot_overlap(path, writable) {
+                    return Err(Refusal::new(
+                        RefusalKind::BadRequest,
+                        format!(
+                            "The snapshot {} overlaps {}, which the run may write.",
+                            path.display(),
+                            shared.display()
+                        ),
+                        "Materialize the snapshot outside the project folder and the lane directories.",
+                    ));
+                }
                 let checkout = TaskCheckout {
                     slug: slug.clone(),
                     worktree: None,
                     branch: None,
                 };
                 let worktree = RunWorktree {
-                    run_dir: project_work_dir(&project_dir, &id),
+                    run_dir: scratch,
                     path: path.clone(),
                     branch: String::new(),
                 };
@@ -1902,9 +1951,13 @@ impl<R: Runner> Lifecycle<R> {
     }
 
     /// The run worktree of `run` and its fan-out branch worktrees (`b-*` in the attempt's
-    /// directory), for editing a halted run by hand.
+    /// directory), for editing a halted run by hand; none for a run on a snapshot.
     pub fn halt_worktrees(&self, run: &str) -> Option<HaltWorktrees> {
         let entry = self.entry(run).ok()?;
+        // A snapshot is read-only to its run: there is nothing to edit by hand.
+        if entry.setup.snapshot {
+            return None;
+        }
         let mut branches: Vec<PathBuf> = fs::read_dir(&entry.worktree.run_dir)
             .into_iter()
             .flatten()
@@ -2182,9 +2235,12 @@ impl<R: Runner> Lifecycle<R> {
             .node(&finished.key.node)
             .map(|node| agent_of(definition, node))
             .unwrap_or(AgentKind::Claude);
+        // Every key of a run on a snapshot ran in the snapshot.
         let directory = match finished.key.branch.last() {
-            Some((fan, index)) => branch_worktree_path(&entry.worktree.run_dir, fan, *index),
-            None => entry.worktree.path.clone(),
+            Some((fan, index)) if !entry.setup.snapshot => {
+                branch_worktree_path(&entry.worktree.run_dir, fan, *index)
+            }
+            _ => entry.worktree.path.clone(),
         };
         let resume = match kind {
             AgentKind::Claude => format!("claude --resume {}", shell_quote(session)),

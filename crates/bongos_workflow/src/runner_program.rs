@@ -141,6 +141,10 @@ pub const MIN_PYTHON: (u32, u32) = (3, 8);
 /// What to do when no usable interpreter is found.
 pub const INTERPRETER_FIX: &str = "install Python 3.8+ or set workflows.programs.python";
 
+/// Why a program of a snapshot run does not start when the OS sandbox is unavailable.
+pub const SNAPSHOT_NEEDS_SANDBOX: &str =
+    "a program of a snapshot run needs the OS sandbox to keep the snapshot read-only";
+
 /// Why a node with MCP permissions does not start in v1.
 pub const MCP_REFUSAL: &str = "MCP from program nodes needs the bongos MCP server (feature 21)";
 
@@ -1505,12 +1509,7 @@ impl ProgramRunner {
             sandbox_note,
         } = self
             .wrap(&node, path(&self.interpreter.program), args, env)
-            .map_err(|error| {
-                refuse(
-                    FailureReason::PermissionDenied,
-                    format!("could not hide the reflogs in the sandbox: {error}"),
-                )
-            })?;
+            .map_err(|error| refuse(FailureReason::PermissionDenied, error))?;
         let git = GitGuard::take(&node, sandbox.is_some());
         write_summary(&dir, &json!({ "pass": number, "sandbox": sandbox_note }));
 
@@ -1583,7 +1582,8 @@ impl ProgramRunner {
 
     /// The command to spawn: inside the OS sandbox when it can be created, else as it is with
     /// the reason it is not sandboxed. A sandbox that can be created but whose reflog directories
-    /// cannot be covered refuses the start (the error) rather than running without it.
+    /// cannot be covered, and a read-only worktree with no sandbox, refuse the start (the error)
+    /// rather than running without it.
     fn wrap(
         &self,
         node: &ProgramNode,
@@ -1614,7 +1614,9 @@ impl ProgramRunner {
             let mut wrapped = futures::executor::block_on(sandbox.wrap(&command))
                 .map_err(|error| error.to_string())?;
             if let Err(error) = hide_in_bubblewrap(&mut wrapped.args, &hidden) {
-                refused = Some(error.clone());
+                refused = Some(format!(
+                    "could not hide the reflogs in the sandbox: {error}"
+                ));
                 return Err(error);
             }
             Ok((wrapped, sandbox))
@@ -1630,6 +1632,11 @@ impl ProgramRunner {
                 sandbox: Some(sandbox),
                 sandbox_note: "sandboxed".to_string(),
             },
+            // Only the OS sandbox keeps a snapshot read-only: the shim alone lets listed
+            // commands write it, so such a program never runs without the sandbox.
+            Err(reason) if node.read_only_worktree => {
+                return Err(format!("{SNAPSHOT_NEEDS_SANDBOX}: {reason}"));
+            }
             Err(reason) => {
                 log::warn!("workflows: a program runs without the OS sandbox: {reason}");
                 Launch {
