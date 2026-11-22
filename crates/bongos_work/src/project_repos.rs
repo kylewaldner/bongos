@@ -41,6 +41,11 @@ impl OpenProjectRepos {
         cx.default_global::<Self>().clone()
     }
 
+    /// [`Self::list`] of the app's list, for a caller that cannot create it.
+    pub fn listed(cx: &App) -> Vec<Arc<LoadedProject>> {
+        open_repos(cx)
+    }
+
     /// Every project repository registered with [`register_project_repo`], now.
     pub fn list(&self) -> Vec<Arc<LoadedProject>> {
         self.0.lock().clone()

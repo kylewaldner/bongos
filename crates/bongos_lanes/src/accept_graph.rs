@@ -7,10 +7,11 @@
 use anyhow::{Context as _, Result, anyhow, bail};
 use bongos_lanes_model::{LiveFacts, StampFile, from_work_tree, parse, stamp};
 use bongos_project_repo::{
-    CommitId, LandMode, LandRequest, LandingResult, ProjectRepo, TreeRef, clean_name, fresh_name,
+    CommitId, HostBoundary, LandMode, LandRequest, LandingResult, PeerIdentity, PersonClaim,
+    ProjectRepo, RepoCommand, TreeRef, clean_name, fresh_name,
 };
-use bongos_project_repo_model::ChangeMeta;
 use bongos_project_repo_model::layout::DEFINITIONS_DIR;
+use bongos_project_repo_model::{Author, ChangeMeta};
 use bongos_work_model::commands::Context as WorkContext;
 use chrono::{DateTime, Utc};
 use gpui::{App, AppContext as _, Task};
@@ -30,6 +31,9 @@ pub enum Accepted {
     Landed { commit: String, digest: String },
     /// Master already records this stamp; nothing was made.
     Unchanged { digest: String },
+    /// The change is made and waits for a person's approval: the request did not come from a
+    /// window that may speak for a person.
+    Waiting { change_id: String, digest: String },
 }
 
 /// The path of `stamp.toml` in the repository.
@@ -38,7 +42,11 @@ pub fn stamp_path() -> String {
 }
 
 /// The text of the file at `path` in `commit`, `None` when it has none.
-async fn file_at(repo: &ProjectRepo, commit: &str, path: &str) -> Result<Option<String>> {
+pub(crate) async fn file_at(
+    repo: &ProjectRepo,
+    commit: &str,
+    path: &str,
+) -> Result<Option<String>> {
     let repository = &repo.location().repository;
     let listed = repo
         .git()
@@ -103,13 +111,35 @@ pub async fn accept_graph_now(
     branch_prefix: &str,
     now: DateTime<Utc>,
 ) -> Result<Accepted> {
+    let author = ctx.author.clone();
+    let (change_id, digest) = match stage_stamp(repo, author.clone(), branch_prefix, now).await? {
+        Ok(staged) => staged,
+        Err(done) => return Ok(done),
+    };
+    let request = LandRequest {
+        meta: ChangeMeta::new(ACCEPT_SUBJECT, author),
+        mode: LandMode::Land,
+    };
+    match repo.land_as_person(&change_id, request, ctx, now).await? {
+        LandingResult::Landed { commit } => Ok(Accepted::Landed { commit, digest }),
+        other => bail!("the stamp did not land: {other:?}"),
+    }
+}
+
+/// Makes the working copy that holds the stamp of master as `author`. Resolves with its change id
+/// and the stamp's digest, or with `Unchanged` when master already records the stamp.
+async fn stage_stamp(
+    repo: &ProjectRepo,
+    author: Author,
+    branch_prefix: &str,
+    now: DateTime<Utc>,
+) -> Result<std::result::Result<(String, String), Accepted>> {
     let master = repo.shown_commit().await?.0;
     let file = stamp_at(repo, &master).await?;
     let digest = file.digest.clone();
     if read_stamp(repo, &master).await?.as_ref() == Some(&file) {
-        return Ok(Accepted::Unchanged { digest });
+        return Ok(Err(Accepted::Unchanged { digest }));
     }
-    let author = ctx.author.clone();
     let copy = repo
         .create_working_copy(&clean_name(&fresh_name())?, branch_prefix, &author, now)
         .await?;
@@ -123,15 +153,50 @@ pub async fn accept_graph_now(
             .with_context(|| format!("creating {}", parent.display()))?;
     }
     std::fs::write(&path, file.render()?).with_context(|| format!("writing {}", path.display()))?;
+    Ok(Ok((copy.change_id, digest)))
+}
+
+/// `lanes: accept graph` as the writer runs it for `peer`: the stamp lands as a person's own
+/// change only when `peer` may attest a person (a window of this executable) and sent a claim;
+/// from any other peer the change waits for a person's approval ([`Accepted::Waiting`]).
+pub async fn accept_graph_for_peer(
+    repo: &ProjectRepo,
+    claim: Option<PersonClaim>,
+    peer: &PeerIdentity,
+    branch_prefix: &str,
+    now: DateTime<Utc>,
+) -> Result<Accepted> {
+    let author = match (&claim, peer.may_attest_person()) {
+        // A person read back is only a claim (`AuthorKind::PersonClaimed`); the grant, given
+        // below for a peer that may attest one, is what makes the landing the person's own.
+        (Some(claim), true) => {
+            serde_json::from_value(serde_json::json!({ "kind": "person", "name": claim.name }))?
+        }
+        (Some(claim), false) => Author::unattributed(claim.name.clone()),
+        (None, _) => Author::unattributed("lanes"),
+    };
+    let (change_id, digest) = match stage_stamp(repo, author.clone(), branch_prefix, now).await? {
+        Ok(staged) => staged,
+        Err(done) => return Ok(done),
+    };
     let request = LandRequest {
         meta: ChangeMeta::new(ACCEPT_SUBJECT, author),
         mode: LandMode::Land,
     };
-    match repo
-        .land_as_person(&copy.change_id, request, ctx, now)
-        .await?
-    {
-        LandingResult::Landed { commit } => Ok(Accepted::Landed { commit, digest }),
-        other => bail!("the stamp did not land: {other:?}"),
+    HostBoundary::new(repo.clone())
+        .accept_now(
+            RepoCommand::Land {
+                change_id: change_id.clone(),
+                request,
+                person: claim,
+            },
+            peer,
+            now,
+        )
+        .await?;
+    match repo.landing_result(&change_id)? {
+        Some(LandingResult::Landed { commit }) => Ok(Accepted::Landed { commit, digest }),
+        Some(other) => bail!("the stamp did not land: {other:?}"),
+        None => Ok(Accepted::Waiting { change_id, digest }),
     }
 }

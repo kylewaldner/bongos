@@ -167,6 +167,7 @@ bongos_chat.workspace = true
 bongos_chat_model.workspace = true
 bongos_checks.workspace = true
 bongos_emacs.workspace = true
+bongos_engine_host.workspace = true
 bongos_extensions.workspace = true
 bongos_isearch.workspace = true
 bongos_java.workspace = true
