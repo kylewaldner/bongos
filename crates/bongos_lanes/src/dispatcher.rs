@@ -242,8 +242,13 @@ pub trait LanesHost {
 /// The run engine as the dispatcher uses it: [`WorkflowEngine`] in the app.
 pub trait JobEngine {
     fn start(&self, request: StartRequest, cx: &mut App) -> Result<RunId, Refusal>;
-    /// Whether a run with this id exists (it started).
+    /// Whether a run with this id is loaded in the engine now.
     fn knows(&self, run: &str) -> bool;
+    /// Whether a run with this id has a record on disk, loaded or not: `false` only for a run
+    /// that never started. One the engine could not load (a damaged log, a duplicate) still has
+    /// its record. When it cannot be told this is `true`, so a job is never taken for unstarted
+    /// on doubt.
+    fn has_record(&self, run: &str, cx: &App) -> bool;
     /// The active runs of the workflow definition `workflow`.
     fn active_runs_of(&self, workflow: &str) -> Vec<RunId>;
     /// The definition's `instances`; `None` is unlimited.
@@ -264,6 +269,10 @@ impl JobEngine for WorkflowEngine {
 
     fn knows(&self, run: &str) -> bool {
         self.lifecycle().status(run).is_some()
+    }
+
+    fn has_record(&self, run: &str, cx: &App) -> bool {
+        self.run_recorded(run, cx).unwrap_or(true)
     }
 
     fn active_runs_of(&self, workflow: &str) -> Vec<RunId> {
@@ -507,10 +516,11 @@ fn start_verified(
         ended: None,
     };
     let extensions = PickExtensions::extensions(cx);
+    let app: &App = cx;
     with_engine(&parts.engine, || {
         parts.writer.transact(|tx| {
             put_dispatcher(tx, &record)?;
-            clear_unstarted(tx, &*parts.engine, &extensions, &now)?;
+            clear_unstarted(tx, &*parts.engine, &extensions, &now, app)?;
             reconcile(tx, &counts)
         })
     })
@@ -579,18 +589,23 @@ pub const NOT_STARTED_BEFORE_A_CRASH: &str = "not started before a crash";
 /// start): the lane is idle again and its owner record stays, so the same lane continues the
 /// task. An extension job's extensions hear [`JobChange::NotStarted`] first and may decide the
 /// lane instead. Only called when no live host runs a dispatcher, so no start is in flight.
+///
+/// A job is unstarted only when its run has no record on disk ([`JobEngine::has_record`]), never
+/// merely because the engine did not load the run: a started run the engine skipped (a damaged
+/// log) keeps its job, so an extension never hands out the same work twice.
 fn clear_unstarted(
     tx: &mut StateTx,
     engine: &dyn JobEngine,
     extensions: &[Arc<dyn PickExtension>],
     now: &str,
+    cx: &App,
 ) -> Result<()> {
     let state = read_state_in(tx)?;
     for (id, lane) in &state.lanes {
         let Some(job) = &lane.job else {
             continue;
         };
-        if engine.knows(&job.run_id) {
+        if engine.has_record(&job.run_id, cx) {
             continue;
         }
         log::info!("lanes: {id} reserved run {} that never started", job.run_id);

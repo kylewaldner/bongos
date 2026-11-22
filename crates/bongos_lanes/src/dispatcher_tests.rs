@@ -161,6 +161,8 @@ pub(crate) struct FakeEngine {
     jobs: RefCell<Vec<(StartRequest, LanesState)>>,
     dispatcher_starts: RefCell<Vec<StartRequest>>,
     status: RefCell<BTreeMap<String, (String, RunStatus)>>,
+    /// Runs with a record on disk that the engine did not load (a damaged log, say).
+    pub(crate) unloaded: RefCell<BTreeSet<String>>,
     limits: BTreeMap<String, u32>,
     /// The next job start is refused with this.
     refuse: RefCell<Option<Refusal>>,
@@ -193,6 +195,10 @@ impl JobEngine for FakeEngine {
 
     fn knows(&self, run: &str) -> bool {
         self.status.borrow().contains_key(run)
+    }
+
+    fn has_record(&self, run: &str, _cx: &App) -> bool {
+        self.knows(run) || self.unloaded.borrow().contains(run)
     }
 
     fn active_runs_of(&self, workflow: &str) -> Vec<RunId> {
@@ -274,6 +280,7 @@ fn fake_engine(writer: &Arc<StateWriter>, limits: &[(&str, u32)]) -> Rc<FakeEngi
         jobs: RefCell::new(Vec::new()),
         dispatcher_starts: RefCell::new(Vec::new()),
         status: RefCell::new(BTreeMap::new()),
+        unloaded: RefCell::new(BTreeSet::new()),
         limits: limits
             .iter()
             .map(|(name, limit)| (name.to_string(), *limit))
