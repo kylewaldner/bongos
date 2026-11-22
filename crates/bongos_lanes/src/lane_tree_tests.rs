@@ -875,7 +875,10 @@ async fn a_restart_on_the_same_run_branch_keeps_the_failed_runs_work(cx: &mut Te
         first.head
     );
     // The run branch is back at its start, and the tree is clean on it.
-    assert_eq!(git(&fixture.app, &["rev-parse", &job.run_branch]), first.head);
+    assert_eq!(
+        git(&fixture.app, &["rev-parse", &job.run_branch]),
+        first.head
+    );
     assert_eq!(current_branch(&tip), job.run_branch);
     assert_eq!(git(&tip, &["status", "--porcelain"]), "");
 }
