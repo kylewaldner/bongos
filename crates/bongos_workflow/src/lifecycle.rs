@@ -18,6 +18,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use bongos_project_repo::CommitId;
 use bongos_work::ActiveRun;
 use bongos_work_model::derive::{self, Shape};
 use bongos_work_model::store::{Task, WorkTree};
@@ -25,11 +26,12 @@ use bongos_work_model::{TodoState, new_id, now};
 use bongos_workflow_model::definition::{AgentKind, Node, NodeKind};
 use bongos_workflow_model::layers::DEFINITION_FILE;
 use bongos_workflow_model::record::{
-    Attempt, EndState, RUN_SCHEMA, RecordedInput, StartedBy, TodoRef,
+    Attempt, EndState, RUN_SCHEMA, RecordedInput, StartedBy, TodoRef, is_uuid_v7,
 };
 use bongos_workflow_model::{
-    Definition, InputValue, Layer, LayerDirs, NodeKey, RunState, RunToml, ValidationContext,
-    check_fresh_retry, parse, retry_set, schema,
+    Definition, EnvEdit, InputValue, LaneRef, Layer, LayerDirs, NodeKey, RunState, RunSubject,
+    RunToml, UnattendedChoice, ValidationContext, check_fresh_retry, parse,
+    project_subject_problems, retry_set, schema,
 };
 use serde_json::Value;
 
@@ -51,29 +53,121 @@ pub const BY_PERSON: &str = "person";
 /// The heading a revision comment goes under in the node's prompt.
 pub const REVISION_HEADING: &str = "Revision requested:";
 
-/// What `start` is asked to start.
+/// What a start runs on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartSubject {
+    /// A task, completing its todo at `todo_index`; `None` is the task's current todo (the first
+    /// open one).
+    Task {
+        id: String,
+        todo_index: Option<usize>,
+    },
+    /// A whole project: a run with no task and no todo.
+    Project { id: String },
+}
+
+impl StartSubject {
+    /// The task id, `None` for a project subject.
+    pub fn task_id(&self) -> Option<&str> {
+        match self {
+            Self::Task { id, .. } => Some(id),
+            Self::Project { .. } => None,
+        }
+    }
+}
+
+/// The tree a run works in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunTree {
+    /// A new run worktree. For a task run every field is `None`: the worktree is made from the
+    /// task's own repository and branch, as it always was.
+    Fresh {
+        repo: Option<PathBuf>,
+        base: Option<String>,
+        merge_into: Option<String>,
+    },
+    /// A lane's tree at `path`. `base` is the second tree's path, `start` the ref the run branch
+    /// is created from and `merge_into` the branch the success merge targets.
+    Lane {
+        path: PathBuf,
+        base: Option<PathBuf>,
+        start: Option<String>,
+        merge_into: Option<String>,
+    },
+    /// A tree materialized at `path` that the run reads and never writes.
+    Snapshot { path: PathBuf },
+}
+
+impl Default for RunTree {
+    fn default() -> Self {
+        Self::Fresh {
+            repo: None,
+            base: None,
+            merge_into: None,
+        }
+    }
+}
+
+/// What `start` is asked to start. A request that sets none of the fields after `started_by` (as
+/// [`StartRequest::new`] leaves them) starts a task run exactly as it always did.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StartRequest {
-    pub task_id: String,
-    /// The todo the run completes; `None` is the task's current todo (the first open one).
-    pub todo_index: Option<usize>,
+    pub subject: StartSubject,
     /// The workflow to run; `None` is the one the todo names.
     pub workflow: Option<String>,
     /// Input values that win over the definition's sources.
     pub overrides: BTreeMap<String, InputValue>,
     pub started_by: StartedBy,
+    /// The id the run is to have, reserved by the caller; `None` makes a new one.
+    pub run_id: Option<RunId>,
+    /// The run that starts this one.
+    pub parent: Option<String>,
+    pub lane: Option<LaneRef>,
+    pub tree: RunTree,
+    /// Edits to the environment of the run's nodes, applied in order (carried, not applied yet).
+    pub env: Vec<EnvEdit>,
+    pub unattended: Option<UnattendedChoice>,
+    /// The commit of the project repository whose definitions the first attempt reads, instead of
+    /// the verified commit. The caller reads the layers at it ([`StartContext::definition_commit`]
+    /// must be this commit).
+    pub definition_commit: Option<CommitId>,
 }
 
 impl StartRequest {
     /// Kyle starts the todo's own workflow on the current todo of `task_id`.
     pub fn new(task_id: impl Into<String>) -> Self {
-        Self {
-            task_id: task_id.into(),
+        Self::on(StartSubject::Task {
+            id: task_id.into(),
             todo_index: None,
+        })
+    }
+
+    /// A start on the project `project_id`, with no task.
+    pub fn project(project_id: impl Into<String>) -> Self {
+        Self::on(StartSubject::Project {
+            id: project_id.into(),
+        })
+    }
+
+    fn on(subject: StartSubject) -> Self {
+        Self {
+            subject,
             workflow: None,
             overrides: BTreeMap::new(),
             started_by: StartedBy::Person,
+            run_id: None,
+            parent: None,
+            lane: None,
+            tree: RunTree::default(),
+            env: Vec::new(),
+            unattended: None,
+            definition_commit: None,
         }
+    }
+
+    /// The task the run is on; `None` for a project subject.
+    pub fn task_id(&self) -> Option<&str> {
+        self.subject.task_id()
     }
 }
 
@@ -81,6 +175,15 @@ impl StartRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefusalKind {
     UnknownTask,
+    UnknownProject,
+    /// The request asks for something this version cannot do yet (a lane or snapshot tree, a run
+    /// with no task, a dispatcher started as a run).
+    Unsupported,
+    /// The request itself is wrong: a reserved run id that is not a UUID v7 or is taken, or a
+    /// definition commit the layers were not read from.
+    BadRequest,
+    /// A run with no task was asked to run a workflow that reads the task.
+    NeedsTask,
     Group,
     NoOpenTodo,
     ActiveRun,
@@ -698,7 +801,10 @@ impl<R: Runner> Lifecycle<R> {
             .map_err(Refusal::runtime)
     }
 
-    /// Starts a run on the task and todo of `request`. Refused, in this order: a group, no open
+    /// Starts a run on the task and todo of `request`. A request whose own fields cannot be
+    /// honored (a lane or snapshot tree, a taken or malformed run id, a definition commit the
+    /// layers were not read from) is refused first, and a project subject goes to
+    /// [`Self::start_project`]. Then refused, in this order: a group, no open
     /// todo, an active run, an unknown workflow, a definition with errors, a missing required
     /// input, an agent CLI that cannot run, a missing interpreter, an allowed MCP server not
     /// installed, too little free space, no task worktree. Nothing is written before every check
@@ -709,11 +815,19 @@ impl<R: Runner> Lifecycle<R> {
         dirs: &LayerDirs,
         context: &StartContext<'_>,
     ) -> Result<RunId, Refusal> {
+        self.check_request(&request, context)?;
+        let (task_id, todo_index) = match &request.subject {
+            StartSubject::Task { id, todo_index } => (id.clone(), *todo_index),
+            StartSubject::Project { id } => {
+                let id = id.clone();
+                return self.start_project(request, &id, dirs, context);
+            }
+        };
         let tree = context.tree;
-        let task = tree.task_by_id(&request.task_id).ok_or_else(|| {
+        let task = tree.task_by_id(&task_id).ok_or_else(|| {
             Refusal::new(
                 RefusalKind::UnknownTask,
-                format!("No task {} is loaded.", request.task_id),
+                format!("No task {task_id} is loaded."),
                 "Pick a task in the Work view.",
             )
         })?;
@@ -724,7 +838,7 @@ impl<R: Runner> Lifecycle<R> {
                 "Pick a leaf, or use `task: run`.",
             ));
         }
-        let (todo_index, todo) = open_todo(task, request.todo_index).ok_or_else(|| {
+        let (todo_index, todo) = open_todo(task, todo_index).ok_or_else(|| {
             Refusal::new(
                 RefusalKind::NoOpenTodo,
                 "This task has no open todo for a workflow to complete.",
@@ -732,7 +846,7 @@ impl<R: Runner> Lifecycle<R> {
             )
         })?;
         let reported = context.active_run.clone();
-        if let Some(refusal) = self.active_refusal(&request.task_id, reported) {
+        if let Some(refusal) = self.active_refusal(&task_id, reported) {
             return Err(refusal);
         }
         let name = request
@@ -752,23 +866,15 @@ impl<R: Runner> Lifecycle<R> {
             context.checks.validation(),
             Some(context.checks),
         )?;
-        let inputs = bongos_workflow_model::resolve(
+        refuse_dispatcher(&name, &definition)?;
+        let inputs = start_inputs(
+            &name,
             &definition,
-            task,
+            Some(task),
             tree,
             Some(todo_index),
             &request.overrides,
-        );
-        if let Some(missing) = inputs.iter().find(|input| input.missing) {
-            return Err(Refusal::new(
-                RefusalKind::MissingInput,
-                format!(
-                    "Workflow '{name}' needs the input '{}' (from {}), which has no value.",
-                    missing.name, missing.source
-                ),
-                "Fill it in on the task, or give it when starting.",
-            ));
-        }
+        )?;
         check_machine(&definition, context.checks)?;
 
         let file = task.file.as_ref().ok_or_else(|| {
@@ -779,7 +885,7 @@ impl<R: Runner> Lifecycle<R> {
             )
         })?;
         let checkout = TaskCheckout::from_task(task.slug.clone(), file);
-        let id = new_id();
+        let id = request.run_id.clone().unwrap_or_else(new_id);
         let worktree = self.create_worktree(&checkout, &id, 1)?;
         let dir = task.dir.join(RUNS_DIR).join(&id);
         let created = now().to_string();
@@ -788,13 +894,19 @@ impl<R: Runner> Lifecycle<R> {
             id: id.clone(),
             workflow: name,
             layer: resolved.layer.label().to_string(),
-            task_id: request.task_id.clone(),
+            subject: RunSubject::Task {
+                id: task_id.clone(),
+            },
+            task_id: task_id.clone(),
             created: created.clone(),
             started_by: request.started_by,
-            todo: TodoRef {
+            parent: request.parent.clone(),
+            lane: request.lane.clone(),
+            unattended: request.unattended,
+            todo: Some(TodoRef {
                 index: todo_index,
                 name: todo.name.clone(),
-            },
+            }),
             inputs: inputs
                 .into_iter()
                 .map(|input| RecordedInput {
@@ -807,7 +919,7 @@ impl<R: Runner> Lifecycle<R> {
         };
         let mut entry = RunEntry {
             id: id.clone(),
-            task_id: request.task_id,
+            task_id,
             task: checkout,
             dir,
             record,
@@ -822,6 +934,113 @@ impl<R: Runner> Lifecycle<R> {
         self.runs.push(entry);
         self.note(&id);
         Ok(id)
+    }
+
+    /// The checks of a request's own fields, before anything is read: a tree this version cannot
+    /// make yet, a reserved run id that is not a UUID v7 or is taken, and a definition commit the
+    /// caller did not read the layers from. A request that sets none of these passes.
+    fn check_request(
+        &self,
+        request: &StartRequest,
+        context: &StartContext<'_>,
+    ) -> Result<(), Refusal> {
+        match (&request.tree, &request.subject) {
+            (
+                RunTree::Fresh {
+                    repo: None,
+                    base: None,
+                    merge_into: None,
+                },
+                _,
+            )
+            | (RunTree::Fresh { .. }, StartSubject::Project { .. }) => {}
+            (RunTree::Fresh { .. }, StartSubject::Task { .. }) => {
+                return Err(unsupported(
+                    "A task run makes its worktree from the task's own repository and branch.",
+                ));
+            }
+            (RunTree::Lane { .. }, _) => {
+                return Err(unsupported("A run in a lane's tree is not supported yet."));
+            }
+            (RunTree::Snapshot { .. }, _) => {
+                return Err(unsupported(
+                    "A run on a snapshot tree is not supported yet.",
+                ));
+            }
+        }
+        if let Some(id) = &request.run_id {
+            if !is_uuid_v7(id) {
+                return Err(Refusal::new(
+                    RefusalKind::BadRequest,
+                    format!("The run id '{id}' is not a UUID v7."),
+                    "Reserve a new run id.",
+                ));
+            }
+            if self.runs.iter().any(|entry| &entry.id == id) {
+                return Err(Refusal::new(
+                    RefusalKind::BadRequest,
+                    format!("A run {id} already exists."),
+                    "Reserve a new run id.",
+                ));
+            }
+        }
+        if let Some(commit) = &request.definition_commit
+            && context.definition_commit.as_deref() != Some(commit.0.as_str())
+        {
+            return Err(Refusal::new(
+                RefusalKind::BadRequest,
+                format!(
+                    "The run asks for the definitions of commit {}, which were not read.",
+                    commit.0
+                ),
+                "Start it from a project whose repository has that commit.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// A start with a project subject: the project must be loaded, the workflow named, and every
+    /// input given in `overrides` or `literal:`; a workflow with a `task.*` or `todo.*` input is
+    /// refused naming it. The run itself cannot start yet: its tree is a later addition.
+    fn start_project(
+        &mut self,
+        request: StartRequest,
+        project_id: &str,
+        dirs: &LayerDirs,
+        context: &StartContext<'_>,
+    ) -> Result<RunId, Refusal> {
+        let tree = context.tree;
+        if project_task(tree, project_id).is_none() {
+            return Err(Refusal::new(
+                RefusalKind::UnknownProject,
+                format!("No project {project_id} is loaded."),
+                "Pick a project in the Work view.",
+            ));
+        }
+        let name = request.workflow.clone().ok_or_else(|| {
+            Refusal::new(
+                RefusalKind::UnknownWorkflow,
+                "A run with no task has no todo to name its workflow.",
+                "Name the workflow when starting.",
+            )
+        })?;
+        let (_, definition) = load_definition(
+            dirs,
+            &name,
+            context.checks.validation(),
+            Some(context.checks),
+        )?;
+        refuse_dispatcher(&name, &definition)?;
+        if let Some(problem) = project_subject_problems(&definition).into_iter().next() {
+            return Err(Refusal::new(
+                RefusalKind::NeedsTask,
+                problem.message,
+                "Start it on a task, or pick a workflow that does not read one.",
+            ));
+        }
+        start_inputs(&name, &definition, None, tree, None, &request.overrides)?;
+        check_machine(&definition, context.checks)?;
+        Err(unsupported("A run with no task cannot start yet."))
     }
 
     /// Loads the runs a relaunch finds: `runs/<id>/run.toml` under every task directory of `tree`.
@@ -1710,6 +1929,67 @@ pub(crate) fn open_todo(
             .enumerate()
             .find(|(_, todo)| todo.state == TodoState::Open),
     }
+}
+
+fn unsupported(message: &str) -> Refusal {
+    Refusal::new(RefusalKind::Unsupported, message, "")
+}
+
+/// The top group of the project `id` in `tree`.
+fn project_task<'a>(tree: &'a WorkTree, id: &str) -> Option<&'a Task> {
+    tree.projects
+        .iter()
+        .map(|project| &project.task)
+        .find(|task| task.id() == Some(id))
+}
+
+/// A dispatcher is never started as a run: it has no nodes for the scheduler to drive.
+fn refuse_dispatcher(name: &str, definition: &Definition) -> Result<(), Refusal> {
+    if definition.dispatcher {
+        return Err(Refusal::new(
+            RefusalKind::Unsupported,
+            format!("Workflow '{name}' is a dispatcher; it is not started as a run."),
+            "Pick another workflow.",
+        ));
+    }
+    Ok(())
+}
+
+/// The inputs of a start, resolved for `task` (none for a project subject): refused when one
+/// reads a task the run does not have, or when a required one has no value.
+fn start_inputs(
+    name: &str,
+    definition: &Definition,
+    task: Option<&Task>,
+    tree: &WorkTree,
+    todo: Option<usize>,
+    overrides: &BTreeMap<String, InputValue>,
+) -> Result<Vec<bongos_workflow_model::inputs::Input>, Refusal> {
+    let inputs = bongos_workflow_model::resolve(definition, task, tree, todo, overrides).map_err(
+        |error| {
+            Refusal::new(
+                RefusalKind::NeedsTask,
+                error.to_string(),
+                "Start it on a task, or pick a workflow that does not read one.",
+            )
+        },
+    )?;
+    if let Some(missing) = inputs.iter().find(|input| input.missing) {
+        let fix = if task.is_some() {
+            "Fill it in on the task, or give it when starting."
+        } else {
+            "Give it when starting."
+        };
+        return Err(Refusal::new(
+            RefusalKind::MissingInput,
+            format!(
+                "Workflow '{name}' needs the input '{}' (from {}), which has no value.",
+                missing.name, missing.source
+            ),
+            fix,
+        ));
+    }
+    Ok(inputs)
 }
 
 /// Resolves and checks the definition `name` against `base` (the settings' context, so

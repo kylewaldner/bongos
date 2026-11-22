@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use bongos_chat::model::Agent;
 use bongos_chat::{AgentCommand, ChatHealth, Health, HealthState};
-use bongos_project_repo::{ActivitySources, LiveSources, ProjectRepo, SnapshotReason};
+use bongos_project_repo::{ActivitySources, CommitId, LiveSources, ProjectRepo, SnapshotReason};
 use bongos_work::{ActiveRun, LiveModesRegistry, NeedsYouRegistry};
 use bongos_work_model::commands::Context as WorkContext;
 use bongos_work_model::layout::WORKFLOWS_DIR;
@@ -54,8 +54,8 @@ use crate::dispatch::{AppRunner, RunnerInputs, RunnerSnapshot};
 use crate::landing::{LandingRunEnd, LandingRuns, set_landing_runs};
 use crate::lifecycle::{
     ClearOutcome, ClearedRun, GateField, GitWorktrees, HaltWorktrees, Lifecycle, Refusal,
-    RefusalKind, RunId, RunStatus, StartChecks, StartContext, StartRequest, WorkflowEvent,
-    find_cleared,
+    RefusalKind, RunId, RunStatus, StartChecks, StartContext, StartRequest, StartSubject,
+    WorkflowEvent, find_cleared,
 };
 use crate::mcp::{self, McpCache};
 use crate::outcomes::{self, Delivered, Reported, RunOutcome};
@@ -637,11 +637,34 @@ impl WorkflowEngine {
     /// until the result is dropped. An old-format task, or none, gets the engine's layers as
     /// they are.
     pub fn dirs_for(&self, task: Option<&Task>, cx: &App) -> Result<TaskDirs, Refusal> {
+        self.dirs_at(task, None, cx)
+    }
+
+    /// [`Self::dirs_for`] with the project layer read from `commit` instead of the verified
+    /// commit when one is given; a task with no project repository cannot honor it.
+    pub fn dirs_at(
+        &self,
+        task: Option<&Task>,
+        commit: Option<CommitId>,
+        cx: &App,
+    ) -> Result<TaskDirs, Refusal> {
         let mut dirs = self.dirs.clone();
         let repo = task.and_then(|task| bongos_work::project_repo_of(task, cx));
+        if let Some(commit) = &commit
+            && repo.is_none()
+        {
+            return Err(Refusal::new(
+                RefusalKind::BadRequest,
+                format!(
+                    "The run asks for the definitions of commit {}, but its project has no repository.",
+                    commit.0
+                ),
+                "Start it without a definition commit.",
+            ));
+        }
         let layer = match repo
             .as_ref()
-            .map(|repo| project_layer_in(repo, None))
+            .map(|repo| project_layer_in(repo, commit.clone()))
             .transpose()
         {
             Ok(layer) => layer,
@@ -821,17 +844,28 @@ impl WorkflowEngine {
     ) -> Result<RunId, Refusal> {
         // The runs on disk are loaded before any new one exists, so the load never meets it.
         self.load_runs_once(cx);
-        let start = LiveModesRegistry::can_start_run(&request.task_id, cx);
-        let active_run = if start.allowed {
-            None
-        } else {
-            LiveModesRegistry::live_modes(&request.task_id, cx).run
-        };
+        // A run with no task holds no task, so no other source's run can refuse it.
+        let active_run = request.task_id().and_then(|task_id| {
+            if LiveModesRegistry::can_start_run(task_id, cx).allowed {
+                None
+            } else {
+                LiveModesRegistry::live_modes(task_id, cx).run
+            }
+        });
         let checks = AppChecks::read(&self.mcp.cache, cx);
         let settings = WorkflowsSettings::get_global(cx).clone();
-        // The project layer is read from the verified commit and stays materialized until the
-        // run's definition has been copied into its first attempt.
-        let task_dirs = self.dirs_for(tree.task_by_id(&request.task_id), cx)?;
+        // The project layer is read from the verified commit, or the commit the request names,
+        // and stays materialized until the run's definition has been copied into its first
+        // attempt.
+        let subject_task = match &request.subject {
+            StartSubject::Task { id, .. } => tree.task_by_id(id),
+            StartSubject::Project { id } => tree
+                .projects
+                .iter()
+                .map(|project| &project.task)
+                .find(|task| task.id() == Some(id.as_str())),
+        };
+        let task_dirs = self.dirs_at(subject_task, request.definition_commit.clone(), cx)?;
         if let Some(repo) = &task_dirs.repo {
             self.refuse_held(repo)?;
         }
@@ -906,7 +940,7 @@ impl WorkflowEngine {
         let record = lifecycle.record(run)?;
         Some((
             record.task_id.clone(),
-            record.todo.clone(),
+            record.todo.clone()?,
             record.workflow.clone(),
         ))
     }
@@ -1378,7 +1412,7 @@ impl WorkflowEngine {
             (
                 record.workflow.clone(),
                 record.task_id.clone(),
-                record.todo.clone(),
+                record.todo.clone()?,
                 lifecycle.runtime().definition(run)?.clone(),
                 lifecycle.state(run)?,
                 lifecycle.task_checkout(run)?.clone(),

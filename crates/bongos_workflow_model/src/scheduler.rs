@@ -152,9 +152,9 @@ fn closes_unbounded_cycle(
     let mut found = None;
     visit(
         definition,
-        &definition.start.value,
+        definition.start_node(),
         &mut BTreeSet::new(),
-        &mut vec![(definition.start.value.as_str(), None)],
+        &mut vec![(definition.start_node(), None)],
         &mut found,
         (from, target, route.line),
     );
@@ -351,7 +351,13 @@ pub fn step(
     limits: &Limits,
     free: usize,
 ) -> Vec<Command> {
-    if state.cancelled || state.ended.is_some() || state.halted || !state.held.is_empty() {
+    // A dispatcher's run is not driven by the scheduler: it starts, ends and fails nothing.
+    if definition.dispatcher
+        || state.cancelled
+        || state.ended.is_some()
+        || state.halted
+        || !state.held.is_empty()
+    {
         return Vec::new();
     }
     let plan = plan(definition, state, limits);
@@ -719,7 +725,15 @@ impl<'a> Walk<'a> {
     }
 
     fn run(&mut self) {
-        let start = self.definition.start.value.clone();
+        // A dispatcher has no start and no nodes: the scheduler never starts anything for it.
+        let Some(start) = self
+            .definition
+            .start
+            .as_ref()
+            .map(|start| start.value.clone())
+        else {
+            return;
+        };
         if let Some(chain) = self.enter(Vec::new(), Vec::new(), None, &start, 0) {
             self.queue.push_back(chain);
         }

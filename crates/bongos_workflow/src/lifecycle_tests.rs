@@ -28,12 +28,14 @@ use tempfile::TempDir;
 use crate::WorkflowsSettings;
 use crate::engine::{EngineRunner, WorkflowEngine};
 use crate::lifecycle::{
-    GitWorktrees, Lifecycle, Offer, RefusalKind, RunStatus, RunWorktrees, StartChecks,
+    GitWorktrees, Lifecycle, Offer, RefusalKind, RunStatus, RunTree, RunWorktrees, StartChecks,
     StartContext, StartRequest, WorkflowEvent, attempt_dir, definition_copy_dir,
 };
 use crate::runtime::Runner;
 use crate::runtime::fake::FakeRunner;
 use crate::worktrees::{Git, RunWorktree, TaskCheckout, WorktreeError};
+use bongos_workflow_model::record::StartedBy;
+use bongos_workflow_model::{LaneRef, RunSubject, RunToml, UnattendedChoice, UnattendedSource};
 
 const LEAF: &str = "leaf-id";
 const GROUP: &str = "group-id";
@@ -637,8 +639,8 @@ fn start_refusals_come_in_order_with_their_fix() {
     assert_eq!(fs::read_dir(&runs_dir).unwrap().count(), 1);
     let record = lifecycle.record(&run).unwrap();
     assert_eq!(record.workflow, "full");
-    assert_eq!(record.todo.index, 1);
-    assert_eq!(record.todo.name, "implement");
+    assert_eq!(record.todo.as_ref().unwrap().index, 1);
+    assert_eq!(record.todo.as_ref().unwrap().name, "implement");
     assert_eq!(record.attempts.len(), 1);
     assert!(runs_dir.join(&run).join("run.toml").is_file());
     assert!(
@@ -1116,7 +1118,7 @@ fn restart_makes_a_new_attempt_with_a_new_worktree_and_no_reused_result() {
             .collect::<Vec<_>>(),
         [1, 2]
     );
-    assert_eq!(record.todo.name, "implement");
+    assert_eq!(record.todo.as_ref().unwrap().name, "implement");
 
     // No earlier result: the new attempt starts from nothing, on the latest definition.
     let state = lifecycle.state(&run).unwrap();
@@ -1962,10 +1964,10 @@ fn an_edited_gate_field_is_what_the_next_node_state_holds() {
         bongos_workflow_model::state_doc::RunIdentity {
             id: run.clone(),
             workflow: "reviewed".to_string(),
-            todo: bongos_workflow_model::record::TodoRef {
+            todo: Some(bongos_workflow_model::record::TodoRef {
                 index: 1,
                 name: "implement".to_string(),
-            },
+            }),
             task_id: LEAF.to_string(),
             task_dir: world.root.clone(),
             branch: TASK_BRANCH.to_string(),
@@ -1986,3 +1988,191 @@ fn an_edited_gate_field_is_what_the_next_node_state_holds() {
 
 #[path = "landing_tests.rs"]
 mod landing_tests;
+
+/// `SINGLE` with the inputs `inputs` (lines of the `[inputs]` table), named `name`.
+fn with_inputs(name: &str, inputs: &str) -> String {
+    SINGLE
+        .replace("\"single\"", &format!("\"{name}\""))
+        .replace(
+            "start = \"work\"\n",
+            &format!("start = \"work\"\n\n[inputs]\n{inputs}\n"),
+        )
+}
+
+fn project_request(workflow: &str) -> StartRequest {
+    StartRequest {
+        workflow: Some(workflow.to_string()),
+        ..StartRequest::project(GROUP)
+    }
+}
+
+#[test]
+fn a_project_subject_start_of_a_workflow_that_reads_the_task_is_refused_naming_the_input() {
+    let world = World::new();
+    write_definition(
+        world.profile(),
+        "goaled",
+        &with_inputs("goaled", r#"goal = { type = "text", from = "task.goal" }"#),
+    );
+    let mut lifecycle = world.lifecycle();
+    let mut request = project_request("goaled");
+    // An override does not make a task source usable: the workflow reads the task.
+    request
+        .overrides
+        .insert("goal".to_string(), InputValue::Text("Tidy".to_string()));
+    let refusal = world.start(&mut lifecycle, request).unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::NeedsTask);
+    assert_eq!(
+        refusal.message,
+        "input goal reads task.goal; a run with no task cannot use it"
+    );
+    let text = fs::read_to_string(world.profile().join("goaled").join(DEFINITION_FILE)).unwrap();
+    let problems = bongos_workflow_model::project_subject_problems(
+        &bongos_workflow_model::parse(&text).unwrap(),
+    );
+    assert_eq!(problems.len(), 1);
+    assert_eq!(problems[0].message, refusal.message);
+    assert!(lifecycle.all_runs().is_empty(), "nothing started");
+}
+
+#[test]
+fn a_project_subject_start_resolves_its_inputs_from_overrides_alone() {
+    let world = World::new();
+    write_definition(
+        world.profile(),
+        "briefed",
+        &with_inputs(
+            "briefed",
+            r#"brief = { type = "text", from = "literal:draft" }
+mode = { type = "text", from = "literal:fast" }"#,
+        ),
+    );
+    let mut lifecycle = world.lifecycle();
+    // Every input resolves from the override or its literal, with no task: the start gets past
+    // the inputs and the machine checks, and only the run's tree is not supported yet.
+    let mut request = project_request("briefed");
+    request
+        .overrides
+        .insert("brief".to_string(), InputValue::Text("Tidy".to_string()));
+    let refusal = world.start(&mut lifecycle, request).unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::Unsupported, "{refusal}");
+    assert!(lifecycle.all_runs().is_empty(), "nothing started");
+
+    // An unknown project and a start with no workflow named are refused first.
+    let refusal = world
+        .start(&mut lifecycle, StartRequest::project("nowhere"))
+        .unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::UnknownProject);
+    let refusal = world
+        .start(&mut lifecycle, StartRequest::project(GROUP))
+        .unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::UnknownWorkflow);
+}
+
+#[test]
+fn a_dispatcher_is_never_started_as_a_run() {
+    let world = World::new();
+    let dir = world.profile().join("lanes");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join(DEFINITION_FILE),
+        "schema = 1\nname = \"lanes\"\ndispatcher = true\n",
+    )
+    .unwrap();
+    let mut lifecycle = world.lifecycle();
+    let refusal = world
+        .start(&mut lifecycle, with_workflow("lanes"))
+        .unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::Unsupported, "{refusal}");
+    assert!(lifecycle.all_runs().is_empty());
+}
+
+#[test]
+fn a_lane_or_snapshot_tree_is_refused_until_it_is_supported() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    for tree in [
+        RunTree::Lane {
+            path: world.root.join("lane"),
+            base: None,
+            start: None,
+            merge_into: None,
+        },
+        RunTree::Snapshot {
+            path: world.root.join("snapshot"),
+        },
+        RunTree::Fresh {
+            repo: Some(world.root.join("repo")),
+            base: None,
+            merge_into: None,
+        },
+    ] {
+        let request = StartRequest {
+            tree,
+            ..with_workflow("single")
+        };
+        let refusal = world.start(&mut lifecycle, request).unwrap_err();
+        assert_eq!(refusal.kind, RefusalKind::Unsupported, "{refusal}");
+    }
+    assert!(lifecycle.all_runs().is_empty());
+}
+
+#[test]
+fn a_task_start_records_its_reserved_id_parent_lane_and_unattended_choice() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    let id = bongos_work_model::new_id();
+    let request = StartRequest {
+        run_id: Some(id.clone()),
+        parent: Some("parent-run".to_string()),
+        lane: Some(LaneRef {
+            id: "lane-1".to_string(),
+            kind: "build".to_string(),
+        }),
+        unattended: Some(UnattendedChoice {
+            value: true,
+            source: UnattendedSource::Lane,
+        }),
+        started_by: StartedBy::Lane,
+        ..with_workflow("single")
+    };
+    let run = world.start(&mut lifecycle, request.clone()).unwrap();
+    assert_eq!(run, id);
+    let text = fs::read_to_string(lifecycle.run_dir(&run).unwrap().join("run.toml")).unwrap();
+    let record = RunToml::parse(&text).unwrap();
+    assert_eq!(
+        record.subject,
+        RunSubject::Task {
+            id: LEAF.to_string()
+        }
+    );
+    assert_eq!(record.task_id, LEAF);
+    assert_eq!(record.parent.as_deref(), Some("parent-run"));
+    assert_eq!(record.lane, request.lane);
+    assert_eq!(record.unattended, request.unattended);
+    assert_eq!(record.started_by, StartedBy::Lane);
+    assert_eq!(record.todo.as_ref().unwrap().name, "implement");
+
+    // The reserved id is taken now, and an id that is no UUID v7 is refused.
+    for bad in [id, "not-a-uuid".to_string()] {
+        let request = StartRequest {
+            run_id: Some(bad),
+            ..with_workflow("single")
+        };
+        let refusal = world.start(&mut lifecycle, request).unwrap_err();
+        assert_eq!(refusal.kind, RefusalKind::BadRequest, "{refusal}");
+    }
+}
+
+#[test]
+fn a_definition_commit_the_layers_were_not_read_from_is_refused() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    let request = StartRequest {
+        definition_commit: Some(bongos_project_repo::CommitId("a".repeat(40))),
+        ..with_workflow("single")
+    };
+    let refusal = world.start(&mut lifecycle, request).unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::BadRequest, "{refusal}");
+    assert!(lifecycle.all_runs().is_empty());
+}

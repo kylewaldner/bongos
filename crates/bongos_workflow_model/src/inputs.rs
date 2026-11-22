@@ -51,34 +51,68 @@ pub struct Input {
     pub missing: bool,
 }
 
+/// An input whose source reads a task, resolved for a run with no task (a project subject).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{}", no_task_message(.input, .from))]
+pub struct NoTaskInput {
+    pub input: String,
+    pub from: String,
+}
+
+/// Whether `source` reads the task or its todo (`task.*`, `todo.*`).
+pub fn reads_task(source: &str) -> bool {
+    source.starts_with("task.") || source.starts_with("todo.")
+}
+
+/// Why a run with no task cannot use the input `input` read from `source`.
+pub fn no_task_message(input: &str, source: &str) -> String {
+    format!("input {input} reads {source}; a run with no task cannot use it")
+}
+
 /// Resolves every input of `definition` for `task` and its todo at `todo` (an index into its
-/// `todos`), in declaration order.
+/// `todos`), in declaration order. With no task (a project subject) every input comes from
+/// `overrides` or a `literal:` source; one that would read the task or a todo is an error.
 pub fn resolve(
     definition: &Definition,
-    task: &Task,
+    task: Option<&Task>,
     tree: &WorkTree,
     todo: Option<usize>,
     overrides: &BTreeMap<String, InputValue>,
-) -> Vec<Input> {
+) -> Result<Vec<Input>, NoTaskInput> {
     definition
         .inputs
         .iter()
         .map(|input| {
             let (value, source) = match overrides.get(&input.name) {
                 Some(value) => (Some(value.clone()), OVERRIDE_SOURCE.to_string()),
-                None => (
-                    source_value(&input.from, task, tree, todo),
-                    input.from.clone(),
-                ),
+                None => {
+                    let value = match task {
+                        Some(task) => source_value(&input.from, task, tree, todo),
+                        None if reads_task(&input.from) => {
+                            return Err(NoTaskInput {
+                                input: input.name.clone(),
+                                from: input.from.clone(),
+                            });
+                        }
+                        None => literal(&input.from),
+                    };
+                    (value, input.from.clone())
+                }
             };
-            Input {
+            Ok(Input {
                 name: input.name.clone(),
                 missing: input.required && value.is_none(),
                 value,
                 source,
-            }
+            })
         })
         .collect()
+}
+
+fn literal(source: &str) -> Option<InputValue> {
+    source
+        .strip_prefix("literal:")
+        .map(|text| InputValue::Text(text.to_string()))
 }
 
 /// The value of one source. Empty text and empty lists are no value. An unknown source has no
@@ -89,8 +123,8 @@ pub fn source_value(
     tree: &WorkTree,
     todo: Option<usize>,
 ) -> Option<InputValue> {
-    if let Some(text) = source.strip_prefix("literal:") {
-        return Some(InputValue::Text(text.to_string()));
+    if let Some(value) = literal(source) {
+        return Some(value);
     }
     let file = task.file.as_ref();
     let text = |value: Option<&str>| {

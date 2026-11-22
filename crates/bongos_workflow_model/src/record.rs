@@ -317,12 +317,62 @@ pub enum StartedBy {
     Healer,
     /// A landing check of a project repository started it.
     Landing,
+    /// A lane started it.
+    Lane,
+    /// It was started from the shell.
+    Host,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TodoRef {
     pub index: usize,
     pub name: String,
+}
+
+/// What a run works on: a task, or a whole project (a run with no task).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RunSubject {
+    Task { id: String },
+    Project { id: String },
+}
+
+impl RunSubject {
+    /// The task id, `None` for a project subject.
+    pub fn task_id(&self) -> Option<&str> {
+        match self {
+            Self::Task { id } => Some(id),
+            Self::Project { .. } => None,
+        }
+    }
+
+    /// The value `run.toml` mirrors in `task_id` for older readers: the task id, or empty.
+    pub fn task_id_mirror(&self) -> String {
+        self.task_id().unwrap_or_default().to_string()
+    }
+}
+
+/// The lane a run belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LaneRef {
+    pub id: String,
+    pub kind: String,
+}
+
+/// Where an unattended choice came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnattendedSource {
+    Start,
+    Lane,
+    Project,
+}
+
+/// Whether a run runs unattended, and who decided it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct UnattendedChoice {
+    pub value: bool,
+    pub source: UnattendedSource,
 }
 
 /// A resolved input as `run.toml` keeps it. A value that was missing is not written.
@@ -356,6 +406,7 @@ pub struct Attempt {
 /// `runs/<run id>/run.toml`: the run's identity, written at create and when an attempt is added.
 /// Times are RFC 3339 strings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "RunTomlFile")]
 pub struct RunToml {
     pub schema: u32,
     /// A UUID v7 ([`is_uuid_v7`]).
@@ -363,14 +414,78 @@ pub struct RunToml {
     pub workflow: String,
     /// `shipped`, `profile` or `project`.
     pub layer: String,
+    /// What the run works on. Authoritative: a record older than the field reads as the task of
+    /// `task_id`.
+    pub subject: RunSubject,
+    /// A mirror of `subject` for older readers: the task id, or empty for a project subject.
     pub task_id: String,
     pub created: String,
     pub started_by: StartedBy,
-    pub todo: TodoRef,
+    /// The run that started this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<LaneRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unattended: Option<UnattendedChoice>,
+    /// The todo the run completes; `None` for a project subject.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todo: Option<TodoRef>,
     #[serde(default)]
     pub inputs: Vec<RecordedInput>,
     #[serde(default)]
     pub attempts: Vec<Attempt>,
+}
+
+/// `run.toml` as written, where `subject` may be missing (records older than the field).
+#[derive(Deserialize)]
+struct RunTomlFile {
+    schema: u32,
+    id: String,
+    workflow: String,
+    layer: String,
+    #[serde(default)]
+    subject: Option<RunSubject>,
+    #[serde(default)]
+    task_id: String,
+    created: String,
+    started_by: StartedBy,
+    #[serde(default)]
+    parent: Option<String>,
+    #[serde(default)]
+    lane: Option<LaneRef>,
+    #[serde(default)]
+    unattended: Option<UnattendedChoice>,
+    #[serde(default)]
+    todo: Option<TodoRef>,
+    #[serde(default)]
+    inputs: Vec<RecordedInput>,
+    #[serde(default)]
+    attempts: Vec<Attempt>,
+}
+
+impl From<RunTomlFile> for RunToml {
+    fn from(file: RunTomlFile) -> Self {
+        let subject = file.subject.unwrap_or_else(|| RunSubject::Task {
+            id: file.task_id.clone(),
+        });
+        Self {
+            schema: file.schema,
+            id: file.id,
+            workflow: file.workflow,
+            layer: file.layer,
+            task_id: subject.task_id_mirror(),
+            subject,
+            created: file.created,
+            started_by: file.started_by,
+            parent: file.parent,
+            lane: file.lane,
+            unattended: file.unattended,
+            todo: file.todo,
+            inputs: file.inputs,
+            attempts: file.attempts,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

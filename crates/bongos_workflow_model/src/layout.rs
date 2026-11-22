@@ -175,7 +175,7 @@ pub fn layout(definition: &Definition, state: &RunState) -> GraphLayout {
     let mut stack = Vec::new();
     let mut back: BTreeMap<(String, usize), Option<(String, u32)>> = BTreeMap::new();
     visit(
-        &definition.start.value,
+        definition.start_node(),
         &out,
         &mut visited,
         &mut stack,
@@ -184,7 +184,7 @@ pub fn layout(definition: &Definition, state: &RunState) -> GraphLayout {
     );
     order.reverse();
     let mut column: BTreeMap<String, usize> = BTreeMap::new();
-    column.insert(definition.start.value.clone(), 0);
+    column.insert(definition.start_node().to_string(), 0);
     for name in &order {
         let Some(&here) = column.get(name) else {
             continue;
