@@ -12,12 +12,12 @@ use bongos_project_repo_model::ChangeSummary;
 use bongos_project_repo_model::layout::{DEFINITIONS_DIR, WORKFLOWS_DIR};
 use bongos_workflow_model::layers::DEFINITION_FILE;
 use bongos_workflow_model::layers::resolve;
-use bongos_workflow_model::{Layer, LayerDirs, Resolved, Severity, parse};
+use bongos_workflow_model::{Layer, LayerDirs, Resolved, Severity, ValidationContext, parse};
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use gpui::App;
 
-use crate::definitions::check_definition;
+use crate::definitions::{ValidationHooks, check_parsed_in};
 
 /// The name of check 5.
 pub const WORKFLOW_VALID_CHECK: &str = "workflow-valid";
@@ -113,12 +113,21 @@ pub fn problems(workflows: &Path, touched: &[String]) -> Vec<String> {
         let name = parse(&text)
             .map(|definition| definition.name)
             .unwrap_or_else(|_| folder.to_string());
-        let report = check_definition(&Resolved {
+        let resolved = Resolved {
             name: name.clone(),
             layer: Layer::Project,
             dir,
             overrides: Vec::new(),
-        });
+        };
+        let (mut report, definition) =
+            check_parsed_in(&resolved, ValidationContext::default(), |_, _| {});
+        // The checks other crates add to `workflow: validate` judge a landing too.
+        if let Some(definition) = definition {
+            report
+                .diagnostics
+                .extend(ValidationHooks::run(&definition, &resolved.dir));
+            report.diagnostics.sort_by_key(|diagnostic| diagnostic.line);
+        }
         if let Some(error) = &report.load_error {
             lines.push(format!("workflow {name}: {error}"));
         }

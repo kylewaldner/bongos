@@ -765,6 +765,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         bongos_linear::register(workspace);
         bongos_workflow::register(workspace);
         bongos_checks::register(workspace);
+        bongos_lanes::register(workspace);
         let language_offer = cx.new(|_| bongos_extensions::offer::LanguageOffer::new());
         let extension_build_status = cx.new(|cx| {
             bongos_extensions::status_item::ExtensionBuildStatus::new(workspace.weak_handle(), cx)
@@ -5674,6 +5675,7 @@ mod tests {
                 "kotlin",
                 "language_selector",
                 "languages",
+                "lanes",
                 "line_ending_selector",
                 "linear",
                 "lsp_tool",
