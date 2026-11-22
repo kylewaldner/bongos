@@ -1,12 +1,15 @@
-//! The staleness script of a prepared task's first job (pick rule 8). It runs in the lane's tree
-//! after its reset, as `<script> <task id> <prepared commit> <tree path>`, with the lane's
+//! The staleness script of a prepared task's first job (pick rule 8). It is run from a pinned,
+//! read-only copy of the definitions the job runs on (master's when it names none), in the lane's
+//! tree after its reset, as `<script> <task id> <prepared commit> <tree path>`, with the lane's
 //! environment and a timeout; its first output line, `stale` or `fresh`, decides. Anything else
 //! is a failure, and the lane halts with "staleness script failed: <line or exit code>".
 
-use std::path::PathBuf;
+use std::any::Any;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use bongos_lanes_model::{EnvEdit, LaneId, TaskId};
+use bongos_project_repo_model::layout::DEFINITIONS_DIR;
 use futures::FutureExt as _;
 use gpui::{App, Task};
 
@@ -53,21 +56,42 @@ pub fn staleness_answer(stdout: &str, code: Option<i32>) -> Result<Staleness, St
     }
 }
 
-/// Runs `check`'s script, resolved against the lane's tree when relative, in that tree, with the
-/// process environment and the lane's edits; a run past `timeout` is killed and fails.
+/// A read-only copy of a commit's files (`ProjectRepo::materialize`), kept while its guard lives.
+pub struct PinnedTree {
+    /// The root of the copy: `definitions/` is inside it.
+    pub root: PathBuf,
+    /// Removes the copy when dropped.
+    pub guard: Box<dyn Any + Send>,
+}
+
+/// The program a staleness script is run as: `script`, a path under `definitions/`, in the pinned
+/// copy rooted at `root`. A path that leaves `definitions/` is refused.
+pub fn staleness_program(root: &Path, script: &str) -> Result<PathBuf, String> {
+    let relative = Path::new(script);
+    let inside = relative
+        .components()
+        .all(|component| matches!(component, Component::Normal(_) | Component::CurDir));
+    if script.is_empty() || !inside {
+        return Err(format!("{script} is not a path inside {DEFINITIONS_DIR}/"));
+    }
+    Ok(root.join(DEFINITIONS_DIR).join(relative))
+}
+
+/// Runs `check`'s script from the pinned copy `pinned` of its definitions, in the lane's tree,
+/// with the process environment and the lane's edits; a run past `timeout` is killed and fails.
+/// The copy is kept until the script ended.
 pub fn run_staleness_script(
     check: StalenessCheck,
+    pinned: PinnedTree,
     timeout: Duration,
     cx: &App,
 ) -> Task<Result<Staleness, String>> {
     let Some(tree) = check.tree.clone() else {
         return Task::ready(Err("no lane tree to run it in".to_string()));
     };
-    let script = PathBuf::from(&check.script);
-    let program = if script.is_absolute() {
-        script
-    } else {
-        tree.join(script)
+    let program = match staleness_program(&pinned.root, &check.script) {
+        Ok(program) => program,
+        Err(error) => return Task::ready(Err(error)),
     };
     let env = apply_env(std::env::vars(), &check.env);
     let mut command = util::command::new_command(&program);
@@ -82,6 +106,7 @@ pub fn run_staleness_script(
         .kill_on_drop(true);
     let timer = cx.background_executor().timer(timeout);
     cx.background_executor().spawn(async move {
+        let _pinned = pinned;
         let output = command.output().fuse();
         let timer = timer.fuse();
         futures::pin_mut!(output, timer);

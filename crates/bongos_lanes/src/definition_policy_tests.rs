@@ -11,7 +11,7 @@ use gpui::TestAppContext;
 
 use super::{after, builds, finish, graph, harness_with, history_of, leaf, start, start_request};
 use crate::dispatch_job::STALENESS_FAILED;
-use crate::dispatcher::{Dispatcher, JobCommit, JobDefinitionPolicy};
+use crate::dispatcher::{AheadLanding, Dispatcher, JobCommit, JobDefinitionPolicy};
 use crate::staleness::Staleness;
 
 /// A policy with one answer per lane, `Use(master)` for the others, and a changeable answer
@@ -183,6 +183,88 @@ async fn an_ahead_lane_leaves_its_task_prepared(cx: &mut TestAppContext) {
     assert_eq!(design.jobs_done, 1);
 }
 
+/// The design lane's preparation of F has started, and its landings resolve only when the test
+/// says.
+async fn preparing_with_gated_landings(cx: &mut TestAppContext) -> (super::Harness, Dispatcher) {
+    let harness = harness_with(
+        AHEAD_TABLE,
+        bongos_lanes_model::PickGraph::new(vec![TaskId::new("F")], feature()),
+        &[],
+        Rc::new(TestPolicy::default()),
+    );
+    harness.host.landing_gated.set(true);
+    let started = start(&harness, start_request(), cx).await;
+    let dispatcher = started.dispatcher.unwrap();
+    assert_eq!(harness.engine.job_tasks(), ["F.d"]);
+    (harness, dispatcher)
+}
+
+// D7: a preparation whose landings are still resolving leaves its owner `Ahead` and its lane
+// holding the job; once they land, the task is prepared at the landed commit.
+#[gpui::test]
+async fn an_ahead_lane_waits_for_its_landings(cx: &mut TestAppContext) {
+    let (harness, _dispatcher) = preparing_with_gated_landings(cx).await;
+    let run = harness.run_of("F.d");
+
+    harness.set_run("F.d", RunStatus::Succeeded, cx);
+    let owner = harness.state().owners[&TaskId::new("F")].clone();
+    assert_eq!(owner.state, OwnerState::Ahead);
+    let design = harness.lane("design", 1);
+    assert_eq!(design.state, LaneState::Running);
+    assert_eq!(design.job.as_ref().unwrap().run_id, run);
+    assert!(harness.host.snapshots.borrow().is_empty());
+
+    let resolved = harness.host.resolve_landings(AheadLanding::Landed {
+        commit: "c7".to_string(),
+    });
+    assert_eq!(resolved, std::slice::from_ref(&run));
+    cx.run_until_parked();
+
+    let owner = harness.state().owners[&TaskId::new("F")].clone();
+    assert_eq!(owner.state, OwnerState::Prepared);
+    assert_eq!(owner.lane, None);
+    assert_eq!(owner.prepared_commit.as_deref(), Some("c7"));
+    let design = harness.lane("design", 1);
+    assert_eq!(design.state, LaneState::Idle);
+    assert_eq!(design.job, None);
+    assert_eq!(design.jobs_done, 1);
+    assert_eq!(
+        *harness.host.snapshots.borrow(),
+        [(LaneId::new("design", 1), run, RunStatus::Succeeded)]
+    );
+}
+
+// D7: a refused landing of a preparation halts the ahead lane and its task with the reason.
+#[gpui::test]
+async fn a_refused_landing_halts_the_ahead_lane(cx: &mut TestAppContext) {
+    let (harness, _dispatcher) = preparing_with_gated_landings(cx).await;
+    let run = harness.run_of("F.d");
+
+    harness.set_run("F.d", RunStatus::Succeeded, cx);
+    harness
+        .host
+        .resolve_landings(AheadLanding::Refused("check docs failed".to_string()));
+    cx.run_until_parked();
+
+    let text = "landing refused: check docs failed";
+    let design = harness.lane("design", 1);
+    assert_eq!(design.state, LaneState::Halted);
+    assert_eq!(design.job, None);
+    assert_eq!(design.reason, Some(WaitReason::Failed(text.to_string())));
+    let owner = harness.state().owners[&TaskId::new("F")].clone();
+    assert_eq!(owner.state, OwnerState::Halted);
+    assert_eq!(owner.lane, Some(LaneId::new("design", 1)));
+    assert_eq!(owner.reason.as_deref(), Some(text));
+    assert_eq!(owner.prepared_commit, None);
+    let short: String = run.chars().take(8).collect();
+    assert!(
+        history_of(&harness, "F").contains(&format!("run {short} succeeded, but its {text}")),
+        "{:?}",
+        history_of(&harness, "F")
+    );
+    assert_eq!(harness.host.snapshots.borrow().len(), 1);
+}
+
 // Each job starts on the commit the policy names for its lane; `Wait` leaves the lane idle.
 #[gpui::test]
 async fn each_job_starts_on_the_commit_its_lane_is_given(cx: &mut TestAppContext) {
@@ -326,8 +408,9 @@ async fn a_snapshot_follows_every_job_end(cx: &mut TestAppContext) {
         cx.run_until_parked();
         let snapshots = harness.host.snapshots.borrow().clone();
         assert_eq!(snapshots.len(), count + 1, "after {task}: {snapshots:?}");
-        let (lane, snapshot_run) = snapshots.last().unwrap();
+        let (lane, snapshot_run, ended) = snapshots.last().unwrap();
         assert_eq!(snapshot_run, &run);
         assert_eq!(lane, &build(count as u32 + 1));
+        assert_eq!(*ended, status);
     }
 }

@@ -19,8 +19,9 @@ use gpui::{App, TestAppContext};
 use tempfile::TempDir;
 
 use crate::dispatcher::{
-    DispatcherRecord, JobCommit, JobDefinitionPolicy, JobEngine, JobSetup, Lanes, LanesHost,
-    LanesParts, LanesStarted, NOTHING_READY, StartLanes, VerifiedCommitPolicy, put_dispatcher,
+    AheadLanding, DispatcherRecord, JobCommit, JobDefinitionPolicy, JobEngine, JobSetup, Lanes,
+    LanesHost, LanesParts, LanesStarted, NOTHING_READY, StartLanes, VerifiedCommitPolicy,
+    put_dispatcher,
 };
 use crate::lane_control::RunEnd;
 use crate::staleness::{Staleness, StalenessCheck};
@@ -55,8 +56,11 @@ pub(crate) struct TestHost {
     staleness_checks: RefCell<Vec<StalenessCheck>>,
     /// What every staleness script answers.
     staleness: RefCell<Result<Staleness, String>>,
-    /// Every snapshot after a job end: the lane and the job's run.
-    snapshots: RefCell<Vec<(LaneId, String)>>,
+    /// Every snapshot after a job end: the lane, the job's run and how it ended.
+    snapshots: RefCell<Vec<(LaneId, String, RunStatus)>>,
+    /// An ahead job's landings resolve only when the test sends what they came to.
+    pub(crate) landing_gated: Cell<bool>,
+    landing_gates: RefCell<Vec<(String, oneshot::Sender<AheadLanding>)>>,
 }
 
 /// A policy that answers every job with one commit decision.
@@ -97,10 +101,25 @@ impl LanesHost for TestHost {
         gpui::Task::ready(self.staleness.borrow().clone())
     }
 
-    fn snapshot_after_job(&self, lane: &LaneId, run: &str, _cx: &mut App) {
+    fn snapshot_after_job(&self, lane: &LaneId, run: &str, status: RunStatus, _cx: &mut App) {
         self.snapshots
             .borrow_mut()
-            .push((lane.clone(), run.to_string()));
+            .push((lane.clone(), run.to_string(), status));
+    }
+
+    fn ahead_landing(&self, run: &str, cx: &mut App) -> gpui::Task<AheadLanding> {
+        if !self.landing_gated.get() {
+            return gpui::Task::ready(AheadLanding::Nothing);
+        }
+        let (sender, receiver) = oneshot::channel();
+        self.landing_gates
+            .borrow_mut()
+            .push((run.to_string(), sender));
+        cx.foreground_executor().spawn(async move {
+            receiver
+                .await
+                .unwrap_or_else(|_| AheadLanding::Refused("gate dropped".to_string()))
+        })
     }
 
     fn check_locations(
@@ -175,6 +194,19 @@ impl LanesHost for TestHost {
 }
 
 impl TestHost {
+    /// Resolves the landings of every ahead run waiting on them with `landing`; returns their
+    /// runs.
+    pub(crate) fn resolve_landings(&self, landing: AheadLanding) -> Vec<String> {
+        self.landing_gates
+            .borrow_mut()
+            .drain(..)
+            .map(|(run, gate)| {
+                gate.send(landing.clone()).ok();
+                run
+            })
+            .collect()
+    }
+
     fn release(&self) {
         for gate in self.gates.borrow_mut().drain(..) {
             gate.send(Ok(JobSetup::default())).ok();
@@ -367,6 +399,8 @@ fn harness_of(
         staleness_checks: RefCell::new(Vec::new()),
         staleness: RefCell::new(Ok(Staleness::Fresh)),
         snapshots: RefCell::new(Vec::new()),
+        landing_gated: Cell::new(false),
+        landing_gates: RefCell::new(Vec::new()),
     });
     let engine = fake_engine(&writer, limits);
     let lanes = Lanes::new(LanesParts {

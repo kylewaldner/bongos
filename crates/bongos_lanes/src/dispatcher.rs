@@ -34,7 +34,9 @@ use bongos_lanes_model::{
 };
 use bongos_project_repo::{CommitId, RepoEvent, StateTx, StateWriter};
 use bongos_workflow::lifecycle::RefusalKind;
-use bongos_workflow::{Refusal, RunId, RunTree, StartRequest, WorkflowEngine, WorkflowEvent};
+use bongos_workflow::{
+    Refusal, RunId, RunStatus, RunTree, StartRequest, WorkflowEngine, WorkflowEvent,
+};
 use bongos_workflow_model::record::StartedBy;
 use bongos_workflow_model::{EnvEdit, UnattendedChoice, UnattendedSource};
 use futures::StreamExt as _;
@@ -52,7 +54,7 @@ use crate::pick_extension::{
     extension_pick, instance_use, lane_after_unstarted, with_engine,
 };
 use crate::profile::LaneProfiles;
-use crate::staleness::{Staleness, StalenessCheck};
+use crate::staleness::{PinnedTree, Staleness, StalenessCheck};
 use crate::store::{LANES_NAMESPACE, delete_lane, put_lane, put_owner, read_state_in};
 use crate::task_trees::LaneTreeSetup;
 
@@ -253,18 +255,57 @@ pub trait LanesHost {
         Ok(None)
     }
 
-    /// Runs the staleness script of a prepared task's first job ([`crate::run_staleness_script`]
-    /// by default, with `lanes.staleness_timeout_seconds`). An error is the text the lane halts
+    /// A pinned, read-only copy of the project's files at `commit` (`ProjectRepo::materialize`),
+    /// or at the verified commit when `None`. An error says why there is none.
+    fn materialize(
+        &self,
+        _commit: Option<&str>,
+        _cx: &mut App,
+    ) -> Task<Result<PinnedTree, String>> {
+        Task::ready(Err("this project has no repository to pin".to_string()))
+    }
+
+    /// Runs the staleness script of a prepared task's first job. By default the job's definitions
+    /// commit is pinned ([`Self::materialize`]) and [`crate::run_staleness_script`] runs the script
+    /// from that copy, with `lanes.staleness_timeout_seconds`. An error is the text the lane halts
     /// with, after "staleness script failed: ".
     fn staleness(&self, check: StalenessCheck, cx: &mut App) -> Task<Result<Staleness, String>> {
         use settings::Settings as _;
         let timeout = crate::LanesSettings::get_global(cx).staleness_timeout;
-        crate::run_staleness_script(check, timeout, cx)
+        let pinning = self.materialize(check.definition_commit.as_deref(), cx);
+        cx.spawn(async move |cx| {
+            let pinned = pinning
+                .await
+                .map_err(|error| format!("pinning the definitions: {error}"))?;
+            cx.update(|cx| crate::run_staleness_script(check, pinned, timeout, cx))
+                .await
+        })
     }
 
-    /// Called after every job end (the job's run succeeded, failed, halted or was cancelled):
-    /// the app takes a snapshot of the project's state.
-    fn snapshot_after_job(&self, _lane: &LaneId, _run: &str, _cx: &mut App) {}
+    /// What the landings that `run`, an ahead lane's job that succeeded, asked for came to, once
+    /// every one resolved (`ProjectRepo::landing_result`). Until then the job's owner stays
+    /// `Ahead`. By default there is nothing to wait for.
+    fn ahead_landing(&self, _run: &str, _cx: &mut App) -> Task<AheadLanding> {
+        Task::ready(AheadLanding::Nothing)
+    }
+
+    /// Called after every job end (the job's run succeeded, failed, halted or was cancelled,
+    /// `status`). The run engine already takes a job-end snapshot when it exports a run that
+    /// succeeded, failed or was cancelled, so the app's host takes one here only for a halted
+    /// run, which the engine does not snapshot.
+    fn snapshot_after_job(&self, _lane: &LaneId, _run: &str, _status: RunStatus, _cx: &mut App) {}
+}
+
+/// What the landings of an ahead job's run came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AheadLanding {
+    /// The run asked for no landing that was still to resolve: its task is prepared at the
+    /// verified commit.
+    Nothing,
+    /// Every landing it asked for landed; the last at `commit`, which its task is prepared at.
+    Landed { commit: String },
+    /// A landing did not land: the ahead lane and its task halt with this text.
+    Refused(String),
 }
 
 /// The run engine as the dispatcher uses it: [`WorkflowEngine`] in the app.
@@ -962,7 +1003,7 @@ impl Dispatcher {
     pub fn verified_commit_changed(&self, commit: String, cx: &mut App) {
         let parts = self.parts().clone();
         let current = self.table_commit();
-        let (adopt, wait) = table_decision(parts.policy.as_ref(), Some(&current), &commit);
+        let (adopt, mut wait) = table_decision(parts.policy.as_ref(), Some(&current), &commit);
         *self.0.verified.borrow_mut() = commit;
         let table_commit = if adopt == current {
             current
@@ -976,6 +1017,7 @@ impl Dispatcher {
                 }
                 Err(error) => {
                     log::error!("lanes: the lane table at {adopt} cannot be read: {error}");
+                    wait = Some(format!("the lane table at {adopt} cannot be read: {error}"));
                     current
                 }
             }

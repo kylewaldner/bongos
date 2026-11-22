@@ -22,7 +22,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use bongos_lanes_model::{
     AssignedWork, Author, JobEnd, JobEndInput, JobRecord, LaneId, LaneRecord, LaneState, LaneTable,
-    LanesState, OwnerRecord, OwnerState, PickGraph, RunSubject, TaskId, WaitReason,
+    LanesState, OwnerRecord, OwnerState, PickGraph, RunSubject, TaskId, Transition, WaitReason,
     lane_after_retry, owner_after_job_end, short_run, stop_at_job_boundary,
 };
 use bongos_project_repo::{CommitId, StateTx};
@@ -33,7 +33,7 @@ use bongos_workflow_model::record::{EndState, LaneRef, Lifecycle, StartedBy};
 use gpui::{App, Task};
 
 use crate::dispatcher::{
-    Dispatcher, JobSetup, PendingJob, RefreshFirst, environment_refusal, held_task,
+    AheadLanding, Dispatcher, JobSetup, PendingJob, RefreshFirst, environment_refusal, held_task,
 };
 use crate::hooks::{BeforeJob, JobEnd as HookEnd, JobHookCx, JobHooks, after_job_of};
 use crate::job_trees::CurrentJobTrees;
@@ -599,10 +599,65 @@ impl Dispatcher {
     pub fn on_workflow_event(&self, event: &WorkflowEvent, cx: &mut App) {
         let WorkflowEvent::Changed { run, state, .. } = event;
         self.note_lifecycle(run, *state);
+        if *state == RunStatus::Succeeded && self.is_ahead_job(run) {
+            self.await_ahead_landing(run, cx);
+            return;
+        }
+        self.apply_job_change(run, *state, None, cx);
+    }
+
+    /// Whether `run` is the job of a running ahead lane that no pick extension assigned: its
+    /// success waits for the landings it asked for.
+    fn is_ahead_job(&self, run: &str) -> bool {
+        let table = self.table();
+        let Ok(state) = self.parts().writer.read(read_state) else {
+            // The change is applied at once, which reads the state again and logs its error.
+            return false;
+        };
+        state.lanes.values().any(|lane| {
+            lane.state == LaneState::Running
+                && lane
+                    .job
+                    .as_ref()
+                    .is_some_and(|job| job.run_id == run && job.extension.is_none())
+                && lane_kind_is_ahead(&table, &lane.id())
+        })
+    }
+
+    /// An ahead job's run succeeded: its lane keeps the job and its owner stays `Ahead` until
+    /// every landing the run asked for resolved; then the end is applied with what they came to.
+    fn await_ahead_landing(&self, run: &str, cx: &mut App) {
+        let landing = self.parts().host.ahead_landing(run, cx);
+        let weak = self.downgrade();
+        let run = run.to_string();
+        cx.spawn(async move |cx| {
+            let landing = landing.await;
+            if let Some(inner) = weak.upgrade() {
+                cx.update(|cx| {
+                    Dispatcher(inner).apply_job_change(
+                        &run,
+                        RunStatus::Succeeded,
+                        Some(landing),
+                        cx,
+                    )
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Applies `run`'s status change to its lane and owner, then evaluates. `landing` is what an
+    /// ahead job's landings came to; `None` for any other change.
+    fn apply_job_change(
+        &self,
+        run: &str,
+        state: RunStatus,
+        landing: Option<AheadLanding>,
+        cx: &mut App,
+    ) {
         let graph = self.parts().host.graph(cx);
         let now = self.parts().host.now();
         let table = self.table();
-        // An ahead job's success leaves its task prepared at the verified commit now.
         let master = self.verified();
         let extensions = PickExtensions::extensions(cx);
         let result = with_engine(&self.parts().engine, || {
@@ -610,10 +665,11 @@ impl Dispatcher {
                 let end = JobChangeInput {
                     graph: graph.as_ref(),
                     table: &table,
-                    prepared_commit: &master,
+                    master: &master,
+                    landing: landing.as_ref(),
                     now: &now,
                 };
-                job_changed(tx, run, *state, &end, &extensions)
+                job_changed(tx, run, state, &end, &extensions)
             })
         });
         let ended = matches!(
@@ -626,7 +682,7 @@ impl Dispatcher {
                     CurrentJobTrees::clear(&lane, cx);
                 }
                 if ended {
-                    self.parts().host.snapshot_after_job(&lane, run, cx);
+                    self.parts().host.snapshot_after_job(&lane, run, state, cx);
                 }
             }
             Ok(None) => {}
@@ -634,6 +690,41 @@ impl Dispatcher {
         }
         self.settle_if_ended(run, cx);
         self.schedule(false, cx);
+    }
+}
+
+/// Whether lanes of `kind` prepare ahead of their task's turn.
+fn lane_kind_is_ahead(table: &LaneTable, lane: &LaneId) -> bool {
+    table
+        .kinds
+        .iter()
+        .any(|kind| kind.name == lane.kind && kind.ahead.is_some())
+}
+
+/// What lane leaves its job and the job's task with when the landing its ahead run asked for was
+/// refused: both halt with the reason.
+fn halted_by_landing(
+    owner: &OwnerRecord,
+    lane: &LaneRecord,
+    run: &str,
+    reason: &str,
+    now: &str,
+) -> Transition {
+    let text = format!("landing refused: {reason}");
+    let mut lane = lane.clone();
+    lane.state = LaneState::Halted;
+    lane.job = None;
+    lane.reason = Some(WaitReason::Failed(text.clone()));
+    lane.jobs_done += 1;
+    let mut owner = owner.clone();
+    owner.state = OwnerState::Halted;
+    owner.reason = Some(text.clone());
+    owner.by = Author::System;
+    owner.since = now.to_string();
+    Transition {
+        owner,
+        lane,
+        history: Some(format!("run {} succeeded, but its {text}", short_run(run))),
     }
 }
 
@@ -824,8 +915,11 @@ fn lifecycle_of(status: RunStatus) -> Lifecycle {
 struct JobChangeInput<'a> {
     graph: Option<&'a PickGraph>,
     table: &'a LaneTable,
-    /// The verified commit, which an ahead job's success leaves its task prepared at.
-    prepared_commit: &'a str,
+    /// The verified commit, which an ahead job's success leaves its task prepared at when its
+    /// run landed nothing it waited for.
+    master: &'a str,
+    /// What an ahead job's landings came to, once resolved.
+    landing: Option<&'a AheadLanding>,
     now: &'a str,
 }
 
@@ -840,7 +934,8 @@ fn job_changed(
     let JobChangeInput {
         graph,
         table,
-        prepared_commit,
+        master,
+        landing,
         now,
     } = *input;
     let state = read_state_in(tx)?;
@@ -907,27 +1002,38 @@ fn job_changed(
             return Ok(Some(id));
         }
     }
-    let lane_kind_is_ahead = table
-        .kinds
-        .iter()
-        .any(|kind| kind.name == id.kind && kind.ahead.is_some());
+    let lane_kind_is_ahead = lane_kind_is_ahead(table, &id);
     let all_leaves_finished = match (&held, graph) {
         (Some((task, _)), Some(graph)) => all_finished(graph, task),
         _ => false,
-    };
-    let input = JobEndInput {
-        outcome,
-        lane_kind_is_ahead,
-        all_leaves_finished,
-        checks_owed: false,
-        prepared_commit: lane_kind_is_ahead.then(|| prepared_commit.to_string()),
-        now,
     };
     let owner = held
         .as_ref()
         .map(|(_, owner)| owner.clone())
         .unwrap_or_else(|| placeholder_owner(now));
-    let transition = owner_after_job_end(&owner, &lane, &input);
+    let succeeded = outcome == JobEnd::Succeeded;
+    let transition = match landing {
+        Some(AheadLanding::Refused(reason)) if succeeded && lane_kind_is_ahead => {
+            halted_by_landing(&owner, &lane, run, reason, now)
+        }
+        _ => {
+            // An ahead job's success leaves its task prepared at the commit its landings
+            // reached, else at the verified commit.
+            let prepared_commit = match landing {
+                Some(AheadLanding::Landed { commit }) => commit.clone(),
+                _ => master.to_string(),
+            };
+            let input = JobEndInput {
+                outcome,
+                lane_kind_is_ahead,
+                all_leaves_finished,
+                checks_owed: false,
+                prepared_commit: lane_kind_is_ahead.then_some(prepared_commit),
+                now,
+            };
+            owner_after_job_end(&owner, &lane, &input)
+        }
+    };
     let (lane_after, owner_after) = if transition.lane.state == LaneState::Idle {
         stop_at_job_boundary(&transition.lane, Some(&transition.owner), now)
     } else {
