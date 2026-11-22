@@ -2060,6 +2060,7 @@ dependencies = [
  "bongos_linear",
  "bongos_minibuffer",
  "bongos_net",
+ "bongos_project_repo",
  "bongos_prompts",
  "bongos_query_replace",
  "bongos_terraform",

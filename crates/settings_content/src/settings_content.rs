@@ -277,6 +277,9 @@ pub struct SettingsContent {
     /// Settings for workflows: runs of node graphs on a task.
     pub workflows: Option<WorkflowsSettingsContent>,
 
+    /// Settings for lanes: background workflow runs hosted by a headless engine process.
+    pub lanes: Option<LanesSettingsContent>,
+
     /// Settings for task checks: scripts and commands that must pass before a task is done.
     pub task_checks: Option<TaskChecksSettingsContent>,
 
@@ -1601,6 +1604,17 @@ pub struct LinearSettingsContent {
     /// and every Linear command is hidden and only says "Linear sync is off (linear.enabled)".
     ///
     /// Default: true
+    pub enabled: Option<bool>,
+}
+
+/// Settings for lanes.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct LanesSettingsContent {
+    /// Whether lanes are on. While it is off, no engine host starts and it only says "lanes are
+    /// off (lanes.enabled)".
+    ///
+    /// Default: false
     pub enabled: Option<bool>,
 }
 

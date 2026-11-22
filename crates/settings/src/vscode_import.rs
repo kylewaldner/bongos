@@ -231,6 +231,7 @@ impl VsCodeSettings {
             project_repository: None,
             linear: None,
             workflows: None,
+            lanes: None,
             task_checks: None,
             modeline_lines: None,
             feature_flags: None,
