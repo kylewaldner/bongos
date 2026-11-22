@@ -56,6 +56,28 @@ pub(crate) fn rows(
 /// The lanes state of the project.
 pub fn read_state(read: &StateRead) -> Result<LanesState> {
     let (owners, lanes) = rows(read)?;
+    state_from(owners, lanes)
+}
+
+/// The lanes state of the project as the transaction `tx` sees it.
+pub fn read_state_in(tx: &mut StateTx) -> Result<LanesState> {
+    let kv = tx.kv(LANES_NAMESPACE);
+    let strip = |prefix: &str| -> Result<Vec<(String, toml::Value)>> {
+        Ok(kv
+            .scan(prefix)?
+            .into_iter()
+            .map(|(key, value)| (key[prefix.len()..].to_string(), value))
+            .collect())
+    };
+    let owners = strip(OWNER_PREFIX)?;
+    let lanes = strip(LANE_PREFIX)?;
+    state_from(owners, lanes)
+}
+
+fn state_from(
+    owners: Vec<(String, toml::Value)>,
+    lanes: Vec<(String, toml::Value)>,
+) -> Result<LanesState> {
     let mut state = LanesState::default();
     for (task, value) in owners {
         let owner = owner_from(&task, value)?;
@@ -80,6 +102,11 @@ pub fn put_lane(tx: &mut StateTx, lane: &LaneRecord) -> Result<()> {
     let value = toml::Value::try_from(lane).context("serializing a lane")?;
     tx.kv(LANES_NAMESPACE)
         .put(&format!("{LANE_PREFIX}{}", lane.id()), value)
+}
+
+/// Removes the record of lane `id`.
+pub fn delete_lane(tx: &mut StateTx, id: &LaneId) -> Result<()> {
+    tx.kv(LANES_NAMESPACE).delete(&format!("{LANE_PREFIX}{id}"))
 }
 
 /// Removes every owner and lane record, leaving the other records of the namespace.
