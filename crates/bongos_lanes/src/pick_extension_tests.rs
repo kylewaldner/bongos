@@ -6,8 +6,8 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use bongos_lanes_model::{
-    AssignedWork, Assignment, JobRecord, LaneId, LaneRecord, LaneState, RankKey, RunSubject,
-    WaitReason,
+    AssignedWork, Assignment, Author, JobRecord, LaneId, LaneRecord, LaneState, OwnerRecord,
+    OwnerState, RankKey, RunSubject, TaskId, WaitReason,
 };
 use bongos_project_repo::StateTx;
 use bongos_workflow::lifecycle::RefusalKind;
@@ -15,6 +15,7 @@ use bongos_workflow::{Refusal, RunStatus};
 use bongos_workflow_model::record::{EndState, Lifecycle};
 use gpui::TestAppContext;
 
+use super::counts_tests::{profile, set_count};
 use super::{Harness, builds, graph, harness, leaf, start, start_request};
 use crate::dispatch_job::DROPPED_BEFORE_START;
 use crate::dispatcher::{JobEngine as _, NOT_STARTED_BEFORE_A_CRASH};
@@ -23,7 +24,7 @@ use crate::lane_control::LaneTarget;
 use crate::pick_extension::{
     ExtensionPick, JobChange, LaneAfterJob, PickExtension, PickExtensions, instance_room,
 };
-use crate::store::put_lane;
+use crate::store::{put_lane, put_owner};
 use crate::test_support::{GatedHook, SINCE};
 
 /// The kind of the fake extension's work.
@@ -520,6 +521,186 @@ async fn a_job_left_unstarted_by_a_crash_is_cleared_at_the_next_start(cx: &mut T
     assert_eq!(lane.state, LaneState::Idle);
     assert_eq!(lane.job, None);
     assert!(harness.engine.jobs.borrow().is_empty());
+}
+
+/// A queue extension job with the run `run`.
+fn extension_job(run: &str) -> JobRecord {
+    JobRecord {
+        run_id: run.to_string(),
+        subject: RunSubject::Other(QUEUE.to_string()),
+        workflow: "w".to_string(),
+        started: SINCE.to_string(),
+        definition_commit: None,
+        extension: Some(QUEUE.to_string()),
+    }
+}
+
+/// An active owner of a task on `lane`.
+fn active_on(lane: LaneId) -> OwnerRecord {
+    OwnerRecord {
+        lane: Some(lane),
+        state: OwnerState::Active,
+        since: SINCE.to_string(),
+        by: Author::System,
+        reason: None,
+        prepared_commit: None,
+        refreshed: false,
+    }
+}
+
+// Only a run with no record on disk is taken for one a crash left unstarted: a run the engine did
+// not load (a damaged log) keeps its job, so its queue item is never handed out twice.
+#[gpui::test]
+async fn a_job_whose_run_is_recorded_but_not_loaded_is_kept_at_the_next_start(
+    cx: &mut TestAppContext,
+) {
+    let harness = harness(&builds(2), graph(vec![]), &[]);
+    harness
+        .writer
+        .transact(|tx| {
+            for (index, run) in [(1, "0190ondisk"), (2, "0190reserved")] {
+                let mut lane = LaneRecord::new(&build(index), LaneState::Running);
+                lane.job = Some(extension_job(run));
+                put_lane(tx, &lane)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    harness
+        .engine
+        .unloaded
+        .borrow_mut()
+        .insert("0190ondisk".to_string());
+    let extension = Arc::new(FakeExtension::default());
+    register(cx, &extension);
+
+    let _started = start(&harness, start_request(), cx).await;
+
+    assert_eq!(
+        extension.changes(),
+        [(
+            build(2),
+            "0190reserved".to_string(),
+            not_started(NOT_STARTED_BEFORE_A_CRASH)
+        )]
+    );
+    let kept = harness.lane("build", 1);
+    assert_eq!(kept.state, LaneState::Running);
+    assert_eq!(kept.job, Some(extension_job("0190ondisk")));
+    assert_eq!(harness.lane("build", 2).job, None);
+    assert!(harness.engine.jobs.borrow().is_empty());
+}
+
+// With no extension, a job a crash left unstarted is cleared and the lane keeps its task's owner,
+// so the same lane continues the task.
+#[gpui::test]
+async fn an_unstarted_job_is_cleared_with_its_owner_kept_when_no_extension_is_registered(
+    cx: &mut TestAppContext,
+) {
+    let harness = harness(&builds(1), graph(vec![leaf("a")]), &[]);
+    let owner = active_on(build(1));
+    harness
+        .writer
+        .transact(|tx| {
+            let mut lane = LaneRecord::new(&build(1), LaneState::Running);
+            lane.job = Some(JobRecord {
+                run_id: "0190crashed".to_string(),
+                subject: RunSubject::Task(TaskId::new("a")),
+                workflow: "w".to_string(),
+                started: SINCE.to_string(),
+                definition_commit: None,
+                extension: None,
+            });
+            put_lane(tx, &lane)?;
+            put_owner(tx, &TaskId::new("a"), &owner)
+        })
+        .unwrap();
+
+    let _started = start(&harness, start_request(), cx).await;
+
+    let owner_after = harness.state().owners[&TaskId::new("a")].clone();
+    assert_eq!(owner_after.lane, Some(build(1)));
+    assert_eq!(owner_after.state, OwnerState::Active);
+    // The same lane took the task again, with a new run.
+    assert_eq!(harness.engine.job_tasks(), ["a"]);
+    assert_ne!(run_of_lane(&harness, 1), "0190crashed");
+}
+
+// A lowered lane count drops an extension job still pending in `before_job`; the extension hears
+// it was not started, once.
+#[gpui::test]
+async fn a_lowered_count_drops_a_pending_extension_job_once(cx: &mut TestAppContext) {
+    let harness = harness(&builds(2), graph(vec![]), &[]);
+    let profile = profile(&[("build", 2)], cx);
+    let hook = gated_before();
+    register_hook(cx, &hook);
+    let extension = Arc::new(FakeExtension::default());
+    extension.assign_before(&build(2), Some("0190pending"));
+    register(cx, &extension);
+    let started = start(&harness, start_request(), cx).await;
+    assert_eq!(run_of_lane(&harness, 2), "0190pending");
+
+    set_count(&profile, "build", 1, cx);
+    cx.update(|cx| started.dispatcher.as_ref().unwrap().pick_now(cx));
+    cx.run_until_parked();
+
+    assert_eq!(hook.dropped(), 1);
+    assert_eq!(
+        extension.changes(),
+        [(
+            build(2),
+            "0190pending".to_string(),
+            not_started(DROPPED_BEFORE_START)
+        )]
+    );
+    assert!(
+        harness
+            .state()
+            .lanes
+            .get(&build(2))
+            .is_none_or(|lane| lane.job.is_none())
+    );
+    assert!(harness.engine.jobs.borrow().is_empty());
+}
+
+// An extension's halt of a job with no task halts only the lane: the task whose owner the lane
+// still holds stays active, and a retry of the halted run resumes the lane.
+#[gpui::test]
+async fn a_halted_extension_job_with_no_task_leaves_the_held_owner_alone(cx: &mut TestAppContext) {
+    let harness = harness(&builds(1), graph(vec![leaf("a")]), &[]);
+    let owner = active_on(build(1));
+    harness
+        .writer
+        .transact(|tx| {
+            put_lane(tx, &LaneRecord::new(&build(1), LaneState::Idle))?;
+            put_owner(tx, &TaskId::new("a"), &owner)
+        })
+        .unwrap();
+    let extension = Arc::new(FakeExtension::default());
+    extension.assign_before(&build(1), Some("0190queue"));
+    *extension.answer.lock().unwrap() = Some(LaneAfterJob::Halt("queue item failed".to_string()));
+    register(cx, &extension);
+    let _started = start(&harness, start_request(), cx).await;
+    assert_eq!(run_of_lane(&harness, 1), "0190queue");
+
+    cx.update(|cx| harness.engine.set("0190queue", RunStatus::Failed, cx));
+    cx.run_until_parked();
+
+    let halted = harness.lane("build", 1);
+    assert_eq!(halted.state, LaneState::Halted);
+    assert_eq!(
+        halted.job.map(|job| job.run_id).as_deref(),
+        Some("0190queue")
+    );
+    assert_eq!(harness.state().owners[&TaskId::new("a")], owner);
+
+    cx.update(|cx| harness.engine.set("0190queue", RunStatus::Running, cx));
+    cx.run_until_parked();
+
+    let resumed = harness.lane("build", 1);
+    assert_eq!(resumed.state, LaneState::Running);
+    assert_eq!(resumed.reason, None);
+    assert_eq!(harness.state().owners[&TaskId::new("a")], owner);
 }
 
 /// How an extension job goes wrong.
