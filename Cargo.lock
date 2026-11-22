@@ -2233,6 +2233,7 @@ version = "0.1.0"
 dependencies = [
  "bongos_avy_model",
  "bongos_emacs",
+ "bongos_minibuffer",
  "bongos_window",
  "command_palette_hooks",
  "editor",
@@ -2240,6 +2241,7 @@ dependencies = [
  "language",
  "multi_buffer",
  "project",
+ "settings",
  "theme",
  "theme_settings",
  "ui",

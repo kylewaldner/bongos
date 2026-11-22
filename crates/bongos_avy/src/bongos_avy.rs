@@ -5,6 +5,7 @@
 pub mod actions;
 pub mod jump;
 pub mod overlay;
+pub mod session;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod visible;
@@ -14,6 +15,8 @@ mod jump_tests;
 #[cfg(test)]
 mod overlay_tests;
 #[cfg(test)]
+mod session_tests;
+#[cfg(test)]
 mod visible_tests;
 
 use bongos_emacs::prefix_arg::{Meaning, declare};
@@ -21,8 +24,9 @@ use command_palette_hooks::CommandPaletteFilter;
 use gpui::App;
 
 /// Declares that the `avy` actions ignore a prefix argument and hides them from the command
-/// palette, since no handler runs them yet.
+/// palette, since no handler runs them yet. Lets C-g cancel a running jump.
 pub fn init(cx: &mut App) {
+    session::init(cx);
     for name in actions::IGNORED {
         declare(cx, name, Meaning::Ignored);
     }
