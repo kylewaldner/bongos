@@ -486,6 +486,9 @@ pub enum RunTreeRecord {
     },
     /// A materialized tree at `path` the run reads and never writes.
     Snapshot { path: PathBuf },
+    /// The run's own work directory in its project's files folder, `work/<run id>`: no
+    /// repository, no branch, nothing merged.
+    Work,
 }
 
 /// `run.toml` as written, where `subject` may be missing (records older than the field).

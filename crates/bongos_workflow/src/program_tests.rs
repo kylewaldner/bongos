@@ -188,6 +188,7 @@ impl Fixture {
             state,
             worktree,
             read_only_worktree: false,
+            needs_sandbox: false,
             extra_writable: Vec::new(),
             env: Vec::new(),
             scratch,

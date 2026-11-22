@@ -2053,16 +2053,33 @@ mode = { type = "text", from = "literal:fast" }"#,
         ),
     );
     let mut lifecycle = world.lifecycle();
-    // Every input resolves from the override or its literal, with no task: the start gets past
-    // the inputs and the machine checks, and only a run with no repository or snapshot is not
-    // supported yet.
+    // Every input resolves from the override or its literal, with no task.
     let mut request = project_request("briefed");
     request
         .overrides
         .insert("brief".to_string(), InputValue::Text("Tidy".to_string()));
-    let refusal = world.start(&mut lifecycle, request).unwrap_err();
-    assert_eq!(refusal.kind, RefusalKind::Unsupported, "{refusal}");
-    assert!(lifecycle.all_runs().is_empty(), "nothing started");
+    let run = world.start(&mut lifecycle, request).unwrap();
+    let inputs: Vec<(String, Option<InputValue>)> = lifecycle
+        .record(&run)
+        .unwrap()
+        .inputs
+        .iter()
+        .map(|input| (input.name.clone(), input.value.clone()))
+        .collect();
+    assert_eq!(
+        inputs,
+        vec![
+            (
+                "brief".to_string(),
+                Some(InputValue::Text("Tidy".to_string()))
+            ),
+            (
+                "mode".to_string(),
+                Some(InputValue::Text("fast".to_string()))
+            ),
+        ]
+    );
+    lifecycle.cancel(&run).unwrap();
 
     // An unknown project and a start with no workflow named are refused first.
     let refusal = world
