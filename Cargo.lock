@@ -2562,6 +2562,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bongos_lanes_model"
+version = "0.1.0"
+dependencies = [
+ "bongos_workflow_model",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "toml 0.8.23",
+ "toml_edit 0.22.27",
+]
+
+[[package]]
 name = "bongos_language_status"
 version = "0.1.0"
 dependencies = [
