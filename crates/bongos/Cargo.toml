@@ -181,6 +181,7 @@ bongos_net.workspace = true
 bongos_prompts.workspace = true
 bongos_query_replace.workspace = true
 bongos_terraform.workspace = true
+bongos_undo_tree.workspace = true
 bongos_version.workspace = true
 bongos_work.workspace = true
 bongos_workflow.workspace = true

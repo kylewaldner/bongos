@@ -1,0 +1,21 @@
+[package]
+name = "bongos_undo_tree"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/bongos_undo_tree.rs"
+doctest = false
+
+[dependencies]
+bongos_emacs.workspace = true
+gpui.workspace = true
+settings.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

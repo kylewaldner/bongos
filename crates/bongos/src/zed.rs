@@ -5722,6 +5722,7 @@ mod tests {
                 "toast",
                 "todo",
                 "toolchain",
+                "undo_tree",
                 "variable_list",
                 "vim",
                 "window",

@@ -2064,6 +2064,7 @@ dependencies = [
  "bongos_prompts",
  "bongos_query_replace",
  "bongos_terraform",
+ "bongos_undo_tree",
  "bongos_version",
  "bongos_window",
  "bongos_work",
@@ -2862,6 +2863,19 @@ dependencies = [
  "tempfile",
  "util",
 ]
+
+[[package]]
+name = "bongos_undo_tree"
+version = "0.1.0"
+dependencies = [
+ "bongos_emacs",
+ "gpui",
+ "settings",
+]
+
+[[package]]
+name = "bongos_undo_tree_model"
+version = "0.1.0"
 
 [[package]]
 name = "bongos_version"
