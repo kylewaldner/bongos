@@ -2645,6 +2645,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bongos_checks",
+ "bongos_confine",
  "bongos_emacs",
  "bongos_engine_host",
  "bongos_lanes_model",
