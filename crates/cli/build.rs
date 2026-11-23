@@ -43,8 +43,7 @@ fn main() {
 /// time this script ran, which differs from the one the app's build script embeds, and the
 /// engine host refuses a command line whose version differs from its own.
 fn skip_git_head_watch() -> bool {
-    std::env::var("BONGOS_SKIP_GIT_HEAD_WATCH")
-        .is_ok_and(|value| !value.is_empty() && value != "0")
+    std::env::var("BONGOS_SKIP_GIT_HEAD_WATCH").is_ok_and(|value| !value.is_empty() && value != "0")
 }
 
 /// Tells cargo to rerun this script when the checked-out commit changes, so the
