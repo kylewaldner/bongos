@@ -1,6 +1,6 @@
 //! Emacs-style undo grouping. With `undo_tree.grouping` set to `emacs`, a new buffer does not group
 //! edits by time (its group interval is zero), and a run of typing is merged into one undo step
-//! here instead: up to 20 characters typed one after the other in one editor, with no command, no
+//! here instead (a buffer loaded from disk gets the zero interval when an editor shows it): up to 20 characters typed one after the other in one editor, with no command, no
 //! cursor move and no edit by anyone else in between. Every other command is one step of its own.
 //! With `zed` nothing here acts, and the buffer's 300 ms time grouping stays.
 
@@ -92,6 +92,13 @@ pub(crate) fn init(cx: &mut App) {
         |editor: &mut Editor, _: Option<&mut Window>, cx: &mut Context<Editor>| {
             if !editor.mode().is_full() {
                 return;
+            }
+            // Buffers loaded from disk do not reach the buffer observer above, so the editor
+            // covers them.
+            if emacs_grouping(cx) {
+                for buffer in editor.buffer().read(cx).all_buffers() {
+                    buffer.update(cx, |buffer, _| buffer.set_group_interval(Duration::ZERO));
+                }
             }
             editor.register_addon(GroupingAddon::default());
             let this = cx.entity();
