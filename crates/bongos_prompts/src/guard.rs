@@ -17,7 +17,7 @@ use std::ops::Range;
 use std::time::Instant;
 
 use editor::{Editor, SelectionEffects};
-use gpui::{Context, Window};
+use gpui::{Context, Global, Window};
 use language::{Point, TextBufferSnapshot, TransactionId};
 
 use crate::actions::show_toast;
@@ -26,6 +26,13 @@ use crate::mode::{PromptsMode, mode_of, sync};
 /// The toast of a reverted join.
 pub const JOIN_MESSAGE: &str =
     "A rule cannot be joined into a line; select across it to merge boxes";
+
+/// A function the guard calls on a local edit transaction it keeps, just before it finalizes it
+/// (finalizing ends the transaction's grouping with the next one). It lets another crate merge
+/// the transaction into an undo step first.
+pub struct BeforeFinalize(pub fn(&mut Editor, TransactionId, &mut Context<Editor>));
+
+impl Global for BeforeFinalize {}
 
 /// The guard's state in one editor.
 #[derive(Default)]
@@ -138,6 +145,9 @@ pub(crate) fn on_edited(
     if joined || (lost && !region) {
         revert(mode, editor, transaction_id, window, cx);
         return;
+    }
+    if let Some(hook) = cx.try_global::<BeforeFinalize>().map(|hook| hook.0) {
+        hook(editor, transaction_id, cx);
     }
     let (now, interval, version) = {
         let buffer = buffer.read(cx);
