@@ -2815,6 +2815,7 @@ dependencies = [
  "log",
  "project",
  "settings",
+ "terminal_view",
  "theme",
  "theme_settings",
  "ui",
