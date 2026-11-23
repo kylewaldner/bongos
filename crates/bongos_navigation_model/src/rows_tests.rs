@@ -14,6 +14,18 @@ fn snippet_trims_around_a_long_line_and_shifts_ranges() {
 }
 
 #[test]
+fn snippet_keeps_long_matches_whole_on_long_lines() {
+    for match_len in [199, 200, 250] {
+        let matched = "ñ".repeat(match_len);
+        let line = format!("{}{}{}", "é".repeat(100), matched, "ü".repeat(300));
+        let start = 100 * "é".len();
+        let snip = snippet(&line, start..start + matched.len(), 200);
+        assert_eq!(&snip.text[snip.ranges[0].clone()], matched);
+        assert!(snip.text.starts_with(ELLIPSIS) && snip.text.ends_with(ELLIPSIS));
+    }
+}
+
+#[test]
 fn rows_and_pane_names_are_formatted() {
     assert_eq!(find_row("src/a.kt", 12, "val x"), "src/a.kt:12  val x");
     let pos = |hi, hc, vi, vc| PanePosition::Center {

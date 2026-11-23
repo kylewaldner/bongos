@@ -221,6 +221,13 @@ pub struct SessionDelegate {
     keep_selection: Option<usize>,
 }
 
+/// Closing the session stops the pass that still runs (cancelling twice is harmless).
+impl Drop for SessionDelegate {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
 impl SessionDelegate {
     fn new(core: Rc<Core>, source: Source, history: HistoryRing, initial_input: &str) -> Self {
         let (kind, items) = match source {
