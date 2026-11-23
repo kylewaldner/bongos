@@ -338,7 +338,12 @@ impl PreviewSession {
                 if entry_pinned {
                     buffer.unpin_undo_node(entry);
                 }
-                buffer.set_capability(capability, cx);
+                // Something else may have changed the capability while the preview was open
+                // (a collaborator leaving makes it read-only for good, for instance); only the
+                // read-only state the preview set is undone.
+                if buffer.capability() == Capability::ReadOnly {
+                    buffer.set_capability(capability, cx);
+                }
             });
         }
         if let Some(open) = cx.try_global::<OpenPreviews>()

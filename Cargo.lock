@@ -2888,6 +2888,8 @@ dependencies = [
  "serde_json",
  "settings",
  "text",
+ "ui",
+ "util",
  "workspace",
 ]
 
