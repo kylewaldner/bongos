@@ -193,6 +193,11 @@ pub fn strict_yes_or_no(
 }
 
 impl ReadKeyView {
+    /// The prompt in front of the keys.
+    pub fn prompt_text(&self) -> SharedString {
+        self.prompt.clone()
+    }
+
     /// The declared keys as the line shows them, `y n ! q`.
     #[cfg(test)]
     pub(crate) fn legend(&self) -> String {
