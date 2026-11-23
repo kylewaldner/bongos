@@ -2803,8 +2803,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bongos_emacs",
+ "bongos_minibuffer",
  "bongos_navigation_model",
+ "bongos_window",
  "command_palette_hooks",
+ "db",
  "editor",
  "futures 0.3.32",
  "gpui",
@@ -2817,6 +2820,7 @@ dependencies = [
  "ui",
  "util",
  "workspace",
+ "zed_actions",
 ]
 
 [[package]]
