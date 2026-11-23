@@ -1588,4 +1588,19 @@
       "shift-tab": "skill_creator::FocusPreviousField",
     },
   },
+  {
+    "context": "UndoTree",
+    "bindings": {
+      "f": "undo_tree::VundoForward",
+      "b": "undo_tree::VundoBackward",
+      "n": "undo_tree::VundoNext",
+      "p": "undo_tree::VundoPrevious",
+      "m": "undo_tree::VundoMark",
+      "u": "undo_tree::VundoUnmark",
+      "d": "undo_tree::VundoDiff",
+      "enter": "undo_tree::VundoConfirm",
+      "q": "undo_tree::VundoQuit",
+      "ctrl-g": "undo_tree::VundoQuit",
+    },
+  },
 ]
