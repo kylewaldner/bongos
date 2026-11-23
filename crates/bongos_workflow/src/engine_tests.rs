@@ -218,6 +218,7 @@ fn a_failed_health_or_mcp_refresh_keeps_the_last_snapshot() {
                 agent: Agent::Claude,
                 state,
                 fix: String::new(),
+                chat_caps: None,
                 caps: None,
             },
             env: [

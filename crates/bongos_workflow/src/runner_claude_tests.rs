@@ -15,7 +15,7 @@ use bongos_confine::{HostGit, RULE, TreeAccess, TreeGit};
 use bongos_workflow_model::record::EndState;
 use bongos_workflow_model::scheduler::Branch;
 use bongos_workflow_model::{
-    Definition, Event, Failure, FailureReason, Limits, NodeKey, json_schema, parse,
+    Definition, EnvEdit, Event, Failure, FailureReason, Limits, NodeKey, json_schema, parse,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -112,6 +112,7 @@ fn ready(caps: Capabilities) -> Health {
         },
         fix: String::new(),
         caps: Some(caps),
+        chat_caps: None,
     }
 }
 
@@ -159,6 +160,7 @@ fn node(definition: &Definition, name: &str, root: &Path, try_number: u32) -> Cl
         node_result: try_dir.join("node-result.json"),
         session_id: SESSION.to_string(),
         confinement: None,
+        env: Vec::new(),
     }
 }
 
@@ -558,6 +560,69 @@ fn the_environment_holds_only_the_named_variables() {
         .collect();
     let expected: BTreeSet<String> = expected.iter().map(|name| name.to_string()).collect();
     assert_eq!(seen, expected);
+}
+
+#[test]
+fn a_lane_run_adds_its_variables_and_edits_and_no_edit_changes_the_node_names() {
+    let root = TempDir::new().unwrap();
+    let mut node = node(&definition(), "triage", root.path(), 1);
+    let base = base_env(root.path());
+    let plain = launch_env(&base, "run-1", &key("triage"), &node);
+
+    let setup = crate::runtime::RunSetup {
+        lane: Some(bongos_workflow_model::LaneRef {
+            id: "lane-2".to_string(),
+            kind: "build".to_string(),
+        }),
+        lane_dirs: [("target".to_string(), PathBuf::from("/lanes/2/target"))].into(),
+        env: vec![
+            EnvEdit::Set {
+                name: "CARGO_TARGET_DIR".to_string(),
+                value: "/lanes/2/target".to_string(),
+            },
+            EnvEdit::Unset {
+                name: "LANG".to_string(),
+            },
+            EnvEdit::PrependPath {
+                dirs: vec![PathBuf::from("/lanes/2/bin")],
+            },
+            EnvEdit::Set {
+                name: "BONGOS_WORKTREE".to_string(),
+                value: "/elsewhere".to_string(),
+            },
+            EnvEdit::Set {
+                name: "BONGOS_LANE".to_string(),
+                value: "not-the-lane".to_string(),
+            },
+        ],
+        ..Default::default()
+    };
+    node.env = setup.env_edits();
+    let env = launch_env(&base, "run-1", &key("triage"), &node);
+    assert_eq!(env["BONGOS_LANE"], "lane-2");
+    assert_eq!(env["BONGOS_LANE_KIND"], "build");
+    assert_eq!(env["BONGOS_LANE_DIR_TARGET"], "/lanes/2/target");
+    assert_eq!(env["CARGO_TARGET_DIR"], "/lanes/2/target");
+    assert!(!env.contains_key("LANG"));
+    let expected: Vec<PathBuf> = std::iter::once(PathBuf::from("/lanes/2/bin"))
+        .chain(std::env::split_paths(&plain["PATH"]).filter(|path| !path.as_os_str().is_empty()))
+        .collect();
+    assert_eq!(
+        std::env::split_paths(&env["PATH"]).collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(env["BONGOS_WORKTREE"], plain["BONGOS_WORKTREE"]);
+    assert!(!env.contains_key("SECRET_TOKEN"));
+
+    // The same run with no lane gets no lane variable, only its edits.
+    let edits_only = crate::runtime::RunSetup {
+        lane: None,
+        ..setup
+    };
+    node.env = edits_only.env_edits();
+    let env = launch_env(&base, "run-1", &key("triage"), &node);
+    assert!(env.keys().all(|name| !name.starts_with("BONGOS_LANE")));
+    assert!(edits_only.writable_dirs().is_empty());
 }
 
 #[test]

@@ -22,7 +22,9 @@ use std::sync::Arc;
 use bongos_work::WriteError;
 use bongos_work_model::commands::{self, Change, Context, Outcome};
 use bongos_work_model::store::{Task, WorkTree};
-use bongos_work_model::{Extra, HistoryEntry, SessionContext, TodoRole, TodoState};
+use bongos_work_model::{
+    Extra, HistoryEntry, ProjectSessionContext, SessionContext, TodoRole, TodoState,
+};
 use bongos_workflow_model::definition::{Node, NodeKind};
 use bongos_workflow_model::inputs::Input;
 use bongos_workflow_model::record::TodoRef;
@@ -108,6 +110,32 @@ pub fn system_text(context: &SessionContext, workflow: &str, todo: &TodoRef) -> 
     let _ = writeln!(out, "Todo: {}", line(&todo.name));
     if !context.artifacts.is_empty() {
         let _ = writeln!(out, "\n## Shared artifacts\n");
+        for artifact in &context.artifacts {
+            let description = line(&artifact.description);
+            if description.is_empty() {
+                let _ = writeln!(out, "- {}", artifact.path.display());
+            } else {
+                let _ = writeln!(out, "- {}: {description}", artifact.path.display());
+            }
+        }
+    }
+    out
+}
+
+/// The system file an agent node of a run with no task gets: the project context of
+/// `project_session_context`. It names no task; the only files in it are the shared ones.
+pub fn project_system_text(context: &ProjectSessionContext, workflow: &str) -> String {
+    let line = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = String::new();
+    let _ = writeln!(out, "# Project context\n");
+    let _ = writeln!(out, "Project: {}", line(&context.name));
+    let _ = writeln!(out, "Goal: {}", line(&context.goal));
+    let _ = writeln!(out, "Definitions: {}", context.definitions.display());
+    let _ = writeln!(out, "Project documents: {}", context.documents.display());
+    let _ = writeln!(out, "Project files: {}", context.files_dir.display());
+    let _ = writeln!(out, "Workflow: {workflow}");
+    if !context.artifacts.is_empty() {
+        let _ = writeln!(out, "\n## Shared files\n");
         for artifact in &context.artifacts {
             let description = line(&artifact.description);
             if description.is_empty() {

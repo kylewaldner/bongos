@@ -19,19 +19,25 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use bongos_work_model::artifacts::{artifact_key, read_task_artifacts};
 use bongos_work_model::commands::{self, Change, Context, Outcome as CommandOutcome, Write};
-use bongos_work_model::layout::{PROPOSALS_DIR, proposal_file};
+use bongos_work_model::files::write_atomic;
+use bongos_work_model::io::{read_artifacts, serialize_artifacts};
+use bongos_work_model::layout::{self, PROPOSALS_DIR, proposal_file};
 use bongos_work_model::store::{Task, WorkTree};
 use bongos_work_model::{
-    ArtifactsFile, Extra, HistoryEntry, ResultKind, ResultState, TaskResult, Visibility,
+    Artifact, ArtifactsFile, Extra, HistoryEntry, ResultKind, ResultState, TaskResult, Visibility,
 };
 use bongos_workflow_model::definition::Outcome;
-use bongos_workflow_model::{Definition, Limits, NodeKey, RunState, scheduler};
+use bongos_workflow_model::{
+    Definition, Failure, FailureReason, Limits, NodeKey, RunState, scheduler,
+};
 use serde_json::Value;
 
-use crate::worktrees::short_id;
+use crate::lifecycle::PROJECT_WORK_DIR;
+use crate::worktrees::{RunWorktree, branch_worktree_path, short_id};
 
 /// The extra `[result]` keys a `pr` outcome sets, from fields of the same result.
 pub const PR_EXTRA_FIELDS: [&str; 3] = ["title", "branch", "draft"];
@@ -248,6 +254,11 @@ pub fn source_file(root: &Path, relative: &str) -> Result<PathBuf, String> {
 /// (`n` from 2), never overwriting a file and never taking a name the task directory reserves.
 /// The name it took.
 pub fn copy_document(source: &Path, task_dir: &Path) -> Result<String, String> {
+    copy_document_except(source, task_dir, &[])
+}
+
+/// [`copy_document`], never taking one of `taken` either.
+fn copy_document_except(source: &Path, task_dir: &Path, taken: &[&str]) -> Result<String, String> {
     let name = source
         .file_name()
         .and_then(|name| name.to_str())
@@ -263,7 +274,9 @@ pub fn copy_document(source: &Path, task_dir: &Path) -> Result<String, String> {
             (n, Some(extension)) => format!("{stem}-{n}.{extension}"),
             (n, None) => format!("{stem}-{n}"),
         };
-        if artifact_key(Path::new(&candidate)).as_deref() != Some(candidate.as_str()) {
+        if artifact_key(Path::new(&candidate)).as_deref() != Some(candidate.as_str())
+            || taken.contains(&candidate.as_str())
+        {
             continue;
         }
         match create_new(&task_dir.join(&candidate), &bytes) {
@@ -439,4 +452,151 @@ pub fn copy_proposal(task: &Task, source: &Path, workflow: &str) -> Result<PathB
         }
     }
     Err(format!("no free proposal number in {}", task.dir.display()))
+}
+
+/// The worktree an outcome path of `key` is relative to: its fan-out branch worktree while that
+/// still holds the file, else the run worktree (where the join merged it). A snapshot or a work
+/// directory, which has no branch, is the only tree of its run.
+pub fn source_root(worktree: &RunWorktree, key: &NodeKey, path: &str) -> PathBuf {
+    if let Some((fan, index)) = key.branch.last().filter(|_| !worktree.branch.is_empty()) {
+        let branch = branch_worktree_path(&worktree.run_dir, fan, *index);
+        if branch.join(path).exists() {
+            return branch;
+        }
+    }
+    worktree.path.clone()
+}
+
+/// One `document` outcome of a run with no task: the key that reported it, the tree its path is
+/// relative to ([`source_root`]) and the path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectDocument {
+    pub key: NodeKey,
+    pub root: PathBuf,
+    pub path: String,
+}
+
+/// The `document` outcomes the success end of a run with no task copies into its project's files
+/// folder ([`deliver_project_documents`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectDocuments {
+    /// The project's files folder, which the documents are copied into.
+    pub files_dir: PathBuf,
+    pub run_id: String,
+    pub documents: Vec<ProjectDocument>,
+    /// A success end the run reached promised a document.
+    pub promised: bool,
+    /// The file recording the delivery in the attempt directory: once it is there, nothing is
+    /// copied again.
+    pub marker: PathBuf,
+}
+
+/// Copies every document of `documents` into the project's files folder under a free name, never
+/// overwriting a file, never taking a name the folder reserves or its `work` directory, and
+/// records each shared in the folder's `artifacts.toml` ([`record_project_artifact`]), then
+/// writes the marker. A path that is absolute, climbs out or leads outside its tree through a
+/// link is refused ([`source_file`]). Nothing is done when the marker is there already. The names
+/// taken; the failure when a document was promised and none was delivered.
+pub fn deliver_project_documents(documents: &ProjectDocuments) -> Result<Vec<String>, Failure> {
+    if documents.marker.exists() {
+        return Ok(Vec::new());
+    }
+    let mut names = Vec::new();
+    let mut first_failure: Option<(NodeKey, String)> = None;
+    for document in &documents.documents {
+        match deliver_project_document(&documents.files_dir, &documents.run_id, document) {
+            Ok(name) => names.push(name),
+            Err(detail) => {
+                log::warn!(
+                    "workflows: run {} could not deliver the document of {}: {detail}",
+                    documents.run_id,
+                    document.key
+                );
+                first_failure.get_or_insert((document.key.clone(), detail));
+            }
+        }
+    }
+    if documents.promised && names.is_empty() {
+        let (key, detail) = match first_failure {
+            Some((key, detail)) => (Some(key), detail),
+            None => (None, "no node delivered it".to_string()),
+        };
+        return Err(Failure::new(
+            FailureReason::OutcomePromisedNotDelivered,
+            key,
+            detail,
+        ));
+    }
+    let record: Vec<String> = names
+        .iter()
+        .map(|name| format!("{:?}", Delivered::Document { name: name.clone() }))
+        .collect();
+    let text = serde_json::to_string_pretty(&record).unwrap_or_default();
+    if let Err(error) = fs::write(&documents.marker, text) {
+        log::warn!(
+            "workflows: could not write {}: {error}",
+            documents.marker.display()
+        );
+    }
+    Ok(names)
+}
+
+fn deliver_project_document(
+    files_dir: &Path,
+    run_id: &str,
+    document: &ProjectDocument,
+) -> Result<String, String> {
+    let source = source_file(&document.root, &document.path)?;
+    let name = copy_document_except(&source, files_dir, &[PROJECT_WORK_DIR])?;
+    record_project_artifact(
+        files_dir,
+        &name,
+        &document_description(run_id, &document.key.node),
+    )?;
+    Ok(name)
+}
+
+/// Serializes the `artifacts.toml` updates of [`record_project_artifact`]: two runs ending at once
+/// each re-read the file under it, so neither loses the other's entry.
+static PROJECT_ARTIFACTS: Mutex<()> = Mutex::new(());
+
+/// Records `name` shared with `description` in the `artifacts.toml` of the project files folder
+/// `files_dir`: the file is read again under a lock, the entry added (or an entry for the same
+/// path updated), and the file replaced whole through a temporary file and a rename. Every other
+/// entry and key is kept; a file that does not parse is an error and is left as it is.
+pub fn record_project_artifact(
+    files_dir: &Path,
+    name: &str,
+    description: &str,
+) -> Result<(), String> {
+    let _guard = PROJECT_ARTIFACTS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let path = layout::artifacts_file(files_dir);
+    let mut manifest = match read_artifacts(&path) {
+        Ok(manifest) => manifest,
+        Err(bongos_work_model::Error {
+            kind: bongos_work_model::ErrorKind::Io(error),
+            ..
+        }) if error.kind() == io::ErrorKind::NotFound => ArtifactsFile::default(),
+        Err(error) => return Err(error.to_string()),
+    };
+    match manifest
+        .artifacts
+        .iter_mut()
+        .find(|artifact| artifact.path == name)
+    {
+        Some(artifact) => {
+            artifact.description = description.to_string();
+            artifact.visibility = Some(Visibility::Shared);
+        }
+        None => manifest.artifacts.push(Artifact {
+            path: name.to_string(),
+            description: description.to_string(),
+            visibility: Some(Visibility::Shared),
+            extra: Extra::new(),
+        }),
+    }
+    let text = serialize_artifacts(&manifest).map_err(|error| error.to_string())?;
+    write_atomic(&path, text.as_bytes()).map_err(|error| format!("{}: {error}", path.display()))
 }

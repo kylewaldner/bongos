@@ -487,6 +487,12 @@ impl WorkStore {
         }
     }
 
+    /// Recomputes [`Self::repository_overview`] because a layer above the settings (the project's
+    /// lane table) changed which root it decides.
+    pub fn refresh_root_layers(&mut self, cx: &mut gpui::Context<Self>) {
+        self.refresh_overview(cx);
+    }
+
     /// Recomputes [`Self::repository_overview`] from the snapshot and the settings.
     pub(crate) fn refresh_overview(&mut self, cx: &mut gpui::Context<Self>) {
         if !self.enabled {
@@ -507,6 +513,11 @@ impl WorkStore {
             tree: self.snapshot(),
             known: self.git_dirs.clone(),
             poll_decider: self.poll_decider,
+            layers: settings
+                .repositories
+                .iter()
+                .map(|repository| overview::RootLayers::decided(&repository.name, cx))
+                .collect(),
         };
         let fs = self.fs();
         // A newer request replaces (and so cancels) one still running.

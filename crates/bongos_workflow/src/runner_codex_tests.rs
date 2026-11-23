@@ -93,6 +93,7 @@ fn ready(caps: Capabilities) -> Health {
         },
         fix: String::new(),
         caps: Some(caps),
+        chat_caps: None,
     }
 }
 
@@ -146,6 +147,7 @@ fn node(definition: &Definition, root: &Path) -> CodexNode {
         task_dir: root.join("task"),
         node_result: try_dir.join("node-result.json"),
         confinement: None,
+        env: Vec::new(),
     }
 }
 

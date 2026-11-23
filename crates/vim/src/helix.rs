@@ -1231,6 +1231,7 @@ impl Vim {
                     text_color: label_color,
                     x_offset: -fit.left_shift,
                     scale_factor: fit.scale_factor,
+                    background: None,
                 },
                 covered_text_range: Some(start_anchor..hide_end_anchor),
             });

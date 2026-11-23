@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use bongos_chat_model::Agent;
+use bongos_chat_model::{Agent, AgentAdapter as _, Capabilities, ClaudeAdapter};
 use gpui::{AppContext as _, Entity, TestAppContext, UpdateGlobal as _};
 use settings::{ChatAgentContent, Settings as _, SettingsStore};
 use tempfile::TempDir;
@@ -153,6 +153,16 @@ async fn test_both_clis_ready(cx: &mut TestAppContext) {
     let caps = claude.caps.expect("capabilities read from the fake help");
     assert!(caps.has_flag("--session-id"));
     assert!(caps.has_subcommand("auth"));
+    // Chat capabilities come from the version alone, not from the help.
+    let chat_caps = claude
+        .chat_caps
+        .expect("chat capabilities from the version");
+    assert_eq!(
+        chat_caps,
+        ClaudeAdapter::new("claude").capabilities(Some("2.1.319 (Claude Code)"))
+    );
+    assert!(chat_caps.has("auth") && chat_caps.has_flag("--session-id"));
+    assert!(!chat_caps.has_subcommand("auth"));
 
     let codex = health_of(cx, &setup.health, Agent::Codex);
     assert_eq!(
@@ -162,6 +172,7 @@ async fn test_both_clis_ready(cx: &mut TestAppContext) {
             login_checked: true
         }
     );
+    assert_eq!(codex.chat_caps, codex.caps);
     assert!(codex.caps.unwrap().has_subcommand("fork"));
     assert_eq!(*setup.events.lock().unwrap(), 1);
 }
@@ -186,6 +197,7 @@ async fn test_program_not_found(cx: &mut TestAppContext) {
     );
     assert!(!claude.is_offered());
     assert!(claude.caps.is_none());
+    assert!(claude.chat_caps.is_none());
 
     let codex = health_of(cx, &setup.health, Agent::Codex);
     assert_eq!(codex.state, HealthState::NotFound);
@@ -215,6 +227,12 @@ async fn test_logged_out(cx: &mut TestAppContext) {
     assert_eq!(claude_health.fix, fix_logged_out(Agent::Claude, &claude));
     assert!(!claude_health.is_offered());
     assert!(claude_health.caps.is_some());
+    assert!(
+        claude_health
+            .chat_caps
+            .expect("logged out still has chat caps")
+            .has("auth")
+    );
     let codex_health = health_of(cx, &setup.health, Agent::Codex);
     assert_eq!(codex_health.state, HealthState::LoggedOut);
     assert_eq!(
@@ -275,6 +293,8 @@ async fn test_hanging_version_probe_is_unchecked(cx: &mut TestAppContext) {
     assert!(claude_health.fix.contains("did not answer"));
     assert!(claude_health.is_offered());
     assert!(claude_health.caps.is_none());
+    // An unreadable version is an empty set (every fallback applies), not an error.
+    assert_eq!(claude_health.chat_caps, Some(Capabilities::default()));
     assert_eq!(
         health_of(cx, &setup.health, Agent::Codex).state,
         HealthState::Unchecked
@@ -489,4 +509,53 @@ fn test_fix_texts() {
         fix_logged_out(Agent::Codex, "codex"),
         "Run `codex login` in a terminal and log in"
     );
+}
+
+#[gpui::test]
+async fn test_old_claude_version_gives_fallbacks_from_the_version_not_the_help(
+    cx: &mut TestAppContext,
+) {
+    let (claude, codex) = fakes();
+    let setup = setup(
+        cx,
+        true,
+        &claude,
+        &codex,
+        env_of(&[("FAKE_CLI_VERSION", "2.0.0")]),
+    );
+    wait_round(cx, &setup.health, 1).await;
+    let health = health_of(cx, &setup.health, Agent::Claude);
+    let adapter = ClaudeAdapter::new("claude");
+
+    // The help (what the workflow runner reads) still lists the flags...
+    let help_caps = health.caps.expect("help-derived caps");
+    assert!(adapter.shape(&help_caps).native_fork);
+    assert!(adapter.shape(&help_caps).skills_as_plugin);
+    // ...but a chat launch reads `chat_caps`, which an old version leaves without them.
+    let chat_caps = health.chat_caps.expect("chat caps");
+    let shape = adapter.shape(&chat_caps);
+    assert!(!shape.native_fork);
+    assert!(!shape.skills_as_plugin);
+    assert!(shape.context_in_system);
+    assert!(!chat_caps.has_flag("--session-id"));
+    assert!(!health.fix.contains("error"));
+}
+
+#[gpui::test]
+async fn test_unreadable_version_gives_every_fallback_quietly(cx: &mut TestAppContext) {
+    let (claude, codex) = fakes();
+    let setup = setup(
+        cx,
+        true,
+        &claude,
+        &codex,
+        env_of(&[("FAKE_CLI_VERSION", "not-a-version")]),
+    );
+    wait_round(cx, &setup.health, 1).await;
+    let health = health_of(cx, &setup.health, Agent::Claude);
+    assert!(matches!(health.state, HealthState::Ready { .. }));
+    assert!(health.is_offered());
+    assert_eq!(health.chat_caps, Some(Capabilities::default()));
+    let shape = ClaudeAdapter::new("claude").shape(health.chat_caps.as_ref().unwrap());
+    assert!(!shape.native_fork && !shape.skills_as_plugin && shape.context_in_system);
 }

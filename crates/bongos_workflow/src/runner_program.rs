@@ -49,8 +49,8 @@
 //!   runner reruns it after the interval, until a result other than the value or until the
 //!   give-up time passes ("wait timed out").
 //!
-//! The environment is the agent runners' (`PATH`, `HOME`, `LANG`, the node's `BONGOS_*` names)
-//! plus `BONGOS_STATE` and `BONGOS_RESULT`; `TMPDIR` points at `tmp/` in the node's scratch
+//! The environment is the agent runners' (`PATH`, `HOME`, `LANG`, the run's own edits, the node's
+//! `BONGOS_*` names) plus `BONGOS_STATE` and `BONGOS_RESULT`; `TMPDIR` points at `tmp/` in the node's scratch
 //! directory, the one temporary directory both layers let it write. A program costs nothing.
 
 use std::collections::{BTreeMap, HashMap};
@@ -108,6 +108,14 @@ pub const MIN_PYTHON: (u32, u32) = (3, 8);
 
 /// What to do when no usable interpreter is found.
 pub const INTERPRETER_FIX: &str = "install Python 3.8+ or set workflows.programs.python";
+
+/// Why a program of a snapshot run does not start when the OS sandbox is unavailable.
+pub const SNAPSHOT_NEEDS_SANDBOX: &str =
+    "a program of a snapshot run needs the OS sandbox to keep the snapshot read-only";
+
+/// Why a program of a run in a project's work directory does not start when the OS sandbox is
+/// unavailable.
+pub const WORK_DIR_NEEDS_SANDBOX: &str = "a program of a project run with no repository needs the OS sandbox to keep the project's records read-only";
 
 /// Why a node with MCP permissions does not start in v1.
 pub const MCP_REFUSAL: &str = "MCP from program nodes needs the bongos MCP server (feature 21)";
@@ -287,8 +295,13 @@ pub struct ProgramNode {
     pub polls: Option<PollPlan>,
     /// The state document; its `paths` are `worktree` and `scratch`.
     pub state: StateDoc,
-    /// The node's worktree: the working directory, writable.
+    /// The node's worktree: the working directory, writable unless `tree_access` is read-only.
     pub worktree: PathBuf,
+    /// The script never runs without the OS sandbox: its worktree is a snapshot only the sandbox
+    /// keeps read-only, or a work directory beside records only the sandbox keeps it from writing.
+    pub needs_sandbox: bool,
+    /// The run's edits to the environment.
+    pub env: Vec<bongos_workflow_model::EnvEdit>,
     /// The node's scratch directory, writable; holds `$BONGOS_RESULT`, `TMPDIR` and the private
     /// git directory.
     pub scratch: PathBuf,
@@ -389,6 +402,7 @@ pub fn launch_env(
             task_dir: &node.task_dir,
             worktree: &node.worktree,
             node_result: &node.node_result,
+            edits: &node.env,
         },
     );
     let path = |path: &Path| path.to_string_lossy().into_owned();
@@ -927,6 +941,23 @@ impl ProgramRunner {
                     "a job in a main worktree runs only in the OS sandbox ({sandbox_note}): {}",
                     node.worktree.display()
                 ),
+            ));
+        }
+        if sandbox.is_none() && node.needs_sandbox {
+            let reason = sandbox_note
+                .strip_prefix("not sandboxed: ")
+                .unwrap_or(&sandbox_note);
+            // Only the OS sandbox keeps a snapshot read-only (the shim alone lets listed commands
+            // write it) and a work directory's project records untouched, so such a program
+            // never runs without the sandbox.
+            let why = if node.tree_access == TreeAccess::ReadOnly {
+                SNAPSHOT_NEEDS_SANDBOX
+            } else {
+                WORK_DIR_NEEDS_SANDBOX
+            };
+            return Err(refuse(
+                FailureReason::PermissionDenied,
+                format!("{why}: {reason}"),
             ));
         }
         write_summary(dir, &json!({ "pass": number, "sandbox": sandbox_note }));

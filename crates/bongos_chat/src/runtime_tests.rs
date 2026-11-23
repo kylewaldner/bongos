@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use bongos_chat_model::{
     Agent, AgentAdapter as _, Capabilities, ChatRecord, ClaudeAdapter, CodexAdapter, LaunchKind,
-    TaskFacts, read_record, record_path, resolve, seed, write_record,
+    TaskFacts, Timestamp, read_record, record_path, resolve, seed, timestamp_utc, write_record,
 };
 use bongos_work::{LiveModesRegistry, WorkDirs, WorkSettings, WorkStore, WorkStoreEvent};
 use bongos_work_model::session_context;
@@ -41,7 +41,7 @@ const SECRETS: [(&str, &str); 3] = [
     ("prompts.txt", "The private prompts Kyle typed"),
 ];
 
-fn fixture(name: &str) -> PathBuf {
+pub(super) fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("test-fixtures")
         .join(name)
@@ -325,7 +325,7 @@ impl Harness {
     }
 
     /// The values of the log lines `<name> <key> <value>`.
-    fn logged(&self, name: &str, key: &str) -> Vec<String> {
+    pub(super) fn logged(&self, name: &str, key: &str) -> Vec<String> {
         let prefix = format!("{key} ");
         self.log_lines(name)
             .iter()
@@ -361,6 +361,16 @@ impl Harness {
             self.state(id, cx),
             std::fs::read_to_string(&self.log).unwrap_or_default(),
         );
+    }
+
+    /// Moves the runtime's clock past the bell's grace, so output and input count again.
+    pub(super) fn pass_bell_grace(&self, cx: &mut TestAppContext) {
+        self.runtime.update(cx, |runtime, cx| {
+            runtime.advance_clock(
+                bongos_chat_model::channel::state::BELL_GRACE + Duration::from_millis(1),
+                cx,
+            )
+        });
     }
 
     pub(super) async fn wait_content(&self, id: &str, text: &str, cx: &mut TestAppContext) {
@@ -655,10 +665,11 @@ async fn test_bell_title_and_exit_reach_the_state_within_a_second(cx: &mut TestA
     h.type_line(&id, "bell", cx);
     h.wait_state(&id, ChatState::Waiting, cx).await;
     // The output that follows a bell in the same read does not end the wait.
-    cx.executor().timer(Duration::from_millis(700)).await;
     cx.run_until_parked();
     assert_eq!(h.state(&id, cx), ChatState::Waiting);
 
+    // Input after the bell's grace answers its question.
+    h.pass_bell_grace(cx);
     h.type_line(&id, "hello", cx);
     h.wait_state(&id, ChatState::Running, cx).await;
 
@@ -814,52 +825,175 @@ async fn test_nothing_launches_while_chats_are_off(cx: &mut TestAppContext) {
     assert!(h.log_lines("claude").is_empty());
 }
 
+/// `last_active` writes the runtime has asked of the store so far.
+pub(super) fn active_writes(h: &Harness, cx: &mut TestAppContext) -> usize {
+    h.runtime
+        .read_with(cx, |runtime, _| runtime.stats().active_writes)
+}
+
+/// Sets the record's `last_active` far in the past, so a later write shows.
+pub(super) fn age_record(h: &Harness, id: &str) -> Timestamp {
+    let path = record_path(&h.scope, id);
+    let mut record = read_record(&path).unwrap();
+    let old: Timestamp = "2020-01-01T10:00:00Z".parse().unwrap();
+    record.last_active = old;
+    write_record(&path, &record).unwrap();
+    old
+}
+
+pub(super) fn record_active(h: &Harness, id: &str) -> Timestamp {
+    read_record(&record_path(&h.scope, id)).unwrap().last_active
+}
+
 #[gpui::test]
 async fn test_last_active_writes_are_debounced(cx: &mut TestAppContext) {
     let h = harness(cx, true, 60, &[]).await;
-    let debounce = Duration::from_secs(2);
+    // Shorter than the time a turn takes to look idle, so the clock moves it without a state change.
+    let debounce = Duration::from_secs(30);
     h.runtime
         .update(cx, |runtime, _| runtime.set_active_debounce(debounce));
     let id = h.start(Agent::Claude, cx).await;
     // Let the launch's own write fall out of the debounce window.
-    cx.executor().timer(debounce).await;
-    let writes = |cx: &mut TestAppContext| {
-        h.runtime
-            .read_with(cx, |runtime, _| runtime.stats().active_writes)
-    };
-    let title = |cx: &mut TestAppContext| {
-        h.runtime.read_with(cx, |runtime, _| {
-            runtime.live(&id).unwrap().title().map(str::to_string)
-        })
-    };
+    h.runtime
+        .update(cx, |runtime, cx| runtime.advance_clock(debounce, cx));
 
-    let before = writes(cx);
-    let burst_started = std::time::Instant::now();
-    for name in ["one", "two", "three", "four"] {
-        h.type_line(&id, &format!("title {name}"), cx);
-        wait_for(cx, "the title", WITHIN, |cx| {
-            title(cx).as_deref() == Some(name)
-        })
-        .await;
-    }
-    let during = writes(cx);
-    // Four changes inside one debounce window write once. A slow machine can stretch the burst
-    // over more windows, so each full window it took allows one more write: the assertion
-    // depends on the time measured, not on the machine's speed.
-    let windows = (burst_started.elapsed().as_millis() / debounce.as_millis()) as usize;
-    assert!(
-        during - before <= 1 + windows,
-        "four changes in {:?} wrote {} times",
-        burst_started.elapsed(),
-        during - before
-    );
-    cx.executor()
-        .timer(debounce + Duration::from_millis(500))
-        .await;
+    let before = active_writes(&h, cx);
+    // Bell, input, bell, input: four state changes that write (a title or output alone would not).
+    h.type_line(&id, "bell", cx);
+    h.wait_state(&id, ChatState::Waiting, cx).await;
+    // Input right after a bell is older than the bell's question, so it waits out the bell.
+    h.pass_bell_grace(cx);
+    h.type_line(&id, "one", cx);
+    h.wait_state(&id, ChatState::Running, cx).await;
+    h.type_line(&id, "bell", cx);
+    h.wait_state(&id, ChatState::Waiting, cx).await;
+    h.pass_bell_grace(cx);
+    h.type_line(&id, "two", cx);
+    h.wait_state(&id, ChatState::Running, cx).await;
+    // Four changes inside one debounce window write once.
+    assert_eq!(active_writes(&h, cx) - before, 1, "the first change writes");
+    cx.executor().advance_clock(debounce);
     cx.run_until_parked();
-    let after = writes(cx);
-    assert!(after - before <= 2 + windows, "{} writes", after - before);
-    assert!(after > before, "the changes were written");
+    assert_eq!(
+        active_writes(&h, cx) - before,
+        2,
+        "the rest is one write when the window closes"
+    );
+}
+
+#[gpui::test]
+async fn test_a_spinner_title_on_an_idle_chat_writes_nothing(cx: &mut TestAppContext) {
+    // The fake prints a new title every 10 ms right after it starts; nobody types.
+    let h = harness(cx, true, 60, &[("FAKE_CLI_SPIN", "100")]).await;
+    h.runtime
+        .update(cx, |runtime, _| runtime.set_active_debounce(Duration::ZERO));
+    let id = h.start(Agent::Claude, cx).await;
+    h.wait_content(&id, "spun", cx).await;
+    // 30 s of the runtime's clock pass in 100 ms steps (shorter than the idle time).
+    for _ in 0..300 {
+        h.runtime.update(cx, |runtime, cx| {
+            runtime.advance_clock(Duration::from_millis(100), cx)
+        });
+    }
+    cx.run_until_parked();
+    assert_eq!(
+        active_writes(&h, cx),
+        0,
+        "output and titles alone write nothing"
+    );
+    let titled = h.runtime.read_with(cx, |runtime, _| {
+        runtime.live(&id).unwrap().title().map(str::to_string)
+    });
+    assert!(titled.is_some_and(|title| title.starts_with("spinner")));
+}
+
+#[gpui::test]
+async fn test_typing_writes_once_and_the_timer_ending_the_turn_writes_once(
+    cx: &mut TestAppContext,
+) {
+    let h = harness(cx, true, 60, &[]).await;
+    h.runtime
+        .update(cx, |runtime, _| runtime.set_active_debounce(Duration::ZERO));
+    let id = h.start(Agent::Claude, cx).await;
+    h.runtime.update(cx, |runtime, cx| {
+        runtime.advance_clock(Duration::from_secs(61), cx)
+    });
+    h.wait_state(&id, ChatState::Idle, cx).await;
+    // The launch's running state ends once: that is a state change too.
+    wait_for(cx, "the first idle write", WITHIN, |cx| {
+        active_writes(&h, cx) == 1
+    })
+    .await;
+    let old = age_record(&h, &id);
+
+    h.type_line(&id, "hello", cx);
+    h.wait_state(&id, ChatState::Running, cx).await;
+    h.wait_content(&id, "got hello", cx).await;
+    wait_for(cx, "the keyboard write", WITHIN, |_| {
+        record_active(&h, &id) != old
+    })
+    .await;
+    assert_eq!(active_writes(&h, cx), 2, "typing wrote once");
+
+    let old = age_record(&h, &id);
+    h.runtime.update(cx, |runtime, cx| {
+        runtime.advance_clock(Duration::from_secs(61), cx)
+    });
+    h.wait_state(&id, ChatState::Idle, cx).await;
+    wait_for(cx, "the timer's write", WITHIN, |_| {
+        record_active(&h, &id) != old
+    })
+    .await;
+    assert_eq!(
+        active_writes(&h, cx),
+        3,
+        "the timer ending the turn wrote once"
+    );
+    // The write carries the memory's time, so the two agree once it lands.
+    let live = h
+        .runtime
+        .read_with(cx, |runtime, _| runtime.live_activity());
+    assert_eq!(
+        timestamp_utc(&live[&id]),
+        timestamp_utc(&record_active(&h, &id)),
+        "the write carries the memory's time"
+    );
+}
+
+#[gpui::test]
+async fn test_exit_writes_the_exit_time_as_last_active(cx: &mut TestAppContext) {
+    let h = harness(cx, true, 60, &[]).await;
+    h.runtime
+        .update(cx, |runtime, _| runtime.set_active_debounce(Duration::ZERO));
+    let id = h.start(Agent::Claude, cx).await;
+    h.type_line(&id, "hello", cx);
+    h.wait_content(&id, "got hello", cx).await;
+    // Put the memory's last activity at a time the exit's own write cannot be.
+    let before: Timestamp = "2021-06-01T10:00:00Z".parse().unwrap();
+    h.runtime
+        .update(cx, |runtime, _| runtime.set_live_activity(&id, before));
+    let old = age_record(&h, &id);
+
+    // No keystroke: a keystroke would write the time itself, hiding the exit's own write.
+    h.runtime.update(cx, |runtime, cx| runtime.kill(&id, cx));
+    wait_for(cx, "the chat to exit", WITHIN, |cx| {
+        matches!(h.state(&id, cx), ChatState::Exited { .. })
+    })
+    .await;
+    wait_for(cx, "the exit write", WITHIN, |_| {
+        record_active(&h, &id) != old
+    })
+    .await;
+    let written = timestamp_utc(&record_active(&h, &id));
+    assert_ne!(
+        written,
+        timestamp_utc(&before),
+        "the exit wrote its own time, not the earlier change's"
+    );
+    let live = h
+        .runtime
+        .read_with(cx, |runtime, _| runtime.live_activity());
+    assert_eq!(written, timestamp_utc(&live[&id]));
 }
 
 #[gpui::test]
@@ -1147,4 +1281,87 @@ fn test_runtime_root_is_created_private_and_checked() {
     let file = base.join("file");
     std::fs::write(&file, "x").unwrap();
     assert!(write_runtime_dir(&file, &file.join("c1"), &files).is_err());
+}
+
+#[test]
+// A plain test thread with no executor to block, driving a fixture process.
+#[allow(clippy::disallowed_methods)]
+fn test_fake_claude_runs_the_settings_hooks_for_event_markers() {
+    use std::process::{Command, Stdio};
+
+    let temp = TempDir::new().unwrap();
+    let out = temp.path().join("hook-out.jsonl");
+    let events = temp.path().join("events");
+    std::fs::create_dir(&events).unwrap();
+    let settings = temp.path().join("settings.json");
+    write(
+        &settings,
+        concat!(
+            "{\n  \"hooks\": {\n",
+            "    \"Stop\": [\n      {\n        \"hooks\": [\n          {\n",
+            "            \"type\": \"command\",\n",
+            "            \"command\": \"sh -c 'cat >> $OUT'\",\n",
+            "            \"timeout\": 5\n          }\n        ]\n      }\n    ],\n",
+            "    \"Notification\": [\n      {\n        \"hooks\": [\n          {\n",
+            "            \"type\": \"command\",\n",
+            "            \"command\": \"sh -c 'cat >> $OUT'\"\n",
+            "          }\n        ]\n      }\n    ]\n  }\n}\n",
+        ),
+    );
+    let mut child = Command::new(fixture("fake-claude"))
+        .args(["--settings"])
+        .arg(&settings)
+        .env("FAKE_CLI_EVENT_DIR", &events)
+        .env("OUT", &out)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    // Written then renamed, so the poller never reads a half-written marker.
+    let drop_marker = |name: &str, text: &str| {
+        write(&events.join(format!(".{name}.tmp")), text);
+        std::fs::rename(events.join(format!(".{name}.tmp")), events.join(name)).unwrap();
+    };
+    drop_marker(
+        "1-Notification",
+        "notification_type=permission_prompt\nneeds you MARKER-ONE\n",
+    );
+    drop_marker("2-Stop", "done MARKER-TWO\n");
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut text = String::new();
+    while Instant::now() < deadline {
+        text = std::fs::read_to_string(&out).unwrap_or_default();
+        // The poller removes a marker only after its hook has run, so wait for
+        // both markers to be consumed before closing stdin.
+        if text.contains("MARKER-ONE")
+            && text.contains("MARKER-TWO")
+            && files_under(&events).is_empty()
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let timed_out = Instant::now() >= deadline;
+    drop(child.stdin.take());
+    child.wait().unwrap();
+    assert!(
+        !timed_out || files_under(&events).is_empty(),
+        "timed out after 20s: {text}"
+    );
+
+    assert!(
+        text.contains("\"hook_event_name\":\"Notification\"")
+            && text.contains("\"notification_type\":\"permission_prompt\"")
+            && text.contains("\"message\":\"needs you MARKER-ONE\""),
+        "{text}"
+    );
+    assert!(
+        text.contains("\"hook_event_name\":\"Stop\"")
+            && text.contains("\"prompt\":\"done MARKER-TWO\""),
+        "{text}"
+    );
+    assert_eq!(text.lines().count(), 2, "{text}");
+    assert!(files_under(&events).is_empty(), "markers are consumed");
 }

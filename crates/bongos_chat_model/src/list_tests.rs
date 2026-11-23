@@ -41,7 +41,7 @@ fn open_and_archived_lists_are_most_recent_first() {
 
     let entries = read_scope_chats(dir.path()).unwrap();
     assert_eq!(entries.len(), 5);
-    let lists = chat_lists(&entries);
+    let lists = chat_lists(&entries, &Default::default());
     assert_eq!(entry_ids(&lists.open), ["b", "c", "a"]);
     assert_eq!(entry_ids(&lists.archived), ["e", "d"]);
 }
@@ -56,7 +56,7 @@ fn order_compares_instants_and_breaks_ties_by_id() {
     write_chat(dir.path(), "tie-a", "2026-11-08T09:00:00Z", false, None);
 
     let entries = read_scope_chats(dir.path()).unwrap();
-    let lists = chat_lists(&entries);
+    let lists = chat_lists(&entries, &Default::default());
     assert_eq!(entry_ids(&lists.open), ["utc", "zone", "tie-a", "tie-b"]);
 }
 
@@ -70,7 +70,7 @@ fn invalid_files_are_listed_last_with_their_error_and_left_alone() {
     fs::write(&archived_looking, "archived = true\n").unwrap();
 
     let entries = read_scope_chats(dir.path()).unwrap();
-    let lists = chat_lists(&entries);
+    let lists = chat_lists(&entries, &Default::default());
     assert_eq!(entry_ids(&lists.open), ["good", "also-broken", "broken"]);
     assert!(lists.archived.is_empty());
 
@@ -125,10 +125,16 @@ fn forks_are_found_by_parent() {
     );
 
     let entries = read_scope_chats(dir.path()).unwrap();
-    assert_eq!(entry_ids(&forks_of(&entries, "root")), ["f2", "f1"]);
-    assert_eq!(entry_ids(&forks_of(&entries, "f1")), ["grandchild"]);
-    assert!(forks_of(&entries, "grandchild").is_empty());
-    assert!(forks_of(&entries, "missing").is_empty());
+    assert_eq!(
+        entry_ids(&forks_of(&entries, "root", &Default::default())),
+        ["f2", "f1"]
+    );
+    assert_eq!(
+        entry_ids(&forks_of(&entries, "f1", &Default::default())),
+        ["grandchild"]
+    );
+    assert!(forks_of(&entries, "grandchild", &Default::default()).is_empty());
+    assert!(forks_of(&entries, "missing", &Default::default()).is_empty());
 }
 
 #[test]
@@ -140,6 +146,34 @@ fn lists_work_across_scopes() {
 
     let mut entries = read_scope_chats(first.path()).unwrap();
     entries.extend(read_scope_chats(second.path()).unwrap());
-    assert_eq!(entry_ids(&chat_lists(&entries).open), ["b", "a"]);
-    assert_eq!(entry_ids(&forks_of(&entries, "a")), ["b"]);
+    assert_eq!(
+        entry_ids(&chat_lists(&entries, &Default::default()).open),
+        ["b", "a"]
+    );
+    assert_eq!(
+        entry_ids(&forks_of(&entries, "a", &Default::default())),
+        ["b"]
+    );
+}
+
+#[test]
+fn live_chats_sort_by_their_activity_and_closed_ones_by_their_record() {
+    let dir = TempDir::new().unwrap();
+    write_chat(dir.path(), "live", "2026-11-08T08:00:00Z", false, None);
+    write_chat(dir.path(), "closed", "2026-11-08T10:00:00Z", false, None);
+    write_chat(dir.path(), "other", "2026-11-08T09:00:00Z", false, None);
+    let entries = read_scope_chats(dir.path()).unwrap();
+    assert_eq!(
+        entry_ids(&chat_lists(&entries, &Default::default()).open),
+        ["closed", "other", "live"]
+    );
+
+    let activity = std::collections::HashMap::from([(
+        "live".to_string(),
+        "2026-11-08T12:00:00Z".parse().unwrap(),
+    )]);
+    assert_eq!(
+        entry_ids(&chat_lists(&entries, &activity).open),
+        ["live", "closed", "other"]
+    );
 }

@@ -578,7 +578,7 @@ async fn query_replace_commands_dispatch_by_name(cx: &mut TestAppContext) {
 }
 
 /// The `emacs` commands, with the palette text of each.
-const EMACS_ACTIONS: [(&str, &str); 62] = [
+const EMACS_ACTIONS: [(&str, &str); 70] = [
     ("emacs::KeyboardQuit", "emacs: keyboard quit"),
     ("emacs::ForwardWord", "emacs: forward word"),
     ("emacs::BackwardWord", "emacs: backward word"),
@@ -646,6 +646,17 @@ const EMACS_ACTIONS: [(&str, &str); 62] = [
         "emacs::XrefFindImplementations",
         "emacs: xref find implementations",
     ),
+    ("emacs::SymbolJumpNext", "emacs: symbol jump next"),
+    ("emacs::SymbolJumpPrev", "emacs: symbol jump prev"),
+    ("emacs::SymbolOverlayPut", "emacs: symbol overlay put"),
+    (
+        "emacs::SymbolOverlayRemoveAll",
+        "emacs: symbol overlay remove all",
+    ),
+    ("emacs::GotoStackBack", "emacs: goto stack back"),
+    ("emacs::GotoStackForward", "emacs: goto stack forward"),
+    ("emacs::GotoStackPush", "emacs: goto stack push"),
+    ("emacs::XrefHistoryList", "emacs: xref history list"),
     ("emacs::UniversalArgument", "emacs: universal argument"),
     ("emacs::DigitArgument", "emacs: digit argument"),
     ("emacs::NegativeArgument", "emacs: negative argument"),
@@ -1367,6 +1378,9 @@ async fn task_mode_chat_reaches_the_real_chat_new(cx: &mut TestAppContext) {
                 types_root: dir.join("chat-types"),
                 runtime: dir.join("runtime"),
             },
+            bongos_chat::ChannelConfig {
+                reporter: vec!["true".to_string()],
+            },
             cx,
         );
     });
@@ -1452,6 +1466,9 @@ async fn default_workspace_has_the_chats_panel(cx: &mut TestAppContext) {
             bongos_chat::ChatDirs {
                 types_root: dir.join("chat-types"),
                 runtime: dir.join("runtime"),
+            },
+            bongos_chat::ChannelConfig {
+                reporter: vec!["true".to_string()],
             },
             cx,
         );

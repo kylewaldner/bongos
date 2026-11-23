@@ -156,12 +156,35 @@ launch.
   no environment variable. Hide one and resume the chat, and the regenerated list no longer has it.
   This is not file protection: a CLI can still read any file it can reach, and a manifest that
   cannot be parsed lists nothing.
-- **Fallbacks are labeled.** bongos reads each CLI's own `--help` and uses only what it finds. When
-  a feature is missing, the chat still starts and its row in the Chats list says what changed
-  (`labels:`), for example "session id read from the CLI's files", "name not passed to the CLI",
-  "context appended to the system prompt (no hooks)", or "started a new session (no session to
-  resume)". A fork when the CLI has no fork command is a fresh session that starts from a note naming
-  the chat it continues, and is labeled `handoff`; nothing passes one off as a native fork.
+- **Chat state.** Each chat shows `running`, `waiting` or `idle`. A Claude chat's state is exact:
+  Claude's own hooks (session start, prompt submitted, turn done, notification, tool done) run
+  `bongos --chat-report`, which tells bongos the event and nothing else, never the prompt, message,
+  tool data, transcript path or directory. A Codex chat's state is estimated as before, from the
+  bell, terminal output and an idle timer. An estimated state carries a muted "estimated" tag in the
+  chat's header and its list row, whose tooltip says why: reports are off (`chats.channels`), the
+  report socket is unavailable, the Claude version is older than the first with hooks bongos knows,
+  no report has come yet, a turn ended without a report (interrupted or denied), the agent does not
+  report its state yet, the CLI exited when given the hooks (it is then started once more without
+  them), or the bongos path cannot be quoted. `chats.channels` (default `true`) turns reports on for
+  new launches; turning it off stops them at once and running chats go back to estimates.
+  `chats.idle_after_secs` and `chats.submit_delay_ms` apply only to the fallback: a chat without
+  reports, or a turn that ended without one. Reports arrive on one socket per bongos process,
+  `$XDG_RUNTIME_DIR/bongos/chat-<pid>.sock`, else `<temp dir>/bongos-<uid>/chat-<pid>.sock`: the
+  directory is yours alone (mode `0700`, refused if it is a symlink or open to others), the socket
+  is mode `0600`, a connection from another user is dropped, and a report must name a running chat
+  and carry that launch's token, which lives only in bongos's memory and the chat's environment.
+  This keeps out other users and accidental cross-talk (a stale process, a copied environment, a
+  nested CLI). It does not stop a hostile program running as you, which could read a chat's
+  environment from `/proc`; such a program can already do anything you can.
+- **Fallbacks are labeled.** bongos checks each Claude version against a table of the versions it
+  has verified (flags, the login probe and hooks), instead of parsing `--help`: a newer version is
+  assumed to keep everything, and an older or unreadable one gets the fallbacks; Codex is still read
+  from its `--help`. When a feature is missing, the chat still starts and its row in the Chats list
+  says what changed (`labels:`), for example "session id read from the CLI's files", "name not
+  passed to the CLI", "context appended to the system prompt (no hooks)", or "started a new session
+  (no session to resume)". A fork when the CLI has no fork command is a fresh session that starts
+  from a note naming the chat it continues, and is labeled `handoff`; nothing passes one off as a
+  native fork.
 - **Keys (Emacs keymap only).** `C-c c n` starts a chat on the focused task, `C-c c o` opens one
   (resuming it when closed), `C-c c ]` and `C-c c [` cycle, `C-c c k` closes, `C-c c a` archives and
   `C-c c u` restores, `C-c c l` lists the archive, `C-c c r` renames, `C-c c f` forks into another
@@ -559,6 +582,89 @@ scope = "all"
   `task: complete` still refuses a tree edited after its pass. The `task_checks.tree_key_debounce_ms`
   setting is not used yet.
 
+## Lanes
+
+A lane is a worker that takes one job at a time from a project's tasks and runs a workflow on it, so
+several tasks move forward together without you starting each run. It is on by default;
+`lanes.enabled` set to `false` starts no host, takes no work and hides every lane command and
+the `bongos lanes` words (they say "lanes are off (lanes.enabled)"). Lanes need a project repository
+(`project_repository.enabled`) and the Work view (`work.enabled`). A lane never starts by itself:
+you start them, and they stop at a job boundary, never in the middle of a job.
+
+- **The lane table.** `definitions/lanes/lanes.toml` in the project repository, with `schema = 1`.
+  Each `[[kind]]` is a kind of lane with a `name`, a `count` (lanes `build-1`, `build-2`), the
+  `rules` it may take, `areas` (true unless the kind sets it false), `unattended`, an optional
+  `ahead = { cap = N }` (a free lane of the kind prepares tasks no lane owns yet, at most `cap`
+  at a time, and the area rule does not apply to it) and an optional `binding`. A `[rules.<name>]`
+  says what a lane may take: `work_kind`, `state` (`ready`, `in-progress`, ...), `todo`, and the
+  `workflow` to run (or `use_todo_workflow = true`), with `inputs`, a `staleness` script and a
+  `refresh` workflow. `[[pin]]` sends a `task` to a `lane` or a `kind`. Two tasks whose `areas`
+  tags overlap are not worked on together unless an `[[exempt]]` entry lists the tag in `tags` (or
+  the tasks in `tasks`). `owner = "top"` (default) makes a task's top-level task its owner, `"self"`
+  makes every leaf its own; `on_interruption` is `ask` or `resume`; `dispatcher` names the
+  dispatcher workflow (default `lanes`); `[locations]` sets `worktree_root` and `dirs_root`. An
+  unknown key or a bad value is refused, with its line, when the table lands. A project with no
+  table has one kind `default` with one lane. The table is read at the project's verified commit.
+- **Bindings and tokens.** A kind's `binding` gives its lanes `env` values, named `dirs` (below
+  `<project folder>/lanes/<lane>/<name>` unless `[locations]` or the profile say otherwise),
+  `trees` (`repo`, `mode` of `fresh` or `persistent`, `location`, a `base_tree` with `dirs`) and
+  `floors`. Values in `env` may use these tokens: `{lane}`, `{kind}`, `{lane_index}`, `{project}`
+  (the first 12 hex digits of the project id), `{repo}`, `{live_lanes}`, `{cpus}`, `{dir.<name>}`,
+  and one floored integer division of two numeric tokens or integers, such as `{cpus/live_lanes}`,
+  which is at least 1. An unknown token is refused when the table lands.
+- **Window mode and host mode.** One process holds a project's writer. A window that opens the
+  project first holds it (window mode); `bongos lanes start` from a shell, with or without a
+  display, starts an engine host, a headless process that holds the writer and runs the lanes
+  (host mode; its log is `engine-host-<id>.log` in the logs folder). A window opened while a host
+  runs attaches to it as a client and shows the same lanes at once; closing it leaves the lanes
+  running. `lanes: start` in a window that holds the writer shows a summary of what will run, asks
+  you to confirm, and then hands the writer to a new host; the window becomes a client. Closing the
+  last window while lanes run in it does what `lanes.on_last_window_close` says (`ask`, `keep` or
+  `stop`). A host exits once it has had no client, no active run and no lanes' run for
+  `lanes.host.idle_exit_seconds` (300). The lanes' run lasts until the lanes are stopped or reach
+  their bound; with `lanes.exit_when_idle` true it also ends once every lane is idle and nothing
+  is left to take (no task that could still become ready), so the host then exits. A killed host's
+  runs come back interrupted and wait on you (`lanes.on_interruption` or the table's), or are
+  resumed once with `resume`; no run is resumed twice.
+- **Keys.** `C-c f L` is the prefix: `L` shows the Lanes view, `s` starts, `S` stops, `p`
+  pauses a lane, `c` resumes, `d` shows a dry run (what each lane would take next, and why the rest
+  wait), `j` shows what a lane would take next (it only prints; it changes nothing), `o` adopts a halted or stopped task for a free lane (you
+  pick the task, the lane and give a reason, which goes in the task's history) and `a` accepts the
+  current task graph as the recorded one. Every command is also in the palette (`lanes: ...`). The
+  keys are for the Emacs keymap. A lane whose run fails is halted until you adopt its task, resume or
+  stop it.
+- **The command line.** `bongos lanes start [--within <task>]`,
+  `bongos lanes stop [<lane>]`, `bongos lanes pause <lane>`, `bongos lanes resume <lane>`,
+  `bongos lanes status [--json]`, `bongos lanes dry-run [--json] [--lane <lane>]`,
+  `bongos lanes pick --lane <lane> [--json]`, `bongos run <workflow> --task <id|path>
+  [--queue]`, `bongos host status` and `bongos host stop [--now]`. `--project <name|id|path>` picks the
+  project; without it the project whose folder holds the current directory, else the only one.
+  Each command goes to whichever process holds the writer. With no writer, `lanes start` and `run`
+  start a host; `status`, `dry-run` and `pick` read the project's state without one; the others say
+  nothing is running. `bongos run` starts a hand-started run, never a lane run, in a window or a
+  host. `trigger`, `queue`, `pool` and `profile` are reserved words for later features.
+- **`status --json`.** A document with `schema` (`"lanes-status 1"`), `project`, `header` and
+  `lanes`. `header` has `dispatcher` (`not started`, `running`, `pausing` or `ended`), `lanes`,
+  `running`, `idle`, `waiting`, `paused`, `stopped`, `halted`, `table_commit` and `table_wait`. Each
+  lane has `id`, `kind`, `state` (`running`, `idle`, `paused`, `stopped`, `halted` or `waiting`),
+  `reason`, `task`, `goal`, `run`, `workflow`, `run_lifecycle`, `job_started` and `jobs_done`; a field
+  with no value is `null`. `master_split` appears only while master is split. New fields may be
+  added without a new schema name.
+- **Exit codes.** 0 done; 1 refused (the message is on stderr); 2 usage error or project not
+  found; 3 the host could not start (the path of its log is printed); 4 protocol or version
+  mismatch (stop the host with `bongos host stop` when its jobs end, then run the command again).
+- **Settings.** All under `lanes`, user level: `enabled` (true), `reevaluate_interval` (60
+  seconds between looks for work), `exit_when_idle` (false), `on_interruption` (`ask`),
+  `on_last_window_close` (`ask`), `desktop_notifications` (true), `dry_run_limit` (12),
+  `staleness_timeout_seconds` (60), `save_max_file_bytes` (10485760) and `host` with
+  `idle_exit_seconds` (300), `start_timeout_seconds` (15), `handover_timeout_seconds` (1800) and
+  `log_max_bytes` (1048576).
+- **In the Lanes view.** On the row at point: `enter` opens the run's record (`run.toml`), `t`
+  focuses the task, `p` pauses, `c` resumes, `S` stops the lane, `o` adopts, `d` shows a dry run
+  and `g` refreshes. A lane job runs in the lane's own trees. `dry-run` and `pick` are served by
+  whichever process holds the writer (a running host answers them), and `lanes start` carries
+  `--until`, `--max-jobs` and `--unattended` to the host.
+
 ## Emacs keys
 
 Emacs is the default base keymap, so a fresh install has these keys with no setting. They work in
@@ -612,8 +718,13 @@ C-x C-s, C-x C-w and C-x s, and the command keys (M-x, C-x ...) work everywhere 
 | M-x | execute-extended-command (the command palette) |
 | C-x C-f, C-x b | find a file, switch buffer |
 | C-x C-s, C-x C-w, C-x s | save, write file, save all |
-| C-x k, C-x 0, C-x 1 | kill buffer, close the item, close the others |
-| C-x 2, C-x 3, C-x o | split below, split right, other window |
+| C-x k | kill buffer, close the item |
+| C-x o | other window: pick one by its letter |
+| C-x 1, C-x 0 | delete other windows (toggles back), delete this window |
+| C-x 2, C-x 3 | split below, split right |
+| C-x \|, C-x _ | lay two windows out side by side, stacked |
+| C-c down | toggle window dedication |
+| C-x +, C-x \, C-x M-o | balance windows, swap windows, move the buffer to another window |
 | C-x C-c | quit |
 | C-h e | show the echo-area messages |
 
@@ -629,6 +740,24 @@ bar.
 ```json
 { "base_keymap": "VSCode", "emacs": { "cursor_style": "auto" } }
 ```
+
+### Windows
+
+Emacs windows are panes. The window commands act on the panes of the editor area and, for picking,
+on the panels that show an editor or a terminal. Nothing here closes a tab or a buffer, except that a moved tab for a file the destination window already shows gives way to that window's existing tab.
+
+- C-x o switches window. With two windows it goes to the other one; with more, every window shows
+  a letter (a, s, d, f, ...) in reading order, and the letter you press picks it. The letter goes
+  to the picker, never to the editor or the shell in the window; any other key cancels.
+- C-x 1 zooms the current window to fill the frame, and C-x 1 again restores the layout.
+  C-x 0 deletes the current window and hands its tabs to a neighbor.
+- C-x 2 and C-x 3 split below and to the right. C-u before either keeps focus in the old window.
+- C-x _ stacks two windows and C-x | puts them side by side. With more than two windows, the
+  current one and the next stay and the others hand their tabs to the next.
+- C-c down dedicates the current window to what it shows: files opened later go to another
+  window. Press it again to undo.
+- C-x + balances the windows to the same size, C-x \ swaps the current window with the next one
+  and C-x M-o moves the current tab to a picked window.
 
 ### Kill ring
 
@@ -767,6 +896,22 @@ another way in: the variants above are commands in the command palette (`task: a
 `prompts: send without marking`, `workflow: retry step fresh`), and C-x C-SPC stands in for
 C-u C-SPC.
 
+### Avy jump
+
+Avy jumps the cursor to any visible text with a few keys, as in Emacs. It is on by default with the
+Emacs keys, works in full editors (a file you edit) and not in terminals, a picker's query editor,
+the minibuffer or other small editors. Three commands, each in the command palette:
+
+- **M-;** (avy-goto-char-timer): type the characters to look for, then pause. Labels appear on
+  every visible match. Press **Enter** to show the labels at once, without waiting for the pause.
+  The pause is `emacs.avy_timeout` in milliseconds (default 500), editable in Settings.
+- **C-;** (avy-goto-word-1): type one character; labels appear on the visible words that start with it.
+- **C-M-;** (avy-goto-line): labels appear on the start of every visible line.
+
+Type the label characters to jump; the cursor moves there, and into another pane when the label is
+in one. **C-g** or **Escape** cancels the labels and leaves the cursor where it was, and nothing
+you typed is inserted.
+
 ## Keybinding profiles
 
 bongos has three keybinding profiles, set with `base_keymap` in settings: `"Emacs"` (the default),
@@ -903,6 +1048,40 @@ happened, such as `Replaced 12 occurrences` or `Replaced 12, skipped 3`.
 
 `minibuffer.enabled_for` names `query_replace` by default, so the prompts and the questions are in
 the strip. Remove it from that list to get them as a centered modal; the keys are the same.
+
+## Symbol jump and goto stack
+
+M-n and M-p jump between the occurrences of the symbol at the cursor, as `symbol-overlay` does in
+Emacs, and a goto stack lets you go back to where you were after a jump. Under the Emacs base keymap
+(the default) these keys work in an editor:
+
+| Key | Command |
+|---|---|
+| M-n, M-p | jump to the next, previous occurrence of the symbol at the cursor |
+| M-i | toggle the highlight (overlay) of the symbol at the cursor |
+| M-I | clear every symbol highlight in the buffer |
+| left, right | goto stack: back, forward |
+| up | goto stack: push the current place |
+| C-c x h | xref history list |
+
+- **Jumps.** M-n and M-p match the symbol as a whole word (`n` does not match `println`), flash the
+  occurrence they land on, and wrap around the buffer; the echo area says `wrapped` when they do. With
+  no symbol at the cursor the echo area says `No symbol at point`.
+- **Overlay.** M-i highlights every occurrence of the symbol at the cursor and M-i on it again removes
+  the highlight; M-I removes them all.
+- **Goto stack.** `left` goes back to the previous place of the stack, `right` goes forward again, and
+  `up` pushes the current place so that `left` can return to it later. `C-c x h` opens the stack as a
+  picker, newest first; RET goes to the entry.
+- **Navigation history settings.** Two settings decide what else the stack records:
+  `navigation_history.record_large_moves` (a cursor move of ten rows or more) and
+  `navigation_history.record_item_switches` (switching to another item). Both default to off under
+  the Emacs base keymap without vim or helix mode, and to on otherwise; an explicit `true` or
+  `false` overrides the default.
+- **Panes.** The arrow keys are bound only in editors of the center panes (not in docks, in agent
+  threads, in editors that are not full-mode, in vim mode, or while completions, code actions or
+  signature help show), so they move the cursor everywhere else. Each pane has its
+  own stack. The Emacs keymap no longer binds `alt-,`; on Linux it reaches
+  `editor::GoToPreviousHunk`. `alt-n` also reaches the query editor of full-mode pickers.
 
 ## Minibuffer
 

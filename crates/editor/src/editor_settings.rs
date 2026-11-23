@@ -11,6 +11,7 @@ pub use settings::{
     MultiCursorModifier, ScrollBeyondLastLine, ScrollbarDiagnostics, SeedQuerySetting, ShowMinimap,
     SnippetSortOrder,
 };
+use std::time::Duration;
 use ui::scrollbars::ShowScrollbar;
 
 /// Imports from the VSCode settings at
@@ -32,6 +33,8 @@ pub struct EditorSettings {
     pub save_kill_ring: bool,
     /// Whether terminal copies and pastes use the kill ring (`emacs.terminal_uses_kill_ring`).
     pub terminal_uses_kill_ring: bool,
+    /// How long the Avy jump waits for another key (`emacs.avy_timeout`).
+    pub avy_timeout: Duration,
     pub current_line_highlight: CurrentLineHighlight,
     pub selection_highlight: bool,
     pub rounded_selection: bool,
@@ -41,6 +44,7 @@ pub struct EditorSettings {
     pub hover_popover_sticky: bool,
     pub hover_popover_hiding_delay: DelayMs,
     pub toolbar: Toolbar,
+    pub navigation_history: NavigationHistory,
     pub scrollbar: Scrollbar,
     pub minimap: Minimap,
     pub gutter: Gutter,
@@ -93,6 +97,12 @@ pub struct Jupyter {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct StickyScroll {
     pub enabled: bool,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct NavigationHistory {
+    pub record_large_moves: bool,
+    pub record_item_switches: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -261,6 +271,7 @@ impl Settings for EditorSettings {
         let gutter = editor.gutter.unwrap();
         let axes = scrollbar.axes.unwrap();
         let toolbar = editor.toolbar.unwrap();
+        let navigation_history = editor.navigation_history.unwrap();
         let search = editor.search.unwrap();
         let drag_and_drop_selection = editor.drag_and_drop_selection.unwrap();
         let sticky_scroll = editor.sticky_scroll.unwrap();
@@ -270,6 +281,12 @@ impl Settings for EditorSettings {
                 Some(EmacsCursorStyle::Modern) => Some(CursorShape::Bar),
                 Some(EmacsCursorStyle::Auto) | None => None,
             };
+        // Under the Emacs profile only explicit gotos are recorded, unless a modal keymap
+        // (vim or helix) is on, whose jump list expects Zed's implicit pushes.
+        let records_navigation_by_default = content.base_keymap.map(BaseKeymap::from)
+            != Some(BaseKeymap::Emacs)
+            || content.vim_mode.unwrap_or(false)
+            || content.helix_mode.unwrap_or(false);
         Self {
             cursor_blink: editor.cursor_blink.unwrap(),
             cursor_shape: explicit_cursor_style.or_else(|| {
@@ -297,6 +314,13 @@ impl Settings for EditorSettings {
                 .as_ref()
                 .and_then(|emacs| emacs.terminal_uses_kill_ring)
                 .unwrap_or(false),
+            avy_timeout: Duration::from_millis(
+                content
+                    .emacs
+                    .as_ref()
+                    .and_then(|emacs| emacs.avy_timeout)
+                    .map_or(500, |delay| delay.0),
+            ),
             current_line_highlight: editor.current_line_highlight.unwrap(),
             selection_highlight: editor.selection_highlight.unwrap(),
             rounded_selection: editor.rounded_selection.unwrap(),
@@ -311,6 +335,14 @@ impl Settings for EditorSettings {
                 selections_menu: toolbar.selections_menu.unwrap(),
                 agent_review: toolbar.agent_review.unwrap(),
                 code_actions: toolbar.code_actions.unwrap(),
+            },
+            navigation_history: NavigationHistory {
+                record_large_moves: navigation_history
+                    .record_large_moves
+                    .unwrap_or(records_navigation_by_default),
+                record_item_switches: navigation_history
+                    .record_item_switches
+                    .unwrap_or(records_navigation_by_default),
             },
             scrollbar: Scrollbar {
                 show: scrollbar.show.map(ui_scrollbar_settings_from_raw).unwrap(),
@@ -423,5 +455,47 @@ pub fn ui_scrollbar_settings_from_raw(
         settings::ShowScrollbar::System => ShowScrollbar::System,
         settings::ShowScrollbar::Always => ShowScrollbar::Always,
         settings::ShowScrollbar::Never => ShowScrollbar::Never,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{BorrowAppContext as _, TestAppContext};
+    use settings::SettingsStore;
+
+    fn init_settings(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+        });
+    }
+
+    #[gpui::test]
+    fn test_avy_timeout_defaults_to_500_ms(cx: &mut TestAppContext) {
+        init_settings(cx);
+        cx.update(|cx| {
+            assert_eq!(
+                EditorSettings::get_global(cx).avy_timeout,
+                Duration::from_millis(500)
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn test_avy_timeout_reads_the_user_value(cx: &mut TestAppContext) {
+        init_settings(cx);
+        cx.update(|cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |content| {
+                    content.emacs.get_or_insert_default().avy_timeout =
+                        Some(settings::DelayMs(250));
+                })
+            });
+            assert_eq!(
+                EditorSettings::get_global(cx).avy_timeout,
+                Duration::from_millis(250)
+            );
+        });
     }
 }

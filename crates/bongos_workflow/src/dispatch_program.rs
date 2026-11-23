@@ -137,7 +137,7 @@ impl NodeKind for ProgramNodes {
             RunIdentity {
                 id: node.run.to_string(),
                 workflow: binding.workflow.clone(),
-                todo: todo_of(binding),
+                todo: binding.setup.project.is_none().then(|| todo_of(binding)),
                 task_id: binding.task_id.clone(),
                 task_dir: binding.task_dir.clone(),
                 branch: binding.checkout.branch.clone().unwrap_or_default(),
@@ -147,12 +147,16 @@ impl NodeKind for ProgramNodes {
             Paths {
                 worktree: worktree.clone(),
                 scratch: scratch.clone(),
+                trees: Default::default(),
             },
         );
         let try_dir = try_dir(&binding.attempt_dir, key, node.try_number);
         let (host_git, tree_git) = host_git(binding, &worktree)
             .map_err(|detail| fail(FailureReason::WorktreeUnavailable, detail))?;
         let program_node = ProgramNode {
+            // Only the OS sandbox keeps a snapshot read-only, and a project's files folder, which
+            // holds every run's records, read-only around a run's work directory.
+            needs_sandbox: binding.setup.branchless(),
             script,
             output: definition_node.output.clone(),
             permissions,
@@ -162,11 +166,14 @@ impl NodeKind for ProgramNodes {
                 .as_ref()
                 .map(|polls| PollPlan::resolve(polls, &inputs.programs)),
             state,
-            declared_dirs: Vec::new(),
-            tree_access: TreeAccess::Writable,
+            // The lane's named directories are the only ones a program writes besides its tree and
+            // scratch.
+            declared_dirs: binding.setup.writable_dirs(),
+            tree_access: tree_access(binding),
             tree_git,
             host_git,
             worktree,
+            env: binding.setup.env_edits(),
             scratch,
             node_result: try_dir.join("node-result.json"),
             try_dir,
@@ -222,6 +229,20 @@ pub(crate) fn host_git(
     worktree: &Path,
 ) -> Result<(HostGit, TreeGit), String> {
     let records_dir = binding.run_dir.exists().then(|| binding.run_dir.clone());
+    if binding.setup.branchless() {
+        // A snapshot or a work directory is no repository of the run's and has no recorded git
+        // directory: a `.git` in it (or one it sits inside) is masked read-only, never the job's.
+        let tree_git = if std::fs::symlink_metadata(worktree.join(".git")).is_ok() {
+            TreeGit::ReadOnly
+        } else {
+            TreeGit::None
+        };
+        let host = HostGit {
+            git_dirs: Vec::new(),
+            records_dir,
+        };
+        return Ok((host, tree_git));
+    }
     let common = common_dir_of(&binding.worktree.git_dir);
     if std::fs::symlink_metadata(worktree.join(".git")).is_err() {
         let host = HostGit {
@@ -279,6 +300,16 @@ pub(crate) fn host_git(
         records_dir,
     };
     Ok((host, TreeGit::Private))
+}
+
+/// How the node may use its tree: a snapshot is read and never written; every other tree (a run,
+/// branch or lane tree, a work directory) is writable.
+pub(crate) fn tree_access(binding: &RunBinding) -> TreeAccess {
+    if binding.setup.snapshot {
+        TreeAccess::ReadOnly
+    } else {
+        TreeAccess::Writable
+    }
 }
 
 /// The linked git directory of the branch worktree `worktree`: the directory directly under

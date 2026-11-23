@@ -4,8 +4,7 @@
 
 use std::fs;
 
-use bongos_confine::TreeAccess;
-use bongos_work_model::artifacts::session_context;
+use bongos_work_model::artifacts::{project_session_context, session_context};
 use bongos_work_model::new_id;
 use bongos_workflow_model::record::TodoRef;
 use bongos_workflow_model::template::{Scope, render};
@@ -13,13 +12,13 @@ use bongos_workflow_model::{Failure, FailureReason, NodeKey, RunState};
 
 use crate::agent_confinement::AgentJob;
 use crate::dispatch::{NodeKind, RunnerSnapshot};
-use crate::dispatch_program::{host_git, scratch_dir};
+use crate::dispatch_program::{host_git, scratch_dir, tree_access};
 use crate::lifecycle::{definition_copy_dir, prompt_with_revision};
 use crate::process::ProcessRecord;
 use crate::run_view::try_dir;
 use crate::runner_claude::{ClaudeCli, ClaudeNode, ClaudeRunner, NodeCaps};
 use crate::runtime::{Finish, NodeStart, RunBinding};
-use crate::task_link::{prompt_scope, system_text};
+use crate::task_link::{project_system_text, prompt_scope, system_text};
 use crate::worktrees::{Git, branch_worktree_path, create_branch};
 use bongos_workflow_model::definition::AgentKind;
 
@@ -91,8 +90,8 @@ impl NodeKind for AgentNodes {
                 .map_err(|detail| fail(FailureReason::WorktreeUnavailable, detail))?;
             Some(AgentJob {
                 scratch: scratch_dir(binding, key, node.try_number),
-                declared_dirs: vec![],
-                tree_access: TreeAccess::Writable,
+                declared_dirs: binding.setup.writable_dirs(),
+                tree_access: tree_access(binding),
                 tree_git,
                 host_git,
                 state_paths: inputs.agent_confinement.claude_state_paths.clone(),
@@ -118,6 +117,7 @@ impl NodeKind for AgentNodes {
             task_dir: binding.task_dir.clone(),
             session_id: new_id(),
             confinement,
+            env: binding.setup.env_edits(),
         };
         self.runner_for(cli, inputs)
             .start(node.run, key, node.try_number, claude_node)
@@ -213,8 +213,15 @@ fn add_item(scope: &mut Scope, node: &NodeStart<'_>) {
     }
 }
 
-/// The system text: the task context of `session_context`.
-fn system_for(binding: &RunBinding) -> Result<String, String> {
+/// The system text: the project context of `project_session_context` for a run with no task,
+/// else the task context of `session_context`.
+pub(crate) fn system_for(binding: &RunBinding) -> Result<String, String> {
+    if let Some(source) = &binding.setup.project {
+        let context =
+            project_session_context(&source.project, &source.files_dir, &source.definitions)
+                .map_err(|error| format!("{}: {error:#}", source.files_dir.display()))?;
+        return Ok(project_system_text(&context, &binding.workflow));
+    }
     let context = session_context(&binding.task_dir)
         .map_err(|error| format!("{}: {error:#}", binding.task_dir.display()))?;
     let todo = TodoRef {
@@ -231,12 +238,13 @@ fn system_for(binding: &RunBinding) -> Result<String, String> {
 }
 
 /// Where `key` runs: the run worktree, or for a key inside a fan-out its branch worktree, which
-/// is created from the run branch when it does not exist yet.
+/// is created from the run branch when it does not exist yet. A run on a snapshot or in a
+/// project's work directory has no branch to make one from: every key runs in its one tree.
 pub(crate) fn node_worktree(
     key: &NodeKey,
     binding: &RunBinding,
 ) -> Result<std::path::PathBuf, String> {
-    let Some((fan, index)) = key.branch.last() else {
+    let Some((fan, index)) = key.branch.last().filter(|_| !binding.setup.branchless()) else {
         return Ok(binding.worktree.path.clone());
     };
     let path = branch_worktree_path(&binding.worktree.run_dir, fan, *index);

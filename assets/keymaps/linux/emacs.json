@@ -85,7 +85,6 @@
       "ctrl-alt-shift-z": "emacs::ZapBackUpToChar", // zap-back-up-to-char
       "alt-.": "emacs::XrefFindDefinitions", // xref-find-definitions
       "alt-?": "editor::FindAllReferences", // xref-find-references
-      "alt-,": "pane::GoBack", // xref-pop-marker-stack
       "ctrl-x h": "editor::SelectAll", // mark-whole-buffer
       "ctrl-d": "editor::Delete", // delete-char
       "alt-d": "emacs::KillWord", // kill-word
@@ -148,6 +147,13 @@
       "alt-9": ["emacs::DigitArgument", { "digit": 9 }], // digit-argument
       "alt--": "emacs::NegativeArgument", // negative-argument
       "ctrl-o": "emacs::OpenLine", // open-line
+      "alt-n": "emacs::SymbolJumpNext", // symbol-overlay-jump-next
+      "alt-p": "emacs::SymbolJumpPrev", // symbol-overlay-jump-prev
+      "alt-i": "emacs::SymbolOverlayPut", // symbol-overlay-put
+      "alt-shift-i": "emacs::SymbolOverlayRemoveAll", // symbol-overlay-remove-all
+      "alt-;": "avy::GotoCharTimer", // avy-goto-char-timer
+      "ctrl-;": "avy::GotoWord1", // avy-goto-word-1
+      "ctrl-alt-;": "avy::GotoLine", // avy-goto-line
     },
   },
   {
@@ -215,6 +221,18 @@
     },
   },
   {
+    // The goto stack on the arrows, in editors of the center panes only, with or without a region (keep this
+    // block after the `selection_mode` block above, which it outranks). Every other place keeps its own
+    // arrows: small and dock editors, terminals, panels, agent threads, editors showing completions, code
+    // actions or signature help, and vim's modes. `down` keeps its default row.
+    "context": "!Dock && Pane > Editor && mode == full && !AcpThread && !showing_completions && !showing_code_actions && !showing_signature_help && !vim_mode",
+    "bindings": {
+      "left": "emacs::GotoStackBack", // goto-stack-back
+      "right": "emacs::GotoStackForward", // goto-stack-forward
+      "up": "emacs::GotoStackPush", // goto-stack-push
+    },
+  },
+  {
     "context": "Editor && (showing_code_actions || showing_completions)",
     "bindings": {
       "ctrl-p": "editor::ContextMenuPrevious",
@@ -247,18 +265,24 @@
       "ctrl-x ctrl-c": "zed::Quit", // save-buffers-kill-terminal
       "ctrl-x 5 0": "workspace::CloseWindow", // delete-frame
       "ctrl-x 5 2": "workspace::NewWindow", // make-frame-command
-      "ctrl-x o": "workspace::ActivateNextPane", // other-window
+      "ctrl-x o": "window::SwitchWindow", // other-window
       "ctrl-x k": "pane::CloseActiveItem", // kill-buffer
-      "ctrl-x 0": "pane::CloseActiveItem", // delete-window
-      // "ctrl-x 1": "pane::JoinAll", // in case you prefer to delete the splits but keep the buffers open
-      "ctrl-x 1": "pane::CloseOtherItems", // delete-other-windows
-      "ctrl-x 2": "pane::SplitDown", // split-window-below
-      "ctrl-x 3": "pane::SplitRight", // split-window-right
+      "ctrl-x 1": "window::ToggleDeleteOtherWindows", // delete-other-windows
+      "ctrl-x 2": "window::SplitWindowBelow", // split-window-below
+      "ctrl-x 3": "window::SplitWindowRight", // split-window-right
+      "ctrl-x 0": "window::DeleteWindow", // delete-window
+      "ctrl-x |": "window::SplitWindowHorizontallyInstead", // window-layout-transpose to side by side
+      "ctrl-x _": "window::SplitWindowVerticallyInstead", // window-layout-transpose to stacked
+      "ctrl-c down": "window::ToggleWindowDedication", // toggle-window-dedicated
+      "ctrl-x +": "window::BalancePanes", // balance-windows
+      "ctrl-x \\": "window::SwapPanes", // window-swap-states
+      "ctrl-x alt-o": "window::MoveBufferToPane", // buf-move to another window
       "ctrl-x ctrl-f": "file_finder::Toggle", // find-file
       "ctrl-x ctrl-s": "workspace::Save", // save-buffer
       "ctrl-x ctrl-.": "emacs::PopGlobalMark", // pop-global-mark
       "ctrl-x ctrl-w": "workspace::SaveAs", // write-file
       "ctrl-x s": "workspace::SaveAll", // save-some-buffers
+      "ctrl-c x h": "emacs::XrefHistoryList", // xref-history-list
       // Work panel (C-c w): tasks, todos, projects and artifacts. The unbound commands are in
       // the command palette.
       "ctrl-c w w": "work::TogglePanel",
@@ -362,6 +386,15 @@
       "ctrl-c f V": "workflow::Validate",
       "ctrl-c f n": "workflow::New",
       "ctrl-c f e": "workflow::EditDefinition",
+      "ctrl-c f L L": "lanes::Show",
+      "ctrl-c f L s": "lanes::Start",
+      "ctrl-c f L S": "lanes::Stop",
+      "ctrl-c f L p": "lanes::Pause",
+      "ctrl-c f L c": "lanes::Resume",
+      "ctrl-c f L d": "lanes::DryRun",
+      "ctrl-c f L j": "lanes::Pick",
+      "ctrl-c f L o": "lanes::Adopt",
+      "ctrl-c f L a": "lanes::AcceptGraph",
       "ctrl-g": "emacs::KeyboardQuit", // keyboard-quit
     },
   },

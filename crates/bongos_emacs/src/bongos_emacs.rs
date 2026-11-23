@@ -10,6 +10,7 @@ mod count_adapters;
 mod cursor;
 mod global_mark;
 mod goto_line;
+mod goto_stack;
 mod intercept;
 mod jumps;
 mod kill;
@@ -33,8 +34,11 @@ mod repeat;
 pub mod snapshot_text;
 mod space;
 mod string_rectangle;
+mod symbol_jump;
+mod symbol_overlay;
 mod transpose;
 mod words;
+mod xref_history;
 mod yank;
 mod zap;
 
@@ -52,6 +56,8 @@ mod cursor_tests;
 mod global_mark_tests;
 #[cfg(test)]
 mod goto_line_tests;
+#[cfg(test)]
+mod goto_stack_tests;
 #[cfg(test)]
 mod intercept_tests;
 #[cfg(test)]
@@ -93,16 +99,22 @@ mod space_tests;
 #[cfg(test)]
 mod string_rectangle_tests;
 #[cfg(test)]
+mod symbol_jump_tests;
+#[cfg(test)]
+mod symbol_overlay_tests;
+#[cfg(test)]
 mod transpose_tests;
 #[cfg(test)]
 mod words_tests;
+#[cfg(test)]
+mod xref_history_tests;
 #[cfg(test)]
 mod yank_tests;
 #[cfg(test)]
 mod zap_tests;
 
 use editor::Editor;
-use gpui::{App, Entity, Window};
+use gpui::{Action as _, App, Entity, Window};
 
 use crate::prefix_arg::CountArg;
 
@@ -120,6 +132,17 @@ pub fn init(cx: &mut App) {
     count_adapters::init(cx);
     cursor::init(cx);
     global_mark::init(cx);
+    xref_history::init(cx);
+    goto_stack::init(cx);
+    for name in [
+        actions::SymbolJumpNext::name_for_type(),
+        actions::SymbolJumpPrev::name_for_type(),
+        actions::SymbolOverlayPut::name_for_type(),
+        actions::SymbolOverlayRemoveAll::name_for_type(),
+        actions::XrefHistoryList::name_for_type(),
+    ] {
+        prefix_arg::declare(cx, name, prefix_arg::Meaning::Ignored);
+    }
     rectangle_mode::init(cx);
     cx.observe_new(|editor: &mut Editor, mut window, cx| {
         let weak = cx.entity().downgrade();
@@ -209,6 +232,22 @@ pub fn init(cx: &mut App) {
             cx,
             prefix_commands::negative_argument_command,
         );
+        register(editor, &weak, cx, symbol_jump::symbol_jump_next_command);
+        register(editor, &weak, cx, symbol_jump::symbol_jump_prev_command);
+        register(editor, &weak, cx, goto_stack::goto_stack_push_command);
+        register(
+            editor,
+            &weak,
+            cx,
+            symbol_overlay::symbol_overlay_put_command,
+        );
+        register(
+            editor,
+            &weak,
+            cx,
+            symbol_overlay::symbol_overlay_remove_all_command,
+        );
+        symbol_overlay::init_editor(cx);
         prefix_arg::init_editor(editor, window.as_deref_mut(), cx);
         recenter::init_editor(cx);
         kill_ring_sink::init_editor(cx);

@@ -114,6 +114,8 @@ fn prompts_focused(session: &Entity<SessionView>, cx: &mut VisualTestContext) ->
 
 #[gpui::test]
 async fn test_dual_layout_shows_two_panes_and_chat_only_one(cx: &mut TestAppContext) {
+    use workspace::dock::Panel as _;
+
     let h = harness(cx, true, 60, &[]).await;
     let dual = h.start(Agent::Claude, cx).await;
     let mut request = h.request(Agent::Codex, "implement");
@@ -125,10 +127,32 @@ async fn test_dual_layout_shows_two_panes_and_chat_only_one(cx: &mut TestAppCont
     let (workspace, cx) = panel_window(&h, cx).await;
     let panel = panel_of(&workspace, cx);
 
+    assert!(
+        panel.read_with(cx, |panel, cx| panel.panes(cx)).is_empty(),
+        "the session list has no panes"
+    );
+
     let session = show(&panel, &dual, cx);
     assert_eq!(pane_count(&session, cx), 2);
     wait_prompts_loaded(&session, cx).await;
     assert!(session.read_with(cx, |session, _| session.terminal_view().is_some()));
+    let panes = panel.read_with(cx, |panel, cx| panel.panes(cx));
+    assert_eq!(panes.len(), 2);
+    assert_eq!(panes, session.read_with(cx, |s, _| s.visible_panes()));
+    let terminal_panes: Vec<_> = panes
+        .iter()
+        .filter(|pane| {
+            pane.read_with(cx, |pane, _| {
+                pane.active_item()
+                    .is_some_and(|item| item.downcast::<terminal_view::TerminalView>().is_some())
+            })
+        })
+        .cloned()
+        .collect();
+    assert_eq!(terminal_panes.len(), 1, "one pane holds the terminal");
+    dispatch(cx, "chat::TogglePromptEditor");
+    let alone = panel.read_with(cx, |panel, cx| panel.panes(cx));
+    assert_eq!(alone, vec![terminal_panes[0].clone()]);
 
     let session = show(&panel, &chat_only, cx);
     assert_eq!(pane_count(&session, cx), 1);
@@ -136,6 +160,7 @@ async fn test_dual_layout_shows_two_panes_and_chat_only_one(cx: &mut TestAppCont
         session.read_with(cx, |session, cx| session.shown_layout(cx)),
         Layout::ChatOnly
     );
+    assert_eq!(panel.read_with(cx, |panel, cx| panel.panes(cx)).len(), 1);
 }
 
 #[gpui::test]
@@ -543,4 +568,41 @@ async fn test_a_reload_never_drops_a_dirty_prompts_buffer(cx: &mut TestAppContex
             .unwrap()
             .starts_with("unsaved draft")
     );
+}
+
+#[gpui::test]
+async fn test_the_header_tags_an_estimated_state_and_the_dump_view_says_why(
+    cx: &mut TestAppContext,
+) {
+    // No channel (reports are off in this harness): the state is estimated.
+    let h = harness(cx, true, 60, &[]).await;
+    let id = h.start(Agent::Claude, cx).await;
+    wait_indexed(&h, &id, cx).await;
+    let (workspace, cx) = panel_window(&h, cx).await;
+    let panel = panel_of(&workspace, cx);
+    let session = show(&panel, &id, cx);
+
+    let header = session.read_with(cx, |session, cx| session.header_text(cx));
+    assert!(header.ends_with(" (estimated)"), "{header}");
+    let text = panel.read_with(cx, |panel, cx| panel.view_text(cx));
+    assert!(text.starts_with("Chat\n"), "{text}");
+    assert!(text.contains("(estimated: "), "{text}");
+    assert!(text.contains("\nchannel: off\n"), "{text}");
+    assert!(text.contains("\nstate: "), "{text}");
+}
+
+#[gpui::test]
+async fn test_the_header_has_no_tag_for_an_exact_state(cx: &mut TestAppContext) {
+    let c = crate::channel_runtime_tests::channels(cx).await;
+    let (id, _token) = c.start_live(cx).await;
+    wait_indexed(&c.h, &id, cx).await;
+    let (workspace, cx) = panel_window(&c.h, cx).await;
+    let panel = panel_of(&workspace, cx);
+    let session = show(&panel, &id, cx);
+
+    let header = session.read_with(cx, |session, cx| session.header_text(cx));
+    assert!(!header.contains("estimated"), "{header}");
+    let text = panel.read_with(cx, |panel, cx| panel.view_text(cx));
+    assert!(text.contains(" (exact)\n"), "{text}");
+    assert!(text.contains("\nchannel: live\n"), "{text}");
 }

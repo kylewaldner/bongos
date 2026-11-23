@@ -66,10 +66,12 @@ const ON_BOUND_FAIL: &str = "fail";
 /// The engine's limits, all settings (D19).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Limits {
-    /// `workflows.max_concurrent_runs`: runs executing at once; the rest are Queued.
+    /// `workflows.max_concurrent_runs`: hand-started runs executing at once; the rest are
+    /// Queued. Lane and landing runs are not counted and never wait for it
+    /// ([`crate::record::StartedBy::counts_toward_run_limit`]).
     pub max_concurrent_runs: u32,
     /// `workflows.max_concurrent_sessions`: agent sessions plus programs executing across all
-    /// runs; `None` is twice the run limit.
+    /// runs, lane and landing runs included; `None` is twice the run limit.
     pub max_concurrent_sessions: Option<u32>,
     /// `workflows.max_parallel_branches`: branches of one run executing at once.
     pub max_parallel_branches: u32,
@@ -152,9 +154,9 @@ fn closes_unbounded_cycle(
     let mut found = None;
     visit(
         definition,
-        &definition.start.value,
+        definition.start_node(),
         &mut BTreeSet::new(),
-        &mut vec![(definition.start.value.as_str(), None)],
+        &mut vec![(definition.start_node(), None)],
         &mut found,
         (from, target, route.line),
     );
@@ -173,7 +175,8 @@ impl Limits {
         self.session_limit().saturating_sub(running)
     }
 
-    /// Whether one more run may start executing while `executing` runs do; otherwise it is Queued.
+    /// Whether one more hand-started run may start executing while `executing` hand-started runs
+    /// do; otherwise it is Queued.
     pub fn admits_run(&self, executing: usize) -> bool {
         executing < self.max_concurrent_runs as usize
     }
@@ -351,7 +354,13 @@ pub fn step(
     limits: &Limits,
     free: usize,
 ) -> Vec<Command> {
-    if state.cancelled || state.ended.is_some() || state.halted || !state.held.is_empty() {
+    // A dispatcher's run is not driven by the scheduler: it starts, ends and fails nothing.
+    if definition.dispatcher
+        || state.cancelled
+        || state.ended.is_some()
+        || state.halted
+        || !state.held.is_empty()
+    {
         return Vec::new();
     }
     let plan = plan(definition, state, limits);
@@ -719,7 +728,15 @@ impl<'a> Walk<'a> {
     }
 
     fn run(&mut self) {
-        let start = self.definition.start.value.clone();
+        // A dispatcher has no start and no nodes: the scheduler never starts anything for it.
+        let Some(start) = self
+            .definition
+            .start
+            .as_ref()
+            .map(|start| start.value.clone())
+        else {
+            return;
+        };
         if let Some(chain) = self.enter(Vec::new(), Vec::new(), None, &start, 0) {
             self.queue.push_back(chain);
         }

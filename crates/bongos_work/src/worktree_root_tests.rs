@@ -21,7 +21,9 @@ use crate::worktree_tests::{
 };
 use crate::worktrees::{
     EXCLUDE_LINE, Layout, Plan, StartedToast, WORKTREES_DIR, inside_line, plan, started_message,
+    writable_spot,
 };
+use bongos_work_model::worktree_path::Source;
 
 /// A project `name` on the repository `repository`, with its top group and the leaves given as
 /// `(slug, id)`.
@@ -283,6 +285,58 @@ async fn a_template_inside_the_checkout_adds_its_own_exclude_line(cx: &mut TestA
         [EXCLUDE_LINE, "/.trees/"]
     );
     assert_eq!(git(&setup.real, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn a_project_profile_or_lane_root_refuses_instead_of_falling_back() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("work");
+    project(&root, "invoicing", "invoicing", &[("inner", "i1")]);
+    let tree = loaded(&root);
+    // A root that is a file cannot hold a worktree, whoever runs the test.
+    let blocked = temp.path().join("blocked");
+    std::fs::write(&blocked, "").unwrap();
+    let template = format!("{}/{{slug}}", blocked.display());
+    let repositories = [test_repository(
+        "invoicing",
+        "/src/invoicing",
+        Some(&template),
+    )];
+    let layout = test_layout(&temp.path().join("data"));
+    let Ok(Plan::Ready(request)) = plan(&tree, "i1", &repositories, &layout) else {
+        panic!("expected a ready plan");
+    };
+    let planned_parent = || blocked.to_string_lossy().into_owned();
+
+    for (source, layer) in [
+        (Source::Project, "by the project"),
+        (
+            Source::Profile {
+                name: "fast-disk".to_string(),
+            },
+            "by project profile fast-disk",
+        ),
+        (Source::Lane, "by the lane binding"),
+    ] {
+        let error = writable_spot(&request.clone().with_source(source), planned_parent)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&blocked.to_string_lossy().into_owned()),
+            "{error}"
+        );
+        assert!(error.contains(layer), "{error}");
+        assert!(error.ends_with("nothing was created"), "{error}");
+        assert!(
+            !temp.path().join("data").exists(),
+            "nothing central was made"
+        );
+    }
+
+    // The repository's own root still falls back to the central directory.
+    let (spot, fallback) = writable_spot(&request, planned_parent).unwrap();
+    assert_eq!(spot, temp.path().join("data/worktrees/invoicing/inner"));
+    assert_eq!(fallback, Some(blocked.to_string_lossy().into_owned()));
 }
 
 fn set_mode(path: &Path, mode: u32) {

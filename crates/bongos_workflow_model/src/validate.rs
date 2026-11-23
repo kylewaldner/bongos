@@ -185,6 +185,22 @@ pub fn validate(definition: &Definition, context: &ValidationContext) -> Vec<Dia
     diagnostics
 }
 
+/// Every input of `definition` whose source reads a task or a todo (`task.*`, `todo.*`), which a
+/// run with a project subject cannot resolve, as one error each, in declaration order.
+pub fn project_subject_problems(definition: &Definition) -> Vec<Diagnostic> {
+    definition
+        .inputs
+        .iter()
+        .filter(|input| crate::inputs::reads_task(&input.from))
+        .map(|input| Diagnostic {
+            node: None,
+            line: input.line,
+            severity: Severity::Error,
+            message: crate::inputs::no_task_message(&input.name, &input.from),
+        })
+        .collect()
+}
+
 pub(crate) fn outcome_name(outcome: Outcome) -> &'static str {
     match outcome {
         Outcome::Pr => "pr",
@@ -294,6 +310,19 @@ impl<'a> Validator<'a> {
             self.error(None, 1, "the definition directory is missing");
         }
 
+        if definition.instances == Some(0) {
+            self.error(
+                None,
+                definition.instances_line.unwrap_or(1),
+                "instances must be at least 1",
+            );
+        }
+
+        if definition.dispatcher {
+            self.check_dispatcher();
+            return;
+        }
+
         for end in &definition.ends {
             if self.is_node(&end.name) {
                 self.error(
@@ -304,18 +333,21 @@ impl<'a> Validator<'a> {
             }
         }
 
-        let start = &definition.start;
-        if self.is_end(&start.value) && !self.is_node(&start.value) {
+        let start = definition.start_node();
+        let start_line = definition.start_line();
+        if definition.start.is_none() {
+            self.error(None, start_line, "start is missing; name the first node");
+        } else if self.is_end(start) && !self.is_node(start) {
             self.error(
                 None,
-                start.line,
-                format!("start must be a node, not end '{}'", start.value),
+                start_line,
+                format!("start must be a node, not end '{start}'"),
             );
-        } else if !self.is_node(&start.value) {
+        } else if !self.is_node(start) {
             self.error(
                 None,
-                start.line,
-                format!("start names unknown node '{}'", start.value),
+                start_line,
+                format!("start names unknown node '{start}'"),
             );
         }
 
@@ -326,7 +358,7 @@ impl<'a> Validator<'a> {
         {
             self.error(
                 None,
-                start.line,
+                start_line,
                 "no success end; add an end with kind = \"success\"",
             );
         }
@@ -341,6 +373,28 @@ impl<'a> Validator<'a> {
             if node.is_checks() {
                 self.check_items_from(node, &graph);
             }
+        }
+    }
+
+    /// A dispatcher is not driven by the scheduler: it declares no nodes and no ends.
+    fn check_dispatcher(&mut self) {
+        let definition = self.definition;
+        for node in &definition.nodes {
+            self.error(
+                Some(&node.name),
+                node.line,
+                format!(
+                    "a dispatcher declares no nodes; remove node '{}'",
+                    node.name
+                ),
+            );
+        }
+        for end in &definition.ends {
+            self.error(
+                Some(&end.name),
+                end.line,
+                format!("a dispatcher declares no ends; remove end '{}'", end.name),
+            );
         }
     }
 
@@ -1220,7 +1274,7 @@ impl<'a> Validator<'a> {
         let count = nodes.len();
 
         // Reachability from start.
-        let start = graph.index.get(definition.start.value.as_str()).copied();
+        let start = graph.index.get(definition.start_node()).copied();
         let mut reached = vec![false; count];
         if let Some(start) = start {
             let mut queue = VecDeque::from([start]);
@@ -1240,7 +1294,8 @@ impl<'a> Validator<'a> {
                         node.line,
                         format!(
                             "node '{}' is unreachable from start '{}'",
-                            node.name, definition.start.value
+                            node.name,
+                            definition.start_node()
                         ),
                     );
                 }
@@ -1304,7 +1359,7 @@ impl<'a> Validator<'a> {
             if has_success && !any_success_reached {
                 self.error(
                     None,
-                    definition.start.line,
+                    definition.start_line(),
                     "no success end is reachable from start",
                 );
             }

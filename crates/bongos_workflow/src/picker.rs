@@ -21,7 +21,7 @@ use workspace::Workspace;
 use crate::WorkflowsSettings;
 use crate::actions::show_toast;
 use crate::commands::{VALIDATE_TITLE, open_report};
-use crate::definitions::{Report, check_definition_in};
+use crate::definitions::{Report, check_parsed_in};
 use crate::engine::WorkflowEngine;
 use crate::lifecycle::{StartRequest, open_todo};
 use crate::runner_claude::AgentDefaults;
@@ -40,12 +40,13 @@ pub struct Candidate {
 }
 
 /// The definitions of every layer, by name, each labeled with its winning layer and the lower
-/// layers it shadows. A definition with an error is a row with its name and first error.
+/// layers it shadows. A definition with an error is a row with its name and first error. A
+/// dispatcher is never a row: it is not started on a task.
 pub fn candidates(dirs: &LayerDirs, context: &ValidationContext) -> Vec<Candidate> {
     layers::resolve(dirs)
         .resolved
         .into_iter()
-        .map(|resolved| {
+        .filter_map(|resolved| {
             let mut label = format!("{} ({}", resolved.name, resolved.layer.label());
             if !resolved.overrides.is_empty() {
                 let shadowed: Vec<&str> = resolved
@@ -56,7 +57,10 @@ pub fn candidates(dirs: &LayerDirs, context: &ValidationContext) -> Vec<Candidat
                 label.push_str(&format!(", shadows {}", shadowed.join(", ")));
             }
             label.push(')');
-            let report = check_definition_in(&resolved, context.clone(), |_, _| {});
+            let (report, definition) = check_parsed_in(&resolved, context.clone(), |_, _| {});
+            if definition.is_some_and(|definition| definition.dispatcher) {
+                return None;
+            }
             let diagnostics = report.first_error().map(|first| {
                 label.push_str(&format!(": error: {first}"));
                 let report = Report {
@@ -65,11 +69,11 @@ pub fn candidates(dirs: &LayerDirs, context: &ValidationContext) -> Vec<Candidat
                 };
                 report.render()
             });
-            Candidate {
+            Some(Candidate {
                 name: resolved.name,
                 label,
                 diagnostics,
-            }
+            })
         })
         .collect()
 }
@@ -182,7 +186,8 @@ impl Review {
         let text = std::fs::read_to_string(&file)
             .map_err(|error| format!("{}: {error}", file.display()))?;
         let definition = parse(&text).map_err(|error| error.to_string())?;
-        let inputs = resolve(&definition, task, tree, Some(todo), &self.overrides);
+        let inputs = resolve(&definition, Some(task), tree, Some(todo), &self.overrides)
+            .map_err(|error| error.to_string())?;
         Ok(Summary::build(
             &definition,
             resolved.layer,

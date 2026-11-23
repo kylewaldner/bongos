@@ -1,7 +1,13 @@
 // Disable command line from opening on release mode
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod engine_host;
+#[cfg(test)]
+mod engine_host_tests;
 mod zed;
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod chat_report_args_tests;
 
 // Ensure the binary name stays in sync with APP_NAME so that the paths used
 // at runtime (data dir, config dir, etc.) match what the binary is called.
@@ -209,6 +215,16 @@ fn main() {
         return;
     }
 
+    // `bongos --chat-report <mode> ...` is a chat hook's reporter: it sends one report over the
+    // chat channel and exits 0, before any settings, logging, database or UI work.
+    #[cfg(not(target_os = "windows"))]
+    if let Some(words) = &args.chat_report {
+        if let Some((mode, rest)) = words.split_first() {
+            bongos_chat_model::channel::client::main(mode, rest);
+        }
+        process::exit(0);
+    }
+
     #[cfg(target_os = "windows")]
     if args.record_etw_trace {
         let zed_pid = args
@@ -282,6 +298,16 @@ fn main() {
     if args.version {
         println!("{}", bongos_version::version_line());
         return;
+    }
+
+    // The engine host never opens a window and is not the app's single instance.
+    if let Some(project_id) = args.engine_host.clone() {
+        let mode = match args.read.clone() {
+            Some(words) => engine_host::Mode::Read(words),
+            None if args.probe => engine_host::Mode::Probe,
+            None => engine_host::Mode::Host,
+        };
+        engine_host::run(project_id, mode);
     }
 
     if args.system_specs {
@@ -547,6 +573,27 @@ fn main() {
             cx,
         );
         bongos_language_status::init(paths::logs_dir(), cx);
+        // Before the projects open: the first process to open one holds its writer (and serves its
+        // socket while lanes are on), a later one attaches to it.
+        bongos_engine_host::install_window(
+            bongos_engine_host::WindowHosting {
+                bongos_version: release_channel::AppVersion::global(cx).to_string(),
+                log: paths::log_file().clone(),
+                hosts_dir: bongos_engine_host::default_hosts_dir(),
+                lanes_enabled: std::rc::Rc::new(|cx| {
+                    <bongos_lanes::LanesSettings as settings::Settings>::get_global(cx).enabled
+                }),
+                handover_times: std::rc::Rc::new(|cx| {
+                    let host =
+                        &<bongos_lanes::LanesSettings as settings::Settings>::get_global(cx).host;
+                    bongos_engine_host::HandoverTimes {
+                        start_timeout: host.start_timeout,
+                        handover_timeout: host.handover_timeout,
+                    }
+                }),
+            },
+            cx,
+        );
         bongos_work::init(
             fs.clone(),
             bongos_work::WorkDirs::new(util::paths::home_dir(), paths::data_dir()),
@@ -554,6 +601,7 @@ fn main() {
         );
         bongos_chat::init(
             bongos_chat::ChatDirs::new(util::paths::home_dir(), paths::data_dir()),
+            chat_channel_config(),
             cx,
         );
         bongos_prompts::init(cx);
@@ -567,6 +615,8 @@ fn main() {
         bongos_linear::init_client(cx);
         bongos_workflow::init(cx);
         bongos_checks::init(cx);
+        bongos_lanes::init(cx);
+        bongos_engine_host::init(cx);
         let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
         let workspace_store = cx.new(|cx| WorkspaceStore::new(client.clone(), cx));
 
@@ -667,6 +717,7 @@ fn main() {
         bongos_linear::init_palette(cx);
         bongos_workflow::init_palette(cx);
         bongos_checks::init_palette(cx);
+        bongos_lanes::init_palette(cx);
         let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
             enterprise_uri: language::language_settings::all_language_settings(None, cx)
                 .edit_predictions
@@ -764,6 +815,8 @@ fn main() {
         which_key::init(cx);
         bongos_minibuffer::init(cx);
         bongos_emacs::init(cx);
+        bongos_window::init(cx);
+        bongos_avy::init(cx);
         bongos_isearch::init(cx);
         bongos_query_replace::init(cx);
         zed::install_isearch_kill_source(cx);
@@ -1549,6 +1602,22 @@ pub(crate) static FORCE_CLI_MODE: LazyLock<bool> = LazyLock::new(|| {
     env_var
 });
 
+/// How chat hooks run the report client: this executable with `--chat-report`. Empty when the
+/// executable's path is unknown, so no chat gets a channel.
+fn chat_channel_config() -> bongos_chat::ChannelConfig {
+    let reporter = match std::env::current_exe() {
+        Ok(exe) => vec![
+            exe.to_string_lossy().into_owned(),
+            "--chat-report".to_string(),
+        ],
+        Err(error) => {
+            log::error!("chats: cannot find the bongos executable for chat reports: {error}");
+            Vec::new()
+        }
+    };
+    bongos_chat::ChannelConfig { reporter }
+}
+
 fn stdout_is_a_pty() -> bool {
     !*FORCE_CLI_MODE && io::stdout().is_terminal()
 }
@@ -1633,8 +1702,42 @@ struct Args {
     #[arg(hide = true)]
     askpass: Option<String>,
 
+    /// Sends one chat report over the chat channel socket, for an agent's hooks: `claude-hook`
+    /// (reads the hook input on stdin) or `state <running|waiting|idle>`. Takes every word after it.
+    #[cfg(not(target_os = "windows"))]
+    #[arg(
+        long,
+        hide = true,
+        num_args = 1..,
+        allow_hyphen_values = true,
+        value_names = ["MODE", "ARGS"]
+    )]
+    chat_report: Option<Vec<String>>,
+
     #[arg(long, hide = true)]
     dump_all_actions: bool,
+
+    /// Runs a headless host of the workflow engine for one project, with no window.
+    #[arg(long, hide = true, value_name = "PROJECT_ID")]
+    engine_host: Option<String>,
+
+    /// With `--engine-host`, exits 0 once the engine is initialized and its settings are on.
+    #[arg(long, hide = true, requires = "engine_host")]
+    probe: bool,
+
+    /// With `--engine-host`, runs one read mode (its name, then its arguments, which may start
+    /// with `--`) against the project's store opened for reading only, prints its output and
+    /// exits.
+    #[arg(
+        long,
+        hide = true,
+        requires = "engine_host",
+        conflicts_with = "probe",
+        num_args = 1..,
+        allow_hyphen_values = true,
+        value_names = ["NAME", "ARGS"]
+    )]
+    read: Option<Vec<String>>,
 
     /// Output current environment variables as JSON to stdout
     #[arg(long, hide = true)]

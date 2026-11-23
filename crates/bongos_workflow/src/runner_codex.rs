@@ -92,6 +92,8 @@ pub struct CodexNode {
     pub node_result: PathBuf,
     /// What the step may write while `confinement.agent_steps` is on; `None` while it is off.
     pub confinement: Option<AgentJob>,
+    /// The run's edits to the environment.
+    pub env: Vec<bongos_workflow_model::EnvEdit>,
 }
 
 /// The model a node names itself or through `[defaults]`; Codex has no default alias, so none is
@@ -242,6 +244,7 @@ pub fn launch_env(
             task_dir: &node.task_dir,
             worktree: &node.worktree,
             node_result: &node.node_result,
+            edits: &node.env,
         },
     )
 }

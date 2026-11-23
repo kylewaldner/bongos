@@ -76,6 +76,7 @@ pub(crate) struct FakeChats {
 pub(crate) fn sent() -> Sent {
     Sent {
         submitted: true,
+        confirmed: false,
         named: None,
     }
 }

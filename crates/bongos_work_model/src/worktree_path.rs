@@ -85,7 +85,7 @@ pub struct Configured<'a> {
 }
 
 /// Where a resolved path came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
     /// The repository's own `worktree_root`.
     Own,
@@ -93,6 +93,34 @@ pub enum Source {
     Default,
     /// No template: the central directory.
     Central,
+    /// The project's own `[locations]` in its lane table.
+    Project,
+    /// The project profile of this machine, by its name.
+    Profile { name: String },
+    /// A lane binding's own location on a tree.
+    Lane,
+}
+
+impl Source {
+    /// Whether a root from this source that cannot be written falls back to the central
+    /// directory. Only the user's own settings do; a root the project, its profile or a lane
+    /// names is meant, so an unwritable one refuses instead.
+    pub fn falls_back(&self) -> bool {
+        matches!(self, Source::Own | Source::Default | Source::Central)
+    }
+
+    /// The layer in words: "own", "default", "central", "project", "from project profile
+    /// <name>" or "lane".
+    pub fn label(&self) -> String {
+        match self {
+            Source::Own => "own".to_string(),
+            Source::Default => "default".to_string(),
+            Source::Central => "central".to_string(),
+            Source::Project => "project".to_string(),
+            Source::Profile { name } => format!("from project profile {name}"),
+            Source::Lane => "lane".to_string(),
+        }
+    }
 }
 
 pub struct ResolveInput<'a> {
@@ -245,6 +273,45 @@ pub fn preview(
         central_dir,
     };
     Ok(place.path(PREVIEW_SLUG).to_string_lossy().into_owned())
+}
+
+/// The deepest directory a template names before its first token: the part of every path it
+/// gives that does not depend on the repository or the slug (`/mnt/fast/wt` for
+/// `/mnt/fast/wt/{repo}/{slug}`, `/mnt/fast` for `/mnt/fast/wt-{repo}`). A relative template is
+/// relative to the parent of the repository path, like in [`resolve`].
+pub fn fixed_root(
+    template: &str,
+    repository_path: &Path,
+    home: &Path,
+) -> Result<PathBuf, TemplateError> {
+    let template = parse(template)?;
+    let mut text = String::new();
+    for part in &template.parts {
+        match part {
+            Part::Literal(literal) => text.push_str(literal),
+            Part::Repo | Part::Slug => break,
+        }
+    }
+    let directory = if text.ends_with('/') || text == "~" {
+        text.as_str()
+    } else {
+        text.rfind('/').map_or("", |slash| &text[..=slash])
+    };
+    let place = Place {
+        template: None,
+        repository_name: "",
+        repository_path,
+        home,
+        central_dir: Path::new(""),
+    };
+    let path = if directory == "~" || directory.starts_with("~/") {
+        home.join(directory[1..].trim_start_matches('/'))
+    } else if directory.starts_with('/') {
+        PathBuf::from(directory)
+    } else {
+        place.repository_parent().join(directory)
+    };
+    Ok(normalize(&path))
 }
 
 /// The slug as it appears in a worktree path. Within `limit` characters it is unchanged. Longer,

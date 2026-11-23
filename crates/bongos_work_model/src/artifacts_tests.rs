@@ -504,3 +504,47 @@ fn merge_keeps_the_strictest_duplicate_and_normalizes_paths() {
     assert_eq!(merged.artifacts[0].visibility, Some(Visibility::HumanOnly));
     assert_eq!(merged.artifacts[1].visibility, Some(Visibility::Shared));
 }
+
+#[test]
+fn the_project_context_names_the_project_its_documents_and_shared_files_and_no_task() {
+    let temp = TempDir::new().unwrap();
+    let (root, backfill) = seed(&temp);
+    let tree = load(&root);
+    let project = &tree.projects[0];
+    let files = temp.path().join("files").join("g1");
+    write(&files.join("roadmap.md"), "# roadmap\n");
+    write(&files.join("budget.md"), "# budget\n");
+    write(
+        &layout::artifacts_file(&files),
+        "schema = 1\n\n[[artifact]]\npath = \"roadmap.md\"\ndescription = \"The roadmap\"\n\
+         visibility = \"shared\"\n\n[[artifact]]\npath = \"budget.md\"\n\
+         description = \"The budget\"\nvisibility = \"human-only\"\n",
+    );
+    let definitions = temp.path().join("snapshot").join("definitions");
+
+    let context = artifacts::project_session_context(project, &files, &definitions).unwrap();
+    assert_eq!(context.name, "Invoicing");
+    assert_eq!(context.goal, "Invoicing");
+    assert_eq!(context.documents, definitions.join("documents"));
+    assert_eq!(context.files_dir, files);
+    assert_eq!(context.definitions, definitions);
+    assert_eq!(
+        context.artifacts,
+        vec![SharedArtifact {
+            path: files.join("roadmap.md"),
+            description: "The roadmap".to_string(),
+        }]
+    );
+    // No task's path or file is in what the agent is told, and no human-only file.
+    let text = serde_json::to_string(&context).unwrap();
+    for needle in [
+        backfill.to_string_lossy().into_owned(),
+        layout::task_file(&project.task.dir)
+            .to_string_lossy()
+            .into_owned(),
+        WORKTREE.to_string(),
+        "budget.md".to_string(),
+    ] {
+        assert!(!text.contains(&needle), "{needle} is in {text}");
+    }
+}

@@ -1204,3 +1204,90 @@ fn a_loop_bound_stands_in_for_max_passes_on_a_cycle() {
         "{unset:?}"
     );
 }
+
+const DISPATCHER: &str =
+    "schema = 1\nname = \"lanes\"\ndescription = \"Run the project's lanes\"\ndispatcher = true\n";
+
+#[test]
+fn a_dispatcher_with_no_start_nodes_or_ends_is_valid() {
+    let definition = parse(DISPATCHER).unwrap();
+    assert!(definition.dispatcher);
+    assert_eq!(definition.start, None);
+    assert_eq!(definition.instances, Some(1));
+    assert_eq!(
+        validate(&definition, &ValidationContext::default()),
+        Vec::new()
+    );
+}
+
+#[test]
+fn a_dispatcher_refuses_nodes_and_ends() {
+    let text = format!(
+        "{DISPATCHER}[nodes.a]\nkind = \"agent\"\nprompt = \"a.md\"\n[ends.done]\nkind = \"success\"\n"
+    );
+    let diagnostics = validate(&parse(&text).unwrap(), &ValidationContext::default());
+    let messages: Vec<_> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(
+        messages,
+        [
+            "a dispatcher declares no nodes; remove node 'a'",
+            "a dispatcher declares no ends; remove end 'done'",
+        ]
+    );
+    assert!(has_errors(&diagnostics));
+}
+
+#[test]
+fn a_dispatcher_is_limited_to_one_instance_whatever_is_written() {
+    let definition = parse(&format!("{DISPATCHER}instances = 4\n")).unwrap();
+    assert_eq!(definition.instances, Some(1));
+    assert!(!has_errors(&validate(
+        &definition,
+        &ValidationContext::default()
+    )));
+}
+
+#[test]
+fn zero_instances_is_an_error() {
+    let definition = parse(&format!("{DISPATCHER}instances = 0\n")).unwrap();
+    let diagnostics = validate(&definition, &ValidationContext::default());
+    assert_eq!(
+        diagnostics,
+        [Diagnostic {
+            node: None,
+            line: 5,
+            severity: Severity::Error,
+            message: "instances must be at least 1".to_string(),
+        }]
+    );
+    let text = VALID.replacen("start = ", "instances = 0\nstart = ", 1);
+    let diagnostics = validate(&parse(&text).unwrap(), &context());
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.is_error() && d.message == "instances must be at least 1"),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn a_definition_that_is_not_a_dispatcher_needs_a_start() {
+    let error = parse("schema = 1\nname = \"d\"\n").unwrap_err();
+    assert!(error.message.contains("start"), "{error}");
+}
+
+#[test]
+fn project_subject_problems_name_every_task_or_todo_input() {
+    let text = "schema = 1\nname = \"d\"\nstart = \"a\"\n[inputs]\ngoal = { type = \"text\", from = \"task.goal\" }\nmode = { type = \"text\", from = \"literal:x\" }\ntodo = { type = \"text\", from = \"todo.name\" }\n[nodes.a]\nkind = \"agent\"\nprompt = \"x\"\n";
+    let problems = crate::validate::project_subject_problems(&parse(text).unwrap());
+    let messages: Vec<_> = problems.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(
+        messages,
+        [
+            "input goal reads task.goal; a run with no task cannot use it",
+            "input todo reads todo.name; a run with no task cannot use it",
+        ]
+    );
+    assert_eq!(problems[0].line, 5);
+    assert!(problems.iter().all(Diagnostic::is_error));
+}

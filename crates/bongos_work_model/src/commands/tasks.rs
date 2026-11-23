@@ -494,6 +494,51 @@ pub struct StartedWorktree {
     pub fallback: Option<String>,
 }
 
+/// What a branch-only start made: the branch and what it was cut from, with no worktree.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StartedBranch {
+    pub branch: String,
+    pub base: String,
+    pub base_sha: String,
+}
+
+/// A branch-only start (a lane runs the leaf in its own tree): record the branch just cut for an
+/// open leaf and mark its current todo started. Refused when the task already records a branch
+/// or a worktree, so neither is ever written over.
+pub fn record_branch(tree: &WorkTree, ctx: &Context, id: &str, started: StartedBranch) -> Outcome {
+    edit_task(tree, ctx, id, |place, file| {
+        super::require_leaf(place, tree, "branch")?;
+        super::require_open(place.slug(), file)?;
+        if let Some(existing) = &file.worktree {
+            return Err(format!(
+                "{} already has the worktree {existing}",
+                place.slug()
+            ));
+        }
+        if let Some(existing) = &file.branch {
+            return Err(format!(
+                "{} already has the branch {existing}",
+                place.slug()
+            ));
+        }
+        file.branch = Some(started.branch.clone());
+        file.base = Some(started.base.clone());
+        file.base_sha = Some(started.base_sha.clone());
+        if let Some(todo) = file
+            .todos
+            .iter_mut()
+            .find(|todo| todo.state == TodoState::Open)
+            && todo.started.is_none()
+        {
+            todo.started = Some(ctx.at);
+        }
+        Ok((
+            "branch created",
+            Some(format!("{} from {}", started.branch, started.base)),
+        ))
+    })
+}
+
 /// `task: start`: record the worktree just created for an open leaf and mark its current todo
 /// started. Refused when the task already records a worktree, so a second one is never written
 /// over the first.

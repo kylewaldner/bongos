@@ -2261,6 +2261,12 @@ impl Window {
             .render_to_image(&self.rendered_frame.scene)
     }
 
+    /// For testing: the quads of the last presented frame, in paint order.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn painted_quads(&self) -> &[crate::Quad] {
+        &self.rendered_frame.scene.quads
+    }
+
     /// Set the content size of the window.
     pub fn resize(&mut self, size: Size<Pixels>) {
         self.platform_window.resize(size);

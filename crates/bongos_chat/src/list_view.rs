@@ -18,21 +18,22 @@
 //! The view reads the records, the runtime and the health, and writes nothing to a record; the
 //! commands behind the keys do their own writing.
 
-use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use bongos_chat_model::{ChatEntry, ChatRecord, Fork, Layout, timestamp_utc};
+use bongos_chat_model::{ChatEntry, ChatRecord, Fork, Layout, display_order, timestamp_utc};
 use bongos_work::{Focus, WorkStore, WorkStoreEvent, ask, focused};
 use bongos_work_model::Timestamp;
 use bongos_work_model::store::WorkTree;
 use gpui::{
-    AnyElement, App, Context, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, WeakEntity, Window,
+    AnyElement, App, Context, ElementId, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Task,
+    WeakEntity, Window, div,
 };
 use ui::{
     Button, Clickable as _, Color, Icon, IconName, IconSize, Label, LabelCommon as _, LabelSize,
-    ListItem, ListItemSpacing, StatefulInteractiveElement as _, Toggleable as _, h_flex, v_flex,
+    ListItem, ListItemSpacing, StatefulInteractiveElement as _, Toggleable as _, Tooltip, h_flex,
+    v_flex,
 };
 use workspace::Workspace;
 
@@ -64,6 +65,24 @@ pub(crate) struct Row {
     pub archived: bool,
     pub title: String,
     pub lines: Vec<String>,
+    /// Why the state is estimated, when it is: the first line then ends with [`ESTIMATED_SUFFIX`].
+    pub estimated: Option<String>,
+}
+
+/// The small tag after an estimated state, in the text of the views.
+pub(crate) const ESTIMATED_SUFFIX: &str = " (estimated)";
+
+/// The quiet "estimated" tag, with the reason as its tooltip.
+pub(crate) fn estimated_tag(id: ElementId, reason: String) -> AnyElement {
+    div()
+        .id(id)
+        .child(
+            Label::new("estimated")
+                .size(LabelSize::XSmall)
+                .color(Color::Muted),
+        )
+        .tooltip(Tooltip::text(reason))
+        .into_any_element()
 }
 
 /// Everything the list shows, read from the records, the runtime and the health.
@@ -177,19 +196,6 @@ fn time_text(timestamp: &Timestamp) -> String {
 /// How the list names the task `id`: its goal, with its Linear identifier when it has one.
 pub(crate) fn task_name(tree: &WorkTree, id: &str) -> Option<String> {
     Some(tree.task_by_id(id)?.named_goal())
-}
-
-/// Newest last activity first, ties by id. A file that could not be read has no time: it comes
-/// after the readable ones, by file name.
-fn display_order(a: &ChatEntry, b: &ChatEntry) -> Ordering {
-    match (a.record(), b.record()) {
-        (Some(a), Some(b)) => timestamp_utc(&b.last_active)
-            .cmp(&timestamp_utc(&a.last_active))
-            .then_with(|| a.id.cmp(&b.id)),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => a.file_name().cmp(&b.file_name()),
-    }
 }
 
 /// The list of the Chats panel.
@@ -373,7 +379,8 @@ impl ChatListView {
                 name.to_lowercase().contains(&needle)
             })
             .collect();
-        chats.sort_by(|a, b| display_order(&a.entry, &b.entry));
+        let activity = runtime.live_activity();
+        chats.sort_by(|a, b| display_order(&a.entry, &b.entry, &activity));
         for chat in chats {
             let archived = chat.entry.record().is_some_and(|record| record.archived);
             let task_goal = scope_task.is_none().then(|| {
@@ -411,6 +418,7 @@ impl ChatListView {
                             .map(|live| live.missing_skills().to_vec())
                             .unwrap_or_default(),
                         stale: self.stale.contains(id) && live.is_some(),
+                        estimated: live.and_then(|live| live.estimate_reason()),
                     };
                     record_row(record, facts)
                 }
@@ -607,10 +615,33 @@ impl ChatListView {
                 v_flex()
                     .w_full()
                     .child(Label::new(row.title.clone()))
-                    .children(row.lines.iter().map(|line| {
-                        Label::new(line.clone())
-                            .size(LabelSize::Small)
-                            .color(Color::Muted)
+                    .children(row.lines.iter().enumerate().map(|(line_index, line)| {
+                        let tag =
+                            row.estimated
+                                .clone()
+                                .filter(|_| line_index == 0)
+                                .and_then(|reason| {
+                                    line.strip_suffix(ESTIMATED_SUFFIX)
+                                        .map(|text| (text, reason))
+                                });
+                        match tag {
+                            Some((text, reason)) => h_flex()
+                                .gap_1()
+                                .child(
+                                    Label::new(text.to_string())
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted),
+                                )
+                                .child(estimated_tag(
+                                    ElementId::NamedInteger("chat-estimated".into(), index as u64),
+                                    reason,
+                                ))
+                                .into_any_element(),
+                            None => Label::new(line.clone())
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                                .into_any_element(),
+                        }
                     })),
             );
         if row.selectable {
@@ -647,12 +678,19 @@ struct RowFacts<'a> {
     fallbacks: Vec<String>,
     missing_skills: Vec<String>,
     stale: bool,
+    /// Why the state is estimated, when it is.
+    estimated: Option<String>,
 }
 
 fn record_row(record: &ChatRecord, facts: RowFacts<'_>) -> Row {
+    let tag = if facts.estimated.is_some() {
+        ESTIMATED_SUFFIX
+    } else {
+        ""
+    };
     let mut lines = vec![
         format!(
-            "agent: {}  type: {}  layout: {}  state: {}",
+            "agent: {}  type: {}  layout: {}  state: {}{tag}",
             record.agent,
             record.chat_type,
             layout_name(record.layout),
@@ -713,6 +751,7 @@ fn record_row(record: &ChatRecord, facts: RowFacts<'_>) -> Row {
         archived: record.archived,
         title: record.name.clone(),
         lines,
+        estimated: facts.estimated,
     }
 }
 
@@ -735,6 +774,7 @@ fn error_row(entry: &ChatEntry, task_goal: Option<String>) -> Row {
         archived: false,
         title: entry.file_name(),
         lines,
+        estimated: None,
     }
 }
 

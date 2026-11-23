@@ -142,6 +142,11 @@ no_count!(
     EndOfBuffer,
     XrefFindDefinitions,
     XrefFindImplementations,
+    SymbolJumpNext,
+    SymbolJumpPrev,
+    SymbolOverlayPut,
+    SymbolOverlayRemoveAll,
+    GotoStackPush,
     RectangleMarkMode,
     CopyRectangleAsKill,
     KillRectangle,
@@ -356,6 +361,27 @@ actions!(
         XrefFindDefinitions,
         /// Goes to the implementation of the symbol at the cursor, pushing the mark first.
         XrefFindImplementations,
+    ]
+);
+actions!(
+    emacs,
+    [
+        /// Jumps to the next occurrence of the symbol at the cursor: symbol-jump-next.
+        SymbolJumpNext,
+        /// Jumps to the previous occurrence of the symbol at the cursor: symbol-jump-prev.
+        SymbolJumpPrev,
+        /// Highlights every occurrence of the symbol at the cursor: symbol-overlay-put.
+        SymbolOverlayPut,
+        /// Removes every symbol highlight: symbol-overlay-remove-all.
+        SymbolOverlayRemoveAll,
+        /// Goes back in the goto stack: goto-stack-back.
+        GotoStackBack,
+        /// Goes forward in the goto stack: goto-stack-forward.
+        GotoStackForward,
+        /// Pushes the current location onto the goto stack: goto-stack-push.
+        GotoStackPush,
+        /// Lists the xref history: xref-history-list.
+        XrefHistoryList,
     ]
 );
 count_action!(
