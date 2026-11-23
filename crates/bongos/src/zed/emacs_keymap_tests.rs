@@ -223,6 +223,10 @@ const EDITOR_KEYS: &[(&str, &str)] = &[
     ("ctrl-u", "emacs::UniversalArgument"),
     ("alt--", "emacs::NegativeArgument"),
     ("ctrl-o", "emacs::OpenLine"),
+    ("alt-n", "emacs::SymbolJumpNext"),
+    ("alt-p", "emacs::SymbolJumpPrev"),
+    ("alt-i", "emacs::SymbolOverlayPut"),
+    ("alt-shift-i", "emacs::SymbolOverlayRemoveAll"),
 ];
 
 /// Keys where the Emacs action replaces Zed's inside editors, with Zed's Linux action in an
@@ -424,7 +428,13 @@ async fn the_key_table_covers_every_emacs_action(cx: &mut gpui::TestAppContext) 
         // Every emacs action has an editor key; the cursor toggle is left unbound on purpose.
         // `pop-global-mark` is a workspace key (`mark_keymap_tests`) and the implementations
         // jump stays in the palette. The digit keys carry an argument, so they are tested apart.
-        const UNBOUND: [&str; 3] = [
+        // The goto stack's arrows (center pane editors only) and `xref-history-list` (a workspace
+        // key) are tested in `symbol_keymap_tests`.
+        const UNBOUND: [&str; 7] = [
+            "emacs::GotoStackBack",
+            "emacs::GotoStackForward",
+            "emacs::GotoStackPush",
+            "emacs::XrefHistoryList",
             "emacs::PopGlobalMark",
             "emacs::XrefFindImplementations",
             "emacs::DigitArgument",
@@ -667,11 +677,6 @@ async fn ctrl_c_y_leaves_the_chat_and_work_keys_alone(cx: &mut gpui::TestAppCont
 /// each owner replaces its row.
 const RESERVED: &[(&str, &[&str])] = &[
     ("ctrl-x b", &["tab_switcher::Toggle"]),
-    ("ctrl-x 0", &["pane::CloseActiveItem"]),
-    ("ctrl-x 1", &["pane::CloseOtherItems"]),
-    ("ctrl-x 2", &["pane::SplitDown"]),
-    ("ctrl-x 3", &["pane::SplitRight"]),
-    ("ctrl-x o", &["workspace::ActivateNextPane"]),
     // Incremental search, and the search bar's own next and previous match.
     ("ctrl-s", &["isearch::Forward", "search::SelectNextMatch"]),
     (
@@ -681,13 +686,6 @@ const RESERVED: &[(&str, &[&str])] = &[
     ("ctrl-/", &["editor::Undo"]),
     ("ctrl-_", &["editor::Undo"]),
     ("ctrl-x u", &["editor::Undo"]),
-    ("alt-i", &[]),
-    ("alt-shift-i", &[]),
-    ("alt-n", &[]),
-    ("alt-p", &[]),
-    ("alt-;", &[]),
-    ("ctrl-;", &[]),
-    ("ctrl-alt-;", &[]),
 ];
 
 #[gpui::test]

@@ -32,7 +32,18 @@ impl StateHandle {
         }
     }
 
+    /// The writer while this process holds it: `None` for a reader, and for a writer released
+    /// to another process ([`StateWriter::release`]), whose writes go through the sink.
     pub fn writer(&self) -> Option<&Arc<StateWriter>> {
+        match self {
+            StateHandle::Writer(writer) if !writer.is_released() => Some(writer),
+            StateHandle::Writer(_) | StateHandle::Reader(_) => None,
+        }
+    }
+
+    /// The writer this process opened, held or released: what [`ProjectRepo::release_writer`]
+    /// lets go and a take-back takes again.
+    pub fn opened_writer(&self) -> Option<&Arc<StateWriter>> {
         match self {
             StateHandle::Writer(writer) => Some(writer),
             StateHandle::Reader(_) => None,

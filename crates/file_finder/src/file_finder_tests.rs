@@ -4482,6 +4482,14 @@ fn init_test(cx: &mut TestAppContext) -> Arc<AppState> {
         theme_settings::init(theme::LoadThemes::JustBase, cx);
         super::init(cx);
         editor::init(cx);
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.editor.navigation_history = Some(settings::NavigationHistoryContent {
+                    record_large_moves: Some(true),
+                    record_item_switches: Some(true),
+                });
+            });
+        });
         state
     })
 }

@@ -16,13 +16,13 @@
 //! failing, stale or without a verdict). It is not "needs you": a held task waits on its checks,
 //! not on the owner.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use anyhow::Result;
-use bongos_project_repo::{StateEvent, StateHandle, StateRead, StateWriter};
+use bongos_project_repo::{StateEvent, StateHandle, StateRead, StateTx, StateWriter};
 use bongos_work::{
     DoneHoldRefresher, DoneHoldSource, DoneHolds, OpenProjectRepos, RowChipsRegistry,
     RowChipsSource,
@@ -79,16 +79,7 @@ pub fn read_hold_rows(read: &StateRead) -> Result<BTreeMap<String, HoldRow>> {
         .collect();
     let mut holds = BTreeMap::new();
     for (task_id, _) in owed {
-        let valid =
-            done.get(&task_id)
-                .is_some_and(|value| match value.clone().try_into::<DoneRecord>() {
-                    Ok(_) => true,
-                    Err(error) => {
-                        log::error!("reading the done record of {task_id}: {error}");
-                        false
-                    }
-                });
-        if valid {
+        if valid_done(&task_id, done.get(&task_id)) {
             continue;
         }
         let row = reasons
@@ -98,6 +89,45 @@ pub fn read_hold_rows(read: &StateRead) -> Result<BTreeMap<String, HoldRow>> {
         holds.insert(task_id, row);
     }
     Ok(holds)
+}
+
+/// Whether `value`, the done record row of `task_id`, is a done record that reads.
+fn valid_done(task_id: &str, value: Option<&toml::Value>) -> bool {
+    value.is_some_and(|value| match value.clone().try_into::<DoneRecord>() {
+        Ok(_) => true,
+        Err(error) => {
+            log::error!("reading the done record of {task_id}: {error}");
+            false
+        }
+    })
+}
+
+/// The tasks among the marker rows `owed` with no valid done record among the rows `done`.
+fn owing(owed: Vec<(String, toml::Value)>, done: Vec<(String, toml::Value)>) -> BTreeSet<String> {
+    let done: BTreeMap<String, toml::Value> = done.into_iter().collect();
+    owed.into_iter()
+        .map(|(task_id, _)| task_id)
+        .filter(|task_id| !valid_done(task_id, done.get(task_id)))
+        .collect()
+}
+
+/// The tasks that still owe checks in one read of a project's run state: every task with a
+/// marker and no valid done record, the tasks [`read_holds`] holds.
+pub fn owing_tasks(read: &StateRead) -> Result<BTreeSet<String>> {
+    let owed = read.kv(OWED_NAMESPACE).scan("")?;
+    if owed.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    Ok(owing(owed, read.kv(DONE_NAMESPACE).scan("")?))
+}
+
+/// [`owing_tasks`] as the transaction `tx` sees them.
+pub fn owing_tasks_in(tx: &mut StateTx) -> Result<BTreeSet<String>> {
+    let owed = tx.kv(OWED_NAMESPACE).scan("")?;
+    if owed.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    Ok(owing(owed, tx.kv(DONE_NAMESPACE).scan("")?))
 }
 
 /// What the `checks` source knows: the holds of each open project, by its id.

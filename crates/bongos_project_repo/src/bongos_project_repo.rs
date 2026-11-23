@@ -29,6 +29,7 @@ mod pins;
 mod project_values;
 mod quick_edit;
 mod registries;
+mod release;
 mod restore;
 pub mod router;
 mod script_check;
@@ -125,8 +126,8 @@ pub use snapshot::{
     WITHHELD_FILE, WITHHELD_SECRET, Withheld, WithheldReason,
 };
 pub use state::{
-    ImportReason, KvRead, KvTx, OpenError, StateEvent, StateRead, StateReader, StateStore, StateTx,
-    StateWriter, VERIFIED_COMMIT_KEY,
+    ImportReason, KvRead, KvTx, OpenError, RELEASED_MESSAGE, StateEvent, StateRead, StateReader,
+    StateStore, StateTx, StateWriter, VERIFIED_COMMIT_KEY,
 };
 pub use state_branch::{SNAPSHOT_INDEX_FILE, state_ref};
 pub use state_hooks::{StateApplyChange, StateApplyHook, StateApplyHooks, TaskTouch};
@@ -179,6 +180,8 @@ mod peer_tests;
 mod project_values_tests;
 #[cfg(test)]
 mod quick_edit_tests;
+#[cfg(test)]
+mod release_tests;
 #[cfg(test)]
 mod restore_tests;
 #[cfg(test)]

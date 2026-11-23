@@ -7,8 +7,11 @@
 //! changes. The run state is never kept apart from the log: it is [`replay`] of the events.
 //!
 //! Limits ([`Limits`], from the `workflows` settings):
-//! - Runs: at most `max_concurrent_runs` execute at once. The rest wait Queued in start order (a
-//!   `Queued` event) and start when a slot frees. A run holds its slot while it has a process
+//! - Runs: at most `max_concurrent_runs` hand-started runs execute at once. The rest wait Queued
+//!   in start order (a `Queued` event) and start when a slot frees. A lane's or a landing check's
+//!   run is not counted and never waits for a slot ([`StartedBy::counts_toward_run_limit`]). A run
+//!   held back ([`Runtime::hold_back`], a definition at its `instances`) waits Queued until it is
+//!   let start. A run holds its slot while it has a process
 //!   running or something to do now; gates, sleeping polls and Queued nodes hold no slot (D12), so
 //!   a run whose only live work waits on those is parked and frees its slot. A parked run that has
 //!   work again (a gate closed, a poll is due) waits for a slot behind the runs already queued,
@@ -30,6 +33,11 @@
 //! both match the record), marks a run with a started key and no finish interrupted, lets each
 //! built-in clean up after its interrupted keys ([`BuiltinNode::recover`]), and gives an
 //! interrupted, halted, ended, cancelled or held run no command until Kyle acts.
+//!
+//! Drain and hand-over: [`Runtime::drain`] starts no new node in any run and resolves once no
+//! node process runs (gates and sleeping polls hold none; a checks key whose check was stopped
+//! counts as parked once [`Runtime::checks_drained`] recorded it). [`Runtime::hand_over`] then
+//! appends `HandedOver` to every live run and [`Runtime::unload`] drops runs without writing.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -37,13 +45,15 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use bongos_work_model::store::Project;
 use bongos_workflow_model::inputs::Input;
-use bongos_workflow_model::record::RunningNode;
+use bongos_workflow_model::record::{RunningNode, StartedBy};
 use bongos_workflow_model::scheduler::Branch;
 use bongos_workflow_model::{
-    Command, Definition, Event, Failure, FailureReason, Limits, NodeKey, RunState, record, replay,
-    scheduler,
+    Command, Definition, EnvEdit, Event, Failure, FailureReason, LaneRef, Limits, NodeKey,
+    RunState, record, replay, scheduler,
 };
+use futures::channel::oneshot;
 use serde_json::Value;
 
 use crate::WorkflowsSettings;
@@ -136,6 +146,100 @@ pub struct RunBinding {
     pub checkout: TaskCheckout,
     /// The run's resolved inputs.
     pub inputs: Vec<Input>,
+    /// What the run was started with besides its task; the default is a task run's.
+    pub setup: RunSetup,
+}
+
+/// What a run was started with besides its task: its lane, its edits to the environment, whether
+/// its tree is a read-only snapshot, and for a run with no task where its agents' context comes
+/// from. The default is a task run's as it always was: no lane, no edit, a writable run worktree.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RunSetup {
+    pub lane: Option<LaneRef>,
+    /// The lane's named directories, by name.
+    pub lane_dirs: BTreeMap<String, PathBuf>,
+    /// The run's edits to its nodes' environment, applied in order.
+    pub env: Vec<EnvEdit>,
+    /// The run works on a snapshot: its worktree is read and never written, and it has no
+    /// repository, run branch or fan-out branch worktrees.
+    pub snapshot: bool,
+    /// The run works in its project's work directory (`work/<run id>` of the project's files
+    /// folder): writable, but with no repository, run branch or fan-out branch worktrees, and its
+    /// programs run only inside the OS sandbox, which keeps the rest of the folder read-only.
+    pub work_dir: bool,
+    /// For a project subject: the project, its files folder and the definitions its agents are
+    /// pointed at.
+    pub project: Option<ProjectSource>,
+}
+
+/// Where the agents of a project-subject run take their context from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectSource {
+    pub project: Project,
+    pub files_dir: PathBuf,
+    pub definitions: PathBuf,
+}
+
+/// `BONGOS_LANE_DIR_<NAME>`: the name upper-cased, every character that is not an ASCII letter or
+/// digit replaced with `_`.
+pub fn lane_dir_variable(name: &str) -> String {
+    let name: String = name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("BONGOS_LANE_DIR_{name}")
+}
+
+impl RunSetup {
+    /// The run has no branches: it works on a snapshot or in its project's work directory, so
+    /// every key runs in its one tree and a join has nothing to merge.
+    pub fn branchless(&self) -> bool {
+        self.snapshot || self.work_dir
+    }
+
+    /// The edits every node of the run gets, in order: the run's own, less any that names one of
+    /// bongos's own `BONGOS_*` variables, then for a lane run `BONGOS_LANE`, `BONGOS_LANE_KIND`
+    /// and one `BONGOS_LANE_DIR_<NAME>` per named directory. So no edit changes a `BONGOS_*`
+    /// variable and a run with no lane has none of the lane's. Empty for a run with no lane and
+    /// no edit.
+    pub fn env_edits(&self) -> Vec<EnvEdit> {
+        let mut edits: Vec<EnvEdit> = self
+            .env
+            .iter()
+            .filter(|edit| match edit {
+                EnvEdit::Set { name, .. } | EnvEdit::Unset { name } => !name.starts_with("BONGOS_"),
+                EnvEdit::PrependPath { .. } => true,
+            })
+            .cloned()
+            .collect();
+        if let Some(lane) = &self.lane {
+            let set = |name: String, value: String| EnvEdit::Set { name, value };
+            edits.push(set("BONGOS_LANE".to_string(), lane.id.clone()));
+            edits.push(set("BONGOS_LANE_KIND".to_string(), lane.kind.clone()));
+            for (name, dir) in &self.lane_dirs {
+                edits.push(set(
+                    lane_dir_variable(name),
+                    dir.to_string_lossy().into_owned(),
+                ));
+            }
+        }
+        edits
+    }
+
+    /// The directories a program of the run may write besides its worktree and scratch: the
+    /// lane's named directories, none for a run with no lane.
+    pub fn writable_dirs(&self) -> Vec<PathBuf> {
+        if self.lane.is_none() {
+            return Vec::new();
+        }
+        self.lane_dirs.values().cloned().collect()
+    }
 }
 
 /// One try a runner is asked to start, with the context of its run.
@@ -249,6 +353,8 @@ struct LiveRun {
     binding: Option<RunBinding>,
     /// The attempt's loop bound; a later settings change reaches only new attempts.
     loop_bound: u32,
+    /// Who started the run ([`Runtime::set_started_by`]); a person until told otherwise.
+    started_by: StartedBy,
 }
 
 impl LiveRun {
@@ -319,6 +425,8 @@ pub enum RuntimeError {
     Duplicate(String),
     #[error("{0}")]
     Io(String),
+    #[error("workflows are draining: no node starts until the drain is cancelled")]
+    Draining,
     #[error(
         "run {run} is over its cost cap: raise workflows.run_max_cost_usd above ${cost:.2} first"
     )]
@@ -359,6 +467,12 @@ pub struct Runtime<R: Runner> {
     settling: Vec<String>,
     /// The built-in program nodes, run instead of through `runner`.
     builtins: BuiltinNodes,
+    /// Queued runs not admitted until let start ([`Runtime::hold_back`]).
+    held_back: BTreeSet<String>,
+    /// Set by [`Runtime::drain`], cleared by [`Runtime::undrain`]: no node starts.
+    draining: bool,
+    /// The drains waiting for no node process to run.
+    drain_waiters: Vec<oneshot::Sender<()>>,
 }
 
 /// The most rounds one [`Runtime::tick`] runs; a round that changes nothing ends it sooner.
@@ -375,7 +489,146 @@ impl<R: Runner> Runtime<R> {
             hold_success: false,
             settling: Vec::new(),
             builtins: BuiltinNodes::default(),
+            held_back: BTreeSet::new(),
+            draining: false,
+            drain_waiters: Vec::new(),
         }
+    }
+
+    /// Records who started run `id`: a lane's or a landing check's run does not count toward
+    /// `max_concurrent_runs` ([`StartedBy::counts_toward_run_limit`]).
+    pub fn set_started_by(&mut self, id: &str, started_by: StartedBy) {
+        if let Some(index) = self.find(id) {
+            self.runs[index].started_by = started_by;
+        }
+    }
+
+    /// Keeps queued run `id` from being admitted (it stays Queued) until [`Runtime::let_start`].
+    pub fn hold_back(&mut self, id: &str) {
+        if self.find(id).is_some() {
+            self.held_back.insert(id.to_string());
+        }
+    }
+
+    /// Lets a run held back by [`Runtime::hold_back`] be admitted at the next tick.
+    pub fn let_start(&mut self, id: &str) {
+        self.held_back.remove(id);
+    }
+
+    /// Whether run `id` is held back.
+    pub fn is_held_back(&self, id: &str) -> bool {
+        self.held_back.contains(id)
+    }
+
+    /// Whether run `id` has started anything: a try, a gate or a merge.
+    pub fn has_begun(&self, id: &str) -> bool {
+        self.find(id)
+            .is_some_and(|index| self.runs[index].has_begun())
+    }
+
+    /// Starts no new node in any run from now on (the running ones finish and are recorded),
+    /// until [`Runtime::undrain`]. The receiver resolves once no node process runs: gates and
+    /// sleeping polls hold none, and a checks key counts as parked once
+    /// [`Runtime::checks_drained`] recorded it. An undrain before then drops it unresolved
+    /// (`Canceled`).
+    pub fn drain(&mut self) -> oneshot::Receiver<()> {
+        self.draining = true;
+        let (sender, receiver) = oneshot::channel();
+        self.drain_waiters.push(sender);
+        self.notify_drained();
+        receiver
+    }
+
+    /// Cancels a drain: nodes start again at the next tick, and the drains still waiting are
+    /// dropped unresolved.
+    pub fn undrain(&mut self) {
+        self.draining = false;
+        self.drain_waiters.clear();
+    }
+
+    /// Whether a drain is in force.
+    pub fn is_draining(&self) -> bool {
+        self.draining
+    }
+
+    /// The node tries in flight across all runs, checks keys included.
+    pub fn nodes_in_flight(&self) -> usize {
+        self.runs.iter().map(|run| run.in_flight.len()).sum()
+    }
+
+    /// Stops the try of checks key `key` of run `id` for a drain and appends `ChecksDrained`:
+    /// the key no longer runs, and the run starts it again from its checkpoint once nodes start
+    /// again (here after an undrain, or in the process the run is handed over to).
+    pub fn checks_drained(&mut self, id: &str, key: &NodeKey) -> Result<(), RuntimeError> {
+        let index = self.live(id)?;
+        let run = &mut self.runs[index];
+        let is_checks = run
+            .definition
+            .node(&key.node)
+            .is_some_and(bongos_workflow_model::definition::Node::is_checks);
+        if !is_checks || !run.in_flight.remove(key) {
+            return Err(RuntimeError::Io(format!(
+                "run {id} has no check of {key} in flight"
+            )));
+        }
+        self.stop_tries(vec![(id.to_string(), key.clone())]);
+        self.runs[index].append(Event::ChecksDrained { key: key.clone() });
+        self.notify_drained();
+        Ok(())
+    }
+
+    /// Appends `HandedOver { to_pid }` to every loaded run that is not over, once each.
+    pub fn hand_over(&mut self, to_pid: u32) {
+        for run in &mut self.runs {
+            if !run.state().is_over() {
+                run.append(Event::HandedOver { to_pid });
+            }
+        }
+    }
+
+    /// [`Self::hand_over`] for the runs `ids` only: `HandedOver { to_pid }` once to each of
+    /// them that is loaded and not over.
+    pub fn hand_over_runs(&mut self, to_pid: u32, ids: &[String]) {
+        for run in &mut self.runs {
+            if ids.contains(&run.id) && !run.state().is_over() {
+                run.append(Event::HandedOver { to_pid });
+            }
+        }
+    }
+
+    /// Drops run `id` from the runtime without appending any event or stopping anything (a run
+    /// handed over belongs to the other process now). Whether it was loaded.
+    pub fn unload(&mut self, id: &str) -> bool {
+        let Some(index) = self.find(id) else {
+            return false;
+        };
+        self.forget(index);
+        self.notify_drained();
+        true
+    }
+
+    /// Resolves every drain waiting once nothing is in flight.
+    fn notify_drained(&mut self) {
+        if self.draining && self.nodes_in_flight() == 0 {
+            for waiter in self.drain_waiters.drain(..) {
+                waiter.send(()).ok();
+            }
+        }
+    }
+
+    /// What [`scheduler::step`] gives run `index` now, less every start while draining.
+    fn commands(&self, index: usize, state: &RunState) -> Vec<Command> {
+        let free = self.limits.free_sessions(self.sessions_in_flight());
+        let mut commands = scheduler::step(
+            &self.runs[index].definition,
+            state,
+            &self.limits_for(index),
+            free,
+        );
+        if self.draining {
+            commands.retain(|command| !matches!(command, Command::Start(_)));
+        }
+        commands
     }
 
     /// Runs the program nodes whose `use` is registered in `builtins` through them.
@@ -629,6 +882,12 @@ impl<R: Runner> Runtime<R> {
     /// are free, and carries out what [`scheduler::step`] gives each executing run, until nothing
     /// changes. Whether anything changed.
     pub fn tick(&mut self) -> bool {
+        let changed = self.run_rounds();
+        self.notify_drained();
+        changed
+    }
+
+    fn run_rounds(&mut self) -> bool {
         if self.quitting {
             return false;
         }
@@ -656,7 +915,14 @@ impl<R: Runner> Runtime<R> {
         if !run.state().halted {
             run.append(Event::Halted);
         }
+        // A run held back at its workflow's instance limit stays held back while halted, so a
+        // resume does not start it past the limit.
+        let held_back = self.held_back.contains(id);
         self.hold(index);
+        if held_back {
+            self.held_back.insert(id.to_string());
+        }
+        self.notify_drained();
         Ok(())
     }
 
@@ -667,6 +933,7 @@ impl<R: Runner> Runtime<R> {
         self.stop_in_flight(&[index]);
         self.runs[index].append(Event::Cancelled);
         self.hold(index);
+        self.notify_drained();
         Ok(())
     }
 
@@ -687,6 +954,9 @@ impl<R: Runner> Runtime<R> {
     /// waits for a run slot. The keys started.
     pub fn resume(&mut self, id: &str) -> Result<Vec<NodeKey>, RuntimeError> {
         let index = self.live(id)?;
+        if self.draining {
+            return Err(RuntimeError::Draining);
+        }
         let state = self.runs[index].state();
         // The cap is whatever the limits say now (`set_limits` follows the settings), never a
         // value kept from when the run halted.
@@ -715,6 +985,9 @@ impl<R: Runner> Runtime<R> {
     /// ([`RunState::retry_floors`]).
     pub fn rerun(&mut self, id: &str, key: NodeKey) -> Result<(), RuntimeError> {
         let index = self.live(id)?;
+        if self.draining {
+            return Err(RuntimeError::Draining);
+        }
         if let Some((_, cost)) =
             cap_crossing(&self.runs[index].state(), self.limits.run_max_cost_usd)
         {
@@ -782,11 +1055,18 @@ impl<R: Runner> Runtime<R> {
             return false;
         };
         self.stop_in_flight(&[index]);
-        self.queue.retain(|queued| queued != id);
-        self.settling.retain(|settling| settling != id);
-        self.runs.remove(index);
-        self.runner.unbind(id);
+        self.forget(index);
+        self.notify_drained();
         true
+    }
+
+    /// Drops run `index` from every list, and its binding from the runner.
+    fn forget(&mut self, index: usize) {
+        let run = self.runs.remove(index);
+        self.queue.retain(|queued| *queued != run.id);
+        self.settling.retain(|settling| *settling != run.id);
+        self.held_back.remove(&run.id);
+        self.runner.unbind(&run.id);
     }
 
     /// The definition run `id` runs now.
@@ -840,6 +1120,7 @@ impl<R: Runner> Runtime<R> {
         run.status = Status::Held;
         let id = run.id.clone();
         self.queue.retain(|queued| *queued != id);
+        self.held_back.remove(&id);
     }
 
     /// Stops the tries in flight of the runs at `indices` with one [`Runner::stop`], so they share
@@ -978,9 +1259,20 @@ impl<R: Runner> Runtime<R> {
     /// any run was interrupted.
     pub fn interrupt_all(&mut self) -> bool {
         let indices: Vec<usize> = (0..self.runs.len()).collect();
+        self.interrupt_indices(indices)
+    }
+
+    /// [`Self::interrupt_all`] for the runs `ids` only: their processes stop and each with a
+    /// key in flight gets `Interrupted` and is held. The others keep running.
+    pub fn interrupt_runs(&mut self, ids: &[String]) -> bool {
+        let indices: Vec<usize> = ids.iter().filter_map(|id| self.find(id)).collect();
+        self.interrupt_indices(indices)
+    }
+
+    fn interrupt_indices(&mut self, indices: Vec<usize>) -> bool {
         self.stop_in_flight(&indices);
         let mut changed = false;
-        for index in 0..self.runs.len() {
+        for index in indices {
             let state = self.runs[index].state();
             if state.running.is_empty() || state.halted || state.is_over() {
                 continue;
@@ -990,29 +1282,44 @@ impl<R: Runner> Runtime<R> {
             self.hold(index);
             changed = true;
         }
+        self.notify_drained();
         changed
     }
 
-    /// Moves queued runs to executing, oldest first, while run slots are free, and appends
-    /// `Queued` to each run left waiting that does not have it yet.
+    /// Moves queued runs to executing, oldest first: a hand-started run while run slots are free,
+    /// a lane's or a landing check's run always; a run held back waits. Appends `Queued` to each
+    /// run left waiting that does not have it yet.
     fn admit_queued(&mut self) -> bool {
         let mut changed = false;
-        loop {
-            let executing = self
-                .runs
-                .iter()
-                .filter(|run| run.status == Status::Executing)
-                .count();
-            if !self.limits.admits_run(executing) {
-                break;
-            }
-            let Some(id) = self.queue.pop_front() else {
-                break;
+        let mut executing = self
+            .runs
+            .iter()
+            .filter(|run| {
+                run.status == Status::Executing && run.started_by.counts_toward_run_limit()
+            })
+            .count();
+        let mut position = 0;
+        while position < self.queue.len() {
+            let id = &self.queue[position];
+            let Some(index) = self.find(id) else {
+                self.queue.remove(position);
+                continue;
             };
-            if let Some(index) = self.find(&id) {
-                self.runs[index].status = Status::Executing;
-                changed = true;
+            if self.held_back.contains(id) {
+                position += 1;
+                continue;
             }
+            let counted = self.runs[index].started_by.counts_toward_run_limit();
+            if counted && !self.limits.admits_run(executing) {
+                position += 1;
+                continue;
+            }
+            self.queue.remove(position);
+            self.runs[index].status = Status::Executing;
+            if counted {
+                executing += 1;
+            }
+            changed = true;
         }
         for id in &self.queue {
             // A parked run queued again has already started; `Queued` marks only a run that
@@ -1042,15 +1349,7 @@ impl<R: Runner> Runtime<R> {
                 changed = true;
                 continue;
             }
-            let free = self.limits.free_sessions(self.sessions_in_flight());
-            if !scheduler::step(
-                &self.runs[index].definition,
-                &state,
-                &self.limits_for(index),
-                free,
-            )
-            .is_empty()
-            {
+            if !self.commands(index, &state).is_empty() {
                 let run = &mut self.runs[index];
                 run.status = Status::Queued;
                 self.queue.push_back(run.id.clone());
@@ -1074,13 +1373,7 @@ impl<R: Runner> Runtime<R> {
                 changed = true;
                 continue;
             }
-            let free = self.limits.free_sessions(self.sessions_in_flight());
-            let commands = scheduler::step(
-                &self.runs[index].definition,
-                &state,
-                &self.limits_for(index),
-                free,
-            );
+            let commands = self.commands(index, &state);
             if commands.is_empty() {
                 if state.running.is_empty() && self.runs[index].in_flight.is_empty() {
                     self.runs[index].status = Status::Parked;
@@ -1352,6 +1645,7 @@ fn open_run(spec: RunSpec) -> Result<LiveRun, RuntimeError> {
         builtins: BTreeMap::new(),
         binding: None,
         loop_bound: spec.loop_bound,
+        started_by: StartedBy::Person,
     })
 }
 

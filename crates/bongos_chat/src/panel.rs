@@ -25,7 +25,7 @@ use project::Project;
 use settings::{Settings as _, SettingsStore};
 use ui::{IconName, prelude::*, v_flex};
 use workspace::dock::{DockPosition, Panel, PanelEvent};
-use workspace::{OpenOptions, Workspace};
+use workspace::{OpenOptions, Pane, Workspace};
 
 use crate::actions::chat;
 use crate::list_view::ChatListView;
@@ -116,7 +116,14 @@ impl ChatPanel {
     /// The text of the view shown: the list, or the header line of the chat.
     pub fn view_text(&self, cx: &App) -> String {
         match self.session() {
-            Some(session) => format!("Chat\n{}\n", session.read(cx).header_text(cx)),
+            Some(session) => {
+                let session = session.read(cx);
+                format!(
+                    "Chat\n{}\n{}",
+                    session.header_text(cx),
+                    session.channel_text(cx)
+                )
+            }
             None => self.list.read(cx).view_text(cx),
         }
     }
@@ -240,6 +247,12 @@ impl Focusable for ChatPanel {
 impl Panel for ChatPanel {
     fn persistent_name() -> &'static str {
         "Chats Panel"
+    }
+
+    fn panes(&self, cx: &App) -> Vec<Entity<Pane>> {
+        self.session()
+            .map(|session| session.read(cx).visible_panes())
+            .unwrap_or_default()
     }
 
     fn panel_key() -> &'static str {

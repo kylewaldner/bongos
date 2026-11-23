@@ -203,6 +203,8 @@ members = [
     "crates/x_ai",
     "crates/bongos",
     "crates/bongos_app",
+    "crates/bongos_avy",
+    "crates/bongos_avy_model",
     "crates/bongos_builder",
     "crates/bongos_builder_model",
     "crates/bongos_chat",
@@ -226,7 +228,9 @@ members = [
     "crates/bongos_query_replace_model",
     "crates/bongos_minibuffer",
     "crates/bongos_minibuffer_model",
+    "crates/bongos_window",
     "crates/bongos_net",
+    "crates/bongos_engine_host",
     "crates/bongos_project_repo",
     "crates/bongos_project_repo_model",
     "crates/bongos_prompts",
@@ -236,6 +240,8 @@ members = [
     "crates/bongos_work",
     "crates/bongos_work_model",
     "crates/bongos_workflow",
+    "crates/bongos_lanes",
+    "crates/bongos_lanes_model",
     "crates/bongos_workflow_model",
     "crates/zed_actions",
     "crates/windows_resources",
@@ -477,6 +483,8 @@ worktree = { path = "crates/worktree" }
 x_ai = { path = "crates/x_ai" }
 bongos = { path = "crates/bongos" }
 bongos_app = { path = "crates/bongos_app" }
+bongos_avy = { path = "crates/bongos_avy" }
+bongos_avy_model = { path = "crates/bongos_avy_model" }
 bongos_builder = { path = "crates/bongos_builder" }
 bongos_builder_model = { path = "crates/bongos_builder_model" }
 bongos_chat = { path = "crates/bongos_chat" }
@@ -484,6 +492,7 @@ bongos_chat_model = { path = "crates/bongos_chat_model" }
 bongos_checks = { path = "crates/bongos_checks" }
 bongos_checks_model = { path = "crates/bongos_checks_model" }
 bongos_confine = { path = "crates/bongos_confine" }
+bongos_engine_host = { path = "crates/bongos_engine_host" }
 bongos_java = { path = "crates/bongos_java" }
 bongos_kotlin = { path = "crates/bongos_kotlin" }
 bongos_language_status = { path = "crates/bongos_language_status" }
@@ -500,6 +509,7 @@ bongos_query_replace = { path = "crates/bongos_query_replace" }
 bongos_query_replace_model = { path = "crates/bongos_query_replace_model" }
 bongos_minibuffer = { path = "crates/bongos_minibuffer" }
 bongos_minibuffer_model = { path = "crates/bongos_minibuffer_model" }
+bongos_window = { path = "crates/bongos_window" }
 bongos_net = { path = "crates/bongos_net" }
 bongos_project_repo = { path = "crates/bongos_project_repo" }
 bongos_project_repo_model = { path = "crates/bongos_project_repo_model" }
@@ -510,6 +520,8 @@ bongos_version = { path = "crates/bongos_version" }
 bongos_work = { path = "crates/bongos_work" }
 bongos_work_model = { path = "crates/bongos_work_model" }
 bongos_workflow = { path = "crates/bongos_workflow" }
+bongos_lanes = { path = "crates/bongos_lanes" }
+bongos_lanes_model = { path = "crates/bongos_lanes_model" }
 bongos_workflow_model = { path = "crates/bongos_workflow_model" }
 zed_actions = { path = "crates/zed_actions" }
 zed_credentials_provider = { path = "crates/zed_credentials_provider" }

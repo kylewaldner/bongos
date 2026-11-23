@@ -163,19 +163,25 @@ prompt_store.workspace = true
 proto.workspace = true
 recent_projects.workspace = true
 bongos_app.workspace = true
+bongos_avy.workspace = true
 bongos_builder.workspace = true
 bongos_chat.workspace = true
+bongos_chat_model.workspace = true
 bongos_checks.workspace = true
 bongos_emacs.workspace = true
+bongos_engine_host.workspace = true
 bongos_extensions.workspace = true
 bongos_isearch.workspace = true
 bongos_java.workspace = true
 bongos_kotlin.workspace = true
 bongos_language_status.workspace = true
 bongos_languages.workspace = true
+bongos_lanes.workspace = true
 bongos_linear.workspace = true
 bongos_minibuffer.workspace = true
+bongos_window.workspace = true
 bongos_net.workspace = true
+bongos_project_repo.workspace = true
 bongos_prompts.workspace = true
 bongos_query_replace.workspace = true
 bongos_terraform.workspace = true
@@ -275,6 +281,7 @@ image.workspace = true
 agent_ui = { workspace = true, features = ["test-support"] }
 search = { workspace = true, features = ["test-support"] }
 repl = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
 
 [package.metadata.cargo-machete]
 ignored = ["profiling", "zstd", "tracing"]

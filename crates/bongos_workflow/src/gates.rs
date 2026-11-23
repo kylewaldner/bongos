@@ -62,11 +62,14 @@ pub fn reasons(state: &RunState) -> Vec<String> {
     found
 }
 
-/// The tasks of the active runs that need Kyle, with why.
+/// The tasks of the active runs that need Kyle, with why: the runs this process drives and those
+/// it shows for another process.
 pub fn needs_you<R: Runner>(lifecycle: &Lifecycle<R>) -> Vec<NeedsYou> {
     let mut found = Vec::new();
-    for run in lifecycle.active_runs() {
-        let (Some(state), Some(task)) = (lifecycle.state(&run), lifecycle.task_of(&run)) else {
+    for run in lifecycle.shown_active_runs() {
+        let (Some(state), Some(task)) =
+            (lifecycle.shown_state(&run), lifecycle.shown_task_of(&run))
+        else {
             continue;
         };
         for reason in reasons(&state) {

@@ -164,10 +164,10 @@ impl Fixture {
             RunIdentity {
                 id: "run-1".to_string(),
                 workflow: "check".to_string(),
-                todo: TodoRef {
+                todo: Some(TodoRef {
                     index: 0,
                     name: "check".to_string(),
-                },
+                }),
                 task_id: "task-1".to_string(),
                 task_dir: self.path("task"),
                 branch: "feature/check".to_string(),
@@ -177,6 +177,7 @@ impl Fixture {
             Paths {
                 worktree: worktree.clone(),
                 scratch: scratch.clone(),
+                trees: Default::default(),
             },
         );
         let settings = ProgramSettings::default();
@@ -192,6 +193,8 @@ impl Fixture {
                 .map(|polls| PollPlan::resolve(polls, &settings)),
             state,
             worktree,
+            needs_sandbox: false,
+            env: Vec::new(),
             scratch,
             declared_dirs: Vec::new(),
             tree_access: TreeAccess::Writable,

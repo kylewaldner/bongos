@@ -370,3 +370,58 @@ fn the_definitions_dir_setting_replaces_the_default_profile_layer() {
         Path::new("/srv/flows")
     );
 }
+
+/// A hook that reports a problem on a definition named `hooked`, and nothing on any other, so
+/// registering it process-wide leaves every other test alone.
+fn hooked_names_are_refused(
+    definition: &bongos_workflow_model::Definition,
+    dir: &Path,
+) -> Vec<bongos_workflow_model::Diagnostic> {
+    if definition.name != "hooked" {
+        return Vec::new();
+    }
+    vec![bongos_workflow_model::Diagnostic {
+        node: None,
+        line: 2,
+        severity: Severity::Error,
+        message: format!(
+            "hooked in {}",
+            dir.file_name().unwrap_or_default().to_string_lossy()
+        ),
+    }]
+}
+
+#[test]
+fn validation_hooks_add_their_diagnostics_to_workflow_validate() {
+    let temp = TempDir::new().unwrap();
+    let text = BROKEN.replace("\"broken\"", "\"hooked\"");
+    write_definition(temp.path(), "hooked", &text);
+    write_definition(temp.path(), "broken", BROKEN);
+    crate::ValidationHooks::register(hooked_names_are_refused);
+    crate::ValidationHooks::register(hooked_names_are_refused);
+    let report = validate_definitions(&profile_only(temp.path()), None).unwrap();
+    let hooked = report
+        .definitions
+        .iter()
+        .find(|definition| definition.name == "hooked")
+        .unwrap();
+    let messages: Vec<_> = hooked
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.message.starts_with("hooked"))
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect();
+    assert_eq!(messages, ["hooked in hooked"], "registered twice, run once");
+    assert_eq!(hooked.diagnostics[0].line, 2, "in line order");
+    let broken = report
+        .definitions
+        .iter()
+        .find(|definition| definition.name == "broken")
+        .unwrap();
+    assert!(
+        broken
+            .diagnostics
+            .iter()
+            .all(|diagnostic| !diagnostic.message.starts_with("hooked"))
+    );
+}

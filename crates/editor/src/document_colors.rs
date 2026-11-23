@@ -400,7 +400,9 @@ mod tests {
     };
 
     use crate::{
-        Editor, LSP_REQUEST_DEBOUNCE_TIMEOUT, actions::MoveToEnd, editor_tests::init_test,
+        Editor, LSP_REQUEST_DEBOUNCE_TIMEOUT,
+        actions::MoveToEnd,
+        editor_tests::{init_test, set_navigation_history_settings},
     };
 
     fn extract_color_inlays(editor: &Editor, cx: &gpui::App) -> Vec<Rgba> {
@@ -422,6 +424,8 @@ mod tests {
         };
 
         init_test(cx, |_| {});
+        // Navigating back reopens the closed editor from its item-switch entry.
+        set_navigation_history_settings(cx, true, true);
 
         let fs = FakeFs::new(cx.executor());
         fs.insert_tree(

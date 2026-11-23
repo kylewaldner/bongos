@@ -1580,7 +1580,12 @@ impl Editor {
         let new_cursor_position = newest_selection.head();
         let selection_start = newest_selection.start;
 
-        if effects.nav_history.is_none() || effects.nav_history == Some(true) {
+        if effects.nav_history == Some(true)
+            || (effects.nav_history.is_none()
+                && EditorSettings::get_global(cx)
+                    .navigation_history
+                    .record_large_moves)
+        {
             self.push_to_nav_history(
                 *old_cursor_position,
                 Some(new_cursor_position.to_point(buffer)),

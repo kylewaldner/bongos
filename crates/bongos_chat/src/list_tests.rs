@@ -767,3 +767,18 @@ fn command_palette_name(name: &str) -> String {
     }
     format!("{namespace}: {words}")
 }
+
+#[gpui::test]
+async fn test_a_row_tags_an_estimated_state(cx: &mut TestAppContext) {
+    // No channel in this harness, so the running chat's state is estimated.
+    let h = harness(cx, true, 60, &[]).await;
+    let id = h.start(Agent::Claude, cx).await;
+    wait_indexed(&h, &[&id], cx).await;
+    let (workspace, cx) = command_window(&h, cx).await;
+    let panel = panel(&workspace, cx);
+    let listing = listing(&panel, cx);
+    let row = &listing.open[0];
+    assert!(row.lines[0].contains("state: "), "{:?}", row.lines);
+    assert!(row.lines[0].ends_with(" (estimated)"), "{:?}", row.lines);
+    assert!(row.estimated.is_some());
+}

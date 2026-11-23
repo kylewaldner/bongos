@@ -1056,11 +1056,12 @@ async fn test_next_and_previous_cycle_running_chats(cx: &mut TestAppContext) {
             .iter()
             .map(|id| store.find(id).unwrap().entry.record().unwrap().clone())
             .collect();
-        chats.sort_by(|a, b| {
-            bongos_chat_model::timestamp_utc(&b.last_active)
-                .cmp(&bongos_chat_model::timestamp_utc(&a.last_active))
-                .then_with(|| a.id.cmp(&b.id))
-        });
+        // Live chats sort by their in-memory activity, not their record's.
+        let activity = runtime.read(cx).live_activity();
+        let time = |chat: &ChatRecord| {
+            bongos_chat_model::timestamp_utc(activity.get(&chat.id).unwrap_or(&chat.last_active))
+        };
+        chats.sort_by(|a, b| time(b).cmp(&time(a)).then_with(|| a.id.cmp(&b.id)));
         chats.into_iter().map(|chat| chat.id).collect::<Vec<_>>()
     });
 

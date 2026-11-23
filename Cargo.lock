@@ -2046,24 +2046,30 @@ dependencies = [
  "assets",
  "audio",
  "bongos_app",
+ "bongos_avy",
  "bongos_builder",
  "bongos_chat",
+ "bongos_chat_model",
  "bongos_checks",
  "bongos_confine",
  "bongos_emacs",
+ "bongos_engine_host",
  "bongos_extensions",
  "bongos_isearch",
  "bongos_java",
  "bongos_kotlin",
+ "bongos_lanes",
  "bongos_language_status",
  "bongos_languages",
  "bongos_linear",
  "bongos_minibuffer",
  "bongos_net",
+ "bongos_project_repo",
  "bongos_prompts",
  "bongos_query_replace",
  "bongos_terraform",
  "bongos_version",
+ "bongos_window",
  "bongos_work",
  "bongos_workflow",
  "breadcrumbs",
@@ -2226,6 +2232,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "bongos_avy"
+version = "0.1.0"
+dependencies = [
+ "bongos_avy_model",
+ "bongos_emacs",
+ "bongos_minibuffer",
+ "bongos_window",
+ "editor",
+ "gpui",
+ "language",
+ "multi_buffer",
+ "project",
+ "settings",
+ "theme",
+ "theme_settings",
+ "ui",
+ "workspace",
+]
+
+[[package]]
+name = "bongos_avy_model"
+version = "0.1.0"
+
+[[package]]
 name = "bongos_builder"
 version = "0.1.0"
 dependencies = [
@@ -2288,6 +2318,7 @@ dependencies = [
  "language",
  "log",
  "menu",
+ "net",
  "nix 0.29.0",
  "paths",
  "project",
@@ -2313,6 +2344,7 @@ version = "0.1.0"
 dependencies = [
  "bongos_work_model",
  "chrono",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
@@ -2430,6 +2462,34 @@ dependencies = [
  "serde",
  "serde_json",
  "unicode-width",
+]
+
+[[package]]
+name = "bongos_engine_host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bongos_checks",
+ "bongos_project_repo",
+ "bongos_project_repo_model",
+ "bongos_work",
+ "bongos_work_model",
+ "bongos_workflow",
+ "bongos_workflow_model",
+ "chrono",
+ "futures 0.3.32",
+ "gpui",
+ "libc",
+ "log",
+ "parking_lot",
+ "paths",
+ "serde",
+ "serde_json",
+ "settings",
+ "sha2",
+ "tempfile",
+ "toml 0.8.23",
+ "util",
 ]
 
 [[package]]
@@ -2577,6 +2637,59 @@ dependencies = [
  "workspace",
  "worktree",
  "zed_actions",
+]
+
+[[package]]
+name = "bongos_lanes"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bongos_checks",
+ "bongos_emacs",
+ "bongos_engine_host",
+ "bongos_lanes_model",
+ "bongos_project_repo",
+ "bongos_project_repo_model",
+ "bongos_work",
+ "bongos_work_model",
+ "bongos_workflow",
+ "bongos_workflow_model",
+ "chrono",
+ "command_palette_hooks",
+ "editor",
+ "fs",
+ "futures 0.3.32",
+ "gpui",
+ "language",
+ "log",
+ "menu",
+ "project",
+ "release_channel",
+ "semver",
+ "serde",
+ "serde_json",
+ "settings",
+ "smol",
+ "tempfile",
+ "thiserror 2.0.17",
+ "toml 0.8.23",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
+name = "bongos_lanes_model"
+version = "0.1.0"
+dependencies = [
+ "bongos_work_model",
+ "bongos_workflow_model",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.17",
+ "toml 0.8.23",
+ "toml_edit 0.22.27",
 ]
 
 [[package]]
@@ -2862,6 +2975,27 @@ name = "bongos_version"
 version = "0.1.0"
 
 [[package]]
+name = "bongos_window"
+version = "0.1.0"
+dependencies = [
+ "bongos_emacs",
+ "bongos_minibuffer",
+ "editor",
+ "fs",
+ "gpui",
+ "language",
+ "project",
+ "settings",
+ "terminal",
+ "terminal_view",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "bongos_work"
 version = "0.1.0"
 dependencies = [
@@ -2942,6 +3076,7 @@ dependencies = [
  "release_channel",
  "sandbox",
  "semver",
+ "serde",
  "serde_json",
  "settings",
  "sysinfo 0.37.2",
@@ -3536,6 +3671,7 @@ dependencies = [
  "anyhow",
  "askpass",
  "bongos_version",
+ "chrono",
  "clap",
  "clap_complete",
  "clap_complete_nushell",
@@ -3547,6 +3683,7 @@ dependencies = [
  "exec",
  "fork",
  "ipc-channel",
+ "libc",
  "parking_lot",
  "paths",
  "plist",
@@ -3554,7 +3691,10 @@ dependencies = [
  "release_channel",
  "serde",
  "serde_json",
+ "serde_json_lenient",
+ "sha2",
  "tempfile",
+ "toml 0.8.23",
  "util",
  "walkdir",
  "windows 0.61.3",
@@ -10505,6 +10645,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases 0.2.1",
  "libc",
+ "memoffset",
 ]
 
 [[package]]

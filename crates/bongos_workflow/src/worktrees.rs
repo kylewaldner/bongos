@@ -51,7 +51,7 @@ impl Git {
 
     /// Runs git with `args` in `directory` and returns its whole output, whatever the exit status.
     /// Replace refs are ignored (`GIT_NO_REPLACE_OBJECTS`): a program node may write `refs/`.
-    pub(crate) async fn output(&self, directory: &Path, args: &[&str]) -> Result<Output, GitError> {
+    pub async fn output(&self, directory: &Path, args: &[&str]) -> Result<Output, GitError> {
         util::command::new_command(&self.binary)
             .current_dir(directory)
             .env("GIT_NO_REPLACE_OBJECTS", "1")
@@ -67,7 +67,7 @@ impl Git {
 
     /// Runs git with `args` in `directory` and returns its trimmed output, or its error output as
     /// the error.
-    pub(crate) async fn run(&self, directory: &Path, args: &[&str]) -> Result<String, GitError> {
+    pub async fn run(&self, directory: &Path, args: &[&str]) -> Result<String, GitError> {
         let output = self.output(directory, args).await?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -119,6 +119,20 @@ impl Git {
                 message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
             })
         }
+    }
+
+    /// Whether `directory`'s worktree has uncommitted changes, untracked files included, with git
+    /// discovering its repository from the tree. Only for trees outside this crate's job trees
+    /// (the lane trees of `bongos_lanes`, until they record their git directory); every tree in
+    /// this crate goes through [`Git::is_dirty`].
+    pub async fn is_dirty_discovering(&self, directory: &Path) -> Result<bool, GitError> {
+        let status = self
+            .run(
+                directory,
+                &["status", "--porcelain", "--untracked-files=normal"],
+            )
+            .await?;
+        Ok(!status.is_empty())
     }
 
     /// Whether the worktree at `at` has uncommitted changes, untracked files included.
@@ -192,6 +206,11 @@ impl RunWorktree {
 /// The common git directory of the linked git directory `git_dir`, from its `commondir` file; a
 /// git directory without one is its own common directory.
 pub(crate) fn common_dir_of(git_dir: &Path) -> Result<PathBuf, String> {
+    // A tree with no repository of the run's (a snapshot, a work directory, a tree that is gone)
+    // records no git directory; nothing is read relative to the working directory for it.
+    if git_dir.as_os_str().is_empty() {
+        return Err("no git directory is recorded".to_string());
+    }
     let common = match std::fs::read_to_string(git_dir.join("commondir")) {
         Ok(text) => git_dir.join(text.trim_end_matches(['\n', '\r'])),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => git_dir.to_path_buf(),
@@ -542,6 +561,39 @@ pub async fn repository_root(git: &Git, worktree: &Path) -> Result<PathBuf, GitE
     })
 }
 
+/// The branch checked out in `dir`; `None` for a detached HEAD or when git cannot tell.
+pub async fn checked_out_branch(git: &Git, dir: &Path) -> Option<String> {
+    git.run(dir, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .await
+        .ok()
+        .filter(|branch| !branch.is_empty())
+}
+
+/// The worktree of the repository of the tree `at`, other than `own`, that has `branch` checked
+/// out (a person's checkout or the main checkout included), from `git worktree list`.
+pub(crate) async fn worktree_holding(
+    git: &Git,
+    at: At<'_>,
+    branch: &str,
+    own: &Path,
+) -> Result<Option<PathBuf>, GitError> {
+    let listing = git.run_at(at, &["worktree", "list", "--porcelain"]).await?;
+    let wanted = format!("refs/heads/{branch}");
+    let own = canonical_or_same(own);
+    let mut path: Option<PathBuf> = None;
+    for line in listing.lines() {
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            path = Some(PathBuf::from(rest));
+        } else if line.strip_prefix("branch ") == Some(wanted.as_str())
+            && let Some(path) = &path
+            && canonical_or_same(path) != own
+        {
+            return Ok(Some(path.clone()));
+        }
+    }
+    Ok(None)
+}
+
 /// Creates the run worktree of attempt `attempt` of run `run_id`: a new branch
 /// ([`run_branch_name`]) from the head of the task branch, checked out at
 /// `<runs dir>/<task slug>-<short>-<attempt>/run`. Refuses a task with no worktree, and a disk
@@ -593,6 +645,97 @@ pub async fn create_run(
         branch,
         git_dir,
     })
+}
+
+/// The run worktree of attempt `attempt` of run `run_id` in a lane's tree at `path`, which the
+/// lane already reset onto the run branch ([`run_branch_name`] of the task branch): the tree is
+/// used as it is, and the run's own directory (its fan-out worktrees and scratch) is made where a
+/// fresh run's would be. Refuses a task with no branch, a tree that is missing or has another
+/// branch checked out, and a disk with less than `workflows.min_free_disk_mb` free.
+pub async fn lane_run(
+    git: &Git,
+    task: &TaskCheckout,
+    run_id: &str,
+    attempt: u32,
+    path: &Path,
+    settings: &WorkflowsSettings,
+    free_space: &dyn Fn(&Path) -> Option<u64>,
+) -> Result<RunWorktree, WorktreeError> {
+    let Some(task_branch) = &task.branch else {
+        return Err(WorktreeError::NotStarted);
+    };
+    let refused = |message: String| WorktreeError::Io {
+        path: path.to_path_buf(),
+        message,
+    };
+    if !path.is_dir() {
+        return Err(refused("the lane's tree is missing".to_string()));
+    }
+    let branch = run_branch_name(task_branch, run_id, attempt);
+    // Earlier jobs wrote the lane's tree, so its `.git` is not trusted: the git directory is the
+    // linked one under the repository's common directory that names the tree.
+    let common = lane_common_dir(git, task, path).await.map_err(refused)?;
+    let git_dir = linked_git_dir_from_record(path, &common)
+        .map_err(|error| refused(format!("{error:#}")))?;
+    let at = At {
+        git_dir: &git_dir,
+        directory: path,
+        job: true,
+    };
+    let checked_out = git
+        .run_at(at, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .await
+        .ok()
+        .filter(|branch| !branch.is_empty());
+    match checked_out {
+        Some(checked_out) if checked_out == branch => {}
+        Some(checked_out) => {
+            return Err(refused(format!(
+                "the lane's tree has {checked_out} checked out, not the run branch {branch}"
+            )));
+        }
+        None => {
+            return Err(refused(format!(
+                "the lane's tree has no branch checked out, not the run branch {branch}"
+            )));
+        }
+    }
+    check_free_space(path, settings.min_free_disk_mb, free_space)?;
+    let repository = repository_of(&git_dir).map_err(refused)?;
+    let runs = runs_dir(&repository, settings.worktrees_dir.as_deref());
+    let run_dir = run_dir(&runs, &task.slug, run_id, attempt);
+    std::fs::create_dir_all(&run_dir).map_err(|error| WorktreeError::Io {
+        path: run_dir.clone(),
+        message: error.to_string(),
+    })?;
+    Ok(RunWorktree {
+        run_dir,
+        path: path.to_path_buf(),
+        branch,
+        git_dir,
+    })
+}
+
+/// The common git directory of the repository of a lane's tree at `path`: read in the task's own
+/// worktree when it has one (the person's tree, trusted as [`create_run`] trusts it), else in the
+/// lane's tree, which `bongos_lanes` made and reset before the run (its own git directory record
+/// is the hand-off of the lane-tree step).
+async fn lane_common_dir(git: &Git, task: &TaskCheckout, path: &Path) -> Result<PathBuf, String> {
+    let from = match &task.worktree {
+        Some(worktree) if worktree.is_dir() => worktree.as_path(),
+        _ => path,
+    };
+    let common = git
+        .run(
+            from,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let common = PathBuf::from(common);
+    common
+        .canonicalize()
+        .map_err(|error| format!("{}: {error}", common.display()))
 }
 
 /// Creates the worktree of fan-out branch `index` of node `node` from the head of the run branch,
@@ -765,6 +908,74 @@ pub struct ClearItem {
     pub reason: Option<String>,
     /// For a fan-out branch, the commits on it that are not on the run branch, when known.
     pub unmerged: Option<u32>,
+    /// The short sha of saved work at the head of the branch (a commit whose subject starts with
+    /// [`WORK_LEFT_BY`]): the worktree goes, but the branch is kept unless the plan's
+    /// `delete_saved` is set.
+    pub saved: Option<String>,
+}
+
+/// The subject prefix of the commit that saves the work a job left in its tree.
+pub const WORK_LEFT_BY: &str = "work left by ";
+
+/// Where saved work goes when the branch of its run cannot hold it.
+pub const SAVED_WORK_REFS: &str = "refs/bongos/saved/";
+
+/// A branch or a [`SAVED_WORK_REFS`] ref whose head is saved work, which `clear finished` lists
+/// and keeps unless the person confirms deleting it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedWork {
+    pub repository: PathBuf,
+    /// The full ref name.
+    pub reference: String,
+    pub sha: String,
+}
+
+impl SavedWork {
+    pub fn short_sha(&self) -> &str {
+        &self.sha[..self.sha.len().min(12)]
+    }
+
+    /// The branch name, or the full ref name of a saved ref.
+    pub fn name(&self) -> &str {
+        self.reference
+            .strip_prefix("refs/heads/")
+            .unwrap_or(&self.reference)
+    }
+}
+
+impl fmt::Display for SavedWork {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} at {}", self.name(), self.short_sha())
+    }
+}
+
+/// The branches and [`SAVED_WORK_REFS`] refs of `repository` whose head is saved work.
+pub async fn saved_work(git: &Git, repository: &Path) -> Result<Vec<SavedWork>, GitError> {
+    let listing = git
+        .run(
+            repository,
+            &[
+                "for-each-ref",
+                "--format=%(refname)%00%(objectname)%00%(contents:subject)",
+                "refs/heads/",
+                SAVED_WORK_REFS,
+            ],
+        )
+        .await?;
+    Ok(listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, '\0');
+            let reference = fields.next()?;
+            let sha = fields.next()?;
+            let subject = fields.next()?;
+            subject.starts_with(WORK_LEFT_BY).then(|| SavedWork {
+                repository: repository.to_path_buf(),
+                reference: reference.to_string(),
+                sha: sha.to_string(),
+            })
+        })
+        .collect())
 }
 
 /// The worktrees of one run that `clear finished` would remove.
@@ -858,12 +1069,29 @@ impl ClearCheck {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ClearPlan {
     pub runs: Vec<ClearRun>,
+    /// The saved work of the runs' repositories on no branch of an item: kept unless
+    /// `delete_saved`.
+    pub saved: Vec<SavedWork>,
+    /// The person confirmed deleting the saved work: the item branches that hold it and `saved`.
+    pub delete_saved: bool,
 }
 
 impl ClearPlan {
-    /// The confirmation text: what is removed and what is skipped.
+    /// How many branches and refs holding saved work the plan lists.
+    pub fn saved_count(&self) -> usize {
+        let on_items = self
+            .runs
+            .iter()
+            .flat_map(|run| &run.remove)
+            .filter(|item| item.saved.is_some())
+            .count();
+        on_items + self.saved.len()
+    }
+
+    /// The confirmation text: what is removed and what is skipped, then the saved work kept.
     pub fn summary(&self) -> String {
         let mut lines = Vec::new();
+        let mut kept = Vec::new();
         for run in &self.runs {
             for item in &run.remove {
                 let unmerged = match item.unmerged {
@@ -875,6 +1103,9 @@ impl ClearPlan {
                     item.path.display(),
                     item.branch
                 ));
+                if let Some(sha) = &item.saved {
+                    kept.push(format!("keep {} at {sha}: saved work", item.branch));
+                }
             }
             for item in &run.skipped {
                 lines.push(format!(
@@ -884,6 +1115,10 @@ impl ClearPlan {
                     item.reason.as_deref().unwrap_or("uncommitted changes")
                 ));
             }
+        }
+        lines.extend(kept);
+        for saved in &self.saved {
+            lines.push(format!("keep {saved}: saved work"));
         }
         lines.join("\n")
     }
@@ -897,7 +1132,9 @@ impl ClearPlan {
 /// `keep_finished_days` before `now`, with each of their worktrees to remove, and those with
 /// uncommitted changes skipped. A run whose recorded run directory is not exactly the one the app
 /// made in the task's own repository ([`check_run_dir`], with `workflows.worktrees_dir` and the
-/// home directory `home`) is kept whole, with the reason. Writes nothing.
+/// home directory `home`) is kept whole, with the reason. Every branch and [`SAVED_WORK_REFS`] ref
+/// of the runs' repositories whose head is saved work is listed, on its item or in `saved`, and
+/// kept unless the person confirms deleting it (`delete_saved`). Writes nothing.
 pub async fn plan_clear(
     git: &Git,
     runs: &[FinishedRun],
@@ -908,6 +1145,8 @@ pub async fn plan_clear(
 ) -> Result<ClearPlan, GitError> {
     let keep = Duration::from_secs(keep_finished_days.saturating_mul(24 * 60 * 60));
     let mut plan = ClearPlan::default();
+    // The saved work of each repository, listed once.
+    let mut saved: Vec<(PathBuf, Vec<SavedWork>)> = Vec::new();
     for run in runs {
         let finished = matches!(
             run.lifecycle,
@@ -936,12 +1175,26 @@ pub async fn plan_clear(
                     branch: run.worktree.branch.clone(),
                     reason: Some(reason),
                     unmerged: None,
+                    saved: None,
                 });
                 plan.runs.push(clear);
                 continue;
             }
         }
+        let repository = clear.repository.clone().unwrap_or_default();
+        let index = match saved.iter().position(|(listed, _)| *listed == repository) {
+            Some(index) => index,
+            None => {
+                saved.push((repository.clone(), saved_work(git, &repository).await?));
+                saved.len() - 1
+            }
+        };
         for (mut item, git_dir) in run_worktrees(git, &run.worktree).await {
+            let head = format!("refs/heads/{}", item.branch);
+            let listed = &mut saved[index].1;
+            if let Some(position) = listed.iter().position(|work| work.reference == head) {
+                item.saved = Some(listed.remove(position).short_sha().to_string());
+            }
             if item.reason.is_none() && item.path.is_dir() {
                 let at = At {
                     git_dir: &git_dir,
@@ -962,6 +1215,7 @@ pub async fn plan_clear(
         }
         plan.runs.push(clear);
     }
+    plan.saved = saved.into_iter().flat_map(|(_, listed)| listed).collect();
     Ok(plan)
 }
 
@@ -1026,6 +1280,7 @@ async fn run_worktrees(git: &Git, run: &RunWorktree) -> Vec<(ClearItem, PathBuf)
                         branch,
                         reason: Some(format!("git directory not trusted: {error}")),
                         unmerged: None,
+                        saved: None,
                     },
                     PathBuf::new(),
                 ));
@@ -1057,6 +1312,7 @@ async fn run_worktrees(git: &Git, run: &RunWorktree) -> Vec<(ClearItem, PathBuf)
                 branch,
                 reason,
                 unmerged,
+                saved: None,
             },
             git_dir,
         ));
@@ -1081,6 +1337,7 @@ async fn run_worktrees(git: &Git, run: &RunWorktree) -> Vec<(ClearItem, PathBuf)
             branch: run.branch.clone(),
             reason,
             unmerged: None,
+            saved: None,
         },
         run.git_dir.clone(),
     ));
@@ -1093,6 +1350,10 @@ pub struct ClearReport {
     pub removed: Vec<ClearItem>,
     /// Kept: uncommitted changes, or git refused, with the reason.
     pub skipped: Vec<(ClearItem, String)>,
+    /// The branches and refs holding saved work that were kept, named with their short sha.
+    pub kept_saved: Vec<String>,
+    /// The branches and refs holding saved work that the person confirmed deleting.
+    pub deleted_saved: Vec<String>,
 }
 
 impl fmt::Display for ClearReport {
@@ -1100,6 +1361,12 @@ impl fmt::Display for ClearReport {
         write!(f, "removed {} worktrees", self.removed.len())?;
         for (item, reason) in &self.skipped {
             write!(f, "\nskipped {}: {reason}", item.path.display())?;
+        }
+        for saved in &self.kept_saved {
+            write!(f, "\nkept saved work {saved}")?;
+        }
+        for saved in &self.deleted_saved {
+            write!(f, "\ndeleted saved work {saved}")?;
         }
         Ok(())
     }
@@ -1111,7 +1378,8 @@ impl fmt::Display for ClearReport {
 /// after that is kept and reported. Each run is checked again first ([`ClearCheck`]), since the
 /// disk may have changed since the plan: a run that no longer passes, or that has no check, is
 /// kept whole, and an item whose worktree is not in the run directory or whose branch is not the
-/// run branch or one of its fan-out branches is kept.
+/// run branch or one of its fan-out branches is kept. A branch holding saved work and the plan's
+/// `saved` are kept unless `delete_saved`; each saved entry is deleted in its own repository.
 pub async fn apply_clear(git: &Git, repository: &Path, plan: &ClearPlan) -> ClearReport {
     let mut report = ClearReport::default();
     for run in &plan.runs {
@@ -1161,14 +1429,22 @@ pub async fn apply_clear(git: &Git, repository: &Path, plan: &ClearPlan) -> Clea
                     continue;
                 }
             }
-            if let Err(error) = git
-                .run(
-                    repository,
-                    &["branch", "-D", "--end-of-options", &item.branch],
-                )
-                .await
-            {
-                log::warn!("removing branch {}: {error}", item.branch);
+            let label = item
+                .saved
+                .as_ref()
+                .map(|sha| format!("{} at {sha}", item.branch));
+            match label {
+                Some(label) if !plan.delete_saved => report.kept_saved.push(label),
+                _ => match git
+                    .run(
+                        repository,
+                        &["branch", "-D", "--end-of-options", &item.branch],
+                    )
+                    .await
+                {
+                    Ok(_) => report.deleted_saved.extend(label),
+                    Err(error) => log::warn!("removing branch {}: {error}", item.branch),
+                },
             }
             report.removed.push(item.clone());
         }
@@ -1183,9 +1459,43 @@ pub async fn apply_clear(git: &Git, repository: &Path, plan: &ClearPlan) -> Clea
                     branch: String::new(),
                     reason: None,
                     unmerged: None,
+                    saved: None,
                 },
                 format!("kept the run directory: {error}"),
             ));
+        }
+    }
+    for saved in &plan.saved {
+        if !plan.delete_saved {
+            report.kept_saved.push(saved.to_string());
+            continue;
+        }
+        // `branch -D` refuses a branch a worktree has checked out; the old sha guards a saved ref
+        // that moved since the plan.
+        let deleting = match saved.reference.strip_prefix("refs/heads/") {
+            Some(branch) => {
+                git.run(
+                    &saved.repository,
+                    &["branch", "-D", "--end-of-options", branch],
+                )
+                .await
+            }
+            None => {
+                git.run(
+                    &saved.repository,
+                    &["update-ref", "-d", &saved.reference, &saved.sha],
+                )
+                .await
+            }
+        };
+        match deleting {
+            Ok(_) => report.deleted_saved.push(saved.to_string()),
+            Err(error) => {
+                log::warn!("deleting {}: {error}", saved.reference);
+                report
+                    .kept_saved
+                    .push(format!("{saved} ({})", error.message));
+            }
         }
     }
     report

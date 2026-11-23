@@ -1,0 +1,223 @@
+#!/bin/sh
+# Prints facts about which Claude Code hook events fire, in which order, with which top-level field
+# names, for the situations a chat session goes through: startup, resume, fork, a permission-needing tool
+# call that is denied, and (if they work non-interactively) /compact and /clear. It also checks that hooks
+# given with --settings merge with other hooks, and times the cheap reporter command a hook would run.
+# Only event names, field NAMES, the SessionStart "source", the Notification "notification_type" and
+# timings are recorded, never field values, tokens, account data or conversation text.
+# Run by hand on a machine with a logged-in claude; never part of a gate. Plain POSIX sh.
+#   chat-channel-probe [-h|--help]
+#   BONGOS_WORKSPACE       scratch root (default /run/media/kyle/miniSSD/bongos-project-workspace)
+#   CHAT_PROBE_RUNS        reporter timing runs (default 20)
+#   CHAT_PROBE_KEEP=1      keep the scratch directory (default: deleted at the end)
+set -eu
+
+usage() {
+  cat <<'USAGE'
+usage: chat-channel-probe [-h|--help]
+
+Writes a scratch settings file with a logging hook (no matcher) on every hook event it knows, then runs
+`claude -p --model haiku` in a scratch directory with --settings for these scenarios and prints, per
+scenario, the events in order with their top-level field names and any SessionStart source or
+Notification notification_type:
+  startup, resume (--resume <id>), fork (--resume <id> --fork-session),
+  permission (default mode, a file-creating tool call that -p cannot approve),
+  compact and clear (/compact and /clear through -p, reported as they behave),
+  unknown-event (a settings file that also names an event that does not exist),
+  no-settings (a run without --settings; expects no log lines).
+It then checks that two hooks for one event from one --settings file both run and that the user's own
+settings have hooks or not (yes/no only, content never read), times 20 runs of
+`bongos --chat-report state idle` (HOME is a scratch directory, no socket variable is set) when a release
+binary exists at $BONGOS_WORKSPACE/target/release/bongos, else of the no-op `sh -c :`, and prints a plain
+text summary table.
+
+OWED MANUAL CHECKS (need a real TTY, not guessed here):
+  - SessionStart source for /clear and /compact in a TTY (the -p results above are not the TTY ones)
+  - hooks on interrupt (Esc, C-c): assumed Stop fires on neither
+  - hooks on a denied interactive permission prompt: assumed Stop does not fire
+  - whether an idle_prompt Notification follows either of those
+  - a prompt pasted mid-turn, and when its UserPromptSubmit fires
+  - trust dialog ordering relative to SessionStart
+  - an empty Enter during a turn: does it submit anything
+  - a 1 MiB bracketed paste plus Enter in a TTY
+Needs claude on PATH and a login. No secrets, account fields or conversation text are printed.
+USAGE
+}
+
+case "${1:-}" in
+  -h | --help) usage; exit 0 ;;
+  "") ;;
+  *) usage >&2; exit 2 ;;
+esac
+
+command -v claude >/dev/null 2>&1 || { echo "chat-channel-probe: claude not found on PATH" >&2; exit 1; }
+
+WS="${BONGOS_WORKSPACE:-/run/media/kyle/miniSSD/bongos-project-workspace}"
+RUNS="${CHAT_PROBE_RUNS:-20}"
+ROOT="$WS/scratch/chat-channel-probe.$$"
+mkdir -p "$ROOT/cwd" "$ROOT/home"
+cleanup() { [ "${CHAT_PROBE_KEEP:-}" = 1 ] || rm -rf "$ROOT"; }
+trap cleanup EXIT INT TERM
+
+LOG="$ROOT/events.log"
+: >"$LOG"
+HOOK="$ROOT/hook.sh"
+SETTINGS="$ROOT/settings.json"
+SETTINGS_BAD="$ROOT/settings-unknown.json"
+SETTINGS_TWO="$ROOT/settings-two.json"
+
+# The logging hook: one line per event, "scenario|tag|event|fields|source|notification_type".
+cat >"$HOOK" <<'HOOKEOF'
+#!/bin/sh
+tag="${1:-a}"
+in=$(cat)
+if command -v jq >/dev/null 2>&1; then
+  line=$(printf '%s' "$in" | jq -r '[(.hook_event_name // "?"), (keys | sort | join(",")),
+    (if .hook_event_name == "SessionStart" then (.source // "") else "" end),
+    (if .hook_event_name == "Notification" then (.notification_type // "") else "" end)] | join("|")') || line="?|jq-failed||"
+else
+  ev=$(printf '%s' "$in" | sed -n 's/.*"hook_event_name"[[:space:]]*:[[:space:]]*"\([A-Za-z]*\)".*/\1/p' | head -n1)
+  fields=$(printf '%s' "$in" | grep -o '"[A-Za-z_]*"[[:space:]]*:' | sed 's/"//g; s/[[:space:]]*:$//' | sort -u | tr '\n' ',' | sed 's/,$//')
+  src=""
+  nt=""
+  [ "$ev" = SessionStart ] && src=$(printf '%s' "$in" | sed -n 's/.*"source"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p' | head -n1)
+  [ "$ev" = Notification ] && nt=$(printf '%s' "$in" | sed -n 's/.*"notification_type"[[:space:]]*:[[:space:]]*"\([a-z_]*\)".*/\1/p' | head -n1)
+  line="$ev|$fields|$src|$nt"
+fi
+printf '%s|%s|%s\n' "${PROBE_SCENARIO:-?}" "$tag" "$line" >>"$PROBE_LOG"
+exit 0
+HOOKEOF
+chmod +x "$HOOK"
+
+EVENTS="SessionStart SessionEnd UserPromptSubmit PreToolUse PostToolUse PostToolUseFailure PermissionRequest PermissionDenied Notification Stop StopFailure SubagentStart SubagentStop PreCompact PostCompact Setup TeammateIdle TaskCreated TaskCompleted Elicitation ElicitationResult ConfigChange InstructionsLoaded CwdChanged FileChanged WorktreeCreate WorktreeRemove"
+
+# write_settings <file> <extra event> <tag count>: hooks (no matcher keys) for every event.
+write_settings() {
+  _f=$1
+  _extra=$2
+  _n=$3
+  {
+    printf '{"hooks":{'
+    _sep=""
+    for _e in $EVENTS $_extra; do
+      printf '%s"%s":[{"hooks":[{"type":"command","command":"sh %s a"}' "$_sep" "$_e" "$HOOK"
+      [ "$_n" = 2 ] && printf ',{"type":"command","command":"sh %s b"}' "$HOOK"
+      printf ']}]'
+      _sep=","
+    done
+    printf '}}\n'
+  } >"$_f"
+}
+write_settings "$SETTINGS" "" 1
+write_settings "$SETTINGS_BAD" "NotARealHookEvent" 1
+write_settings "$SETTINGS_TWO" "" 2
+
+uuid() {
+  if [ -r /proc/sys/kernel/random/uuid ]; then cat /proc/sys/kernel/random/uuid; else uuidgen; fi
+}
+SID=$(uuid)
+
+# run_claude <scenario> <settings file or -> <args...>: prints "scenario exit=N".
+run_claude() {
+  _sc=$1
+  _set=$2
+  shift 2
+  _rc=0
+  if [ "$_set" = - ]; then
+    (cd "$ROOT/cwd" && PROBE_LOG="$LOG" PROBE_SCENARIO="$_sc" timeout 180 claude -p --model haiku "$@" >/dev/null 2>&1) || _rc=$?
+  else
+    (cd "$ROOT/cwd" && PROBE_LOG="$LOG" PROBE_SCENARIO="$_sc" timeout 180 claude -p --model haiku --settings "$_set" "$@" >/dev/null 2>&1) || _rc=$?
+  fi
+  echo "$_sc exit=$_rc" >>"$ROOT/exits.txt"
+}
+
+echo "running scenarios (each calls claude -p once)..." >&2
+run_claude startup "$SETTINGS" --session-id "$SID" "say ok"
+run_claude resume "$SETTINGS" --resume "$SID" "say ok again"
+run_claude fork "$SETTINGS" --resume "$SID" --fork-session "say ok once more"
+run_claude permission "$SETTINGS" --permission-mode default "Use the Write tool to create a file named probe-out.txt containing the word ok."
+run_claude compact "$SETTINGS" --resume "$SID" "/compact"
+run_claude clear "$SETTINGS" --resume "$SID" "/clear"
+run_claude unknown-event "$SETTINGS_BAD" "say ok"
+run_claude merge-two "$SETTINGS_TWO" "say ok"
+run_claude no-settings - "say ok"
+
+# Events of one scenario, for one hook tag, in order: "Event[fields]{source=..,type=..}".
+events_of() { # <scenario> <tag>
+  awk -F'|' -v s="$1" -v t="$2" '$1 == s && $2 == t {
+    x = $3 "[" $4 "]"
+    if ($5 != "") x = x "{source=" $5 "}"
+    if ($6 != "") x = x "{notification_type=" $6 "}"
+    printf "%s%s", (n++ ? " > " : ""), x }
+    END { if (!n) printf "(no events)" }' "$LOG"
+  echo
+}
+
+count_of() { # <scenario> <tag>
+  awk -F'|' -v s="$1" -v t="$2" '$1 == s && $2 == t { n++ } END { print n + 0 }' "$LOG"
+}
+
+# User's own settings: only whether they define hooks (yes/no), never what they are.
+user_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+user_hooks=n.a.
+if [ -f "$user_dir/settings.json" ] && command -v jq >/dev/null 2>&1; then
+  if jq -e 'has("hooks") and (.hooks | length > 0)' "$user_dir/settings.json" >/dev/null 2>&1; then
+    user_hooks=yes
+  else
+    user_hooks=no
+  fi
+fi
+
+# Timing of the reporter command.
+BIN="$WS/target/release/bongos"
+if [ -x "$BIN" ]; then
+  timed="real: $BIN --chat-report state idle"
+else
+  timed="STAND-IN: sh -c : (no release binary at $BIN; the real number is measured when --chat-report exists)"
+fi
+TIMES="$ROOT/times.txt"
+: >"$TIMES"
+i=0
+while [ "$i" -lt "$RUNS" ]; do
+  t0=$(date +%s%N)
+  if [ -x "$BIN" ]; then
+    env -i HOME="$ROOT/home" PATH="$PATH" "$BIN" --chat-report state idle >/dev/null 2>&1 || true
+  else
+    sh -c : >/dev/null 2>&1
+  fi
+  t1=$(date +%s%N)
+  echo $(((t1 - t0) / 1000)) >>"$TIMES"
+  i=$((i + 1))
+done
+sort -n "$TIMES" >"$TIMES.s"
+tmin=$(sed -n 1p "$TIMES.s")
+tmax=$(sed -n '$p' "$TIMES.s")
+tmed=$(sed -n "$(((RUNS + 2) / 2))p" "$TIMES.s")
+us_to_ms() { awk -v u="$1" 'BEGIN { printf "%.2f", u / 1000 }'; }
+
+echo
+echo "chat-channel-probe summary"
+echo "claude version: $(claude --version 2>&1 | head -n1)"
+echo "hook logger: $(command -v jq >/dev/null 2>&1 && echo jq || echo sed/grep)"
+echo
+echo "events per scenario (event[top-level field names]{source / notification_type}), in order:"
+for sc in startup resume fork permission compact clear unknown-event no-settings; do
+  echo "- $sc ($(grep "^$sc " "$ROOT/exits.txt")): $(events_of "$sc" a)"
+done
+echo
+echo "notification_type values seen: $(awk -F'|' '$6 != "" { print $6 }' "$LOG" | sort -u | tr '\n' ' ')"
+echo "SessionStart source values seen: $(awk -F'|' '$5 != "" { print $1 "=" $5 }' "$LOG" | sort -u | tr '\n' ' ')"
+echo "events seen at least once: $(awk -F'|' '{ print $3 }' "$LOG" | sort -u | tr '\n' ' ')"
+echo "events never seen (configured): $(for e in $EVENTS; do awk -F'|' -v e="$e" '$3 == e { f = 1 } END { exit !f }' "$LOG" || printf '%s ' "$e"; done)"
+echo
+echo "merge checks:"
+echo "- two hooks on one event from one --settings file both ran (merge-two): a=$(count_of merge-two a) b=$(count_of merge-two b) lines (expect equal, nonzero)"
+echo "- user's own settings define hooks: $user_hooks (whether they also ran is not observable without reading them)"
+echo "- run without --settings logged $(count_of no-settings a) lines (expect 0)"
+echo "- settings naming an unknown event still ran the known ones: $(count_of unknown-event a) lines, $(grep '^unknown-event ' "$ROOT/exits.txt")"
+echo
+echo "reporter timing over $RUNS runs ($timed): min $(us_to_ms "$tmin") ms, median $(us_to_ms "$tmed") ms, max $(us_to_ms "$tmax") ms"
+echo
+echo "OWED MANUAL CHECKS (need a TTY, see --help): /clear and /compact source in a TTY; hooks on interrupt and on"
+echo "denied interactive permission; idle_prompt after either; mid-turn pasted prompt and its UserPromptSubmit;"
+echo "trust dialog ordering; empty Enter during a turn; 1 MiB bracketed paste plus Enter."

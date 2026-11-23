@@ -3,7 +3,7 @@
 //! app keymap loaded, and asserts what the editor ends up as. Every key goes through
 //! `simulate_keystrokes`, so it passes the keystroke interceptor as a typed key does.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -617,6 +617,31 @@ async fn reposition_ignores_the_argument(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn pop_global_mark_ignores_the_argument(cx: &mut TestAppContext) {
     assert_ignores_the_argument(cx, "aˇb\nc", "ctrl-x ctrl-.").await;
+}
+
+#[gpui::test]
+async fn xref_history_list_ignores_the_argument_and_runs_once(cx: &mut TestAppContext) {
+    // The goto stack is empty, so each run says so once in the echo area.
+    let (_editor, mut cx) = workspace_editor("one\ntwo", 0, cx).await;
+    let messages = Rc::new(RefCell::new(Vec::new()));
+    cx.update(|_, cx| {
+        let messages = messages.clone();
+        cx.default_global::<workspace::MinibufferRouting>()
+            .set_message_hook(Some(Rc::new(move |_, _, text, _| {
+                messages.borrow_mut().push(text.to_string());
+                true
+            })));
+    });
+    cx.simulate_keystrokes("ctrl-c x h");
+    cx.run_until_parked();
+    assert_eq!(*messages.borrow(), ["Goto stack is empty"]);
+    cx.simulate_keystrokes("ctrl-u ctrl-c x h");
+    cx.run_until_parked();
+    assert_eq!(
+        *messages.borrow(),
+        ["Goto stack is empty", "Goto stack is empty"]
+    );
+    assert!(cx.update(|window, cx| prefix_arg::pending(window, cx).is_none()));
 }
 
 #[gpui::test]

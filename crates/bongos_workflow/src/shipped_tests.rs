@@ -19,7 +19,7 @@ use tempfile::TempDir;
 use crate::definitions::{
     DefinitionError, SHIPPED_FILES, materialize, new_definition_from, validate_definitions,
 };
-use crate::shipped::{FILES, TEMPLATES, files_of, template};
+use crate::shipped::{DISPATCHERS, FILES, TEMPLATES, files_of, template};
 
 fn contents(dir: &str, file: &str) -> &'static str {
     FILES
@@ -106,7 +106,7 @@ fn unbounded_back_edges(definition: &Definition) -> Vec<String> {
         }
     }
     let mut out = Vec::new();
-    let start = definition.start.value.as_str();
+    let start = definition.start_node();
     visit(
         definition,
         start,
@@ -142,6 +142,7 @@ fn the_shipped_set_has_the_four_definitions_and_every_file_belongs_to_one() {
         assert!(
             TEMPLATES
                 .iter()
+                .chain(DISPATCHERS)
                 .any(|template| file.path.starts_with(&format!("{}/", template.dir))),
             "{} belongs to no template",
             file.path
@@ -163,7 +164,10 @@ fn the_shipped_set_has_the_four_definitions_and_every_file_belongs_to_one() {
 fn every_shipped_definition_validates_clean_against_an_empty_mcp_set() {
     let (_temp, dirs) = shipped_dir_on_disk();
     let report = validate_definitions(&dirs, None).unwrap();
-    assert_eq!(report.definitions.len(), TEMPLATES.len());
+    assert_eq!(
+        report.definitions.len(),
+        TEMPLATES.len() + DISPATCHERS.len()
+    );
     assert_eq!(report.error_count(), 0, "{}", report.render());
     assert_eq!(report.warning_count(), 0, "{}", report.render());
 }
@@ -656,4 +660,27 @@ fn new_from_a_template_defaults_to_its_name_and_never_overwrites() {
         Path::new(&profile).read_dir().unwrap().count(),
         TEMPLATES.len()
     );
+}
+
+#[test]
+fn the_shipped_lanes_dispatcher_validates_and_is_no_template() {
+    let lanes = definition("lanes");
+    assert!(lanes.dispatcher);
+    assert_eq!(lanes.name, "lanes");
+    assert_eq!(
+        lanes.description.as_deref(),
+        Some("Run the project's lanes")
+    );
+    assert_eq!(lanes.start, None);
+    assert!(lanes.nodes.is_empty() && lanes.ends.is_empty());
+    assert_eq!(lanes.instances, Some(1));
+    assert_eq!(validate(&lanes, &ValidationContext::default()), Vec::new());
+    assert!(
+        template("lanes").is_none(),
+        "workflow: new never copies a dispatcher"
+    );
+    let (_temp, dirs) = shipped_dir_on_disk();
+    let report = validate_definitions(&dirs, Some("lanes")).unwrap();
+    assert_eq!(report.error_count(), 0, "{}", report.render());
+    assert_eq!(report.warning_count(), 0, "{}", report.render());
 }

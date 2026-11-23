@@ -25,8 +25,8 @@ pub struct Summary {
 impl Summary {
     pub fn of<R: Runner>(lifecycle: &Lifecycle<R>) -> Self {
         let mut summary = Self::default();
-        for run in lifecycle.active_runs() {
-            let Some(state) = lifecycle.state(&run) else {
+        for run in lifecycle.shown_active_runs() {
+            let Some(state) = lifecycle.shown_state(&run) else {
                 continue;
             };
             if !gates::reasons(&state).is_empty() {

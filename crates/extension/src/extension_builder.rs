@@ -409,6 +409,19 @@ impl ExtensionBuilder {
             }
         }
 
+        if let Ok(head_output) = util::command::new_command("git")
+            .arg("--git-dir")
+            .arg(&git_dir)
+            .args(["rev-parse", "HEAD"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .await
+            && head_output.status.success()
+            && String::from_utf8_lossy(&head_output.stdout).trim() == rev
+        {
+            return Ok(());
+        }
+
         let fetch_output = util::command::new_command("git")
             .arg("--git-dir")
             .arg(&git_dir)

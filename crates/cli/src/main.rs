@@ -496,6 +496,29 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
+    // `bongos lanes|run|host ...` is the lanes' command line, before clap sees the arguments.
+    #[cfg(unix)]
+    {
+        let words: Vec<String> = std::env::args().skip(1).collect();
+        if cli::lanes_cli::is_lanes_word(words.first().map(String::as_str)) {
+            let app = Detect::detect(None).context("Bundle detection")?;
+            let version = release_channel::AppVersion::load(
+                env!("CARGO_PKG_VERSION"),
+                option_env!("ZED_BUILD_ID"),
+                option_env!("ZED_COMMIT_SHA")
+                    .map(|sha| release_channel::AppCommitSha::new(sha.to_string())),
+            );
+            let env = cli::lanes_cli::RealEnv {
+                program: app.path(),
+                bongos_version: version.to_string(),
+            };
+            let outcome = cli::lanes_cli::execute(&words, &env);
+            print!("{}", outcome.stdout);
+            eprint!("{}", outcome.stderr);
+            std::process::exit(outcome.code);
+        }
+    }
+
     let args = Args::parse();
 
     // `bongos --askpass` Makes bongos operate in nc/netcat mode for use with askpass

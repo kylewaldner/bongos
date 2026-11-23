@@ -52,19 +52,20 @@ pub struct RunRow {
 }
 
 impl RunRow {
-    /// The rows of every run `lifecycle` knows, in start order.
+    /// The rows of every run `lifecycle` shows (those it drives, then those it reads for another
+    /// process), in start order.
     pub fn all<R: Runner>(lifecycle: &Lifecycle<R>) -> Vec<Self> {
         lifecycle
-            .all_runs()
+            .shown_runs()
             .iter()
             .filter_map(|run| Self::of(lifecycle, run))
             .collect()
     }
 
     pub fn of<R: Runner>(lifecycle: &Lifecycle<R>, run: &str) -> Option<Self> {
-        let state = lifecycle.state(run)?;
-        let record = lifecycle.record(run)?;
-        let checkout = lifecycle.task_checkout(run);
+        let state = lifecycle.shown_state(run)?;
+        let record = lifecycle.shown_record(run)?;
+        let checkout = lifecycle.shown_task_checkout(run);
         let mut nodes: Vec<String> = Vec::new();
         for key in state.running.keys().chain(state.open_gates.keys()) {
             if !nodes.contains(&key.node) {
@@ -72,8 +73,7 @@ impl RunRow {
             }
         }
         let outcomes = lifecycle
-            .runtime()
-            .definition(run)
+            .shown_definition(run)
             .map(|definition| {
                 outcomes::collect(definition, &state)
                     .iter()
@@ -90,7 +90,11 @@ impl RunRow {
                 .map(project_of)
                 .unwrap_or_default(),
             workflow: record.workflow.clone(),
-            todo: record.todo.name.clone(),
+            todo: record
+                .todo
+                .as_ref()
+                .map(|todo| todo.name.clone())
+                .unwrap_or_default(),
             status: RunStatus::of(&state),
             nodes,
             elapsed_ms: state.finished.iter().map(|f| f.elapsed_ms).sum(),

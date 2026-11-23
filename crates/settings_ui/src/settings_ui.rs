@@ -6392,6 +6392,37 @@ pub mod test {
         assert_eq!(BASE_KEYMAP_LABELS, ["Emacs", "Vim", "VS Code", "None"]);
     }
 
+    #[gpui::test]
+    async fn test_avy_timeout_row_writes_emacs_avy_timeout(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| register_settings(cx));
+        cx.update(|cx| {
+            let app_state = AppState::test(cx);
+            AppState::set_global(app_state, cx);
+        });
+        let field = cx.update(|cx| {
+            crate::page_data::settings_data(cx)
+                .into_iter()
+                .flat_map(|page| page.items.into_vec())
+                .find_map(|item| match item {
+                    SettingsPageItem::SettingItem(item) if item.title == "Avy Timeout" => item
+                        .field
+                        .as_any()
+                        .downcast_ref::<SettingField<settings::DelayMs>>()
+                        .copied(),
+                    _ => None,
+                })
+                .expect("the Avy Timeout setting is on a page")
+        });
+        assert_eq!(field.json_path, Some("emacs.avy_timeout"));
+
+        let mut content = settings::SettingsContent::default();
+        cx.update(|cx| (field.write)(&mut content, Some(settings::DelayMs(250)), cx));
+        assert_eq!(
+            content.emacs.and_then(|emacs| emacs.avy_timeout),
+            Some(settings::DelayMs(250))
+        );
+    }
+
     struct BaseKeymapDropdownView {
         field: SettingField<settings::BaseKeymapContent>,
     }

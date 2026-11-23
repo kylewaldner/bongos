@@ -745,13 +745,23 @@ fn run_toml() -> RunToml {
         id: RUN_ID.to_string(),
         workflow: "pr-ship".to_string(),
         layer: "shipped".to_string(),
+        subject: RunSubject::Task {
+            id: "task-1".to_string(),
+        },
         task_id: "task-1".to_string(),
         created: "2026-11-11T10:00:00Z".to_string(),
         started_by: StartedBy::TreeRun,
-        todo: TodoRef {
+        parent: None,
+        lane: None,
+        unattended: None,
+        tree: None,
+        definitions: None,
+        env: Vec::new(),
+        lane_dirs: Default::default(),
+        todo: Some(TodoRef {
             index: 0,
             name: "implement".to_string(),
-        },
+        }),
         inputs: vec![
             RecordedInput {
                 name: "goal".to_string(),
@@ -931,4 +941,88 @@ fn the_loop_bound_is_written_only_when_there_is_one_and_old_records_load() {
         RunToml::parse(&text).unwrap().attempts[0].loop_bound,
         Some(7)
     );
+}
+
+#[test]
+fn a_project_subject_run_toml_round_trips_with_no_todo_and_an_empty_task_id() {
+    let mut run = run_toml();
+    run.subject = RunSubject::Project {
+        id: "project-1".to_string(),
+    };
+    run.task_id = String::new();
+    run.todo = None;
+    run.started_by = StartedBy::Lane;
+    run.parent = Some(RUN_ID.to_string());
+    run.lane = Some(LaneRef {
+        id: "lane-1".to_string(),
+        kind: "build".to_string(),
+    });
+    run.unattended = Some(UnattendedChoice {
+        value: true,
+        source: UnattendedSource::Lane,
+    });
+    run.tree = Some(RunTreeRecord::Repository {
+        repo: "/repos/app".into(),
+        base: "main".to_string(),
+        merge_into: Some("integration".to_string()),
+    });
+    run.definitions = Some("/projects/app/repository/definitions".into());
+    run.env = vec![
+        crate::EnvEdit::Set {
+            name: "CARGO_TARGET_DIR".to_string(),
+            value: "/lanes/1/target".to_string(),
+        },
+        crate::EnvEdit::Unset {
+            name: "RUSTC_WRAPPER".to_string(),
+        },
+    ];
+    run.lane_dirs = [("target".to_string(), "/lanes/1/target".into())].into();
+    let text = run.to_toml();
+    assert!(!text.contains("[todo]"), "{text}");
+    assert_eq!(RunToml::parse(&text).unwrap(), run);
+    run.tree = Some(RunTreeRecord::Snapshot {
+        path: "/snapshots/abc".into(),
+    });
+    let text = run.to_toml();
+    assert!(text.contains("task_id = \"\""), "{text}");
+    assert!(text.contains("kind = \"project\""), "{text}");
+    assert_eq!(RunToml::parse(&text).unwrap(), run);
+    assert_eq!(run.subject.task_id(), None);
+    run.tree = Some(RunTreeRecord::Work);
+    let text = run.to_toml();
+    assert!(text.contains("kind = \"work\""), "{text}");
+    assert_eq!(RunToml::parse(&text).unwrap(), run);
+}
+
+#[test]
+fn an_old_run_toml_with_no_subject_reads_as_its_task() {
+    let run = run_toml();
+    let text = run.to_toml();
+    let start = text.find("[subject]").unwrap();
+    let end = start
+        + text[start..]
+            .find("\n\n")
+            .map_or(text.len() - start, |at| at + 2);
+    let old = format!("{}{}", &text[..start], &text[end..]);
+    assert!(!old.contains("subject"), "{old}");
+    let parsed = RunToml::parse(&old).unwrap();
+    assert_eq!(
+        parsed.subject,
+        RunSubject::Task {
+            id: "task-1".to_string()
+        }
+    );
+    assert_eq!(parsed, run);
+}
+
+#[test]
+fn host_and_lane_starts_round_trip() {
+    for started_by in [StartedBy::Host, StartedBy::Lane] {
+        let mut run = run_toml();
+        run.started_by = started_by;
+        assert_eq!(
+            RunToml::parse(&run.to_toml()).unwrap().started_by,
+            started_by
+        );
+    }
 }

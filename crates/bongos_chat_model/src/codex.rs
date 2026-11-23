@@ -175,6 +175,8 @@ impl AgentAdapter for CodexAdapter {
             cwd: plan.chat.cwd.clone(),
             fallbacks,
             capture_session_id: capture,
+            // No Codex channel yet: a plan's channel is ignored and its names never pass.
+            channel: false,
         }
     }
 

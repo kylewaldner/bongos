@@ -18,8 +18,8 @@ use serde::Serialize;
 
 use crate::error::{Error, Result};
 use crate::io::{read_artifacts, read_task};
-use crate::layout::{self, OP_FILE, TASKS_DIR, is_temp_file};
-use crate::store::{Task, collect_files};
+use crate::layout::{self, DOCUMENTS_DIR, OP_FILE, TASKS_DIR, is_temp_file};
+use crate::store::{Project, Task, collect_files};
 use crate::types::{Artifact, ArtifactsFile, Extra, Visibility};
 
 /// The line the UI shows above a task's artifacts.
@@ -46,6 +46,24 @@ pub struct SessionContext {
     /// The goal of the group the task is in, when it is in one.
     pub parent_goal: Option<String>,
     /// The shared artifacts, by path.
+    pub artifacts: Vec<SharedArtifact>,
+}
+
+/// What an agent working on a whole project (a run with no task) is told: the project's name and
+/// goal, where its documents, files and definitions are, and its shared files. It names no task.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ProjectSessionContext {
+    /// The project's title, or its folder name when `project.toml` never parsed.
+    pub name: String,
+    /// The goal of the project's top group.
+    pub goal: String,
+    /// The project-level documents: `documents/` in `definitions`.
+    pub documents: PathBuf,
+    /// The project's own files folder.
+    pub files_dir: PathBuf,
+    /// The definitions tree the agent is pointed at.
+    pub definitions: PathBuf,
+    /// The shared files of the project's files folder, by path.
     pub artifacts: Vec<SharedArtifact>,
 }
 
@@ -221,5 +239,37 @@ pub fn session_context(task_dir: &Path) -> Result<SessionContext> {
         worktree: file.worktree.map(PathBuf::from),
         parent_goal,
         artifacts: shared_artifacts(task_dir),
+    })
+}
+
+/// The context of an agent working on `project` as a whole: its name and goal (its top group's
+/// `task.toml`), the paths of its project-level documents (`documents/` in `definitions`), of
+/// `files_dir` (the project's files folder) and of `definitions`, and the [`shared_artifacts`] of
+/// `files_dir`, read from disk now. No task path is in it. Fails when the top group's `task.toml`
+/// never parsed.
+pub fn project_session_context(
+    project: &Project,
+    files_dir: &Path,
+    definitions: &Path,
+) -> Result<ProjectSessionContext> {
+    let file = project.task.file.as_ref().ok_or_else(|| {
+        Error::new(crate::ErrorKind::Syntax(
+            "the project's task.toml has never been read".to_string(),
+        ))
+        .with_path(Some(&layout::task_file(&project.task.dir)))
+    })?;
+    let name = project
+        .file
+        .as_ref()
+        .map(|file| file.title.clone())
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| project.slug.clone());
+    Ok(ProjectSessionContext {
+        name,
+        goal: file.goal.clone(),
+        documents: definitions.join(DOCUMENTS_DIR),
+        files_dir: files_dir.to_path_buf(),
+        definitions: definitions.to_path_buf(),
+        artifacts: shared_artifacts(files_dir),
     })
 }

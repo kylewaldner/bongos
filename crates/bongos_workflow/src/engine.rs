@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use bongos_chat::model::Agent;
 use bongos_chat::{AgentCommand, ChatHealth, Health, HealthState};
-use bongos_project_repo::{ActivitySources, LiveSources, ProjectRepo, SnapshotReason};
+use bongos_project_repo::{ActivitySources, CommitId, LiveSources, ProjectRepo, SnapshotReason};
 use bongos_work::{ActiveRun, LiveModesRegistry, NeedsYouRegistry};
 use bongos_work_model::commands::Context as WorkContext;
 use bongos_work_model::layout::WORKFLOWS_DIR;
@@ -54,8 +54,8 @@ use crate::dispatch::{AppRunner, RunnerInputs, RunnerSnapshot};
 use crate::landing::{LandingRunEnd, LandingRuns, set_landing_runs};
 use crate::lifecycle::{
     ClearOutcome, ClearedRun, GateField, GitWorktrees, HaltWorktrees, Lifecycle, Refusal,
-    RefusalKind, RunId, RunStatus, StartChecks, StartContext, StartRequest, WorkflowEvent,
-    find_cleared,
+    RefusalKind, RunId, RunStatus, StartChecks, StartContext, StartRequest, StartSubject,
+    WorkflowEvent, find_cleared,
 };
 use crate::mcp::{self, McpCache};
 use crate::outcomes::{self, Delivered, Reported, RunOutcome};
@@ -65,7 +65,7 @@ use crate::runner_program::Interpreter;
 use crate::runtime::{Runner, Settlement};
 use crate::shipped::Template;
 use crate::task_link::{self, Completed, Finale, Next, StoreWrites, TaskWrites, WriteCommand};
-use crate::worktrees::{Git, RunWorktree, TaskCheckout, branch_worktree_path};
+use crate::worktrees::{Git, RunWorktree, TaskCheckout};
 
 /// The runner the engine's runs use.
 pub type EngineRunner = Box<dyn Runner + Send>;
@@ -303,6 +303,20 @@ struct Observers(Vec<Rc<dyn Fn(&WorkflowEvent, &mut App)>>);
 
 impl Global for Observers {}
 
+/// The files folders of the open project repositories whose state this process reads as a
+/// client: another process holds their writer, and their runs.
+fn files_held_elsewhere(cx: &App) -> Vec<PathBuf> {
+    bongos_work::OpenProjectRepos::listed(cx)
+        .iter()
+        .map(|loaded| loaded.repo())
+        .filter(|repo| {
+            repo.state()
+                .is_some_and(|state| state.opened_writer().is_none())
+        })
+        .map(|repo| repo.location().files.clone())
+        .collect()
+}
+
 impl WorkflowEngine {
     /// An engine over `dirs` with no runs, running nodes through the app's [`AppRunner`]; nothing
     /// is read or written.
@@ -387,7 +401,8 @@ impl WorkflowEngine {
 
     /// Loads the runs on disk once, at the first work tree the app's engine sees. A run that
     /// cannot be loaded is logged and skipped; orphan processes are logged with what became of
-    /// them.
+    /// them. The runs of a project whose writer another process holds (a window that is a client
+    /// of an engine host) are that process's and are not loaded here.
     fn load_runs_once(&self, cx: &mut App) {
         if !self.ticker.load_pending.load(Ordering::SeqCst) {
             return;
@@ -395,10 +410,17 @@ impl WorkflowEngine {
         let Some(tree) = self.writes.tree(cx) else {
             return;
         };
+        // A tree with no project yet (the engine host's project is still opening) holds no run to
+        // load, and loading now would leave the runs of the project unloaded for good.
+        if tree.projects.is_empty() {
+            return;
+        }
         if !self.ticker.load_pending.swap(false, Ordering::SeqCst) {
             return;
         }
-        let report = self.lifecycle().load_runs(&tree);
+        let report = self
+            .lifecycle()
+            .load_runs_except(&tree, &files_held_elsewhere(cx));
         match report {
             Ok(report) => {
                 for (path, reason) in &report.skipped {
@@ -418,6 +440,29 @@ impl WorkflowEngine {
         self.publish(cx);
     }
 
+    /// Reads again, from their records, the runs of the projects another process writes (a
+    /// window that is a client of an engine host), so the Runs panel, the status item, the
+    /// needs-you list and the run view show them ([`Lifecycle::observe_runs`]). Only the runs whose
+    /// files changed are read again; nothing is written, no lock is taken and nothing drives them
+    /// here. A change tells the views, never the engine's observers: those act on runs this
+    /// process drives.
+    pub fn refresh_observed_runs(&self, cx: &mut App) {
+        let held = files_held_elsewhere(cx);
+        let changed = if held.is_empty() {
+            self.lifecycle().observe_runs(&WorkTree::default(), &[])
+        } else {
+            let Some(tree) = self.writes.tree(cx) else {
+                return;
+            };
+            self.lifecycle().observe_runs(&tree, &held)
+        };
+        if changed {
+            NeedsYouRegistry::changed(cx);
+            crate::status_item::changed(cx);
+            crate::run_view::refresh_views(cx);
+        }
+    }
+
     /// One pass of the loop; whether the loop goes on.
     fn loop_pass(&self, cx: &mut App) -> bool {
         if self.ticker.stopped() || !WorkflowsSettings::get_global(cx).enabled {
@@ -425,6 +470,7 @@ impl WorkflowEngine {
         }
         self.ticker.passes.fetch_add(1, Ordering::SeqCst);
         self.load_runs_once(cx);
+        self.refresh_observed_runs(cx);
         if self.tick_runs(cx) {
             self.publish(cx);
         }
@@ -638,11 +684,34 @@ impl WorkflowEngine {
     /// until the result is dropped. An old-format task, or none, gets the engine's layers as
     /// they are.
     pub fn dirs_for(&self, task: Option<&Task>, cx: &App) -> Result<TaskDirs, Refusal> {
+        self.dirs_at(task, None, cx)
+    }
+
+    /// [`Self::dirs_for`] with the project layer read from `commit` instead of the verified
+    /// commit when one is given; a task with no project repository cannot honor it.
+    pub fn dirs_at(
+        &self,
+        task: Option<&Task>,
+        commit: Option<CommitId>,
+        cx: &App,
+    ) -> Result<TaskDirs, Refusal> {
         let mut dirs = self.dirs.clone();
         let repo = task.and_then(|task| bongos_work::project_repo_of(task, cx));
+        if let Some(commit) = &commit
+            && repo.is_none()
+        {
+            return Err(Refusal::new(
+                RefusalKind::BadRequest,
+                format!(
+                    "The run asks for the definitions of commit {}, but its project has no repository.",
+                    commit.0
+                ),
+                "Start it without a definition commit.",
+            ));
+        }
         let layer = match repo
             .as_ref()
-            .map(|repo| project_layer_in(repo, None))
+            .map(|repo| project_layer_in(repo, commit.clone()))
             .transpose()
         {
             Ok(layer) => layer,
@@ -687,6 +756,25 @@ impl WorkflowEngine {
     /// source locks it too.
     pub fn lifecycle(&self) -> MutexGuard<'_, Lifecycle<EngineRunner>> {
         self.runs.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether `run` has a record on disk: it is loaded, or a task or project of the loaded work
+    /// tree has a `runs/<id>` directory for it (a run whose log could not be loaded still has one).
+    /// `None` when no work tree is loaded, so it cannot be told.
+    pub fn run_recorded(&self, run: &str, cx: &App) -> Option<bool> {
+        if self.lifecycle().status(run).is_some() {
+            return Some(true);
+        }
+        let tree = self.writes.tree(cx)?;
+        // An id that is not one path component names no run directory.
+        if run.is_empty() || run == "." || run == ".." || run.contains(['/', '\\']) {
+            return Some(false);
+        }
+        Some(tree.tasks().into_iter().any(|task| {
+            bongos_work_model::layout::runs_dir(&task.dir)
+                .join(run)
+                .exists()
+        }))
     }
 
     /// Checks the definition `name`, or every definition with no name.
@@ -822,17 +910,28 @@ impl WorkflowEngine {
     ) -> Result<RunId, Refusal> {
         // The runs on disk are loaded before any new one exists, so the load never meets it.
         self.load_runs_once(cx);
-        let start = LiveModesRegistry::can_start_run(&request.task_id, cx);
-        let active_run = if start.allowed {
-            None
-        } else {
-            LiveModesRegistry::live_modes(&request.task_id, cx).run
-        };
+        // A run with no task holds no task, so no other source's run can refuse it.
+        let active_run = request.task_id().and_then(|task_id| {
+            if LiveModesRegistry::can_start_run(task_id, cx).allowed {
+                None
+            } else {
+                LiveModesRegistry::live_modes(task_id, cx).run
+            }
+        });
         let checks = AppChecks::read(&self.mcp.cache, cx);
         let settings = WorkflowsSettings::get_global(cx).clone();
-        // The project layer is read from the verified commit and stays materialized until the
-        // run's definition has been copied into its first attempt.
-        let task_dirs = self.dirs_for(tree.task_by_id(&request.task_id), cx)?;
+        // The project layer is read from the verified commit, or the commit the request names,
+        // and stays materialized until the run's definition has been copied into its first
+        // attempt.
+        let subject_task = match &request.subject {
+            StartSubject::Task { id, .. } => tree.task_by_id(id),
+            StartSubject::Project { id } => tree
+                .projects
+                .iter()
+                .map(|project| &project.task)
+                .find(|task| task.id() == Some(id.as_str())),
+        };
+        let task_dirs = self.dirs_at(subject_task, request.definition_commit.clone(), cx)?;
         if let Some(repo) = &task_dirs.repo {
             self.refuse_held(repo)?;
         }
@@ -844,6 +943,12 @@ impl WorkflowEngine {
                 active_run,
                 checks: &checks,
                 definition_commit: task_dirs.commit.clone(),
+                // The project repository's own checkout of its definitions, which stays.
+                definitions: task_dirs.repo.as_ref().map(|repo| {
+                    repo.location()
+                        .repository
+                        .join(bongos_project_repo_model::layout::DEFINITIONS_DIR)
+                }),
             };
             lifecycle.start(request, &task_dirs.dirs, &context)
         };
@@ -907,7 +1012,7 @@ impl WorkflowEngine {
         let record = lifecycle.record(run)?;
         Some((
             record.task_id.clone(),
-            record.todo.clone(),
+            record.todo.clone()?,
             record.workflow.clone(),
         ))
     }
@@ -1114,6 +1219,107 @@ impl WorkflowEngine {
     /// The active runs, in start order.
     pub fn active_runs(&self) -> Vec<RunId> {
         self.lifecycle().active_runs()
+    }
+
+    /// The runs that move on by itself, not those waiting for a person, in start order.
+    pub fn progressing_runs(&self) -> Vec<RunId> {
+        self.lifecycle().progressing_runs()
+    }
+
+    /// Loads the runs on disk now when they are still to be loaded, before a handover reads
+    /// them. False when they cannot be loaded yet (no work tree), so a handover would miss runs
+    /// this engine loads later.
+    pub fn runs_loaded(&self, cx: &mut App) -> bool {
+        self.load_runs_once(cx);
+        !self.ticker.load_pending.load(Ordering::SeqCst)
+    }
+
+    /// The runs not over whose records are under `files` (a project's files), in start order:
+    /// the runs a handover of that project moves.
+    pub fn live_runs_under(&self, files: &Path) -> Vec<RunId> {
+        let lifecycle = self.lifecycle();
+        lifecycle
+            .runs_under(files)
+            .into_iter()
+            .filter(|run| lifecycle.state(run).is_some_and(|state| !state.is_over()))
+            .collect()
+    }
+
+    /// How many of `runs` have a node process in flight.
+    pub fn runs_in_flight(&self, runs: &[RunId]) -> usize {
+        let lifecycle = self.lifecycle();
+        runs.iter()
+            .filter(|run| !lifecycle.runtime().in_flight(run).is_empty())
+            .count()
+    }
+
+    /// Starts no new node in any run until [`Self::undrain`]; resolves once no node process runs
+    /// ([`crate::runtime::Runtime::drain`]).
+    pub fn drain(&self) -> futures::channel::oneshot::Receiver<()> {
+        self.lifecycle().runtime_mut().drain()
+    }
+
+    /// Lets nodes start again after [`Self::drain`].
+    pub fn undrain(&self) {
+        self.lifecycle().runtime_mut().undrain();
+    }
+
+    /// Records that a drain stopped the check of checks key `key` of `run`
+    /// ([`crate::runtime::Runtime::checks_drained`]): the key counts as parked, and the run starts
+    /// it again from its checkpoint, with no person, wherever it is loaded next.
+    pub fn checks_drained(&self, run: &str, key: &NodeKey, cx: &mut App) -> Result<(), String> {
+        let recorded = self
+            .lifecycle()
+            .runtime_mut()
+            .checks_drained(run, key)
+            .map_err(|error| error.to_string());
+        self.publish(cx);
+        recorded
+    }
+
+    /// "Interrupt them now" at a handover: the processes of `runs` stop and the runs with a node
+    /// in flight are recorded interrupted, as at quit.
+    pub fn interrupt_runs(&self, runs: &[RunId], cx: &mut App) {
+        if self.lifecycle().interrupt_runs(runs) {
+            self.publish(cx);
+        }
+    }
+
+    /// Hands `runs` over to the process `to_pid`: `HandedOver` to each, then they leave this
+    /// engine, which appends nothing to them again.
+    pub fn hand_over_runs(&self, to_pid: u32, runs: &[RunId], cx: &mut App) {
+        self.lifecycle().hand_over_runs(to_pid, runs);
+        self.publish(cx);
+    }
+
+    /// While `on`, no run starts or restarts under `files` (a project's files): its writer moves
+    /// to another process ([`Lifecycle::refuse_starts_under`]).
+    pub fn refuse_starts_under(&self, files: &Path, on: bool) {
+        self.lifecycle().refuse_starts_under(files, on);
+    }
+
+    /// Loads again `runs`, those on disk this engine does not hold: after a handover the other
+    /// process never took, the runs it handed over come back and continue. Runs another handover
+    /// moved away stay away. The runs loaded.
+    pub fn reload_runs(&self, runs: &[RunId], cx: &mut App) -> Vec<RunId> {
+        let Some(tree) = self.writes.tree(cx) else {
+            log::error!("workflows: no work tree to load the runs again from");
+            return Vec::new();
+        };
+        let loaded = match self.lifecycle().load_new_runs(&tree, runs) {
+            Ok(report) => {
+                for (path, reason) in &report.skipped {
+                    log::warn!("workflows: did not load {}: {reason}", path.display());
+                }
+                report.loaded
+            }
+            Err(error) => {
+                log::error!("workflows: could not load the runs again: {error}");
+                Vec::new()
+            }
+        };
+        self.publish(cx);
+        loaded
     }
 
     /// Runs `command` on the lifecycle, then ticks once so what it set going begins at once, then
@@ -1379,7 +1585,7 @@ impl WorkflowEngine {
             (
                 record.workflow.clone(),
                 record.task_id.clone(),
-                record.todo.clone(),
+                record.todo.clone()?,
                 lifecycle.runtime().definition(run)?.clone(),
                 lifecycle.state(run)?,
                 lifecycle.task_checkout(run)?.clone(),
@@ -1413,6 +1619,27 @@ impl WorkflowEngine {
     /// confirmation, outcomes and todo ([`task_link::next`]), then ends it or waits on Kyle.
     fn settle_run(&self, run: RunId, cx: &mut App) {
         let engine = self.clone();
+        let project_end = self.lifecycle().project_end(&run);
+        if let Some(end) = project_end {
+            // A run with no task: its merge, if it names one, and nothing of a task's.
+            cx.spawn(async move |cx| {
+                let settled = cx
+                    .background_spawn(async move {
+                        crate::lifecycle::project_settlement(&Git::new("git"), &end).await
+                    })
+                    .await;
+                let result = cx.update(|cx| {
+                    let result = engine.lifecycle().settle_project(&run, settled);
+                    engine.publish(cx);
+                    result
+                });
+                if let Err(error) = result {
+                    log::warn!("workflows: could not settle run {run}: {error}");
+                }
+            })
+            .detach();
+            return;
+        }
         cx.spawn(async move |cx| {
             let settlement = engine.settlement(&run, cx).await;
             let result = cx.update(|cx| {
@@ -1615,7 +1842,7 @@ impl WorkflowEngine {
                     .task
                     .as_ref()
                     .ok_or("the run's task is not loaded")?;
-                let root = source_root(&context.worktree, &reported.key, path);
+                let root = outcomes::source_root(&context.worktree, &reported.key, path);
                 let source = outcomes::source_file(&root, path)?;
                 let name = outcomes::copy_document(&source, &task.dir)?;
                 let description = outcomes::document_description(&context.run, &reported.key.node);
@@ -1637,25 +1864,13 @@ impl WorkflowEngine {
                     .task
                     .as_ref()
                     .ok_or("the run's task is not loaded")?;
-                let root = source_root(&context.worktree, &reported.key, path);
+                let root = outcomes::source_root(&context.worktree, &reported.key, path);
                 let source = outcomes::source_file(&root, path)?;
                 let written = outcomes::copy_proposal(task, &source, &context.workflow)?;
                 Ok(Delivered::Proposal { path: written })
             }
         }
     }
-}
-
-/// The worktree an outcome path of `key` is relative to: its fan-out branch worktree while that
-/// still holds the file, else the run worktree (where the join merged it).
-fn source_root(worktree: &RunWorktree, key: &NodeKey, path: &str) -> PathBuf {
-    if let Some((fan, index)) = key.branch.last() {
-        let branch = branch_worktree_path(&worktree.run_dir, fan, *index);
-        if branch.join(path).exists() {
-            return branch;
-        }
-    }
-    worktree.path.clone()
 }
 
 /// The final merge of the run into its task branch.
