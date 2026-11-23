@@ -480,6 +480,69 @@ impl UndoTree {
         self.pins.get(&ix).is_some_and(|count| *count > 0)
     }
 
+    /// Panics unless the arena, the free list, the id map and the parent and
+    /// child links agree: one live node per id, no id of a freed node, every
+    /// link between live nodes and every active child among its children.
+    #[cfg(test)]
+    pub(crate) fn assert_consistent(&self) {
+        let mut live = 0;
+        for (ix, slot) in self.nodes.iter().enumerate() {
+            let Some(node) = slot else {
+                assert!(
+                    self.free.contains(&ix),
+                    "slot {ix} is neither live nor free"
+                );
+                continue;
+            };
+            live += 1;
+            assert!(
+                !self.free.contains(&ix),
+                "live slot {ix} is on the free list"
+            );
+            match &node.entry {
+                Some(entry) => assert_eq!(
+                    self.ids.get(&entry.transaction.id),
+                    Some(&ix),
+                    "the id map misses node {ix}"
+                ),
+                None => assert_eq!(ix, ROOT_IX, "only the root has no entry"),
+            }
+            match node.parent {
+                Some(parent) => {
+                    let parent = self.nodes[parent].as_ref().expect("live parent");
+                    assert_eq!(
+                        parent.children.iter().filter(|c| **c == ix).count(),
+                        1,
+                        "node {ix} is not listed once by its parent"
+                    );
+                }
+                None => assert_eq!(ix, ROOT_IX, "only the root has no parent"),
+            }
+            for child in &node.children {
+                let child = self.nodes[*child].as_ref().expect("live child");
+                assert_eq!(child.parent, Some(ix), "child of {ix} points elsewhere");
+            }
+            if let Some(active) = node.active_child {
+                assert!(
+                    node.children.contains(&active),
+                    "active child of {ix} is not a child"
+                );
+            }
+        }
+        assert_eq!(live, self.len);
+        assert_eq!(self.ids.len() + 1, self.len, "the id map has stale ids");
+        for (id, ix) in &self.ids {
+            let node = self.nodes[*ix]
+                .as_ref()
+                .expect("the id map points at a freed slot");
+            assert_eq!(node.id(), UndoNodeId(*id));
+        }
+        for ix in self.pins.keys() {
+            assert!(self.nodes[*ix].is_some(), "pin on a freed slot");
+        }
+        assert!(self.nodes[self.current].is_some(), "current is freed");
+    }
+
     // Internals.
 
     fn n(&self, ix: NodeIx) -> &UndoNode {

@@ -8,9 +8,9 @@ use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
-struct OracleEntry {
-    id: TransactionId,
-    edit_ids: Vec<clock::Lamport>,
+pub(crate) struct OracleEntry {
+    pub(crate) id: TransactionId,
+    pub(crate) edit_ids: Vec<clock::Lamport>,
     first_edit_at: Instant,
     last_edit_at: Instant,
     suppress_grouping: bool,
@@ -21,10 +21,10 @@ struct OracleEntry {
 }
 
 #[derive(Default)]
-struct Oracle {
-    undo_stack: Vec<OracleEntry>,
-    redo_stack: Vec<OracleEntry>,
-    depth: usize,
+pub(crate) struct Oracle {
+    pub(crate) undo_stack: Vec<OracleEntry>,
+    pub(crate) redo_stack: Vec<OracleEntry>,
+    pub(crate) depth: usize,
     group_interval: Duration,
 }
 
@@ -126,20 +126,82 @@ impl Oracle {
         self.undo_stack.push(entry);
         Some(id)
     }
+
+    // Node surgery on the stacks. Where the old stack history differs from
+    // the tree's rules, these follow the tree: a push keeps the redo stack,
+    // `remove_from_undo` puts the entry on top of the redo stack, and an id
+    // on neither stack gives `None`.
+
+    /// A pushed entry. Its `forked` flag only approximates the tree's fork
+    /// rule, so grouping across pushed entries is not modeled exactly.
+    pub(crate) fn push(&mut self, id: TransactionId, edit_ids: Vec<clock::Lamport>, now: Instant) {
+        self.undo_stack.push(OracleEntry {
+            id,
+            edit_ids,
+            first_edit_at: now,
+            last_edit_at: now,
+            suppress_grouping: false,
+            forked: !self.redo_stack.is_empty(),
+        });
+    }
+
+    pub(crate) fn forget(&mut self, id: TransactionId) -> Option<OracleEntry> {
+        if let Some(ix) = self.undo_stack.iter().rposition(|entry| entry.id == id) {
+            Some(self.undo_stack.remove(ix))
+        } else if let Some(ix) = self.redo_stack.iter().rposition(|entry| entry.id == id) {
+            Some(self.redo_stack.remove(ix))
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn merge(
+        &mut self,
+        transaction: TransactionId,
+        destination: TransactionId,
+    ) -> Option<TransactionId> {
+        self.transaction(destination)?;
+        let forgotten = self.forget(transaction)?;
+        if let Some(entry) = self
+            .undo_stack
+            .iter_mut()
+            .chain(self.redo_stack.iter_mut())
+            .find(|entry| entry.id == destination)
+        {
+            entry.edit_ids.extend_from_slice(&forgotten.edit_ids);
+        }
+        Some(forgotten.id)
+    }
+
+    pub(crate) fn remove_from_undo(&mut self, id: TransactionId) -> Option<TransactionId> {
+        let ix = self.undo_stack.iter().rposition(|entry| entry.id == id)?;
+        let entry = self.undo_stack.remove(ix);
+        self.redo_stack.push(entry);
+        Some(id)
+    }
+
+    /// The edits of a transaction on either stack.
+    pub(crate) fn transaction(&self, id: TransactionId) -> Option<&[clock::Lamport]> {
+        self.undo_stack
+            .iter()
+            .chain(self.redo_stack.iter())
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.edit_ids.as_slice())
+    }
 }
 
 /// A buffer and the oracle, driven together with fixed instants.
-struct Pair {
-    buffer: Buffer,
-    oracle: Oracle,
+pub(crate) struct Pair {
+    pub(crate) buffer: Buffer,
+    pub(crate) oracle: Oracle,
     base: Instant,
-    now: Instant,
-    ended: Vec<TransactionId>,
-    edits: Vec<clock::Lamport>,
+    pub(crate) now: Instant,
+    pub(crate) ended: Vec<TransactionId>,
+    pub(crate) edits: Vec<clock::Lamport>,
 }
 
 impl Pair {
-    fn new(group_interval: Duration) -> Self {
+    pub(crate) fn new(group_interval: Duration) -> Self {
         let mut buffer = Buffer::new(ReplicaId::LOCAL, BufferId::new(1).unwrap(), "");
         buffer.set_group_interval(group_interval);
         let base = Instant::now();
@@ -156,23 +218,23 @@ impl Pair {
         }
     }
 
-    fn at(&mut self, millis: u64) {
+    pub(crate) fn at(&mut self, millis: u64) {
         self.now = self.base + Duration::from_millis(millis);
     }
 
-    fn start(&mut self) {
+    pub(crate) fn start(&mut self) {
         let id = self.buffer.start_transaction_at(self.now);
         self.oracle.start_transaction(id, self.now);
     }
 
-    fn edit(&mut self, text: &str) {
+    pub(crate) fn edit(&mut self, text: &str) {
         let end = self.buffer.len();
         let op = self.buffer.edit([(end..end, text)]);
         self.oracle.push_undo(op.timestamp());
         self.edits.push(op.timestamp());
     }
 
-    fn end(&mut self) -> Option<TransactionId> {
+    pub(crate) fn end(&mut self) -> Option<TransactionId> {
         let id = self.buffer.end_transaction_at(self.now).map(|(id, _)| id);
         assert_eq!(id, self.oracle.end_transaction(self.now));
         if let Some(id) = id {
@@ -182,19 +244,19 @@ impl Pair {
     }
 
     /// One outer transaction with one edit; returns its id after grouping.
-    fn transact(&mut self, text: &str) -> TransactionId {
+    pub(crate) fn transact(&mut self, text: &str) -> TransactionId {
         self.start();
         self.edit(text);
         self.end().unwrap()
     }
 
-    fn undo(&mut self) -> Option<TransactionId> {
+    pub(crate) fn undo(&mut self) -> Option<TransactionId> {
         let id = self.buffer.undo().map(|(id, _)| id);
         assert_eq!(id, self.oracle.pop_undo());
         id
     }
 
-    fn redo(&mut self) -> Option<TransactionId> {
+    pub(crate) fn redo(&mut self) -> Option<TransactionId> {
         let id = self.buffer.redo().map(|(id, _)| id);
         assert_eq!(id, self.oracle.pop_redo());
         id
@@ -205,7 +267,74 @@ impl Pair {
         self.oracle.group_until(id);
     }
 
-    fn assert_stacks(&self) {
+    pub(crate) fn push(&mut self, transaction: Transaction) {
+        self.oracle
+            .push(transaction.id, transaction.edit_ids.clone(), self.now);
+        self.buffer.push_transaction(transaction, self.now);
+    }
+
+    pub(crate) fn push_empty(&mut self) -> TransactionId {
+        let id = self.buffer.push_empty_transaction(self.now);
+        self.oracle.push(id, Vec::new(), self.now);
+        id
+    }
+
+    pub(crate) fn forget(&mut self, id: TransactionId) -> Option<TransactionId> {
+        let forgotten = self.buffer.forget_transaction(id).map(|t| t.id);
+        assert_eq!(forgotten, self.oracle.forget(id).map(|entry| entry.id));
+        forgotten
+    }
+
+    pub(crate) fn merge(
+        &mut self,
+        transaction: TransactionId,
+        destination: TransactionId,
+    ) -> Option<TransactionId> {
+        let merged = self
+            .buffer
+            .history
+            .merge_transactions(transaction, destination)
+            .map(|t| t.id);
+        assert_eq!(merged, self.oracle.merge(transaction, destination));
+        merged
+    }
+
+    pub(crate) fn remove_from_undo(&mut self, id: TransactionId) -> Option<TransactionId> {
+        let removed = self.buffer.undo_transaction(id).map(|_| id);
+        assert_eq!(removed, self.oracle.remove_from_undo(id));
+        removed
+    }
+
+    /// Checks `get_transaction`, `transaction` and `transaction_mut` against
+    /// the oracle's stacks for each id.
+    pub(crate) fn assert_lookups(&mut self, ids: &[TransactionId]) {
+        for id in ids {
+            let expected = self.oracle.transaction(*id).map(|edits| edits.to_vec());
+            assert_eq!(
+                self.buffer.get_transaction(*id).map(|t| t.edit_ids.clone()),
+                expected,
+                "get_transaction({id:?})"
+            );
+            assert_eq!(
+                self.buffer
+                    .history
+                    .transaction(*id)
+                    .map(|t| t.edit_ids.clone()),
+                expected,
+                "transaction({id:?})"
+            );
+            assert_eq!(
+                self.buffer
+                    .history
+                    .transaction_mut(*id)
+                    .map(|t| t.edit_ids.clone()),
+                expected,
+                "transaction_mut({id:?})"
+            );
+        }
+    }
+
+    pub(crate) fn assert_stacks(&self) {
         let view = |entries: Vec<HistoryEntry>| {
             entries
                 .into_iter()
@@ -239,12 +368,12 @@ impl Pair {
     }
 }
 
-fn node(id: TransactionId) -> UndoNodeId {
+pub(crate) fn node(id: TransactionId) -> UndoNodeId {
     UndoNodeId(id)
 }
 
 /// Every node reachable from the root by following children.
-fn reachable(tree: &UndoTree) -> Vec<UndoNodeId> {
+pub(crate) fn reachable(tree: &UndoTree) -> Vec<UndoNodeId> {
     let mut found = Vec::new();
     let mut stack = vec![tree.root()];
     while let Some(id) = stack.pop() {
