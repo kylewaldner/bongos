@@ -59,7 +59,8 @@ const UNCONFINED: Promise = Promise {
     title: "Jobs are not confined",
     body: "No sandbox is available here, so bongos promises no confinement for jobs. Install \
            Bubblewrap (Linux) to get it. Program and agent steps run unsandboxed (and the log \
-           says so), while task checks refuse to start.",
+           says so), except in a main worktree, where they are refused. Task checks refuse to \
+           start unless confinement.task_checks is off.",
 };
 
 /// The promise for a platform and whether its sandbox is available.

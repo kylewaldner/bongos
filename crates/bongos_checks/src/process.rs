@@ -792,9 +792,28 @@ fn resolved(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
+/// Whether `path` lies inside a lane's named directory at its default place below bongos's data
+/// folder: `<data_dir>/projects/<slug>/lanes/<lane>/<name>`, or below one. Nothing else of a
+/// project folder (its repository, state, files, working copies) is in that area.
+fn in_default_lane_dirs(path: &Path, data_dir: &Path) -> bool {
+    use bongos_project_repo_model::layout::{LANES_DIR, PROJECTS_DIR};
+    use std::path::Component;
+    let Ok(rest) = path.strip_prefix(data_dir) else {
+        return false;
+    };
+    let parts: Vec<Component> = rest.components().collect();
+    parts.len() >= 5
+        && parts
+            .iter()
+            .all(|part| matches!(part, Component::Normal(_)))
+        && parts[0] == Component::Normal(PROJECTS_DIR.as_ref())
+        && parts[2] == Component::Normal(LANES_DIR.as_ref())
+}
+
 /// Refuses a declared directory that equals, contains or lies inside the checks' output folder
-/// (`records_dir`) or bongos's data folder, or that equals or contains the home folder. Checked
-/// before anything is made at a declared path.
+/// (`records_dir`), that equals or contains bongos's data folder or lies inside it outside a
+/// project's lane directories (see [`in_default_lane_dirs`]), or that equals or contains the
+/// home folder. Checked before anything is made at a declared path.
 ///
 /// Also refuses one reached through a symlink (its resolved path differs from its own), and one
 /// that equals, contains or lies inside another writable root (the tree, the part's scratch,
@@ -807,14 +826,45 @@ fn check_declared_dirs(
     tree: &Path,
     scratch: &Path,
 ) -> Result<(), String> {
+    check_declared_dirs_at(
+        dirs,
+        records_dir,
+        tree,
+        scratch,
+        paths::data_dir(),
+        paths::home_dir(),
+    )
+}
+
+/// [`check_declared_dirs`] with the data and home folders given.
+pub(crate) fn check_declared_dirs_at(
+    dirs: &[PathBuf],
+    records_dir: Option<&Path>,
+    tree: &Path,
+    scratch: &Path,
+    data_dir: &Path,
+    home: &Path,
+) -> Result<(), String> {
     let lenient = |path: &Path| resolved(path).unwrap_or_else(|_| path.to_path_buf());
-    let mut both_ways = vec![("the bongos data folder", lenient(paths::data_dir()))];
+    let data_dir = lenient(data_dir);
+    let mut both_ways = Vec::new();
     if let Some(records_dir) = records_dir {
         both_ways.push(("the checks' output folder", lenient(records_dir)));
     }
-    let home = lenient(paths::home_dir());
+    let home = lenient(home);
     for dir in dirs {
         let path = resolved(dir)?;
+        if data_dir.starts_with(&path)
+            || (path.starts_with(&data_dir) && !in_default_lane_dirs(&path, &data_dir))
+        {
+            return Err(format!(
+                "the declared directory {} overlaps the bongos data folder {} (only a \
+                 project's {}/<lane>/<name> directories may be inside it)",
+                dir.display(),
+                data_dir.display(),
+                bongos_project_repo_model::layout::LANES_DIR,
+            ));
+        }
         for (what, other) in &both_ways {
             if path.starts_with(other) || other.starts_with(&path) {
                 return Err(format!(

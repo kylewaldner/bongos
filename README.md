@@ -456,8 +456,9 @@ definition. The keys are for the Emacs keymap; every command is also in the pale
   configuration or pointers a job wrote. On macOS jobs are confined by path through Seatbelt: reads
   are not restricted, and a process a job leaves running may outlive it. With no sandbox available,
   jobs are not confined; install Bubblewrap (Linux) to get it. Without a usable sandbox, program
-  and agent steps run unsandboxed (and the log says so), while task checks refuse to start until
-  Bubblewrap is installed or `confinement.task_checks` is set to false. Two switches turn it on per kind of
+  and agent steps run unsandboxed (and the log says so), except in a main worktree, where they are
+  refused, and task checks refuse to start until Bubblewrap is installed or
+  `confinement.task_checks` is set to false. Two switches turn it on per kind of
   job: `confinement.task_checks` (on by default) and `confinement.agent_steps` (off by
   default until the confined Claude Code CLI is verified with a logged-in session and user-scoped
   MCP servers; a confined Claude Code CLI runs with `CLAUDE_CONFIG_DIR` set to `~/.claude`). Each switch that is off adds a line to the section, for example `Agent steps are

@@ -1245,6 +1245,47 @@ fn a_declared_directory_nested_in_another_writable_root_is_refused() {
 }
 
 #[test]
+fn a_declared_directory_in_the_data_folder_is_allowed_only_in_a_lane_dir() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let data = root.join("data");
+    let project = data.join("projects/demo");
+    std::fs::create_dir_all(project.join("repository")).unwrap();
+    let home = root.join("home");
+    let tree = root.join("tree");
+    let scratch = root.join("scratch");
+    let check = |dir: &Path| {
+        crate::process::check_declared_dirs_at(
+            &[dir.to_path_buf()],
+            None,
+            &tree,
+            &scratch,
+            &data,
+            &home,
+        )
+    };
+
+    check(&project.join("lanes/app-1/out")).unwrap();
+    check(&project.join("lanes/app-1/out/deep")).unwrap();
+
+    for refused in [
+        data.clone(),
+        root.clone(),
+        data.join("projects"),
+        project.clone(),
+        project.join("lanes"),
+        project.join("lanes/app-1"),
+        project.join("repository"),
+        project.join("repository/lanes/app-1/out"),
+        project.join("state/lanes/app-1/out"),
+        data.join("checks-scratch/out"),
+    ] {
+        let reason = check(&refused).unwrap_err();
+        assert!(reason.contains("overlaps the bongos data folder"), "{reason}");
+    }
+}
+
+#[test]
 fn a_declared_directory_named_twice_is_fine() {
     let fixture = fixture();
     let _registry = own_registry(&fixture);

@@ -631,7 +631,12 @@ fn promise_text_per_platform() {
     let unconfined = promise(Platform::Linux, SandboxAvailability::Unavailable);
     assert!(unconfined.body.starts_with("No sandbox is available here"));
     assert!(unconfined.body.contains("Install Bubblewrap (Linux)"));
-    assert!(unconfined.body.contains("task checks refuse to start"));
+    assert!(unconfined.body.contains("except in a main worktree, where they are refused"));
+    assert!(
+        unconfined
+            .body
+            .contains("Task checks refuse to start unless confinement.task_checks is off")
+    );
     assert_eq!(
         promise(Platform::Other, SandboxAvailability::Available),
         unconfined
