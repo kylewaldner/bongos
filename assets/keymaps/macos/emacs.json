@@ -146,6 +146,9 @@
       "alt-p": "emacs::SymbolJumpPrev", // symbol-overlay-jump-prev
       "alt-i": "emacs::SymbolOverlayPut", // symbol-overlay-put
       "alt-shift-i": "emacs::SymbolOverlayRemoveAll", // symbol-overlay-remove-all
+      "alt-;": "avy::GotoCharTimer", // avy-goto-char-timer
+      "ctrl-;": "avy::GotoWord1", // avy-goto-word-1
+      "ctrl-alt-;": "avy::GotoLine", // avy-goto-line
     },
   },
   {

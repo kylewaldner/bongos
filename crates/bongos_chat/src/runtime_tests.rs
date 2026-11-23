@@ -1333,13 +1333,23 @@ fn test_fake_claude_runs_the_settings_hooks_for_event_markers() {
     let mut text = String::new();
     while Instant::now() < deadline {
         text = std::fs::read_to_string(&out).unwrap_or_default();
-        if text.contains("MARKER-ONE") && text.contains("MARKER-TWO") {
+        // The poller removes a marker only after its hook has run, so wait for
+        // both markers to be consumed before closing stdin.
+        if text.contains("MARKER-ONE")
+            && text.contains("MARKER-TWO")
+            && files_under(&events).is_empty()
+        {
             break;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+    let timed_out = Instant::now() >= deadline;
     drop(child.stdin.take());
     child.wait().unwrap();
+    assert!(
+        !timed_out || files_under(&events).is_empty(),
+        "timed out after 20s: {text}"
+    );
 
     assert!(
         text.contains("\"hook_event_name\":\"Notification\"")

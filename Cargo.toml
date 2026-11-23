@@ -203,6 +203,8 @@ members = [
     "crates/x_ai",
     "crates/bongos",
     "crates/bongos_app",
+    "crates/bongos_avy",
+    "crates/bongos_avy_model",
     "crates/bongos_builder",
     "crates/bongos_builder_model",
     "crates/bongos_chat",
@@ -480,6 +482,8 @@ worktree = { path = "crates/worktree" }
 x_ai = { path = "crates/x_ai" }
 bongos = { path = "crates/bongos" }
 bongos_app = { path = "crates/bongos_app" }
+bongos_avy = { path = "crates/bongos_avy" }
+bongos_avy_model = { path = "crates/bongos_avy_model" }
 bongos_builder = { path = "crates/bongos_builder" }
 bongos_builder_model = { path = "crates/bongos_builder_model" }
 bongos_chat = { path = "crates/bongos_chat" }

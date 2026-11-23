@@ -3055,7 +3055,7 @@ fn appearance_page() -> SettingsPage {
         ]
     }
 
-    fn cursor_section() -> [SettingsPageItem; 6] {
+    fn cursor_section() -> [SettingsPageItem; 7] {
         [
             SettingsPageItem::SectionHeader("Cursor"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -3109,6 +3109,21 @@ fn appearance_page() -> SettingsPage {
                     pick: |settings_content| settings_content.emacs.as_ref()?.cursor_style.as_ref(),
                     write: |settings_content, value, _| {
                         settings_content.emacs.get_or_insert_default().cursor_style = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            // todo(settings ui): add units to this number input
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Avy Timeout",
+                description: "Time in milliseconds Avy jump waits after the last typed character before it shows the labels.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("emacs.avy_timeout"),
+                    pick: |settings_content| settings_content.emacs.as_ref()?.avy_timeout.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.emacs.get_or_insert_default().avy_timeout = value;
                     },
                 }),
                 metadata: None,

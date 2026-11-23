@@ -36,7 +36,9 @@
     "save_kill_ring": true,
     // Whether copies and pastes in the terminal use the kill ring. While false, a terminal copy
     // or a program's clipboard write leaves the ring alone.
-    "terminal_uses_kill_ring": false
+    "terminal_uses_kill_ring": false,
+    // Time in milliseconds Avy jump waits after the last typed character before it shows the labels.
+    "avy_timeout": 500
   },
   // The name of a font to use for rendering text in the editor
   // ".ZedMono" currently aliases to Lilex

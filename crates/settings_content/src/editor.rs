@@ -825,6 +825,10 @@ pub struct EmacsSettingsContent {
     ///
     /// Default: false
     pub terminal_uses_kill_ring: Option<bool>,
+    /// Time in milliseconds Avy jump waits after the last typed character before it shows the labels.
+    ///
+    /// Default: 500
+    pub avy_timeout: Option<DelayMs>,
 }
 
 /// Which cursor shape the Emacs mode asks for.
