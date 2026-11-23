@@ -1179,6 +1179,11 @@ impl WorkflowEngine {
         self.lifecycle().active_runs()
     }
 
+    /// The runs that move on by itself, not those waiting for a person, in start order.
+    pub fn progressing_runs(&self) -> Vec<RunId> {
+        self.lifecycle().progressing_runs()
+    }
+
     /// Loads the runs on disk now when they are still to be loaded, before a handover reads
     /// them. False when they cannot be loaded yet (no work tree), so a handover would miss runs
     /// this engine loads later.

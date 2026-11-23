@@ -685,8 +685,9 @@ struct Changes {
 /// reuse that branch, else at `refs/bongos/saved/<lane>/<run id>`; never on any other branch.
 /// No hook runs and nothing is signed.
 ///
-/// A last run that is not known (none given, or the tree is on another run's run branch, as after
-/// that run's record was cleared) never lets work go: the tree is saved as left by an unrecorded
+/// A last run that is not known (none given, the tree is on another run's run branch, as after
+/// that run's record was cleared, or the last run succeeded and the tree is dirty off its own
+/// branch) never lets work go: the tree is saved as left by an unrecorded
 /// run, at a saved ref, whatever the given run's end. Commits only a detached `HEAD` holds are kept
 /// at a saved ref too.
 async fn save(git: &Git, request: &ResetRequest) -> Result<Option<Saved>, String> {
@@ -703,8 +704,16 @@ async fn save(git: &Git, request: &ResetRequest) -> Result<Option<Saved>, String
         run_branch: String::new(),
         end: LastEnd::Halted,
     };
+    // A succeeded run's work is merged, so nothing of it is saved, but a tree left dirty off
+    // that run's own branch holds work no run recorded.
+    let stray = match &request.last {
+        Some(last) if last.end == LastEnd::Succeeded && current != last.run_branch => {
+            git.is_dirty(tree).await.map_err(git_error)?
+        }
+        _ => false,
+    };
     let last = match &request.last {
-        Some(last) if !on_other_run_branch(&current, &last.run_id) => last,
+        Some(last) if !stray && !on_other_run_branch(&current, &last.run_id) => last,
         _ => &unrecorded,
     };
     let saved = save_changes(git, request, tree, last).await?;

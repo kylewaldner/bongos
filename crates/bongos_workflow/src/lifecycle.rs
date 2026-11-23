@@ -363,6 +363,12 @@ impl RunStatus {
     pub fn is_active(self) -> bool {
         !matches!(self, Self::Succeeded | Self::Cancelled)
     }
+
+    /// Whether the run moves on by itself: queued, running, or pausing while its keys finish.
+    /// Halted, failed, paused and waiting-on-you runs wait for a person.
+    pub fn progresses_alone(self) -> bool {
+        matches!(self, Self::Queued | Self::Running | Self::Pausing)
+    }
 }
 
 /// What the lifecycle tells the app.
@@ -1124,6 +1130,18 @@ impl<R: Runner> Lifecycle<R> {
         self.runs
             .iter()
             .filter(|entry| self.status(&entry.id).is_some_and(RunStatus::is_active))
+            .map(|entry| entry.id.clone())
+            .collect()
+    }
+
+    /// Every run that moves on by itself (see [`RunStatus::progresses_alone`]), in start order.
+    pub fn progressing_runs(&self) -> Vec<RunId> {
+        self.runs
+            .iter()
+            .filter(|entry| {
+                self.status(&entry.id)
+                    .is_some_and(RunStatus::progresses_alone)
+            })
             .map(|entry| entry.id.clone())
             .collect()
     }

@@ -232,13 +232,14 @@ pub(crate) fn stop_request(cx: &App) -> Option<mpsc::UnboundedSender<bool>> {
         .map(|requests| requests.0.clone())
 }
 
-/// Resolves once no run is active and `busy` says nothing is, on the executor's clock. Clients do
-/// not count: the one that asked to stop is connected.
+/// Resolves once no run moves on by itself and `busy` says nothing is, on the executor's clock. A
+/// halted, failed, paused or waiting run waits for a person and is not waited on. Clients do not
+/// count: the one that asked to stop is connected.
 async fn wait_until_no_runs(busy: &HostBusy, cx: &mut AsyncApp) {
     let executor = cx.background_executor().clone();
     while cx.update(|cx| {
         cx.try_global::<WorkflowEngine>()
-            .is_some_and(|engine| !engine.active_runs().is_empty())
+            .is_some_and(|engine| !engine.progressing_runs().is_empty())
             || busy(cx)
     }) {
         executor.timer(BUSY_RECHECK).await;
