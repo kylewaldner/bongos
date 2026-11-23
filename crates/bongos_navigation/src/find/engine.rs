@@ -115,7 +115,10 @@ impl FindRequest {
         // (only under the base directory, which narrows everything).
         let (paths, names): (Vec<&str>, Vec<&str>) =
             globs.into_iter().partition(|glob| glob.contains('/'));
-        let mut include: Vec<String> = paths.into_iter().map(|glob| join_base(base, glob)).collect();
+        let mut include: Vec<String> = paths
+            .into_iter()
+            .map(|glob| join_base(base, glob))
+            .collect();
         match (dirs.is_empty(), names.is_empty()) {
             (true, _) => include.extend(names.into_iter().map(str::to_string)),
             (false, true) if include.is_empty() => {

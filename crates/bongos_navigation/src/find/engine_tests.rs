@@ -305,7 +305,11 @@ async fn the_more_count_is_a_floor_once_zeds_search_hit_its_cap(cx: &mut TestApp
         })
         .await
         .unwrap();
-    search.results.send(SearchResult::LimitReached).await.unwrap();
+    search
+        .results
+        .send(SearchResult::LimitReached)
+        .await
+        .unwrap();
     search.results.close();
     let batches: Vec<Vec<Candidate>> = search.rows.collect().await;
     let last = batches.last().unwrap().last().unwrap();
@@ -316,7 +320,10 @@ async fn the_more_count_is_a_floor_once_zeds_search_hit_its_cap(cx: &mut TestApp
             at_least: true
         }
     ));
-    assert_eq!(last.primary.as_ref(), "50+ more matches: RET opens them all");
+    assert_eq!(
+        last.primary.as_ref(),
+        "50+ more matches: RET opens them all"
+    );
     assert_eq!(more_label(50, false), "50 more matches: RET opens them all");
 }
 
