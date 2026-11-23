@@ -1,5 +1,5 @@
 //! Every `undo_tree::` action. `Vundo` has no key (it is reached by name); the others are bound
-//! in the panel's `UndoTree` key context. `VundoDiff` and `VundoConfirm` have no handler yet.
+//! in the panel's `UndoTree` key context.
 
 use gpui::actions;
 

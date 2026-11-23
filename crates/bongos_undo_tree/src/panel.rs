@@ -5,6 +5,10 @@
 //! dedicated pane of its own. Quitting it, by any path (its key, closing its tab or pane, the
 //! previewed pane showing another item, the buffer or editor going away, or the panel being moved
 //! into another pane), closes the preview and removes the panel.
+//!
+//! `d` shows the diff from the marked state (or the state the tree was opened at) to the state
+//! under the cursor in the lower half of the panel; `RET` commits the state under the cursor to
+//! the buffer as one undoable step and closes the panel.
 
 use std::{ops::Range, rc::Rc, time::Instant};
 
@@ -14,7 +18,7 @@ use bongos_undo_tree_model::{
 use editor::Editor;
 use gpui::{
     App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Global, ScrollStrategy,
-    SharedString, Subscription, UniformListScrollHandle, Window, uniform_list,
+    SharedString, Subscription, Task, UniformListScrollHandle, WeakEntity, Window, uniform_list,
 };
 use language::Buffer;
 use ui::prelude::*;
@@ -27,10 +31,13 @@ use workspace::{
 
 use crate::{
     actions::{
-        VundoBackward, VundoForward, VundoMark, VundoNext, VundoPrevious, VundoQuit, VundoUnmark,
+        VundoBackward, VundoConfirm, VundoDiff, VundoForward, VundoMark, VundoNext, VundoPrevious,
+        VundoQuit, VundoUnmark,
     },
     adapter::{TreeShape, shape_of},
-    preview::{PreviewEvent, PreviewSession},
+    commit::{CommitRequest, NOTHING_COMMITTED_MESSAGE},
+    diff::DiffView,
+    preview::{CloseReason, PreviewEvent, PreviewSession},
 };
 
 /// The key context of the panel; its keys are bound in this context only.
@@ -82,6 +89,7 @@ enum Step {
 pub struct UndoTreePanel {
     focus_handle: FocusHandle,
     session: Entity<PreviewSession>,
+    buffer: WeakEntity<Buffer>,
     buffer_id: EntityId,
     home_pane_id: EntityId,
     title: SharedString,
@@ -92,6 +100,8 @@ pub struct UndoTreePanel {
     layout_passes: usize,
     quitting: bool,
     scroll_handle: UniformListScrollHandle,
+    diff: Option<DiffView>,
+    commit: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -121,6 +131,8 @@ impl UndoTreePanel {
         let editor_id = editor.entity_id();
         let subscriptions = vec![
             cx.subscribe(&session, |this, _, event: &PreviewEvent, cx| match event {
+                // A commit closes the preview first; the panel closes once it lands or aborts.
+                PreviewEvent::Closed(CloseReason::Commit) => {}
                 PreviewEvent::Closed(_) => this.quit(cx),
             }),
             cx.subscribe(editor_pane, move |this, pane, event: &pane::Event, cx| {
@@ -141,6 +153,7 @@ impl UndoTreePanel {
         let mut panel = Self {
             focus_handle: cx.focus_handle(),
             session,
+            buffer: buffer.downgrade(),
             buffer_id: buffer.entity_id(),
             home_pane_id,
             title: format!("Undo tree: {file_name}").into(),
@@ -151,6 +164,8 @@ impl UndoTreePanel {
             layout_passes: 0,
             quitting: false,
             scroll_handle: UniformListScrollHandle::new(),
+            diff: None,
+            commit: None,
             _subscriptions: subscriptions,
         };
         panel.refresh(cx);
@@ -190,6 +205,16 @@ impl UndoTreePanel {
     /// How many times the rows were laid out; each lay-out is one pass over the states.
     pub fn layout_passes(&self) -> usize {
         self.layout_passes
+    }
+
+    /// The diff the panel shows, if `d` was pressed.
+    pub fn diff_text(&self, cx: &App) -> Option<String> {
+        self.diff.as_ref().map(|diff| diff.text(cx))
+    }
+
+    /// Whether a commit is being prepared.
+    pub fn is_committing(&self) -> bool {
+        self.commit.is_some()
     }
 
     /// The text of the row at `index`: the branch columns and the mark, then the relative time;
@@ -234,6 +259,9 @@ impl UndoTreePanel {
     }
 
     fn step(&mut self, step: Step, window: &mut Window, cx: &mut Context<Self>) {
+        if self.commit.is_some() {
+            return;
+        }
         // `forward` follows the path to the shape's current state; while the preview is open
         // that is the state the buffer is really in, the entry state.
         self.tree.shape.current = self.tree.shape.entry;
@@ -279,6 +307,97 @@ impl UndoTreePanel {
             self.tree.shape.mark = None;
             self.refresh(cx);
         }
+    }
+
+    /// Shows the diff from the marked state, or the entry state when nothing is marked, to the
+    /// state under the cursor. Each `d` computes it again.
+    fn show_diff(&mut self, _: &VundoDiff, window: &mut Window, cx: &mut Context<Self>) {
+        if self.quitting || self.commit.is_some() {
+            return;
+        }
+        let Some(buffer) = self.buffer.upgrade() else {
+            return;
+        };
+        let from = self.tree.shape.mark.unwrap_or(self.tree.shape.entry);
+        let (Some(from), Some(to)) = (self.tree.id(from), self.tree.id(self.cursor)) else {
+            return;
+        };
+        if self.diff.is_none() {
+            let current = buffer.read(cx).undo_tree().current();
+            self.diff = Some(DiffView::new(&buffer, current, window, cx));
+        }
+        if let Some(diff) = self.diff.as_mut() {
+            diff.show(&buffer, from, to, cx).log_err();
+        }
+        cx.notify();
+    }
+
+    /// Commits the state under the cursor to the buffer and closes the panel. The buffer gets
+    /// its capability back first; the new text is diffed against it in the background and
+    /// applied as one transaction when the buffer has not changed since the panel opened. On the
+    /// entry state this closes the panel and changes nothing.
+    pub fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.quitting || self.commit.is_some() {
+            return;
+        }
+        let target = self.tree.id(self.cursor);
+        let request = {
+            let session = self.session.read(cx);
+            let editor = session.editor().upgrade();
+            match (target, self.buffer.upgrade(), editor) {
+                (Some(target), Some(buffer), Some(editor))
+                    if target != session.entry() && session.closed_reason().is_none() =>
+                {
+                    debug_assert_eq!(target, session.preview_node());
+                    let text = session.copy().read(cx).text();
+                    let request = CommitRequest {
+                        buffer,
+                        editor,
+                        entry_version: session.entry_version().clone(),
+                        selections: session.node_selections(target, cx),
+                    };
+                    Some((request, text))
+                }
+                _ => None,
+            }
+        };
+        let Some((request, text)) = request else {
+            self.quit(cx);
+            return;
+        };
+        self.session
+            .update(cx, |session, cx| session.close_for_commit(cx));
+        let diff = request.buffer.read(cx).diff(text, cx);
+        self.commit = Some(cx.spawn_in(window, async move |this, cx| {
+            let diff = diff.await;
+            this.update_in(cx, |this, window, cx| {
+                this.finish_commit(request, diff, window, cx)
+            })
+            .ok();
+        }));
+    }
+
+    fn finish_commit(
+        &mut self,
+        request: CommitRequest,
+        diff: language::Diff,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.quitting {
+            return;
+        }
+        if request.is_current(cx) {
+            request.apply(diff, UndoTreeClock::now(cx), window, cx);
+        } else {
+            MinibufferRouting::message(
+                window,
+                cx,
+                NOTHING_COMMITTED_MESSAGE,
+                MinibufferMessageKind::Message,
+            );
+        }
+        self.quit(cx);
     }
 
     fn render_rows(&self, range: Range<usize>, cx: &App) -> Vec<AnyElement> {
@@ -341,18 +460,32 @@ impl Render for UndoTreePanel {
             .on_action(cx.listener(Self::set_mark))
             .on_action(cx.listener(Self::clear_mark))
             .on_action(cx.listener(|this, _: &VundoQuit, _, cx| this.quit(cx)))
+            .on_action(cx.listener(Self::show_diff))
+            .on_action(cx.listener(|this, _: &VundoConfirm, window, cx| this.confirm(window, cx)))
             .child(
-                uniform_list(
-                    "undo-tree-rows",
-                    self.rows.len(),
-                    cx.processor(|this, range: Range<usize>, _window, cx| {
-                        this.render_rows(range, cx)
-                    }),
-                )
-                .size_full()
-                .font_buffer(cx)
-                .track_scroll(&self.scroll_handle),
+                div().flex_1().min_h_0().w_full().child(
+                    uniform_list(
+                        "undo-tree-rows",
+                        self.rows.len(),
+                        cx.processor(|this, range: Range<usize>, _window, cx| {
+                            this.render_rows(range, cx)
+                        }),
+                    )
+                    .size_full()
+                    .font_buffer(cx)
+                    .track_scroll(&self.scroll_handle),
+                ),
             )
+            .when_some(self.diff.as_ref(), |this, diff| {
+                this.child(
+                    div()
+                        .h_1_2()
+                        .w_full()
+                        .border_t_1()
+                        .border_color(cx.theme().colors().border)
+                        .child(diff.editor().clone()),
+                )
+            })
     }
 }
 

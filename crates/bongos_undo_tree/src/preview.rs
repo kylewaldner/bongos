@@ -37,6 +37,9 @@ pub enum CloseReason {
     OutsideEdit,
     /// The real editor, its pane or the real buffer went away.
     Released,
+    /// The chosen state is being committed to the real buffer, which needs its capability back
+    /// first. The panel stays until the commit lands or aborts.
+    Commit,
 }
 
 /// Events of a [`PreviewSession`].
@@ -63,6 +66,7 @@ pub struct PreviewSession {
     preview_editor: Entity<Editor>,
     saved_capability: Capability,
     entry: UndoNodeId,
+    entry_version: clock::Global,
     entry_pinned: bool,
     entry_selections: Arc<[Selection<Anchor>]>,
     entry_scroll: Point<ScrollOffset>,
@@ -103,14 +107,16 @@ impl PreviewSession {
                 editor.scroll_position(cx),
             )
         });
-        let (saved_capability, entry, entry_pinned, copy) = buffer.update(cx, |buffer, cx| {
-            let saved_capability = buffer.capability();
-            let entry = buffer.undo_tree().current();
-            let entry_pinned = buffer.pin_undo_node(entry);
-            let copy = buffer.detached_copy(cx);
-            buffer.set_capability(Capability::ReadOnly, cx);
-            (saved_capability, entry, entry_pinned, copy)
-        });
+        let (saved_capability, entry, entry_version, entry_pinned, copy) =
+            buffer.update(cx, |buffer, cx| {
+                let saved_capability = buffer.capability();
+                let entry = buffer.undo_tree().current();
+                let entry_version = buffer.version();
+                let entry_pinned = buffer.pin_undo_node(entry);
+                let copy = buffer.detached_copy(cx);
+                buffer.set_capability(Capability::ReadOnly, cx);
+                (saved_capability, entry, entry_version, entry_pinned, copy)
+            });
 
         let preview_editor = cx.new(|cx| {
             let mut preview_editor = Editor::for_buffer(copy.clone(), None, window, cx);
@@ -158,6 +164,7 @@ impl PreviewSession {
                 preview_editor,
                 saved_capability,
                 entry,
+                entry_version,
                 entry_pinned,
                 entry_selections,
                 entry_scroll,
@@ -199,34 +206,15 @@ impl PreviewSession {
             .buffer
             .upgrade()
             .context("the previewed buffer is gone")?;
-        let (counts, toggle_count, transaction) = {
-            let tree = buffer.read(cx).undo_tree();
-            let node = tree
-                .node(target)
-                .context("the undo state is not in the tree")?;
-            let transaction = node.transaction().cloned();
-            let toggles = tree.toggles(self.preview_node, target);
-            let copy = self.copy.read(cx);
-            let mut counts = HashMap::default();
-            for id in &toggles {
-                let Some(toggled) = tree.node(UndoNodeId(*id)).and_then(|n| n.transaction()) else {
-                    continue;
-                };
-                for edit_id in &toggled.edit_ids {
-                    counts.insert(*edit_id, copy.undo_count(*edit_id) + 1);
-                }
-            }
-            (counts, toggles.len(), transaction)
-        };
-        if !counts.is_empty() {
-            self.copy
-                .update(cx, |copy, cx| copy.undo_operations(counts, cx));
+        let (toggle_count, applied) =
+            move_copy(&buffer, &self.copy, self.preview_node, target, cx)?;
+        if applied {
             self.undo_operation_calls += 1;
         }
         self.last_move_toggles = toggle_count;
         self.preview_node = target;
 
-        let ranges = self.selections_for(target, transaction.as_ref(), cx);
+        let ranges = self.node_selections(target, cx);
         self.preview_editor.update(cx, |preview_editor, cx| {
             preview_editor.change_selections(
                 SelectionEffects::scroll(Autoscroll::newest()),
@@ -243,6 +231,38 @@ impl PreviewSession {
     /// back and the entry state's pin is released. Closing twice does nothing.
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.close_with(CloseReason::Quit, cx);
+    }
+
+    /// Closes the preview to commit the state it shows: like [`Self::close`], the real buffer
+    /// gets its capability back and the entry state's pin is released, but the panel stays
+    /// until the commit lands or aborts.
+    pub fn close_for_commit(&mut self, cx: &mut Context<Self>) {
+        self.close_with(CloseReason::Commit, cx);
+    }
+
+    /// The real buffer's version when the preview opened.
+    pub fn entry_version(&self) -> &clock::Global {
+        &self.entry_version
+    }
+
+    /// The real editor the preview stands in for.
+    pub fn editor(&self) -> &WeakEntity<Editor> {
+        &self.editor
+    }
+
+    /// The selections the state `target` was left with, as offsets in its text (a reversed
+    /// selection has its start after its end): the real editor's selections after the node's
+    /// transaction, or for a node made elsewhere the start of its first edit; the entry state
+    /// keeps the real editor's selections.
+    pub fn node_selections(&self, target: UndoNodeId, cx: &App) -> Vec<Range<MultiBufferOffset>> {
+        let transaction = self.buffer.upgrade().and_then(|buffer| {
+            buffer
+                .read(cx)
+                .undo_tree()
+                .node(target)
+                .and_then(|node| node.transaction().cloned())
+        });
+        self.selections_for(target, transaction.as_ref(), cx)
     }
 
     /// The undo state the preview shows.
@@ -380,6 +400,39 @@ impl PreviewSession {
             .map_or(0, |range| range.start);
         vec![MultiBufferOffset(start)..MultiBufferOffset(start)]
     }
+}
+
+/// Moves `copy`, a detached copy of `buffer` that shows the undo state `from`, to the state `to`
+/// with at most one undo operation. Returns how many transactions the move toggled and whether
+/// an undo operation was applied.
+pub(crate) fn move_copy(
+    buffer: &Entity<Buffer>,
+    copy: &Entity<Buffer>,
+    from: UndoNodeId,
+    to: UndoNodeId,
+    cx: &mut App,
+) -> Result<(usize, bool)> {
+    let (counts, toggle_count) = {
+        let tree = buffer.read(cx).undo_tree();
+        anyhow::ensure!(tree.node(to).is_some(), "the undo state is not in the tree");
+        let toggles = tree.toggles(from, to);
+        let copy = copy.read(cx);
+        let mut counts = HashMap::default();
+        for id in &toggles {
+            let Some(toggled) = tree.node(UndoNodeId(*id)).and_then(|n| n.transaction()) else {
+                continue;
+            };
+            for edit_id in &toggled.edit_ids {
+                counts.insert(*edit_id, copy.undo_count(*edit_id) + 1);
+            }
+        }
+        (counts, toggles.len())
+    };
+    let applied = !counts.is_empty();
+    if applied {
+        copy.update(cx, |copy, cx| copy.undo_operations(counts, cx));
+    }
+    Ok((toggle_count, applied))
 }
 
 /// Resolves selections of the real editor in the copy, which shares the real buffer's id and
