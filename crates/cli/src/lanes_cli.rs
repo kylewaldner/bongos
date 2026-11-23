@@ -856,7 +856,12 @@ fn render_lane_reply(verb: &str, reply: Value, as_json: bool) -> Result<String, 
         });
     }
     if as_json {
-        return serde_json::to_string_pretty(&reply).map_err(|error| error.to_string());
+        // The picker's document, as the read mode prints it with no writer.
+        let doc = match verb {
+            "dry-run" | "pick" => reply.get("pick").unwrap_or(&reply),
+            _ => &reply,
+        };
+        return serde_json::to_string_pretty(doc).map_err(|error| error.to_string());
     }
     message_of(&reply)
 }
@@ -1128,6 +1133,7 @@ pub(crate) mod real {
                 hand_over,
                 &log,
                 start_timeout(),
+                EXITED_GRACE,
             )
         }
 
@@ -1159,7 +1165,8 @@ pub(crate) mod real {
     /// Starts the engine host of `project` with `program` and returns once a writer is live.
     /// Its output goes to `log`. A host that the lock refuses (another holds the writer) exits;
     /// the caller attaches to the writer that holds it, which may not have announced itself yet
-    /// when the refused host exits, so that one is waited for a moment.
+    /// when the refused host exits, so that one is waited for up to `exited_grace`
+    /// ([`EXITED_GRACE`] in the app).
     pub(crate) fn start_host_process(
         program: &Path,
         project: &ProjectRef,
@@ -1167,6 +1174,7 @@ pub(crate) mod real {
         hand_over: bool,
         log: &Path,
         timeout: Duration,
+        exited_grace: Duration,
     ) -> Result<WriterInfo, StartFailure> {
         let failure = |message: String| StartFailure {
             message,
@@ -1207,7 +1215,7 @@ pub(crate) mod real {
                 }
             }
             if let Ok(Some(status)) = child.try_status() {
-                let grace = Instant::now() + EXITED_GRACE;
+                let grace = Instant::now() + exited_grace;
                 loop {
                     if let Some((file, true)) = host_file(project)
                         && file.moving.is_none()

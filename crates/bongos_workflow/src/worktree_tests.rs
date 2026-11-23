@@ -18,8 +18,8 @@ use crate::builtin_merge::{
 use crate::worktrees::{
     ClearItem, FinishedRun, Git, NOT_STARTED, RunWorktree, TaskCheckout, WorktreeError,
     apply_clear, branch_worktree_path, check_free_space, check_run_dir, create_branch, create_run,
-    fan_out_branch_name, join, plan_clear, run_branch_name, run_dir, run_worktree_path, runs_dir,
-    short_id,
+    fan_out_branch_name, join, lane_run, plan_clear, run_branch_name, run_dir, run_worktree_path,
+    runs_dir, short_id,
 };
 
 const RUN_ID: &str = "01890a5d-ac96-774b-bcce-b302099a8057";
@@ -424,6 +424,72 @@ fn a_symlink_out_of_the_runs_dir_is_refused() {
         fs::read_to_string(outside.join("keep.txt")).unwrap(),
         "keep\n"
     );
+}
+
+#[gpui::test]
+async fn a_lane_run_uses_the_lane_tree_on_its_run_branch_and_refuses_another_branch(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::new().await;
+    let git = &fixture.git;
+    let tree = fixture.root.join("lanes").join("lane-build-1");
+    let branch = run_branch_name(TASK_BRANCH, RUN_ID, 1);
+    git_out(
+        git,
+        &fixture.repository,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            &branch,
+            &tree.to_string_lossy(),
+            TASK_BRANCH,
+        ],
+    )
+    .await;
+
+    let run = lane_run(git, &fixture.task, RUN_ID, 1, &tree, &settings(), &plenty)
+        .await
+        .unwrap();
+    assert_eq!(run.path, tree);
+    assert_eq!(run.branch, branch);
+    let expected_dir = fixture
+        .repository
+        .join(".bongos-worktrees/.runs/add-login-099a8057-1");
+    assert_eq!(run.run_dir, expected_dir);
+    assert!(run.run_dir.is_dir());
+
+    // The tree must be on this run's branch: another run's id names another branch.
+    let refused = lane_run(
+        git,
+        &fixture.task,
+        OTHER_RUN_ID,
+        1,
+        &tree,
+        &settings(),
+        &plenty,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        refused.to_string().contains("not the run branch"),
+        "{refused}"
+    );
+    let missing = fixture.root.join("lanes").join("lane-build-2");
+    let refused = lane_run(
+        git,
+        &fixture.task,
+        RUN_ID,
+        1,
+        &missing,
+        &settings(),
+        &plenty,
+    )
+    .await
+    .unwrap_err();
+    assert!(refused.to_string().contains("missing"), "{refused}");
 }
 
 #[gpui::test]

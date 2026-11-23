@@ -363,6 +363,12 @@ impl RunStatus {
     pub fn is_active(self) -> bool {
         !matches!(self, Self::Succeeded | Self::Cancelled)
     }
+
+    /// Whether the run moves on by itself: queued, running, or pausing while its keys finish.
+    /// Halted, failed, paused and waiting-on-you runs wait for a person.
+    pub fn progresses_alone(self) -> bool {
+        matches!(self, Self::Queued | Self::Running | Self::Pausing)
+    }
 }
 
 /// What the lifecycle tells the app.
@@ -410,6 +416,22 @@ pub trait RunWorktrees: Send {
     fn base_branch(&mut self, _repo: &Path) -> Option<String> {
         None
     }
+
+    /// The run worktree of a task run in a lane's tree at `path`, which the lane already put on
+    /// the run branch ([`worktrees::lane_run`]). By default no run is made in a lane's tree.
+    fn lane(
+        &mut self,
+        _task: &TaskCheckout,
+        _run_id: &str,
+        _attempt: u32,
+        path: &Path,
+        _settings: &WorkflowsSettings,
+    ) -> Result<RunWorktree, WorktreeError> {
+        Err(WorktreeError::Io {
+            path: path.to_path_buf(),
+            message: "no run is made in a lane's tree here".to_string(),
+        })
+    }
 }
 
 /// The free bytes on the disk holding a path ([`worktrees::disk_free_bytes`] in the app).
@@ -453,6 +475,26 @@ impl RunWorktrees for GitWorktrees {
 
     fn base_branch(&mut self, repo: &Path) -> Option<String> {
         futures::executor::block_on(worktrees::checked_out_branch(&self.git, repo))
+    }
+
+    fn lane(
+        &mut self,
+        task: &TaskCheckout,
+        run_id: &str,
+        attempt: u32,
+        path: &Path,
+        settings: &WorkflowsSettings,
+    ) -> Result<RunWorktree, WorktreeError> {
+        let free_space = self.free_space.clone();
+        futures::executor::block_on(worktrees::lane_run(
+            &self.git,
+            task,
+            run_id,
+            attempt,
+            path,
+            settings,
+            &move |path: &Path| free_space(path),
+        ))
     }
 }
 
@@ -652,6 +694,23 @@ fn read_cleared(dir: &Path, checkout: &TaskCheckout) -> Result<Option<ClearedRun
         status,
         finished,
     }))
+}
+
+/// The refusal of a start whose run worktree was not made.
+fn worktree_refusal(error: WorktreeError) -> Refusal {
+    match error {
+        WorktreeError::NotStarted => Refusal::new(
+            RefusalKind::NoTaskWorktree,
+            "This task has no worktree.",
+            "Start the task first (task: start).",
+        ),
+        WorktreeError::LowDiskSpace { .. } => Refusal::new(
+            RefusalKind::LowDiskSpace,
+            format!("Not enough free space: {error}."),
+            "Free some space, or lower workflows.min_free_disk_mb.",
+        ),
+        other => Refusal::io(other),
+    }
 }
 
 fn attempt_worktree(attempt: &Attempt) -> RunWorktree {
@@ -893,6 +952,48 @@ pub fn attempt_dir(run_dir: &Path, attempt: u32) -> PathBuf {
     run_dir.join("attempts").join(attempt.to_string())
 }
 
+/// The active run of each task of `tree` (by task id), read from the run records in each task's
+/// folder (`runs/<id>`), for a process with no run engine loaded: a read mode, or a window that
+/// does not hold the writer. Active is what holds a task ([`RunStatus::is_active`]), as the
+/// current attempt's log says. A record that cannot be read is skipped; of two active runs on one
+/// task the newest (run ids are UUID v7) is named.
+pub fn active_runs_on_disk(tree: &WorkTree) -> BTreeMap<String, RunId> {
+    let mut active: BTreeMap<String, RunId> = BTreeMap::new();
+    for task in tree.tasks() {
+        let Some(task_id) = task.id() else {
+            continue;
+        };
+        let Ok(entries) = fs::read_dir(task.dir.join(RUNS_DIR)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Some((run, status)) = recorded_status(&entry.path()) else {
+                continue;
+            };
+            if !status.is_active() {
+                continue;
+            }
+            let newer = active.get(task_id).is_none_or(|known| *known < run);
+            if newer {
+                active.insert(task_id.to_string(), run);
+            }
+        }
+    }
+    active
+}
+
+/// The id and status of the run whose directory is `dir`, from its `run.toml` and the log of its
+/// current attempt; `None` when either cannot be read.
+fn recorded_status(dir: &Path) -> Option<(RunId, RunStatus)> {
+    let text = fs::read_to_string(dir.join(RUN_FILE)).ok()?;
+    let record = RunToml::parse(&text).ok()?;
+    let attempt = record.current_attempt()?;
+    let events = attempt_dir(dir, attempt.n).join(crate::runtime::EVENTS_FILE);
+    let parsed = bongos_workflow_model::record::parse_log(fs::read(events).ok()?).ok()?;
+    let state = bongos_workflow_model::record::replay(&parsed.events);
+    Some((record.id, RunStatus::of(&state)))
+}
+
 /// `<attempt dir>/definition/<rev>`.
 pub fn definition_copy_dir(attempt_dir: &Path, rev: u32) -> PathBuf {
     attempt_dir.join("definition").join(rev.to_string())
@@ -1029,6 +1130,18 @@ impl<R: Runner> Lifecycle<R> {
         self.runs
             .iter()
             .filter(|entry| self.status(&entry.id).is_some_and(RunStatus::is_active))
+            .map(|entry| entry.id.clone())
+            .collect()
+    }
+
+    /// Every run that moves on by itself (see [`RunStatus::progresses_alone`]), in start order.
+    pub fn progressing_runs(&self) -> Vec<RunId> {
+        self.runs
+            .iter()
+            .filter(|entry| {
+                self.status(&entry.id)
+                    .is_some_and(RunStatus::progresses_alone)
+            })
             .map(|entry| entry.id.clone())
             .collect()
     }
@@ -1255,7 +1368,17 @@ impl<R: Runner> Lifecycle<R> {
         })?;
         let checkout = TaskCheckout::from_task(task.slug.clone(), file);
         let id = request.run_id.clone().unwrap_or_else(new_id);
-        let worktree = self.create_worktree(&checkout, &id, 1)?;
+        let (worktree, tree_record) = match &request.tree {
+            RunTree::Lane { path, .. } => {
+                let worktree = self.lane_worktree(&checkout, &id, path)?;
+                let record = RunTreeRecord::Lane {
+                    path: worktree.path.clone(),
+                    run_dir: worktree.run_dir.clone(),
+                };
+                (worktree, Some(record))
+            }
+            _ => (self.create_worktree(&checkout, &id, 1)?, None),
+        };
         let dir = task.dir.join(RUNS_DIR).join(&id);
         let created = now().to_string();
         let record = RunToml {
@@ -1272,7 +1395,7 @@ impl<R: Runner> Lifecycle<R> {
             parent: request.parent.clone(),
             lane: request.lane.clone(),
             unattended: request.unattended,
-            tree: None,
+            tree: tree_record,
             definitions: None,
             env: request.env.clone(),
             lane_dirs: request.lane_dirs,
@@ -1409,9 +1532,9 @@ impl<R: Runner> Lifecycle<R> {
     }
 
     /// The checks of a request's own fields, before anything is read: a tree this version cannot
-    /// make yet (a lane's tree; a snapshot or a named repository for a task run, whose tree is
-    /// always its task's), a base or merge target with no repository, lane directories with no
-    /// lane, a reserved run id that is not a UUID v7 or is taken, and a definition commit the
+    /// make yet (a lane's tree for a run with no task or with a second tree, start or merge
+    /// target; a snapshot or a named repository for a task run), a lane's tree or lane
+    /// directories with no lane, a base or merge target with no repository, a reserved run id that is not a UUID v7 or is taken, and a definition commit the
     /// caller did not read the layers from. A request that sets none of these passes.
     fn check_request(
         &self,
@@ -1441,8 +1564,28 @@ impl<R: Runner> Lifecycle<R> {
                     "A task run makes its worktree from the task's own repository and branch.",
                 ));
             }
+            (
+                RunTree::Lane {
+                    base: None,
+                    start: None,
+                    merge_into: None,
+                    ..
+                },
+                StartSubject::Task { .. },
+            ) => {
+                if request.lane.is_none() {
+                    return Err(Refusal::new(
+                        RefusalKind::BadRequest,
+                        "The run names a lane's tree but no lane.",
+                        "Name the lane, or no lane tree.",
+                    ));
+                }
+            }
             (RunTree::Lane { .. }, _) => {
-                return Err(unsupported("A run in a lane's tree is not supported yet."));
+                return Err(unsupported(
+                    "Only a task run may run in a lane's tree, with no second tree, start or \
+                     merge target yet.",
+                ));
             }
             (RunTree::Snapshot { .. }, StartSubject::Task { .. }) => {
                 return Err(unsupported(
@@ -1676,10 +1819,12 @@ impl<R: Runner> Lifecycle<R> {
         };
         let definitions = match &record_tree {
             RunTreeRecord::Snapshot { path } => path.clone(),
-            RunTreeRecord::Repository { .. } | RunTreeRecord::Work => context
-                .definitions
-                .clone()
-                .unwrap_or_else(|| project_dir.clone()),
+            RunTreeRecord::Repository { .. } | RunTreeRecord::Work | RunTreeRecord::Lane { .. } => {
+                context
+                    .definitions
+                    .clone()
+                    .unwrap_or_else(|| project_dir.clone())
+            }
         };
         let dir = project_dir.join(RUNS_DIR).join(&id);
         let created = now().to_string();
@@ -1786,7 +1931,18 @@ impl<R: Runner> Lifecycle<R> {
     /// loaded is [`RuntimeError::Duplicate`] and none of these load; a log that cannot be opened
     /// skips only its run.
     pub fn load_runs(&mut self, tree: &WorkTree) -> Result<LoadReport, RuntimeError> {
-        self.load_runs_where(tree, None)
+        self.load_runs_where(tree, None, &[])
+    }
+
+    /// [`Self::load_runs`] of every task outside `skip_under` (the files folders of projects whose
+    /// writer another process holds: their runs are that process's, and loading them here would
+    /// stop its running nodes and write to its logs).
+    pub fn load_runs_except(
+        &mut self,
+        tree: &WorkTree,
+        skip_under: &[PathBuf],
+    ) -> Result<LoadReport, RuntimeError> {
+        self.load_runs_where(tree, None, skip_under)
     }
 
     /// [`Self::load_runs`] of only `runs`, those of them not loaded yet: what a take-back after a
@@ -1797,13 +1953,14 @@ impl<R: Runner> Lifecycle<R> {
         tree: &WorkTree,
         runs: &[RunId],
     ) -> Result<LoadReport, RuntimeError> {
-        self.load_runs_where(tree, Some(runs))
+        self.load_runs_where(tree, Some(runs), &[])
     }
 
     fn load_runs_where(
         &mut self,
         tree: &WorkTree,
         only: Option<&[RunId]>,
+        skip_under: &[PathBuf],
     ) -> Result<LoadReport, RuntimeError> {
         let skip_loaded = only.is_some();
         let mut report = LoadReport::default();
@@ -1811,6 +1968,9 @@ impl<R: Runner> Lifecycle<R> {
         let mut specs: Vec<RunSpec> = Vec::new();
         let mut seen: std::collections::BTreeSet<RunId> = std::collections::BTreeSet::new();
         for task in tree.tasks() {
+            if skip_under.iter().any(|files| task.dir.starts_with(files)) {
+                continue;
+            }
             let runs = bongos_work_model::layout::runs_dir(&task.dir);
             let listing = match fs::read_dir(&runs) {
                 Ok(listing) => listing,
@@ -1941,16 +2101,21 @@ impl<R: Runner> Lifecycle<R> {
                 worktree: Some(repo.clone()),
                 branch: Some(base.clone()),
             },
-            (Some(RunTreeRecord::Snapshot { .. } | RunTreeRecord::Work), _) | (None, None) => {
-                TaskCheckout {
-                    slug: task.slug.clone(),
-                    worktree: None,
-                    branch: None,
-                }
+            (Some(RunTreeRecord::Snapshot { .. } | RunTreeRecord::Work), _)
+            | (None | Some(RunTreeRecord::Lane { .. }), None) => TaskCheckout {
+                slug: task.slug.clone(),
+                worktree: None,
+                branch: None,
+            },
+            (None | Some(RunTreeRecord::Lane { .. }), Some(file)) => {
+                TaskCheckout::from_task(task.slug.clone(), file)
             }
-            (None, Some(file)) => TaskCheckout::from_task(task.slug.clone(), file),
         };
-        match record.tree {
+        match &record.tree {
+            // The attempt that ran in the lane's tree keeps its own run directory beside it.
+            Some(RunTreeRecord::Lane { path, run_dir }) if *path == worktree.path => {
+                worktree.run_dir = run_dir.clone();
+            }
             Some(RunTreeRecord::Snapshot { .. }) => {
                 // The snapshot is no run directory: the run's own directory is its work directory.
                 worktree.run_dir = project_work_dir(&task.dir, &record.id);
@@ -2587,19 +2752,19 @@ impl<R: Runner> Lifecycle<R> {
     ) -> Result<RunWorktree, Refusal> {
         self.worktrees
             .create(checkout, run, attempt, &self.settings)
-            .map_err(|error| match error {
-                WorktreeError::NotStarted => Refusal::new(
-                    RefusalKind::NoTaskWorktree,
-                    "This task has no worktree.",
-                    "Start the task first (task: start).",
-                ),
-                WorktreeError::LowDiskSpace { .. } => Refusal::new(
-                    RefusalKind::LowDiskSpace,
-                    format!("Not enough free space: {error}."),
-                    "Free some space, or lower workflows.min_free_disk_mb.",
-                ),
-                other => Refusal::io(other),
-            })
+            .map_err(worktree_refusal)
+    }
+
+    /// The first attempt's run worktree in the lane's tree at `path`.
+    fn lane_worktree(
+        &mut self,
+        checkout: &TaskCheckout,
+        run: &str,
+        path: &Path,
+    ) -> Result<RunWorktree, Refusal> {
+        self.worktrees
+            .lane(checkout, run, 1, path, &self.settings)
+            .map_err(worktree_refusal)
     }
 
     /// Writes attempt `n` of `entry` (the definition copy, `run.toml`) and hands it to the

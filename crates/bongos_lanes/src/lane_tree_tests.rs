@@ -456,6 +456,126 @@ async fn work_off_the_run_branch_is_saved_at_a_saved_ref_never_on_a_task_branch(
     assert_eq!(current_branch(&tip), job.run_branch);
 }
 
+/// The save of `saved` at a saved ref, with its commit's subject and `README.md` there.
+fn saved_at_ref(fixture: &Fixture, saved: Option<crate::lane_tree::Saved>) -> (String, String) {
+    let saved = saved.expect("the work was saved");
+    let Some((commit, SaveTarget::Ref(name))) = saved.commit else {
+        panic!("expected a saved ref: {saved:?}");
+    };
+    assert_eq!(git(&fixture.app, &["rev-parse", &name]), commit);
+    (
+        name,
+        git(&fixture.app, &["log", "-1", "--format=%s", &commit]),
+    )
+}
+
+// A cancelled run's record was cleared, so the last run the engine knows is an older succeeded
+// one; the tree is on the cleared run's branch, so its work is still saved, never reset away.
+#[gpui::test]
+async fn work_of_a_cleared_run_is_saved_when_an_older_run_is_named_last(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::new();
+    let tip = fixture.tip();
+    fixture.reset(&fixture.task_job(RUN_1, None)).await.unwrap();
+    let job = fixture.task_job(RUN_2, Some(last(RUN_1, LastEnd::Succeeded)));
+    fixture.reset(&job).await.unwrap();
+    std::fs::write(tip.join("README.md"), "cancelled work\n").unwrap();
+    std::fs::write(tip.join("new.txt"), "new\n").unwrap();
+
+    let job = fixture.task_job(RUN_3, Some(last(RUN_1, LastEnd::Succeeded)));
+    let outcome = fixture.reset(&job).await.unwrap();
+    let (name, subject) = saved_at_ref(&fixture, outcome.saved);
+    assert_eq!(name, "refs/bongos/saved/build-1/unrecorded");
+    assert_eq!(subject, "work left by an unrecorded run");
+    assert_eq!(
+        git(&fixture.app, &["show", &format!("{name}:README.md")]),
+        "cancelled work"
+    );
+    assert_eq!(
+        git(&fixture.app, &["show", &format!("{name}:new.txt")]),
+        "new"
+    );
+    assert_eq!(current_branch(&tip), job.run_branch);
+    assert_eq!(git(&tip, &["status", "--porcelain"]), "");
+}
+
+// After a succeeded run, a dirty tree that is not on that run's own branch (a task branch after a
+// merge, or another run's branch) holds unrecorded work: it is saved, never reset away.
+#[gpui::test]
+async fn dirty_work_off_a_succeeded_runs_branch_is_saved(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::new();
+    let tip = fixture.tip();
+    fixture.reset(&fixture.task_job(RUN_1, None)).await.unwrap();
+
+    git(&tip, &["checkout", "-q", "task/y"]);
+    std::fs::write(tip.join("README.md"), "work on the task branch\n").unwrap();
+    let job = fixture.task_job(RUN_2, Some(last(RUN_1, LastEnd::Succeeded)));
+    let outcome = fixture.reset(&job).await.unwrap();
+    let (name, subject) = saved_at_ref(&fixture, outcome.saved);
+    assert_eq!(name, "refs/bongos/saved/build-1/unrecorded");
+    assert_eq!(subject, "work left by an unrecorded run");
+    assert_eq!(
+        git(&fixture.app, &["show", &format!("{name}:README.md")]),
+        "work on the task branch"
+    );
+    assert_eq!(current_branch(&tip), job.run_branch);
+    assert_eq!(git(&tip, &["status", "--porcelain"]), "");
+
+    // A clean tree off the run's branch saves nothing.
+    git(&tip, &["checkout", "-q", "task/y"]);
+    let job = fixture.task_job(RUN_3, Some(last(RUN_2, LastEnd::Succeeded)));
+    assert_eq!(fixture.reset(&job).await.unwrap().saved, None);
+}
+
+// With no last run known (no run engine, or its record not loaded), work in the tree is saved at
+// a new saved ref each time, never discarded.
+#[gpui::test]
+async fn with_no_known_last_run_the_work_is_saved(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::new();
+    let tip = fixture.tip();
+    fixture.reset(&fixture.task_job(RUN_1, None)).await.unwrap();
+    std::fs::write(tip.join("README.md"), "first\n").unwrap();
+    let outcome = fixture.reset(&fixture.task_job(RUN_2, None)).await.unwrap();
+    let (name, _) = saved_at_ref(&fixture, outcome.saved);
+    assert_eq!(name, "refs/bongos/saved/build-1/unrecorded");
+
+    std::fs::write(tip.join("README.md"), "second\n").unwrap();
+    let outcome = fixture.reset(&fixture.task_job(RUN_3, None)).await.unwrap();
+    let (name, _) = saved_at_ref(&fixture, outcome.saved);
+    assert_eq!(name, "refs/bongos/saved/build-1/unrecorded-2");
+    assert_eq!(
+        git(&fixture.app, &["show", &format!("{name}:README.md")]),
+        "second"
+    );
+
+    // A clean tree saves nothing.
+    let job = fixture.task_job(RUN_1, None);
+    assert_eq!(fixture.reset(&job).await.unwrap().saved, None);
+}
+
+// A commit made on a detached HEAD is on no branch; the reset keeps it at a saved ref.
+#[gpui::test]
+async fn a_commit_only_a_detached_head_holds_is_kept(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::new();
+    let tip = fixture.tip();
+    fixture.reset(&fixture.task_job(RUN_1, None)).await.unwrap();
+    git(&tip, &["checkout", "-q", "--detach"]);
+    std::fs::write(tip.join("README.md"), "committed detached\n").unwrap();
+    git(&tip, &["commit", "-q", "-a", "-m", "detached"]);
+    let head = git(&tip, &["rev-parse", "HEAD"]);
+
+    let job = fixture.task_job(RUN_2, Some(last(RUN_1, LastEnd::Succeeded)));
+    let outcome = fixture.reset(&job).await.unwrap();
+    let (name, subject) = saved_at_ref(&fixture, outcome.saved);
+    assert_eq!(name, format!("refs/bongos/saved/build-1/{RUN_1}"));
+    assert_eq!(subject, "detached");
+    assert_eq!(git(&fixture.app, &["rev-parse", &name]), head);
+    assert_eq!(current_branch(&tip), job.run_branch);
+}
+
 #[gpui::test]
 async fn a_second_tree_is_never_saved(cx: &mut TestAppContext) {
     cx.executor().allow_parking();

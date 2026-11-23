@@ -489,6 +489,10 @@ pub enum RunTreeRecord {
     /// The run's own work directory in its project's files folder, `work/<run id>`: no
     /// repository, no branch, nothing merged.
     Work,
+    /// A lane's persistent tree at `path`, which the lane put on the run branch of the first
+    /// attempt before the start; `run_dir` holds that attempt's fan-out worktrees and scratch. A
+    /// later attempt runs in a fresh run worktree, as any task run does.
+    Lane { path: PathBuf, run_dir: PathBuf },
 }
 
 /// `run.toml` as written, where `subject` may be missing (records older than the field).

@@ -10,10 +10,14 @@ use bongos_workflow::worktrees::run_branch_name;
 use gpui::TestAppContext;
 
 use crate::job_trees::{
-    CurrentJobTrees, JobRepositories, JobRepository, JobStart, JobTrees, start_job_trees,
+    CurrentJobTrees, JobRepositories, JobRepository, JobStart, JobTrees, LaneJobRequest,
+    prepare_lane_job, start_job_trees,
 };
-use crate::lane_tree::LastEnd;
+use crate::lane_tree::{LastEnd, git_tree_maker};
 use crate::lane_tree_tests::{Fixture, RUN_1, RUN_2, TASK_BRANCH, git, last};
+use crate::locations::binding_of;
+use crate::locations_tests::table;
+use crate::prepare::PrepareRequest;
 use crate::task_trees::SecondTreeLeases;
 
 const BOTH_TABLE: &str = r#"schema = 1
@@ -198,4 +202,141 @@ async fn a_failing_reset_or_a_lane_out_of_the_table_waits_and_deletes_nothing(
         run_branch_name(TASK_BRANCH, RUN_1, 1)
     );
     std::fs::remove_file(&lock).unwrap();
+}
+
+const ENV_TABLE: &str = r#"schema = 1
+
+[[kind]]
+name = "build"
+count = 2
+[kind.binding]
+dirs = ["target"]
+env = { CARGO_TARGET_DIR = "{dir.target}", LANE = "{lane}" }
+trees = [{ repo = "app", mode = "persistent" }]
+"#;
+
+/// The preparation of a job on build-1 of `text`, its repository `primary`, with the fixture's
+/// locations and git, no profile and free space everywhere.
+fn lane_job(fixture: &Fixture, text: &str, primary: Option<JobRepository>) -> LaneJobRequest {
+    let table = table(text);
+    let lane = LaneId::new("build", 1);
+    let from = primary
+        .iter()
+        .map(|primary| (primary.name.clone(), primary.add_from.clone()))
+        .collect();
+    LaneJobRequest {
+        prepare: PrepareRequest {
+            inputs: fixture.inputs.clone(),
+            table: std::sync::Arc::new(table.clone()),
+            lane: lane.clone(),
+            live: lanes(),
+            make_tree: git_tree_maker(fixture.git.clone(), from),
+            free_space: std::sync::Arc::new(|_: &std::path::Path| None),
+        },
+        profile: None,
+        binding: binding_of(&table, &lane).cloned(),
+        values: bongos_lanes_model::TokenValues {
+            lane: lane.to_string(),
+            kind: "build".to_string(),
+            lane_index: 1,
+            project: "0123456789ab".to_string(),
+            repo: String::new(),
+            live_lanes: 2,
+            cpus: 4,
+            dirs: Default::default(),
+        },
+        profile_env: Vec::new(),
+        primary,
+        table_lanes: lanes(),
+        save_max_file_bytes: 1000,
+        forbidden: fixture.forbidden(),
+        git: fixture.git.clone(),
+        leases: SecondTreeLeases::default(),
+    }
+}
+
+#[gpui::test]
+async fn a_prepared_job_runs_in_its_lane_tree_reset_onto_its_run_branch_with_the_lane_env(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::build(ENV_TABLE, |_| None);
+    let request = lane_job(&fixture, ENV_TABLE, Some(fixture.task_job(RUN_1, None)));
+    let setup = cx.update(|cx| prepare_lane_job(request, cx)).await.unwrap();
+    let tip = fixture.tip();
+    let target = fixture.locations.get("target").unwrap().path.clone();
+    assert!(
+        matches!(&setup.tree, bongos_workflow::RunTree::Lane { path, base: None, start: None, merge_into: None } if *path == tip),
+        "{:?}",
+        setup.tree
+    );
+    assert_eq!(
+        git(&tip, &["branch", "--show-current"]),
+        run_branch_name(TASK_BRANCH, RUN_1, 1)
+    );
+    assert!(target.is_dir(), "the named directory is made");
+    assert_eq!(
+        setup.lane_dirs,
+        std::collections::BTreeMap::from([("target".to_string(), target.clone())])
+    );
+    assert!(setup.env.contains(&bongos_lanes_model::EnvEdit::Set {
+        name: "CARGO_TARGET_DIR".to_string(),
+        value: target.to_string_lossy().into_owned(),
+    }));
+    assert!(setup.env.contains(&bongos_lanes_model::EnvEdit::Set {
+        name: "LANE".to_string(),
+        value: "build-1".to_string(),
+    }));
+    assert_eq!(setup.trees.as_ref().unwrap().primary(), tip);
+    assert!(setup.lane_trees.is_some());
+
+    // The work a halted run left in the tree is saved before the next job's reset.
+    std::fs::write(tip.join("left.txt"), "left by the halted run\n").unwrap();
+    let request = lane_job(
+        &fixture,
+        ENV_TABLE,
+        Some(fixture.task_job(RUN_2, Some(last(RUN_1, LastEnd::Halted)))),
+    );
+    cx.update(|cx| prepare_lane_job(request, cx)).await.unwrap();
+    assert!(!tip.join("left.txt").exists());
+    assert_eq!(
+        git(
+            &fixture.app,
+            &[
+                "show",
+                &format!("{}:left.txt", run_branch_name(TASK_BRANCH, RUN_1, 1))
+            ]
+        ),
+        "left by the halted run"
+    );
+}
+
+#[gpui::test]
+async fn a_job_with_no_lane_tree_runs_fresh_with_the_lane_env_and_a_missing_root_waits(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::build(ENV_TABLE, |_| None);
+    // No repository for the job (a task with no branch): a fresh run worktree.
+    let request = lane_job(&fixture, ENV_TABLE, None);
+    let setup = cx.update(|cx| prepare_lane_job(request, cx)).await.unwrap();
+    assert_eq!(setup.tree, bongos_workflow::RunTree::default());
+    assert!(setup.trees.is_none());
+    assert_eq!(setup.lane_dirs.len(), 1);
+    assert!(
+        setup
+            .env
+            .iter()
+            .any(|edit| matches!(edit, bongos_lanes_model::EnvEdit::Set { name, .. } if name == "CARGO_TARGET_DIR"))
+    );
+
+    // The project folder the directories go below is gone: the lane waits, nothing is made.
+    std::fs::remove_dir_all(&fixture.inputs.project_folder).unwrap();
+    let request = lane_job(&fixture, ENV_TABLE, Some(fixture.task_job(RUN_2, None)));
+    let reason = cx
+        .update(|cx| prepare_lane_job(request, cx))
+        .await
+        .unwrap_err();
+    assert!(matches!(reason, WaitReason::Environment(_)), "{reason:?}");
+    assert!(!fixture.inputs.project_folder.exists());
 }

@@ -318,7 +318,8 @@ fn serve(repo: bongos_project_repo::ProjectRepo, cx: &mut App) {
         process::exit(0);
     });
     let busy = Rc::new(|cx: &App| bongos_lanes::dispatcher_running(cx));
-    if let Err(error) = EngineHostProcess::start(repo, options, busy, on_exit, cx) {
+    let drain = Rc::new(|cx: &mut App| bongos_lanes::drain_dispatcher(cx));
+    if let Err(error) = EngineHostProcess::start(repo, options, busy, drain, on_exit, cx) {
         log::error!("serving the project: {error:#}");
         log::logger().flush();
         fail(1, format!("{error:#}"));

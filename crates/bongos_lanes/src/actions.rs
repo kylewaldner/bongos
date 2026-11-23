@@ -58,7 +58,7 @@ pub mod lanes {
             Resume,
             /// Shows what each lane would take next, without starting anything.
             DryRun,
-            /// Makes a lane look for work now.
+            /// Shows what one lane would take now, without starting or writing anything.
             Pick,
             /// Gives a task another lane owns to a free lane.
             Adopt,
@@ -241,7 +241,11 @@ fn register_host_command<A: gpui::Action>(workspace: &mut Workspace, verb: Lanes
                 show_toast(workspace, ENGINE_HOST_MESSAGE, cx);
                 return;
             };
-            if !matches!(verb, LanesVerb::Stop | LanesVerb::Pause | LanesVerb::Resume) {
+            let on_lane = matches!(
+                verb,
+                LanesVerb::Stop | LanesVerb::Pause | LanesVerb::Resume | LanesVerb::Pick
+            );
+            if !on_lane {
                 send_lanes_command(access, verb, LanesPayload::default(), window, cx);
                 return;
             }
@@ -631,8 +635,8 @@ fn start_adopt(
                 lane: Some(args.lane.to_string()),
                 reason: Some(args.reason.clone()),
                 confirm_drop: args.confirm_drop,
-                within: None,
                 person: Some(ctx.author.name.clone()),
+                ..LanesPayload::default()
             };
             let sending = access.request(
                 HostCommand::Lanes {
@@ -736,23 +740,200 @@ pub fn drain_question(busy: usize) -> String {
     }
 }
 
+/// What a `lanes: start` from a window asks for besides its author: a bound and the unattended
+/// override, which a prefix argument asks for (`task: run` on a group gives `within`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StartOptions {
+    pub within: Option<String>,
+    pub until: Option<String>,
+    pub max_jobs: Option<u32>,
+    pub unattended: Option<bool>,
+}
+
+impl StartOptions {
+    /// The start command's payload for `person`.
+    pub fn payload(&self, person: String) -> LanesPayload {
+        LanesPayload {
+            person: Some(person),
+            within: self.within.clone(),
+            until: self.until.clone(),
+            max_jobs: self.max_jobs,
+            unattended: self.unattended,
+            ..LanesPayload::default()
+        }
+    }
+}
+
+/// The bounds a prefix argument on `lanes: start` offers, in the order of [`START_BOUND_CHOICES`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartBoundChoice {
+    None,
+    Until,
+    MaxJobs,
+    Within,
+}
+
+/// The choices of the bound a prefix argument on `lanes: start` asks for.
+pub const START_BOUND_CHOICES: [&str; 4] = [
+    "No bound",
+    "Until a task (no new task after it)",
+    "Jobs per lane",
+    "Within a group",
+];
+
+/// The choices of the unattended override a prefix argument on `lanes: start` asks for.
+pub const START_UNATTENDED_CHOICES: [&str; 3] = [
+    "Unattended as the lane kind or the project says",
+    "Unattended on",
+    "Unattended off",
+];
+
+impl StartBoundChoice {
+    pub fn of(index: usize) -> Option<Self> {
+        [Self::None, Self::Until, Self::MaxJobs, Self::Within]
+            .get(index)
+            .copied()
+    }
+}
+
+/// The options of a start bounded by `choice` with the text the person typed for it, or why the
+/// text does not do.
+pub fn start_options(choice: StartBoundChoice, text: &str) -> Result<StartOptions, String> {
+    let text = text.trim();
+    let named = || {
+        if text.is_empty() {
+            Err("Name a task".to_string())
+        } else {
+            Ok(Some(text.to_string()))
+        }
+    };
+    Ok(match choice {
+        StartBoundChoice::None => StartOptions::default(),
+        StartBoundChoice::Until => StartOptions {
+            until: named()?,
+            ..StartOptions::default()
+        },
+        StartBoundChoice::Within => StartOptions {
+            within: named()?,
+            ..StartOptions::default()
+        },
+        StartBoundChoice::MaxJobs => match text.parse::<u32>() {
+            Ok(count) if count >= 1 => StartOptions {
+                max_jobs: Some(count),
+                ..StartOptions::default()
+            },
+            _ => return Err(format!("{text} is not a number of jobs (1 or more)")),
+        },
+    })
+}
+
+/// The unattended override of the choice at `index` of [`START_UNATTENDED_CHOICES`].
+pub fn start_unattended(index: usize) -> Option<bool> {
+    match index {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
+}
+
 /// `lanes: start`. Lanes run in an engine host: a window that holds the project's writer starts
 /// one, which takes the writer over (the runs here finish their current step first, or are
 /// interrupted when the person says so), and the start then goes to it. A window that reaches
-/// an engine host already sends the start there.
+/// an engine host already sends the start there. With a prefix argument the minibuffer asks for
+/// a bound (until a task, jobs per lane, within a group) and the unattended override first.
 fn start_action(
     workspace: &mut Workspace,
     _: &lanes::Start,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    start_within(workspace, None, window, cx);
+    if bongos_emacs::prefix_arg::take(window, cx).is_none() {
+        start_within(workspace, StartOptions::default(), window, cx);
+        return;
+    }
+    if !LanesSettings::get_global(cx).enabled {
+        show_toast(workspace, OFF_MESSAGE, cx);
+        return;
+    }
+    ask_start_bound(workspace, window, cx);
 }
 
-/// `lanes: start`, bounded to the group `within` when it names one (`task: run` on a group).
+/// Asks for the bound of a start, then its value, then the unattended override, then starts.
+fn ask_start_bound(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let labels = START_BOUND_CHOICES
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let then = Box::new(
+        move |index: usize,
+              workspace: &mut Workspace,
+              window: &mut Window,
+              cx: &mut Context<Workspace>| {
+            let Some(choice) = StartBoundChoice::of(index) else {
+                return;
+            };
+            let title = match choice {
+                StartBoundChoice::None => {
+                    ask_start_unattended(StartOptions::default(), workspace, window, cx);
+                    return;
+                }
+                StartBoundChoice::Until => "Stop taking new tasks after task",
+                StartBoundChoice::MaxJobs => "Jobs per lane",
+                StartBoundChoice::Within => "Only tasks within group",
+            };
+            let then = Box::new(
+                move |text: String,
+                      workspace: &mut Workspace,
+                      window: &mut Window,
+                      cx: &mut Context<Workspace>| {
+                    match start_options(choice, &text) {
+                        Ok(options) => ask_start_unattended(options, workspace, window, cx),
+                        Err(message) => show_toast(workspace, &message, cx),
+                    }
+                },
+            );
+            bongos_work::ask(workspace, title.to_string(), "", false, then, window, cx);
+        },
+    );
+    pick(workspace, "Bound".to_string(), labels, then, window, cx);
+}
+
+fn ask_start_unattended(
+    options: StartOptions,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let labels = START_UNATTENDED_CHOICES
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let then = Box::new(
+        move |index: usize,
+              workspace: &mut Workspace,
+              window: &mut Window,
+              cx: &mut Context<Workspace>| {
+            let options = StartOptions {
+                unattended: start_unattended(index),
+                ..options
+            };
+            start_within(workspace, options, window, cx);
+        },
+    );
+    pick(
+        workspace,
+        "Unattended".to_string(),
+        labels,
+        then,
+        window,
+        cx,
+    );
+}
+
+/// `lanes: start` with `options` (`task: run` on a group bounds it within the group).
 fn start_within(
     workspace: &mut Workspace,
-    within: Option<String>,
+    options: StartOptions,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -777,12 +958,12 @@ fn start_within(
         window_mode,
         runs_in_progress,
     };
-    let bound = within.clone();
+    let within = options.within.clone();
     crate::surfaces::summarize_then_start(
         repo,
         handover,
-        bound,
-        Box::new(move |workspace, window, cx| start_confirmed(workspace, within, window, cx)),
+        within,
+        Box::new(move |workspace, window, cx| start_confirmed(workspace, options, window, cx)),
         window,
         cx,
     );
@@ -791,7 +972,7 @@ fn start_within(
 /// What `lanes: start` does once the person confirmed the summary.
 fn start_confirmed(
     workspace: &mut Workspace,
-    within: Option<String>,
+    options: StartOptions,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -802,11 +983,7 @@ fn start_confirmed(
     let ctx = WorkContext::at_keyboard(PersonAtKeyboard::from_action(window, cx));
     let person = ctx.author.name;
     if !access.is_local() || EngineHostProcess::is_running(cx) {
-        let payload = LanesPayload {
-            person: Some(person),
-            within,
-            ..LanesPayload::default()
-        };
+        let payload = options.payload(person);
         send_lanes_command(access, LanesVerb::Start, payload, window, cx);
         return;
     }
@@ -819,7 +996,7 @@ fn start_confirmed(
     };
     let busy = EngineRuns.in_flight(&runs, cx);
     if busy == 0 {
-        hand_over_and_start(repo, DrainChoice::Wait, person, within, window, cx);
+        hand_over_and_start(repo, DrainChoice::Wait, person, options, window, cx);
         return;
     }
     let labels = DRAIN_CHOICES.iter().map(ToString::to_string).collect();
@@ -830,7 +1007,7 @@ fn start_confirmed(
                 1 => DrainChoice::InterruptNow,
                 _ => return,
             };
-            hand_over_and_start(repo, choice, person, within, window, cx);
+            hand_over_and_start(repo, choice, person, options, window, cx);
         },
     );
     pick(workspace, drain_question(busy), labels, then, window, cx);
@@ -841,7 +1018,7 @@ fn hand_over_and_start(
     repo: ProjectRepo,
     choice: DrainChoice,
     person: String,
-    within: Option<String>,
+    options: StartOptions,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -905,11 +1082,7 @@ fn hand_over_and_start(
                 // This window is a client of the engine host now; its lanes are the host's.
                 let sending = workspace.update(cx, |_, cx| {
                     cx.set_global(WindowLanes(None));
-                    let payload = LanesPayload {
-                        person: Some(person),
-                        within,
-                        ..LanesPayload::default()
-                    };
+                    let payload = options.payload(person);
                     EngineAccess::Remote(client).request(
                         HostCommand::Lanes {
                             verb: LanesVerb::Start,
@@ -975,8 +1148,14 @@ fn run_alias_action(
     let tree = bongos_work::WorkStore::global(cx).and_then(|store| store.read(cx).snapshot());
     let at_point = bongos_work::task_at_point(workspace, window, cx);
     match run_target(tree.as_deref(), at_point.as_deref()) {
-        RunTarget::Group(id) => start_within(workspace, Some(id), window, cx),
-        RunTarget::Project => start_within(workspace, None, window, cx),
+        RunTarget::Group(id) => {
+            let options = StartOptions {
+                within: Some(id),
+                ..StartOptions::default()
+            };
+            start_within(workspace, options, window, cx)
+        }
+        RunTarget::Project => start_within(workspace, StartOptions::default(), window, cx),
         RunTarget::Leaf => window.dispatch_action(Box::new(bongos_workflow::workflow::Run), cx),
     }
 }

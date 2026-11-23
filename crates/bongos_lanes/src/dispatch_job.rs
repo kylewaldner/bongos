@@ -114,7 +114,12 @@ impl Dispatcher {
             .map(|profile| profile.verify_lane(&self.0.config.project, &pending.lane, cx));
         // With no verify the preparation starts at once, as it always did.
         let preparing = match verify {
-            None => Ok(host.prepare_job(&pending.lane, &pending.job, cx)),
+            None => {
+                if !self.still_holds(&pending) {
+                    return;
+                }
+                Ok(host.prepare_job(&pending.lane, &pending.job, cx))
+            }
             Some(verify) => Err(verify),
         };
         let weak = self.downgrade();
@@ -123,6 +128,14 @@ impl Dispatcher {
                 Ok(setup) => setup.await,
                 Err(verify) => match verify.await {
                     Ok(()) => {
+                        // Checked again before the trees are reset: the lane may have let go.
+                        let holds = cx.update(|_| {
+                            weak.upgrade()
+                                .is_some_and(|inner| Dispatcher(inner).still_holds(&pending))
+                        });
+                        if !holds {
+                            return;
+                        }
                         let setup =
                             cx.update(|cx| host.prepare_job(&pending.lane, &pending.job, cx));
                         setup.await
@@ -143,6 +156,25 @@ impl Dispatcher {
             }
         })
         .detach();
+    }
+
+    /// Whether the lane still holds the job's run, so its trees may be reset for it. A state that
+    /// cannot be read counts as held here; the start reads it again and waits on the error.
+    fn still_holds(&self, pending: &PendingJob) -> bool {
+        let holds = self
+            .parts()
+            .writer
+            .read(read_state)
+            .map(|state| lane_holds(&state, &pending.lane, &pending.job.run_id))
+            .unwrap_or(true);
+        if !holds {
+            log::info!(
+                "lanes: {} no longer holds run {}, not preparing it",
+                pending.lane,
+                pending.job.run_id
+            );
+        }
+        holds
     }
 
     fn finish_start(

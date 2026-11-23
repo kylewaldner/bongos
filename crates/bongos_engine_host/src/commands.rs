@@ -164,8 +164,17 @@ pub(crate) fn dispatch(
         },
         HostCommand::Host(HostCtl::Status) => Task::ready(Ok(status)),
         HostCommand::Host(HostCtl::Handover) => crate::handover::serve_handover(repo, peer, cx),
-        HostCommand::Host(control) => {
-            Task::ready(Err(anyhow!("this engine host does not take {control:?}")))
+        // The answer goes first; the server then asks the host process to stop (see
+        // `stop_request`), so the requester hears it.
+        HostCommand::Host(HostCtl::Stop { at_job_boundary }) => {
+            if crate::host_process::stop_request(cx).is_some() {
+                Task::ready(Ok(serde_json::json!({
+                    "stopping": true,
+                    "at_job_boundary": at_job_boundary,
+                })))
+            } else {
+                Task::ready(Err(anyhow!("this process is not an engine host process")))
+            }
         }
     }
 }

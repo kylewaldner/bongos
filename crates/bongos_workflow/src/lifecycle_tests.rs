@@ -29,13 +29,16 @@ use crate::WorkflowsSettings;
 use crate::engine::{EngineRunner, WorkflowEngine};
 use crate::lifecycle::{
     GitWorktrees, Lifecycle, Offer, RefusalKind, RunStatus, RunTree, RunWorktrees, StartChecks,
-    StartContext, StartRequest, WorkflowEvent, attempt_dir, definition_copy_dir,
+    StartContext, StartRequest, WorkflowEvent, active_runs_on_disk, attempt_dir,
+    definition_copy_dir,
 };
 use crate::runtime::Runner;
 use crate::runtime::fake::FakeRunner;
 use crate::worktrees::{Git, RunWorktree, TaskCheckout, WorktreeError};
 use bongos_workflow_model::record::StartedBy;
-use bongos_workflow_model::{LaneRef, RunSubject, RunToml, UnattendedChoice, UnattendedSource};
+use bongos_workflow_model::{
+    LaneRef, RunSubject, RunToml, RunTreeRecord, UnattendedChoice, UnattendedSource,
+};
 
 const LEAF: &str = "leaf-id";
 const GROUP: &str = "group-id";
@@ -284,6 +287,26 @@ impl RunWorktrees for DirWorktrees {
         Ok(RunWorktree {
             run_dir,
             path,
+            branch: format!("{TASK_BRANCH}-run-{attempt}"),
+        })
+    }
+
+    fn lane(
+        &mut self,
+        task: &TaskCheckout,
+        run_id: &str,
+        attempt: u32,
+        path: &Path,
+        _settings: &WorkflowsSettings,
+    ) -> Result<RunWorktree, WorktreeError> {
+        if let Some(error) = self.error.lock().unwrap().clone() {
+            return Err(error);
+        }
+        let run_dir = self.root.join(format!("{}-{run_id}-{attempt}", task.slug));
+        fs::create_dir_all(&run_dir).unwrap();
+        Ok(RunWorktree {
+            run_dir,
+            path: path.to_path_buf(),
             branch: format!("{TASK_BRANCH}-run-{attempt}"),
         })
     }
@@ -1174,8 +1197,14 @@ fn halt_then_resume_reruns_the_node_in_the_same_worktree_with_the_hand_edit() {
         std::slice::from_ref(&key)
     );
 
+    assert_eq!(lifecycle.progressing_runs(), std::slice::from_ref(&run));
     lifecycle.halt(&run).unwrap();
     assert_eq!(lifecycle.status(&run), Some(RunStatus::Halted));
+    assert_eq!(lifecycle.active_runs(), std::slice::from_ref(&run));
+    assert!(
+        lifecycle.progressing_runs().is_empty(),
+        "a halted run waits for a person"
+    );
     assert_eq!(lifecycle.runtime().runner().stopped, [(run.clone(), key)]);
     let halted = lifecycle.halt_worktrees(&run).unwrap();
     let worktree = lifecycle.worktree(&run).unwrap().path.clone();
@@ -1504,6 +1533,30 @@ fn load_runs_kills_a_leftover_process_with_a_matching_start_time() {
         assert!(std::time::Instant::now() < deadline, "not killed");
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+    assert_eq!(lifecycle.state(&run).unwrap().interrupted.len(), 1);
+}
+
+/// A client window must not load the runs of a project another process writes: loading marks a
+/// node in flight interrupted in that process's log (and stops its process).
+#[test]
+fn load_runs_except_leaves_the_runs_under_a_skipped_folder_alone() {
+    let world = World::new();
+    let run = seed(&world, "single", mid_node);
+    let before = fs::read(events_of(&world, &run)).unwrap();
+
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle
+        .load_runs_except(&world.tree, &[world.root.join("work/app")])
+        .unwrap();
+    assert!(report.loaded.is_empty(), "{report:?}");
+    assert!(report.orphans.is_empty(), "{report:?}");
+    assert!(lifecycle.state(&run).is_none());
+    assert_eq!(fs::read(events_of(&world, &run)).unwrap(), before);
+
+    let report = lifecycle
+        .load_runs_except(&world.tree, &[world.root.join("elsewhere")])
+        .unwrap();
+    assert_eq!(report.loaded, vec![run.clone()], "{report:?}");
     assert_eq!(lifecycle.state(&run).unwrap().interrupted.len(), 1);
 }
 
@@ -2111,14 +2164,93 @@ fn a_dispatcher_is_never_started_as_a_run() {
 }
 
 #[test]
-fn a_lane_tree_or_a_task_run_on_a_snapshot_or_named_repository_is_refused() {
+fn the_active_runs_on_disk_name_each_task_with_a_run_that_holds_it() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    assert!(active_runs_on_disk(&world.tree).is_empty());
+    let run = world
+        .start(&mut lifecycle, with_workflow("single"))
+        .unwrap();
+    assert_eq!(
+        active_runs_on_disk(&world.tree),
+        BTreeMap::from([(LEAF.to_string(), run.clone())])
+    );
+    lifecycle.cancel(&run).unwrap();
+    assert!(active_runs_on_disk(&world.tree).is_empty());
+}
+
+fn build_lane() -> Option<LaneRef> {
+    Some(LaneRef {
+        id: "build-1".to_string(),
+        kind: "build".to_string(),
+    })
+}
+
+#[test]
+fn a_task_run_in_a_lane_tree_works_there_and_keeps_its_run_directory_across_a_reload() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    let tree = world.root.join("lane-build-1");
+    fs::create_dir_all(&tree).unwrap();
+    let request = StartRequest {
+        lane: build_lane(),
+        started_by: StartedBy::Lane,
+        tree: RunTree::Lane {
+            path: tree.clone(),
+            base: None,
+            start: None,
+            merge_into: None,
+        },
+        ..with_workflow("single")
+    };
+    let run = world.start(&mut lifecycle, request).unwrap();
+    let binding = lifecycle.binding(&run).unwrap();
+    assert_eq!(binding.worktree.path, tree);
+    assert_ne!(binding.worktree.run_dir, tree);
+    assert!(!binding.worktree.run_dir.starts_with(&tree));
+    let text = fs::read_to_string(lifecycle.run_dir(&run).unwrap().join("run.toml")).unwrap();
+    let record = RunToml::parse(&text).unwrap();
+    assert_eq!(
+        record.tree,
+        Some(RunTreeRecord::Lane {
+            path: tree,
+            run_dir: binding.worktree.run_dir.clone(),
+        })
+    );
+
+    let mut reloaded = world.lifecycle();
+    reloaded.load_runs(&world.tree).unwrap();
+    let again = reloaded.binding(&run).unwrap();
+    assert_eq!(again.worktree, binding.worktree);
+}
+
+#[test]
+fn a_lane_tree_with_no_lane_is_a_bad_request() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    let request = StartRequest {
+        tree: RunTree::Lane {
+            path: world.root.join("lane"),
+            base: None,
+            start: None,
+            merge_into: None,
+        },
+        ..with_workflow("single")
+    };
+    let refusal = world.start(&mut lifecycle, request).unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::BadRequest, "{refusal}");
+    assert!(lifecycle.all_runs().is_empty());
+}
+
+#[test]
+fn a_lane_tree_with_a_start_or_a_task_run_on_a_snapshot_or_named_repository_is_refused() {
     let world = World::new();
     let mut lifecycle = world.lifecycle();
     for tree in [
         RunTree::Lane {
             path: world.root.join("lane"),
             base: None,
-            start: None,
+            start: Some("main".to_string()),
             merge_into: None,
         },
         RunTree::Snapshot {
@@ -2132,6 +2264,7 @@ fn a_lane_tree_or_a_task_run_on_a_snapshot_or_named_repository_is_refused() {
     ] {
         let request = StartRequest {
             tree,
+            lane: build_lane(),
             ..with_workflow("single")
         };
         let refusal = world.start(&mut lifecycle, request).unwrap_err();

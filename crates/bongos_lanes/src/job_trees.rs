@@ -8,14 +8,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use bongos_lanes_model::{JobRecord, LaneId, WaitReason};
+use bongos_lanes_model::table::Binding;
+use bongos_lanes_model::{EnvEdit, JobRecord, LaneId, TokenValues, WaitReason};
 use bongos_work_model::store::WorkTree;
 use bongos_workflow::worktrees::{Git, run_branch_name};
-use gpui::{App, Global};
+use gpui::{App, AppContext as _, Global, Task};
 
+use crate::dispatcher::JobSetup;
+use crate::env::tip_env;
 use crate::lane_tree::{Forbidden, LastRun, ResetRequest, Saved, lane_tree, reset_tree};
-use crate::locations::{LaneLocations, LocationInputs};
-use crate::task_trees::SecondTreeLeases;
+use crate::locations::{LaneLocations, LocationInputs, Place};
+use crate::prepare::{PrepareRequest, prepare_lane};
+use crate::profile::LaneProfileSource;
+use crate::task_trees::{LaneTreeSetup, SecondTreeLeases};
 
 /// Names the repositories a job works in besides its primary one.
 pub type ExtraRepositories = fn(&JobRecord, &WorkTree) -> Vec<String>;
@@ -355,5 +360,122 @@ where
         saved,
         second_leased,
         second_reset,
+    })
+}
+
+/// Everything the preparation of one lane job reads, gathered from the app before it starts.
+pub struct LaneJobRequest {
+    /// The lane's locations to make: the overlap check, the disk floors, the create rule and the
+    /// `after_tree_created` hooks ([`prepare_lane`]).
+    pub prepare: PrepareRequest,
+    pub profile: Option<Arc<dyn LaneProfileSource>>,
+    /// The binding of the lane's kind; with none the lane has no directories and no lane tree.
+    pub binding: Option<Binding>,
+    /// The lane's token values; `repo` and `dirs` are filled in here.
+    pub values: TokenValues,
+    /// The project profile's edits of the lane's environment, applied after the binding's.
+    pub profile_env: Vec<EnvEdit>,
+    /// The job's repository, when its task names one with a branch; `None` runs it in a fresh
+    /// run worktree as a hand start does.
+    pub primary: Option<JobRepository>,
+    /// The lanes of the table at their effective counts.
+    pub table_lanes: Vec<LaneId>,
+    pub save_max_file_bytes: u64,
+    pub forbidden: Forbidden,
+    pub git: Git,
+    pub leases: SecondTreeLeases,
+}
+
+/// Prepares a lane job: makes the lane's locations, resolves its environment and named
+/// directories, then, when the binding lists the job's repository as a persistent tree, saves the
+/// work the last run left there and resets the tree onto the job's run branch
+/// ([`start_job_trees`]), so the run works in the lane's tree; otherwise the run gets a fresh run
+/// worktree with the lane's environment and directories. Any failure is an environment wait.
+pub fn prepare_lane_job(
+    request: LaneJobRequest,
+    cx: &mut App,
+) -> Task<Result<JobSetup, WaitReason>> {
+    let LaneJobRequest {
+        prepare,
+        profile,
+        binding,
+        values,
+        profile_env,
+        primary,
+        table_lanes,
+        save_max_file_bytes,
+        forbidden,
+        git,
+        leases,
+    } = request;
+    let lane = prepare.lane.clone();
+    let preparing = prepare_lane(prepare, profile, cx);
+    cx.spawn(async move |cx| {
+        let locations = preparing.await?.locations;
+        let lane_dirs: BTreeMap<String, PathBuf> = locations
+            .items
+            .iter()
+            .filter_map(|item| match &item.place {
+                Place::Dir { name, base: false } => Some((name.clone(), item.path.clone())),
+                _ => None,
+            })
+            .collect();
+        let tip_values = TokenValues {
+            repo: primary
+                .as_ref()
+                .map(|primary| primary.name.clone())
+                .unwrap_or_default(),
+            dirs: locations.dir_values(&[]),
+            ..values.clone()
+        };
+        let env = match &binding {
+            Some(binding) => tip_env(binding, &tip_values, &profile_env)
+                .map_err(|error| WaitReason::Environment(format!("{lane}: {error}")))?,
+            None => profile_env.clone(),
+        };
+        let in_lane_tree = primary
+            .filter(|primary| lane_tree(&locations, &primary.name, false).is_ok())
+            .zip(binding);
+        let Some((primary, binding)) = in_lane_tree else {
+            return Ok(JobSetup {
+                env,
+                lane_dirs,
+                ..JobSetup::default()
+            });
+        };
+        let start = JobStart {
+            locations: locations.clone(),
+            table_lanes,
+            primary,
+            extra: Vec::new(),
+            save_max_file_bytes,
+            forbidden: forbidden.clone(),
+        };
+        let started = cx
+            .background_spawn(async move {
+                let fresh = async |repository: &JobRepository| -> Result<PathBuf, String> {
+                    Err(format!(
+                        "{} has no lane tree; a fresh tree beside a lane tree is not made",
+                        repository.name
+                    ))
+                };
+                start_job_trees(&git, &start, &leases, &fresh).await
+            })
+            .await?;
+        for (repo, saved) in &started.saved {
+            log::info!(
+                "lanes: {lane} saved the work left in its tree of {repo}: {}",
+                saved.history()
+            );
+        }
+        let setup = LaneTreeSetup {
+            binding,
+            locations,
+            values,
+            profile: profile_env,
+            forbidden,
+            second_checked: started.second_checked(),
+        };
+        Ok(JobSetup::in_lane_tree(started.trees, env, lane_dirs).with_lane_trees(setup))
     })
 }
