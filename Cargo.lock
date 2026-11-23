@@ -2819,6 +2819,7 @@ dependencies = [
  "project",
  "serde_json",
  "settings",
+ "terminal_view",
  "text",
  "theme",
  "theme_settings",
