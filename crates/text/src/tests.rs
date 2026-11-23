@@ -625,7 +625,7 @@ fn test_history() {
     buffer.undo();
     assert_eq!(buffer.text(), "12cde6");
 
-    // Redo stack gets cleared after performing an edit.
+    // An edit after undo starts a new branch; the redo chain below it is empty.
     let transaction_x = buffer.start_transaction_at(now).unwrap();
     buffer.edit([(0..0, "X")]);
     buffer.end_transaction_at(now);

@@ -1341,19 +1341,12 @@ impl Buffer {
         self.history.push_transaction(transaction, now);
     }
 
-    /// Differs from `push_transaction` in that it does not clear the redo stack.
-    /// The caller responsible for
-    /// Differs from `push_transaction` in that it does not clear the redo
-    /// stack. Intended to be used to create a parent transaction to merge
-    /// potential child transactions into.
+    /// Like `push_transaction` with an empty transaction. Intended to be used
+    /// to create a parent transaction to merge potential child transactions
+    /// into.
     ///
     /// The caller is responsible for removing it from the undo history using
-    /// `forget_transaction` if no edits are merged into it. Otherwise, if edits
-    /// are merged into this transaction, the caller is responsible for ensuring
-    /// the redo stack is cleared. The easiest way to ensure the redo stack is
-    /// cleared is to create transactions with the usual `start_transaction` and
-    /// `end_transaction` methods and merging the resulting transactions into
-    /// the transaction created by this method
+    /// `forget_transaction` if no edits are merged into it.
     pub fn push_empty_transaction(&mut self, now: Instant) -> TransactionId {
         self.history
             .push_empty_transaction(self.version.clone(), now, &mut self.lamport_clock)

@@ -206,6 +206,7 @@ impl UndoTree {
 
     /// The undo stack, bottom first: the path from the root's child down to
     /// the current node.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn undo_stack(&self) -> Vec<&HistoryEntry> {
         let mut path = self.ancestors(self.current);
         path.pop();
