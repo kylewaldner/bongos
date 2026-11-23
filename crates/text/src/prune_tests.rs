@@ -248,6 +248,32 @@ fn limits_below_the_floor_are_raised_and_pruned_counts_each_removal() {
     f.buffer.reset_undo_tree();
     assert_eq!(f.pruned(), 3);
     assert_eq!(f.len(), 1);
+    f.assert_consistent();
+}
+
+#[test]
+fn grouping_never_merges_a_pinned_node_away() {
+    let mut f = Fixture::new();
+    let a = f.transact("a");
+    let b = f.transact("b");
+    let c = f.transact("c");
+    assert!(f.buffer.pin_undo_node(node(c)));
+
+    // Grouping up to `a` would merge the pinned `c` into `b`, so it stops.
+    f.buffer.group_until_transaction(a);
+    assert_eq!(f.len(), 4);
+    assert!(f.has(a) && f.has(b) && f.has(c));
+    assert_eq!(f.buffer.undo_tree().current(), node(c));
+    f.assert_consistent();
+
+    // The pin survived: it can be released, and then grouping merges.
+    assert!(f.buffer.unpin_undo_node(node(c)));
+    assert!(!f.buffer.unpin_undo_node(node(c)));
+    f.assert_consistent();
+    f.buffer.group_until_transaction(a);
+    assert!(f.has(a) && !f.has(b) && !f.has(c));
+    assert_eq!(f.buffer.undo_tree().current(), node(a));
+    f.assert_consistent();
 }
 
 #[test]

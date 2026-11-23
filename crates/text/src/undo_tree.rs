@@ -412,8 +412,8 @@ impl UndoTree {
 
     /// How many trailing nodes `group` merges: walking up from the current
     /// node, each node joins its parent when the two are closer than
-    /// `interval`, the parent does not suppress grouping, and the parent has
-    /// no other child and no pin.
+    /// `interval`, the parent does not suppress grouping, the parent has no
+    /// other child and no pin, and the node itself has no pin.
     pub(crate) fn group_count(&self, interval: Duration) -> usize {
         let mut count = 0;
         let mut ix = self.current;
@@ -422,6 +422,7 @@ impl UndoTree {
                 break;
             };
             if !prev.suppress_grouping
+                && !self.is_pinned(ix)
                 && entry.first_edit_at - prev.last_edit_at < interval
                 && self.can_merge_into(parent)
             {
@@ -444,7 +445,7 @@ impl UndoTree {
             if entry.transaction.id == id {
                 return Some(count);
             }
-            if entry.suppress_grouping {
+            if entry.suppress_grouping || self.is_pinned(ix) {
                 return None;
             }
             let parent = self.n(ix).parent?;
