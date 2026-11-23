@@ -150,7 +150,7 @@ impl LanesSource for StoreLanes {
         let graph = bongos_lanes_model::from_work_tree(
             &tree,
             &self.repo.location().id,
-            &bongos_lanes_model::LiveFacts::default(),
+            &crate::host::live_facts(&tree, cx),
         )?;
         graph.task(task).map(|task| task.name.clone())
     }

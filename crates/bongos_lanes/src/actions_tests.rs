@@ -355,3 +355,48 @@ fn task_run_goes_to_the_group_the_leaf_or_the_project() {
     assert_eq!(run_target(Some(&tree), Some("gone")), RunTarget::Project);
     assert_eq!(run_target(None, Some(&phase)), RunTarget::Project);
 }
+
+#[test]
+fn a_prefix_start_turns_the_chosen_bound_and_override_into_the_start_command() {
+    use crate::actions::{
+        START_BOUND_CHOICES, START_UNATTENDED_CHOICES, StartBoundChoice, StartOptions,
+        start_options, start_unattended,
+    };
+
+    assert_eq!(START_BOUND_CHOICES.len(), 4);
+    assert_eq!(START_UNATTENDED_CHOICES.len(), 3);
+    assert_eq!(StartBoundChoice::of(0), Some(StartBoundChoice::None));
+    assert_eq!(StartBoundChoice::of(1), Some(StartBoundChoice::Until));
+    assert_eq!(StartBoundChoice::of(2), Some(StartBoundChoice::MaxJobs));
+    assert_eq!(StartBoundChoice::of(3), Some(StartBoundChoice::Within));
+    assert_eq!(StartBoundChoice::of(4), None);
+
+    assert_eq!(
+        start_options(StartBoundChoice::None, "ignored"),
+        Ok(StartOptions::default())
+    );
+    let until = start_options(StartBoundChoice::Until, " l2 ").unwrap();
+    assert_eq!(until.until.as_deref(), Some("l2"));
+    let jobs = start_options(StartBoundChoice::MaxJobs, "3").unwrap();
+    assert_eq!(jobs.max_jobs, Some(3));
+    let within = start_options(StartBoundChoice::Within, "g1").unwrap();
+    assert_eq!(within.within.as_deref(), Some("g1"));
+    assert!(start_options(StartBoundChoice::MaxJobs, "0").is_err());
+    assert!(start_options(StartBoundChoice::MaxJobs, "many").is_err());
+    assert!(start_options(StartBoundChoice::Until, "  ").is_err());
+
+    assert_eq!(start_unattended(0), None);
+    assert_eq!(start_unattended(1), Some(true));
+    assert_eq!(start_unattended(2), Some(false));
+
+    let options = StartOptions {
+        unattended: Some(false),
+        ..jobs
+    };
+    let payload = options.payload("kim".to_string());
+    assert_eq!(payload.person.as_deref(), Some("kim"));
+    assert_eq!(payload.max_jobs, Some(3));
+    assert_eq!(payload.unattended, Some(false));
+    assert_eq!(payload.until, None);
+    assert_eq!(payload.within, None);
+}

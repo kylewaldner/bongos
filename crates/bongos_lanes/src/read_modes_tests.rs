@@ -105,3 +105,41 @@ fn the_status_text_names_each_lane_and_a_split_master() {
     assert!(text.contains("build-1  running  t1 (Ship)  run r1 of build (running)  3 jobs done"));
     assert!(text.contains("build-2  idle  0 jobs done"));
 }
+
+/// The picker's inputs over `tasks` (all top-level) with one build lane.
+fn loaded(tasks: Vec<bongos_lanes_model::PickTask>) -> Loaded {
+    let top = tasks.iter().map(|task| task.id.clone()).collect();
+    Loaded {
+        graph: bongos_lanes_model::PickGraph::new(top, tasks),
+        table: parse(&format!(
+            "schema = 1\n{}",
+            crate::dispatcher_tests::builds(1)
+        ))
+        .unwrap(),
+        options: PickOptions::default(),
+    }
+}
+
+#[test]
+fn a_pick_answers_for_one_lane_and_skips_a_task_with_an_active_run() {
+    let mut busy = crate::dispatcher_tests::leaf("a");
+    busy.active_run = Some("01890a5d-ac96-774b-bcce-b302099a8057".to_string());
+    let free = crate::dispatcher_tests::leaf("b");
+    let lane = LaneId::new("build", 1);
+    let state = LanesState::default();
+
+    let (text, doc) = pick_answer(Pick::One, Some(&lane), &loaded(vec![busy.clone(), free]), &state)
+        .unwrap();
+    assert!(text.starts_with("build-1: would start b with w"), "{text}");
+    assert_eq!(doc["lane"], "build-1");
+    assert!(doc["outcome"].is_object(), "{doc}");
+
+    let (text, _) = pick_answer(Pick::One, Some(&lane), &loaded(vec![busy]), &state).unwrap();
+    assert!(text.starts_with("build-1: nothing to do (a waits: "), "{text}");
+    assert!(text.contains("is active"), "{text}");
+
+    assert!(pick_answer(Pick::One, None, &loaded(Vec::new()), &state).is_err());
+    let (text, doc) = pick_answer(Pick::DryRun, None, &loaded(Vec::new()), &state).unwrap();
+    assert!(text.starts_with("build-1: nothing to do"), "{text}");
+    assert!(doc.get("per_lane").is_some(), "{doc}");
+}

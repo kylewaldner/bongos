@@ -10,8 +10,8 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result, anyhow, bail};
 use bongos_engine_host::{ReadModes, ReadProject};
 use bongos_lanes_model::{
-    AssignedWork, DryRun, LaneId, LanesState, LiveFacts, PickOptions, PickOutcome, explain,
-    from_work_tree, parse, pick,
+    AssignedWork, DryRun, LaneId, LanesState, PickOptions, PickOutcome, explain, from_work_tree,
+    parse, pick,
 };
 use bongos_project_repo::{
     CommitId, Git, Location, ProjectRepo, StateHandle, StateReader, StateStore, TreeRef,
@@ -97,8 +97,8 @@ fn status_mode(args: &[String], reader: &StateReader, cx: &mut App) -> Result<St
 }
 
 /// Which of the two picker views a read asks for.
-#[derive(Clone, Copy)]
-enum Pick {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Pick {
     DryRun,
     One,
 }
@@ -151,7 +151,8 @@ pub(crate) async fn load(location: &Location, waiting_limit: usize) -> Result<Lo
         .projects
         .first()
         .context("the project has no top group")?;
-    let graph = from_work_tree(&tree, &project.slug, &LiveFacts::default())
+    let live = crate::host::live_facts_on_disk(&tree);
+    let graph = from_work_tree(&tree, &project.slug, &live)
         .context("the project's task graph cannot be read")?;
     let table_path = format!("{DEFINITIONS_DIR}/{LANES_FOLDER}/{LANES_FILE}");
     let table_text = file_at(&repo, &commit, &table_path)
@@ -172,28 +173,35 @@ pub(crate) async fn load(location: &Location, waiting_limit: usize) -> Result<Lo
 }
 
 fn render_pick(view: Pick, args: &ReadArgs, loaded: &Loaded, state: &LanesState) -> Result<String> {
+    let (text, doc) = pick_answer(view, args.lane.as_ref(), loaded, state)?;
+    if args.json {
+        Ok(serde_json::to_string_pretty(&doc)?)
+    } else {
+        Ok(text)
+    }
+}
+
+/// The picker's answer over `state`, as text and as the JSON document `--json` prints: the dry
+/// run (of `lane` only when one is named), or the pick of `lane`. It writes nothing.
+pub(crate) fn pick_answer(
+    view: Pick,
+    lane: Option<&LaneId>,
+    loaded: &Loaded,
+    state: &LanesState,
+) -> Result<(String, Value)> {
     match view {
         Pick::DryRun => {
             let mut dry = explain(&loaded.graph, state, &loaded.table, &loaded.options);
-            if let Some(lane) = &args.lane {
+            if let Some(lane) = lane {
                 dry.per_lane.retain(|(id, _)| id == lane);
             }
-            if args.json {
-                Ok(serde_json::to_string_pretty(&dry)?)
-            } else {
-                Ok(dry_run_text(&dry))
-            }
+            Ok((dry_run_text(&dry), serde_json::to_value(&dry)?))
         }
         Pick::One => {
-            let lane = args.lane.clone().context("name a lane (--lane build-2)")?;
-            let outcome = pick(&loaded.graph, state, &loaded.table, &lane, &loaded.options);
-            if args.json {
-                Ok(serde_json::to_string_pretty(
-                    &json!({ "lane": lane.to_string(), "outcome": outcome }),
-                )?)
-            } else {
-                Ok(outcome_text(&lane, &outcome))
-            }
+            let lane = lane.context("name a lane (--lane build-2)")?;
+            let outcome = pick(&loaded.graph, state, &loaded.table, lane, &loaded.options);
+            let doc = json!({ "lane": lane.to_string(), "outcome": outcome });
+            Ok((outcome_text(lane, &outcome), doc))
         }
     }
 }

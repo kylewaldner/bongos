@@ -142,6 +142,37 @@ async fn accept_graph_lands_the_stamp_of_master_once(cx: &mut TestAppContext) {
     assert_eq!(main_commit(&repo), commit);
 }
 
+// The lanes host listens to the project repository: the new verified commit an accept lands is
+// heard, so a running dispatcher reads its table and stamp there.
+#[gpui::test]
+async fn the_lanes_host_hears_the_verified_commit_an_accept_lands(cx: &mut TestAppContext) {
+    use crate::dispatcher::LanesHost as _;
+
+    cx.executor().allow_parking();
+    let root = TempDir::new().unwrap();
+    let repo = project(&root);
+    cx.update(|cx| {
+        crate::definitions::register(cx);
+        repo.use_registered_checks(cx);
+    });
+    let host = crate::host::ProjectLanesHost::new(repo.clone());
+    let mut events = host.repo_events().expect("a project repository has events");
+
+    let accepted = accept_graph_now(&repo, keyboard(), "work/", now())
+        .await
+        .unwrap();
+    let Accepted::Landed { commit, .. } = accepted else {
+        panic!("expected a landing: {accepted:?}");
+    };
+    let heard = loop {
+        match events.next().await.expect("the repository's events go on") {
+            bongos_project_repo::RepoEvent::VerifiedCommitChanged { commit } => break commit,
+            _ => continue,
+        }
+    };
+    assert_eq!(heard, commit);
+}
+
 fn peer(kind: ClientKind) -> PeerIdentity {
     let (ours, _theirs) = std::os::unix::net::UnixStream::pair().unwrap();
     peer_identity(&ours, kind).unwrap()

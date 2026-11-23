@@ -508,6 +508,59 @@ pub async fn create_run(
     Ok(worktree)
 }
 
+/// The run worktree of attempt `attempt` of run `run_id` in a lane's tree at `path`, which the
+/// lane already reset onto the run branch ([`run_branch_name`] of the task branch): the tree is
+/// used as it is, and the run's own directory (its fan-out worktrees and scratch) is made where a
+/// fresh run's would be. Refuses a task with no branch, a tree that is missing or has another
+/// branch checked out, and a disk with less than `workflows.min_free_disk_mb` free.
+pub async fn lane_run(
+    git: &Git,
+    task: &TaskCheckout,
+    run_id: &str,
+    attempt: u32,
+    path: &Path,
+    settings: &WorkflowsSettings,
+    free_space: &dyn Fn(&Path) -> Option<u64>,
+) -> Result<RunWorktree, WorktreeError> {
+    let Some(task_branch) = &task.branch else {
+        return Err(WorktreeError::NotStarted);
+    };
+    let refused = |message: String| WorktreeError::Io {
+        path: path.to_path_buf(),
+        message,
+    };
+    if !path.is_dir() {
+        return Err(refused("the lane's tree is missing".to_string()));
+    }
+    let branch = run_branch_name(task_branch, run_id, attempt);
+    match checked_out_branch(git, path).await {
+        Some(checked_out) if checked_out == branch => {}
+        Some(checked_out) => {
+            return Err(refused(format!(
+                "the lane's tree has {checked_out} checked out, not the run branch {branch}"
+            )));
+        }
+        None => {
+            return Err(refused(format!(
+                "the lane's tree has no branch checked out, not the run branch {branch}"
+            )));
+        }
+    }
+    check_free_space(path, settings.min_free_disk_mb, free_space)?;
+    let repository = repository_root(git, path).await?;
+    let runs = runs_dir(&repository, settings.worktrees_dir.as_deref());
+    let run_dir = run_dir(&runs, &task.slug, run_id, attempt);
+    std::fs::create_dir_all(&run_dir).map_err(|error| WorktreeError::Io {
+        path: run_dir.clone(),
+        message: error.to_string(),
+    })?;
+    Ok(RunWorktree {
+        run_dir,
+        path: path.to_path_buf(),
+        branch,
+    })
+}
+
 /// Creates the worktree of fan-out branch `index` of node `node` from the head of the run branch,
 /// at `<run dir>/b-<node>-<index>`.
 pub async fn create_branch(

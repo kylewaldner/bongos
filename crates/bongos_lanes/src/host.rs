@@ -13,21 +13,24 @@
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
 use bongos_engine_host::{EngineHostProcess, HostCommands, HostEvent, LanesVerb, WriterHosts};
 use bongos_lanes_model::{
-    Author, JobRecord, LaneId, LaneTable, LiveFacts, PickBound, PickGraph, Problem, RunSubject,
-    StampFile, TaskId, from_work_tree, parse, short_run,
+    Author, JobRecord, LaneId, LaneState, LaneTable, LiveFacts, PickBound, PickGraph, Problem,
+    RunSubject, StampFile, TaskId, TokenValues, WaitReason, from_work_tree, parse, short_run,
 };
 use bongos_project_repo::{
     ChangeFilter, ChangeState, LandingEvent, LandingResult, PeerIdentity, PersonClaim, ProjectRepo,
-    SnapshotReason,
+    RepoEvent, SnapshotReason,
 };
 use bongos_project_repo_model::layout::DEFINITIONS_DIR;
 use bongos_work::{OpenProjectRepos, WorkStore};
+use bongos_work_model::store::WorkTree;
 use bongos_workflow::worktrees::{Git, run_branch_name};
 use bongos_workflow::{RunStatus, WorkflowEngine};
+use bongos_workflow_model::RunTreeRecord;
 use chrono::Utc;
 use futures::StreamExt as _;
 use gpui::{App, AppContext as _, Global, Task};
@@ -41,15 +44,19 @@ use crate::actions::{OFF_MESSAGE, WindowLanes, accepted_message, adopted_message
 use crate::adopt::{AdoptRequest, LeftWork};
 use crate::definitions::{LANES_FILE, LANES_FOLDER};
 use crate::dispatcher::{
-    AheadLanding, Dispatcher, JobEngine, Lanes, LanesHost, LanesParts, StartLanes,
+    AheadLanding, Dispatcher, JobEngine, JobSetup, Lanes, LanesHost, LanesParts, StartLanes,
     VerifiedCommitPolicy,
 };
-use crate::job_trees::forbidden_for;
+use crate::job_trees::{JobRepository, LaneJobRequest, forbidden_for, prepare_lane_job};
 use crate::lane_control::{LaneTarget, LanesStatus};
-use crate::lane_tree::{LastEnd, LastRun, ResetRequest};
+use crate::lane_tree::{LastEnd, LastRun, ResetRequest, git_tree_maker};
 use crate::locations::{LocationInputs, check_lanes};
+use crate::prepare::{PrepareRequest, system_free_space};
 use crate::profile::LaneProfiles;
+use crate::read_modes::{Pick, load, pick_answer};
 use crate::staleness::PinnedTree;
+use crate::store::read_state;
+use crate::task_trees::LaneTaskTrees;
 
 /// What a `lanes:` command carries besides its verb.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,9 +73,66 @@ pub struct LanesPayload {
     /// A start bounded to this group (`task: run` on a group): the lanes take only leaves under it.
     #[serde(default)]
     pub within: Option<String>,
+    /// A start bounded until this task: no new top-level task after it in order is taken.
+    #[serde(default)]
+    pub until: Option<String>,
+    /// A start that stops each lane after this many jobs.
+    #[serde(default)]
+    pub max_jobs: Option<u32>,
+    /// The start's unattended override (`--unattended on|off`): `true`, `false`, `"on"` or
+    /// `"off"`; unset leaves it to the lane kind or the project.
+    #[serde(default, deserialize_with = "on_off")]
+    pub unattended: Option<bool>,
     /// The person at the sending window's keyboard. The writer takes it as the author only from a
     /// window of its own executable; a command-line peer's is ignored.
     pub person: Option<String>,
+}
+
+/// Reads an unattended override written as a bool or as `on`/`off`.
+fn on_off<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OnOff {
+        Bool(bool),
+        Text(String),
+    }
+    match Option::<OnOff>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(OnOff::Bool(value)) => Ok(Some(value)),
+        Some(OnOff::Text(text)) => match text.as_str() {
+            "on" => Ok(Some(true)),
+            "off" => Ok(Some(false)),
+            other => Err(serde::de::Error::custom(format!(
+                "unattended is on or off, not {other}"
+            ))),
+        },
+    }
+}
+
+/// The bound a start asks for: `within` or `until`, never both.
+pub(crate) fn start_bound(payload: &LanesPayload) -> Result<Option<PickBound>> {
+    match (&payload.within, &payload.until) {
+        (Some(_), Some(_)) => bail!("bound a start within a group or until a task, not both"),
+        (Some(group), None) => Ok(Some(PickBound::Within(TaskId::new(group.clone())))),
+        (None, Some(task)) => Ok(Some(PickBound::Until(TaskId::new(task.clone())))),
+        (None, None) => Ok(None),
+    }
+}
+
+/// What `lanes: start` asks the dispatcher for, from the command's payload.
+pub(crate) fn start_request(payload: &LanesPayload, by: Author) -> Result<StartLanes> {
+    if payload.max_jobs == Some(0) {
+        bail!("--max-jobs must be at least 1");
+    }
+    Ok(StartLanes {
+        bound: start_bound(payload)?,
+        max_jobs: payload.max_jobs,
+        unattended: payload.unattended,
+        by,
+    })
 }
 
 /// The message the host answers a command with.
@@ -84,7 +148,8 @@ pub fn register_host(cx: &mut App) {
                 log::info!("lanes {verb:?} from pid {}", peer.pid());
             }
             let answered = handle(verb, payload, peer, cx);
-            if answered.is_ok() {
+            let writes = !matches!(verb, LanesVerb::DryRun | LanesVerb::Pick);
+            if answered.is_ok() && writes {
                 WriterHosts::broadcast(&HostEvent::LanesChanged, cx);
             }
             match answered {
@@ -128,6 +193,9 @@ fn handle(
             let accepted = accept_graph_for_peer(&repo, claim, &peer, &prefix, Utc::now()).await;
             Ok(message(accepted_message(&accepted)))
         }));
+    }
+    if matches!(verb, LanesVerb::DryRun | LanesVerb::Pick) {
+        return read_pick(verb, &payload, cx);
     }
     let lanes = ensure_window_lanes(cx).ok_or_else(|| {
         anyhow!("lanes need exactly one project repository open here, with its writer")
@@ -187,17 +255,7 @@ fn handle(
             }))))
         }
         LanesVerb::Start if EngineHostProcess::is_running(cx) => {
-            let starting = lanes.start(
-                StartLanes {
-                    bound: payload
-                        .within
-                        .map(|group| PickBound::Within(TaskId::new(group))),
-                    max_jobs: None,
-                    unattended: None,
-                    by,
-                },
-                cx,
-            );
+            let starting = lanes.start(start_request(&payload, by)?, cx);
             Ok(cx.spawn(async move |cx| {
                 let started = starting.await?;
                 let run = started.run_id.clone();
@@ -210,21 +268,45 @@ fn handle(
                 }
             }))
         }
-        LanesVerb::Pick if EngineHostProcess::is_running(cx) => {
-            let dispatcher = running_dispatcher(cx)
-                .ok_or_else(|| anyhow!("lanes are not started here; start them first"))?;
-            dispatcher.pick_now(cx);
-            Ok(Task::ready(Ok(message("Looking for work now"))))
+        LanesVerb::Start => Ok(Task::ready(Err(anyhow!(
+            "starting lanes runs in the engine host process, which this window does not start"
+        )))),
+        LanesVerb::AcceptGraph | LanesVerb::DryRun | LanesVerb::Pick => {
+            unreachable!("handled above")
         }
-        LanesVerb::Start | LanesVerb::Pick => Ok(Task::ready(Err(anyhow!(
-            "starting lanes and `pick` run in the engine host process, which this window does \
-             not start"
-        )))),
-        LanesVerb::DryRun => Ok(Task::ready(Err(anyhow!(
-            "`dry run` is not served by the engine host of this build yet"
-        )))),
-        LanesVerb::AcceptGraph => unreachable!("handled above"),
     }
+}
+
+/// `dry run` and `pick` in the process that holds the writer: the picker's answer over the lanes
+/// state as it is now, for every lane or for the one named (`pick` needs one). Nothing is written
+/// and nothing starts.
+fn read_pick(
+    verb: LanesVerb,
+    payload: &LanesPayload,
+    cx: &mut App,
+) -> Result<Task<Result<serde_json::Value>>> {
+    let view = if verb == LanesVerb::Pick {
+        Pick::One
+    } else {
+        Pick::DryRun
+    };
+    let lane = match payload.lane.as_deref() {
+        Some(lane) => Some(parse_lane(Some(lane))?),
+        None if view == Pick::One => bail!("name a lane (--lane build-2)"),
+        None => None,
+    };
+    let repo = sole_writer_repo(cx)?;
+    let state = repo
+        .state()
+        .ok_or_else(|| anyhow!("the project's state is not open"))?
+        .read(read_state)?;
+    let location = repo.location().clone();
+    let limit = LanesSettings::get_global(cx).dry_run_limit as usize;
+    Ok(cx.background_spawn(async move {
+        let loaded = load(&location, limit).await?;
+        let (text, doc) = pick_answer(view, lane.as_ref(), &loaded, &state)?;
+        Ok(json!({ "message": text, "pick": doc }))
+    }))
 }
 
 /// What a start answers: it started, or lanes already run and any bound the start asked for was
@@ -266,7 +348,7 @@ fn status_document(status: &LanesStatus, cx: &App) -> serde_json::Value {
         .unwrap_or_default();
     let graph = WorkStore::global(cx)
         .and_then(|store| store.read(cx).snapshot())
-        .and_then(|tree| from_work_tree(&tree, &project, &LiveFacts::default()));
+        .and_then(|tree| from_work_tree(&tree, &project, &live_facts(&tree, cx)));
     let engine = cx.try_global::<WorkflowEngine>().cloned();
     crate::status_doc::status_doc_with(
         status,
@@ -312,6 +394,42 @@ fn status_text(status: &LanesStatus) -> String {
         })
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// The live facts the picker reads in this process: the active run of each task, from the run
+/// engine when this process has one, else from the run records on disk. A hand-started run holds
+/// its task like a lane job: the picker never takes a leaf with an active run, and its areas are
+/// in flight.
+pub fn live_facts(tree: &WorkTree, cx: &App) -> LiveFacts {
+    match cx.try_global::<WorkflowEngine>() {
+        Some(engine) => {
+            let lifecycle = engine.lifecycle();
+            let active_runs = lifecycle
+                .active_runs()
+                .into_iter()
+                .filter_map(|run| {
+                    let task = lifecycle.record(&run)?.task_id.clone();
+                    (!task.is_empty()).then(|| (TaskId::new(task), run))
+                })
+                .collect();
+            LiveFacts {
+                active_runs,
+                held: Default::default(),
+            }
+        }
+        None => live_facts_on_disk(tree),
+    }
+}
+
+/// [`live_facts`] from the run records on disk, for a process with no run engine (a read mode).
+pub fn live_facts_on_disk(tree: &WorkTree) -> LiveFacts {
+    LiveFacts {
+        active_runs: bongos_workflow::lifecycle::active_runs_on_disk(tree)
+            .into_iter()
+            .map(|(task, run)| (TaskId::new(task), run))
+            .collect(),
+        held: Default::default(),
+    }
 }
 
 /// The dispatcher the engine host process started, kept until its run ends.
@@ -376,6 +494,7 @@ pub fn ensure_window_lanes(cx: &mut App) -> Option<Rc<Lanes>> {
 
 /// What the app tells the lanes of one project repository: its table and stamp at a commit, its
 /// task graph, its locations, and the work a halted job left in its lane's trees.
+#[derive(Clone)]
 pub struct ProjectLanesHost {
     pub repo: ProjectRepo,
     /// The lane table and stamp text at the commits [`LanesHost::load_commit`] read, so the
@@ -456,6 +575,12 @@ impl LanesHost for ProjectLanesHost {
         true
     }
 
+    /// The project repository's events: a landed definition change or a new accepted stamp moves
+    /// the verified commit, which a running dispatcher reads its table and stamp at.
+    fn repo_events(&self) -> Option<futures::channel::mpsc::UnboundedReceiver<RepoEvent>> {
+        Some(self.repo.repo_events())
+    }
+
     fn load_commit(&self, commit: &str, cx: &mut App) -> Task<()> {
         if self.loaded.borrow().contains_key(commit) {
             return Task::ready(());
@@ -510,7 +635,7 @@ impl LanesHost for ProjectLanesHost {
 
     fn graph(&self, cx: &App) -> Option<PickGraph> {
         let tree = WorkStore::global(cx)?.read(cx).snapshot()?;
-        from_work_tree(&tree, &self.project_id(), &LiveFacts::default())
+        from_work_tree(&tree, &self.project_id(), &live_facts(&tree, cx))
     }
 
     /// `window-<pid>-<start time>` (`host-` in an engine host process), or `window-<pid>` where
@@ -542,6 +667,35 @@ impl LanesHost for ProjectLanesHost {
 
     fn now(&self) -> String {
         Utc::now().to_rfc3339()
+    }
+
+    /// Makes the lane's locations and resolves its environment and named directories from the
+    /// lane table at the verified commit; a job whose task's repository the binding lists as a
+    /// persistent tree runs in the lane's tree, reset onto its run branch after the work the last
+    /// run left there is saved ([`prepare_lane_job`]).
+    fn prepare_job(
+        &self,
+        lane: &LaneId,
+        job: &JobRecord,
+        cx: &mut App,
+    ) -> Task<Result<JobSetup, WaitReason>> {
+        let Some(verified) = self.verified_commit() else {
+            return Task::ready(Err(WaitReason::Environment(
+                "the project has no verified commit".to_string(),
+            )));
+        };
+        let loading = self.load_commit(&verified, cx);
+        let host = self.clone();
+        let lane = lane.clone();
+        let job = job.clone();
+        cx.spawn(async move |cx| {
+            loading.await;
+            let preparing = cx.update(|cx| match host.lane_job(&lane, &job, &verified, cx) {
+                Ok(request) => prepare_lane_job(request, cx),
+                Err(reason) => Task::ready(Err(reason)),
+            });
+            preparing.await
+        })
     }
 
     fn left_work(&self, lane: &LaneId, job: &JobRecord, cx: &App) -> Task<Vec<LeftWork>> {
@@ -719,6 +873,97 @@ pub(crate) async fn await_landings(
 }
 
 impl ProjectLanesHost {
+    /// What preparing `job` on `lane` reads, from the lane table at `commit` and the app.
+    fn lane_job(
+        &self,
+        lane: &LaneId,
+        job: &JobRecord,
+        commit: &str,
+        cx: &App,
+    ) -> Result<LaneJobRequest, WaitReason> {
+        let project = self.project_id();
+        let inputs = LocationInputs::from_app(&project, cx).map_err(WaitReason::Environment)?;
+        let table = self
+            .lane_table(commit)
+            .map_err(|error| WaitReason::Environment(format!("the lane table: {error}")))?;
+        let profile = LaneProfiles::source(cx);
+        let table_lanes =
+            crate::locations::table_lane_ids(&table, &project, profile.as_deref());
+        let state = self
+            .repo
+            .state()
+            .and_then(|state| state.read(read_state).ok());
+        let live: Vec<LaneId> = table_lanes
+            .iter()
+            .filter(|id| {
+                state
+                    .as_ref()
+                    .and_then(|state| state.lanes.get(*id))
+                    .is_none_or(|record| record.state != LaneState::Stopped)
+            })
+            .cloned()
+            .collect();
+        let all = check_lanes(&inputs, &table, &live, profile.as_deref())
+            .map_err(|problems| crate::prepare::problems_reason(&problems))?;
+        let tree = WorkStore::global(cx)
+            .and_then(|store| store.read(cx).snapshot())
+            .map(|tree| (*tree).clone())
+            .unwrap_or_default();
+        let forbidden = forbidden_for(lane, &inputs, &all, &tree);
+        let primary = self
+            .task_repository(job, &inputs, cx)
+            .map(|(name, path, branch)| {
+                let last = last_lane_run(lane, &job.run_id, cx);
+                JobRepository::for_task(name, path, &branch, &job.run_id, 1, last)
+            });
+        let values = TokenValues {
+            lane: lane.to_string(),
+            kind: lane.kind.clone(),
+            lane_index: lane.index,
+            project: project
+                .chars()
+                .filter(char::is_ascii_hexdigit)
+                .take(12)
+                .collect(),
+            repo: String::new(),
+            live_lanes: live.len() as u32,
+            cpus: std::thread::available_parallelism().map_or(1, |cpus| cpus.get() as u32),
+            dirs: Default::default(),
+        };
+        let from = primary
+            .iter()
+            .map(|primary| (primary.name.clone(), primary.add_from.clone()))
+            .collect();
+        let binding = crate::locations::binding_of(&table, lane).cloned();
+        let profile_env = profile
+            .as_ref()
+            .map(|profile| profile.env(&project, lane))
+            .unwrap_or_default();
+        let leases = LaneTaskTrees::global(cx)
+            .map(|trees| trees.leases())
+            .unwrap_or_default();
+        Ok(LaneJobRequest {
+            prepare: PrepareRequest {
+                inputs,
+                table: Arc::new(table),
+                lane: lane.clone(),
+                live,
+                make_tree: git_tree_maker(Git::new("git"), from),
+                free_space: system_free_space(),
+            },
+            profile,
+            binding,
+            values,
+            profile_env,
+            primary,
+            table_lanes,
+            save_max_file_bytes: LanesSettings::get_global(cx).save_max_file_bytes,
+            forbidden,
+            git: Git::new("git"),
+            leases,
+        })
+    }
+
     /// The verified commit the project's state records.
     fn verified_commit(&self) -> Option<String> {
         self.repo
@@ -769,6 +1014,50 @@ impl ProjectLanesHost {
             },
         })
     }
+}
+
+/// The run that last used `lane`'s tree before the job `current`: the newest run the lane
+/// started in its tree, with the branch its attempt there had and how it ended. A run still active
+/// counts as halted, so its work is saved before any reset. `None` with no such run loaded.
+fn last_lane_run(lane: &LaneId, current: &str, cx: &App) -> Option<LastRun> {
+    let engine = cx.try_global::<WorkflowEngine>()?;
+    let lifecycle = engine.lifecycle();
+    let lane_id = lane.to_string();
+    let (run, branch) = lifecycle
+        .all_runs()
+        .into_iter()
+        .filter(|run| run != current)
+        .filter_map(|run| {
+            let record = lifecycle.record(&run)?;
+            if record.lane.as_ref()?.id != lane_id {
+                return None;
+            }
+            let Some(RunTreeRecord::Lane { path, .. }) = &record.tree else {
+                return None;
+            };
+            let attempt = record
+                .attempts
+                .iter()
+                .find(|attempt| std::path::Path::new(&attempt.worktree) == path)?;
+            Some((run.clone(), attempt.branch.clone()))
+        })
+        .max_by(|(a, _), (b, _)| a.cmp(b))?;
+    let end = match lifecycle.status(&run)? {
+        RunStatus::Succeeded => LastEnd::Succeeded,
+        RunStatus::Failed => LastEnd::Failed,
+        RunStatus::Cancelled => LastEnd::Cancelled,
+        RunStatus::Halted
+        | RunStatus::Queued
+        | RunStatus::Running
+        | RunStatus::Pausing
+        | RunStatus::Paused
+        | RunStatus::WaitingOnYou => LastEnd::Halted,
+    };
+    Some(LastRun {
+        run_id: run,
+        run_branch: branch,
+        end,
+    })
 }
 
 /// The run branch of `run` in `repository` with the most attempts: `run_branch_name` with the

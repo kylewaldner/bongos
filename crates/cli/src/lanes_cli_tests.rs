@@ -1040,6 +1040,9 @@ mod socket {
                 hand_over,
                 &self.log,
                 Duration::from_secs(60),
+                // A hang guard: the loser's host exits at once, and the winner may take a while
+                // to announce itself on a loaded machine.
+                Duration::from_secs(60),
             )
         }
         fn read_mode(&self, _: &ProjectRef, _: &[String]) -> Result<ReadOutput, String> {
