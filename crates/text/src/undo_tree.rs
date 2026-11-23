@@ -8,14 +8,28 @@
 //! The classic undo and redo stacks are views of this tree: the undo stack is
 //! the path from the root down to the current node, and the redo stack is the
 //! chain of active children below the current node.
+//!
+//! The tree keeps at most a limited number of nodes. When a new node pushes it
+//! over the limit, the oldest leaf that nothing needs is removed, repeatedly.
+//! A node is needed when it is on the path from the root to the current node,
+//! on the path from the root to a pinned node, or on the chain of active
+//! children below the current node, so the text and the redo stack never
+//! change by pruning. A removed node is always an undone state; its edits stay
+//! in the buffer's CRDT.
 
 use crate::{HistoryEntry, Transaction, TransactionId};
 use collections::HashMap;
-use std::time::Duration;
+use std::{cmp::Reverse, collections::BinaryHeap, time::Duration};
 
 type NodeIx = usize;
 
 const ROOT_IX: NodeIx = 0;
+
+/// The node limit of a new tree.
+pub const DEFAULT_UNDO_NODE_LIMIT: usize = 10_000;
+
+/// The smallest node limit; lower limits are raised to it.
+pub const MIN_UNDO_NODE_LIMIT: usize = 100;
 
 /// Identifies a node of an [`UndoTree`]: the id of the node's transaction, or
 /// [`UndoNodeId::ROOT`] for the root, which stands for the base text.
@@ -84,6 +98,7 @@ pub struct UndoTree {
     current: NodeIx,
     pins: HashMap<NodeIx, usize>,
     pruned: usize,
+    limit: usize,
     next_seq: u64,
     len: usize,
 }
@@ -109,6 +124,7 @@ impl UndoTree {
             current: ROOT_IX,
             pins: HashMap::default(),
             pruned: 0,
+            limit: DEFAULT_UNDO_NODE_LIMIT,
             next_seq: 1,
             len: 1,
         }
@@ -157,9 +173,15 @@ impl UndoTree {
         self.len
     }
 
-    /// The number of nodes removed to keep the tree within its node limit.
+    /// The number of nodes removed to keep the tree within its node limit,
+    /// over the life of the tree. Resetting the tree does not change it.
     pub fn pruned(&self) -> usize {
         self.pruned
+    }
+
+    /// The most nodes the tree keeps, unless every leaf is needed.
+    pub fn limit(&self) -> usize {
+        self.limit
     }
 
     /// The number of edges between the root and the node.
@@ -390,8 +412,8 @@ impl UndoTree {
 
     /// How many trailing nodes `group` merges: walking up from the current
     /// node, each node joins its parent when the two are closer than
-    /// `interval`, the parent does not suppress grouping, and the parent has
-    /// no other child and no pin.
+    /// `interval`, the parent does not suppress grouping, the parent has no
+    /// other child and no pin, and the node itself has no pin.
     pub(crate) fn group_count(&self, interval: Duration) -> usize {
         let mut count = 0;
         let mut ix = self.current;
@@ -400,6 +422,7 @@ impl UndoTree {
                 break;
             };
             if !prev.suppress_grouping
+                && !self.is_pinned(ix)
                 && entry.first_edit_at - prev.last_edit_at < interval
                 && self.can_merge_into(parent)
             {
@@ -422,7 +445,7 @@ impl UndoTree {
             if entry.transaction.id == id {
                 return Some(count);
             }
-            if entry.suppress_grouping {
+            if entry.suppress_grouping || self.is_pinned(ix) {
                 return None;
             }
             let parent = self.n(ix).parent?;
@@ -478,6 +501,113 @@ impl UndoTree {
 
     pub(crate) fn is_pinned(&self, ix: NodeIx) -> bool {
         self.pins.get(&ix).is_some_and(|count| *count > 0)
+    }
+
+    /// Protects a node, and the path from the root to it, from pruning. Pins
+    /// count: a node pinned twice needs two unpins. Returns `false` and does
+    /// nothing when the node is not in the tree, for instance because it was
+    /// pruned.
+    pub(crate) fn pin(&mut self, id: UndoNodeId) -> bool {
+        let Some(ix) = self.ix_of(id) else {
+            return false;
+        };
+        *self.pins.entry(ix).or_insert(0) += 1;
+        true
+    }
+
+    /// Releases one pin of a node. Returns `false` and does nothing when the
+    /// node is not in the tree or has no pin.
+    pub(crate) fn unpin(&mut self, id: UndoNodeId) -> bool {
+        let Some(ix) = self.ix_of(id) else {
+            return false;
+        };
+        match self.pins.get_mut(&ix) {
+            Some(count) if *count > 1 => *count -= 1,
+            Some(_) => {
+                self.pins.remove(&ix);
+            }
+            None => return false,
+        }
+        true
+    }
+
+    /// Sets the node limit, raised to [`MIN_UNDO_NODE_LIMIT`] if lower, and
+    /// prunes down to it.
+    pub(crate) fn set_limit(&mut self, limit: usize) {
+        self.limit = limit.max(MIN_UNDO_NODE_LIMIT);
+        self.prune();
+    }
+
+    /// Removes the oldest unneeded leaf, by creation order, until the tree is
+    /// within its limit or no leaf can go. A node left without children
+    /// becomes a candidate itself. The tree stays over its limit rather than
+    /// lose a node on the path to the current node or a pinned node, or on the
+    /// chain of active children below the current node.
+    pub(crate) fn prune(&mut self) {
+        if self.len <= self.limit {
+            return;
+        }
+        let needed = self.needed_nodes();
+        let mut candidates = BinaryHeap::new();
+        for (ix, slot) in self.nodes.iter().enumerate() {
+            if let Some(node) = slot
+                && node.children.is_empty()
+                && !needed[ix]
+            {
+                candidates.push(Reverse((node.seq, ix)));
+            }
+        }
+        while self.len > self.limit {
+            let Some(Reverse((_, ix))) = candidates.pop() else {
+                break;
+            };
+            let parent = self.n(ix).parent.expect("the root is always needed");
+            self.unlink(ix);
+            self.release(ix);
+            self.pruned += 1;
+            let parent_node = self.n(parent);
+            if parent_node.children.is_empty() && !needed[parent] {
+                candidates.push(Reverse((parent_node.seq, parent)));
+            }
+        }
+    }
+
+    /// Drops every node but the current one, which becomes the root: the
+    /// tree is one node at the current state with no transaction, and all
+    /// pins are cleared. The count of pruned nodes is kept, because nothing
+    /// is pruned here. The buffer's text and its edits are not touched.
+    pub(crate) fn reset(&mut self) {
+        let limit = self.limit;
+        let pruned = self.pruned;
+        *self = Self::new();
+        self.limit = limit;
+        self.pruned = pruned;
+    }
+
+    /// Marks the nodes that pruning must keep: the paths from the root to the
+    /// current node, to the end of the active chain below it and to every
+    /// pinned node.
+    fn needed_nodes(&self) -> Vec<bool> {
+        let mut needed = vec![false; self.nodes.len()];
+        let mut mark_path = |mut ix: NodeIx| {
+            while !needed[ix] {
+                needed[ix] = true;
+                match self.n(ix).parent {
+                    Some(parent) => ix = parent,
+                    None => break,
+                }
+            }
+        };
+        mark_path(self.current);
+        let mut chain_end = self.redo_anchor();
+        while let Some(child) = self.n(chain_end).active_child {
+            chain_end = child;
+        }
+        mark_path(chain_end);
+        for ix in self.pins.keys() {
+            mark_path(*ix);
+        }
+        needed
     }
 
     /// Panics unless the arena, the free list, the id map and the parent and
