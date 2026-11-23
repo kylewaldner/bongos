@@ -6,6 +6,8 @@
 
 pub mod actions;
 pub mod adapter;
+pub mod commit;
+pub mod diff;
 pub mod grouping;
 pub mod limit;
 pub mod open;
@@ -13,6 +15,10 @@ pub mod panel;
 pub mod preview;
 pub mod settings;
 
+#[cfg(test)]
+mod commit_tests;
+#[cfg(test)]
+mod diff_tests;
 #[cfg(test)]
 mod grouping_tests;
 #[cfg(test)]
