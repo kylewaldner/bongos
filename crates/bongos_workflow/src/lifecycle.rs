@@ -1931,7 +1931,18 @@ impl<R: Runner> Lifecycle<R> {
     /// loaded is [`RuntimeError::Duplicate`] and none of these load; a log that cannot be opened
     /// skips only its run.
     pub fn load_runs(&mut self, tree: &WorkTree) -> Result<LoadReport, RuntimeError> {
-        self.load_runs_where(tree, None)
+        self.load_runs_where(tree, None, &[])
+    }
+
+    /// [`Self::load_runs`] of every task outside `skip_under` (the files folders of projects whose
+    /// writer another process holds: their runs are that process's, and loading them here would
+    /// stop its running nodes and write to its logs).
+    pub fn load_runs_except(
+        &mut self,
+        tree: &WorkTree,
+        skip_under: &[PathBuf],
+    ) -> Result<LoadReport, RuntimeError> {
+        self.load_runs_where(tree, None, skip_under)
     }
 
     /// [`Self::load_runs`] of only `runs`, those of them not loaded yet: what a take-back after a
@@ -1942,13 +1953,14 @@ impl<R: Runner> Lifecycle<R> {
         tree: &WorkTree,
         runs: &[RunId],
     ) -> Result<LoadReport, RuntimeError> {
-        self.load_runs_where(tree, Some(runs))
+        self.load_runs_where(tree, Some(runs), &[])
     }
 
     fn load_runs_where(
         &mut self,
         tree: &WorkTree,
         only: Option<&[RunId]>,
+        skip_under: &[PathBuf],
     ) -> Result<LoadReport, RuntimeError> {
         let skip_loaded = only.is_some();
         let mut report = LoadReport::default();
@@ -1956,6 +1968,9 @@ impl<R: Runner> Lifecycle<R> {
         let mut specs: Vec<RunSpec> = Vec::new();
         let mut seen: std::collections::BTreeSet<RunId> = std::collections::BTreeSet::new();
         for task in tree.tasks() {
+            if skip_under.iter().any(|files| task.dir.starts_with(files)) {
+                continue;
+            }
             let runs = bongos_work_model::layout::runs_dir(&task.dir);
             let listing = match fs::read_dir(&runs) {
                 Ok(listing) => listing,

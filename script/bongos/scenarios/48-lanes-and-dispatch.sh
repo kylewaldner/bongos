@@ -30,21 +30,18 @@
 #   6. The host this scenario started is killed (`kill -9` of the pid in `host.json`); `bongos lanes
 #      start` starts another; the interrupted run of design-1 is the same run, waiting on you
 #      (`waitingonyou`); every run record of a lane has its own id.
-#   7. `bongos host stop`; the host is ended by its pid; a window opened on the project is the writer
+#   7. `bongos host stop --now` ends the host (its pid exits); a window opened on the project is the writer
 #      in window mode; `bongos run "fake job" --task <id>` reaches it and no engine host starts;
 #      `lanes: start` (summary, then the confirmation) hands the writer to a new host and the window
 #      becomes a client (`host.json` names the host, the window still runs).
 # Deviations from the brief, each forced by what the build offers today:
-# - Stage 3 and stage 1 swap places: `lanes dry-run` is answered only while no process holds the
-#   project (a running host says it is not served yet), so it runs before the lanes start.
+# - Stage 3 runs before stage 1, so its dry runs see every task free; stage 1 checks that a running
+#   host serves `lanes dry-run` as well.
 # - Stage 2 reads the Lanes view from a screenshot (there is no dump of the view): what is asserted
 #   is that `host.json` still names the host with the window open, and that the view was drawn.
 # - Stage 5: the count of `build` cannot be lowered from a script (a lane table lands only from the
 #   window that holds the writer, and a test `LaneProfileSource` is code), so build-2 is stopped by
 #   its own command, which ends a lane at its job boundary the same way.
-# - Stage 7: `bongos host stop` is refused by a running host in this build ("does not take Stop"), so
-#   the line is run and its answer logged, and the host is ended with `kill` of its own pid; lanes
-#   are stopped with `bongos lanes stop` at the end.
 # - A program node runs under the audit hook alone: the smoke sandbox is itself a bubblewrap sandbox
 #   whose /tmp/h is a symlink, so a `bwrap` that always fails is put first on PATH.
 # The scenario leaves the app quit, restores settings.json and never writes final.png.
@@ -485,7 +482,7 @@ show() { names_of <"$CLI_OUT"; names_of <"$CLI_ERR"; }
 
 # ---------------------------------------------------------------------------------------------
 step "Lanes 3: two tasks share the area editor; with both build lanes free one is taken; an exemption lets both run"
-# `lanes dry-run` is served from the store while no process holds the project, so it runs now.
+# `lanes dry-run` is served from the store while no process holds the project.
 cli_ok lanes dry-run
 show
 cp "$CLI_OUT" "$RUN/dry-run-before.txt"
@@ -535,6 +532,9 @@ ids = [lane["id"] for lane in doc["lanes"]]
 assert ids == ["build-1", "build-2", "design-1", "docs-1"], ids
 assert doc["header"]["lanes"] == 4
 PY
+# A running host serves `lanes dry-run` too.
+cli_ok lanes dry-run
+grep -qE '^(build|design|docs)-[0-9]+: ' "$CLI_OUT" || fail "the host's dry run names no lane: $(show)"
 lanes_busy() { status_json && [ "$(lane_field build-1 state)" = running ] && [ "$(lane_field build-2 state)" = running ]; }
 poll 60 "both build lanes to run" lanes_busy || fail "the build lanes do not run: $(cat "$CLI_OUT")"
 [ "$(lane_field build-1 task)" = "$PALETTE_ID" ] || fail "build-1 does not work on Add editor palette: $(show)"
@@ -646,12 +646,11 @@ say "smoke: host killed (kill -9); lanes start made host $HOST_PID; run ${INTERR
 
 # ---------------------------------------------------------------------------------------------
 step "Lanes 7: the host stops; a window is the writer in window mode; bongos run reaches it; lanes start hands over"
-# Deviation: `bongos host stop` is refused by this build's host (it does not take Stop), so the host
-# this scenario started is ended with its own pid.
-cli host stop
-say "smoke: bongos host stop: exit $CLI_CODE: $(cat "$CLI_ERR")"
-kill "$HOST_PID"
-poll 60 "the host to exit" host_gone_2
+# The hold file keeps build-2's job running, so a stop at the job boundary would wait for good:
+# `bongos host stop --now` ends the host now and its jobs are interrupted.
+cli_ok host stop --now
+say "smoke: bongos host stop --now: $(tr '\n' ' ' <"$CLI_OUT")"
+poll 60 "the host to exit after bongos host stop" host_gone_2 || fail "the host did not exit after bongos host stop: $(cat "$HOST_FILE_GLOB")"
 # A window opened on the project is now the writer, in window mode.
 printf '%s\n' "Build cart totals" "Build search index" "Write docs guide" >"$SCRATCH/hold"
 launch_drawn

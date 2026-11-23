@@ -1536,6 +1536,30 @@ fn load_runs_kills_a_leftover_process_with_a_matching_start_time() {
     assert_eq!(lifecycle.state(&run).unwrap().interrupted.len(), 1);
 }
 
+/// A client window must not load the runs of a project another process writes: loading marks a
+/// node in flight interrupted in that process's log (and stops its process).
+#[test]
+fn load_runs_except_leaves_the_runs_under_a_skipped_folder_alone() {
+    let world = World::new();
+    let run = seed(&world, "single", mid_node);
+    let before = fs::read(events_of(&world, &run)).unwrap();
+
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle
+        .load_runs_except(&world.tree, &[world.root.join("work/app")])
+        .unwrap();
+    assert!(report.loaded.is_empty(), "{report:?}");
+    assert!(report.orphans.is_empty(), "{report:?}");
+    assert!(lifecycle.state(&run).is_none());
+    assert_eq!(fs::read(events_of(&world, &run)).unwrap(), before);
+
+    let report = lifecycle
+        .load_runs_except(&world.tree, &[world.root.join("elsewhere")])
+        .unwrap();
+    assert_eq!(report.loaded, vec![run.clone()], "{report:?}");
+    assert_eq!(lifecycle.state(&run).unwrap().interrupted.len(), 1);
+}
+
 #[test]
 fn load_runs_skips_a_cleared_run_and_a_corrupt_record() {
     let world = World::new();

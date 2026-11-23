@@ -302,6 +302,20 @@ struct Observers(Vec<Rc<dyn Fn(&WorkflowEvent, &mut App)>>);
 
 impl Global for Observers {}
 
+/// The files folders of the open project repositories whose state this process reads as a
+/// client: another process holds their writer, and their runs.
+fn files_held_elsewhere(cx: &App) -> Vec<PathBuf> {
+    bongos_work::OpenProjectRepos::listed(cx)
+        .iter()
+        .map(|loaded| loaded.repo())
+        .filter(|repo| {
+            repo.state()
+                .is_some_and(|state| state.opened_writer().is_none())
+        })
+        .map(|repo| repo.location().files.clone())
+        .collect()
+}
+
 impl WorkflowEngine {
     /// An engine over `dirs` with no runs, running nodes through the app's [`AppRunner`]; nothing
     /// is read or written.
@@ -386,7 +400,8 @@ impl WorkflowEngine {
 
     /// Loads the runs on disk once, at the first work tree the app's engine sees. A run that
     /// cannot be loaded is logged and skipped; orphan processes are logged with what became of
-    /// them.
+    /// them. The runs of a project whose writer another process holds (a window that is a client
+    /// of an engine host) are that process's and are not loaded here.
     fn load_runs_once(&self, cx: &mut App) {
         if !self.ticker.load_pending.load(Ordering::SeqCst) {
             return;
@@ -402,7 +417,9 @@ impl WorkflowEngine {
         if !self.ticker.load_pending.swap(false, Ordering::SeqCst) {
             return;
         }
-        let report = self.lifecycle().load_runs(&tree);
+        let report = self
+            .lifecycle()
+            .load_runs_except(&tree, &files_held_elsewhere(cx));
         match report {
             Ok(report) => {
                 for (path, reason) in &report.skipped {
