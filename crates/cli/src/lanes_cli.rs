@@ -952,8 +952,6 @@ pub(crate) mod real {
         WriterInfo,
     };
 
-    /// The protocol of the project socket this build speaks.
-    const PROTOCOL_VERSION: u32 = 1;
     const DEFAULT_START_TIMEOUT: Duration = Duration::from_secs(15);
     const ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
     const POLL: Duration = Duration::from_millis(25);
@@ -1270,7 +1268,7 @@ pub(crate) mod real {
             .map_err(|error| RequestError::Unreachable(error.to_string()))?;
         let hello = json!({
             "message": "hello",
-            "protocol": PROTOCOL_VERSION,
+            "protocol": bongos_version::ENGINE_HOST_PROTOCOL,
             "bongos_version": version,
             "client": "cli",
         });

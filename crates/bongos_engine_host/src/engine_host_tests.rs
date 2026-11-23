@@ -411,6 +411,44 @@ async fn a_protocol_or_version_mismatch_is_refused_with_the_version_text(cx: &mu
 }
 
 #[gpui::test]
+async fn a_stale_protocol_with_the_same_version_string_is_refused_and_the_current_one_is_welcomed(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let host = start_writer(&fixture, true, cx);
+    let socket = host.server().unwrap().socket().to_path_buf();
+
+    let hello_with = |protocol: u32| {
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        let hello = ClientMessage::Hello {
+            protocol,
+            bongos_version: VERSION.to_string(),
+            client: ClientKind::Window,
+        };
+        stream
+            .write_all(&crate::protocol::encode_line(&hello).unwrap())
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        serde_json::from_str::<ServerMessage>(&line).unwrap()
+    };
+
+    // The same version string, one protocol behind the shared constant: a dev build's stale peer.
+    assert_eq!(
+        hello_with(bongos_version::ENGINE_HOST_PROTOCOL - 1),
+        ServerMessage::Refused {
+            text: version_refusal(VERSION)
+        }
+    );
+    // The same version string and the shared protocol: welcomed.
+    assert!(matches!(
+        hello_with(bongos_version::ENGINE_HOST_PROTOCOL),
+        ServerMessage::Welcome { .. }
+    ));
+}
+
+#[gpui::test]
 async fn a_client_windows_run_checks_runs_in_the_writer_and_a_cli_peer_passes_no_person(
     cx: &mut TestAppContext,
 ) {
