@@ -227,6 +227,7 @@ members = [
     "crates/bongos_query_replace_model",
     "crates/bongos_minibuffer",
     "crates/bongos_minibuffer_model",
+    "crates/bongos_navigation",
     "crates/bongos_navigation_model",
     "crates/bongos_window",
     "crates/bongos_net",
@@ -508,6 +509,7 @@ bongos_query_replace = { path = "crates/bongos_query_replace" }
 bongos_query_replace_model = { path = "crates/bongos_query_replace_model" }
 bongos_minibuffer = { path = "crates/bongos_minibuffer" }
 bongos_minibuffer_model = { path = "crates/bongos_minibuffer_model" }
+bongos_navigation = { path = "crates/bongos_navigation" }
 bongos_navigation_model = { path = "crates/bongos_navigation_model" }
 bongos_window = { path = "crates/bongos_window" }
 bongos_net = { path = "crates/bongos_net" }

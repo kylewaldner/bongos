@@ -5697,6 +5697,7 @@ mod tests {
                 "menu",
                 "minibuffer",
                 "multi_workspace",
+                "navigation",
                 "new_process_modal",
                 "notebook",
                 "outline",

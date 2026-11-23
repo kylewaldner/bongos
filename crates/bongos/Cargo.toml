@@ -178,6 +178,7 @@ bongos_languages.workspace = true
 bongos_lanes.workspace = true
 bongos_linear.workspace = true
 bongos_minibuffer.workspace = true
+bongos_navigation.workspace = true
 bongos_window.workspace = true
 bongos_net.workspace = true
 bongos_project_repo.workspace = true
