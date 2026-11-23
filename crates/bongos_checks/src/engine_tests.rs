@@ -204,6 +204,8 @@ impl World {
                     let checks = content.task_checks.get_or_insert_default();
                     checks.enabled = Some(true);
                     checks.kill_grace_seconds = Some(1);
+                    // These tests run real scripts; they do not depend on a sandbox.
+                    content.confinement.get_or_insert_default().task_checks = Some(false);
                 });
             });
             let engine = ChecksEngine::new(

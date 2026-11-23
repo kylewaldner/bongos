@@ -454,7 +454,8 @@ definition. The keys are for the Emacs keymap; every command is also in the pale
   branches after each run and checks them, and git run by bongos and by the editor never uses
   configuration or pointers a job wrote. On macOS jobs are confined by path through Seatbelt: reads
   are not restricted, and a process a job leaves running may outlive it. With no sandbox available,
-  jobs are not confined; install Bubblewrap (Linux) to get it. Two switches turn it on per kind of
+  jobs are not confined; install Bubblewrap (Linux) to get it. Without a usable sandbox, task
+  checks do not run until Bubblewrap is installed or `confinement.task_checks` is set to false. Two switches turn it on per kind of
   job: `confinement.task_checks` (on by default) and `confinement.agent_steps` (off by default for
   now, because the Claude Code CLI needs extra config: its config directory must be inside a
   writable path). Each switch that is off adds a line to the section, for example `Agent steps are

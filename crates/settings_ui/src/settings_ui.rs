@@ -1788,7 +1788,12 @@ impl SettingsWindow {
             let switches = page_data::confinement_switches(cx);
             if switches != confinement_switches {
                 confinement_switches = switches;
+                // Keep the scroll position and any open sub page: only a note appears or goes.
+                let scroll_top = this.list_state.logical_scroll_top();
+                let sub_pages = std::mem::take(&mut this.sub_page_stack);
                 this.rebuild_pages(window, cx);
+                this.sub_page_stack = sub_pages;
+                this.list_state.scroll_to(scroll_top);
             }
 
             // Whenever settings are changed, it's possible that the changed

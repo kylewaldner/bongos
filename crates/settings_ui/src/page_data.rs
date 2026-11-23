@@ -12463,7 +12463,10 @@ mod task_checks_tests {
                 .items
                 .iter()
                 .filter_map(|item| match item {
-                    SettingsPageItem::ActionLink(link) if link.title.contains("not confined") => {
+                    SettingsPageItem::ActionLink(link)
+                        if bongos_confine::switch_off_notes(false, false)
+                            .contains(&link.title.as_ref()) =>
+                    {
                         Some(link.title.to_string())
                     }
                     _ => None,
