@@ -9,6 +9,9 @@ pub mod subscription;
 #[cfg(test)]
 mod tests;
 mod undo_map;
+mod undo_tree;
+#[cfg(test)]
+mod undo_tree_tests;
 
 pub use anchor::*;
 use anyhow::{Context as _, Result};
@@ -40,6 +43,7 @@ pub use subscription::*;
 pub use sum_tree::Bias;
 use sum_tree::{Dimensions, FilterCursor, SumTree, Summary, TreeMap, TreeSet};
 use undo_map::UndoMap;
+pub use undo_tree::{UndoNode, UndoNodeId, UndoTree};
 use util::debug_panic;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -148,13 +152,24 @@ impl HistoryEntry {
     pub fn transaction_id(&self) -> TransactionId {
         self.transaction.id
     }
+
+    pub fn transaction(&self) -> &Transaction {
+        &self.transaction
+    }
+
+    pub fn first_edit_at(&self) -> Instant {
+        self.first_edit_at
+    }
+
+    pub fn last_edit_at(&self) -> Instant {
+        self.last_edit_at
+    }
 }
 
 struct History {
     base_text: Rope,
     operations: TreeMap<clock::Lamport, Operation>,
-    undo_stack: Vec<HistoryEntry>,
-    redo_stack: Vec<HistoryEntry>,
+    tree: UndoTree,
     transaction_depth: usize,
     group_interval: Duration,
 }
@@ -219,8 +234,7 @@ impl History {
         Self {
             base_text,
             operations: Default::default(),
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
+            tree: UndoTree::new(),
             transaction_depth: 0,
             // Don't group transactions in tests unless we opt in, because it's a footgun.
             group_interval: if cfg!(any(test, feature = "test-support")) {
@@ -235,6 +249,16 @@ impl History {
         self.operations.insert(op.timestamp(), op);
     }
 
+    #[cfg(test)]
+    fn undo_stack(&self) -> Vec<HistoryEntry> {
+        self.tree.undo_stack().into_iter().cloned().collect()
+    }
+
+    #[cfg(test)]
+    fn redo_stack(&self) -> Vec<HistoryEntry> {
+        self.tree.redo_stack().into_iter().cloned().collect()
+    }
+
     fn start_transaction(
         &mut self,
         start: clock::Global,
@@ -244,7 +268,7 @@ impl History {
         self.transaction_depth += 1;
         if self.transaction_depth == 1 {
             let id = clock.tick();
-            self.undo_stack.push(HistoryEntry {
+            self.tree.start_pending(HistoryEntry {
                 transaction: Transaction {
                     id,
                     start,
@@ -264,89 +288,38 @@ impl History {
         assert_ne!(self.transaction_depth, 0);
         self.transaction_depth -= 1;
         if self.transaction_depth == 0 {
-            if self
-                .undo_stack
-                .last()
-                .unwrap()
-                .transaction
-                .edit_ids
-                .is_empty()
-            {
-                self.undo_stack.pop();
-                None
-            } else {
-                self.redo_stack.clear();
-                let entry = self.undo_stack.last_mut().unwrap();
-                entry.last_edit_at = now;
-                Some(entry)
-            }
+            let entry = self.tree.end_pending()?;
+            entry.last_edit_at = now;
+            Some(entry)
         } else {
             None
         }
     }
 
     fn group(&mut self) -> Option<TransactionId> {
-        let mut count = 0;
-        let mut entries = self.undo_stack.iter();
-        if let Some(mut entry) = entries.next_back() {
-            while let Some(prev_entry) = entries.next_back() {
-                if !prev_entry.suppress_grouping
-                    && entry.first_edit_at - prev_entry.last_edit_at < self.group_interval
-                {
-                    entry = prev_entry;
-                    count += 1;
-                } else {
-                    break;
-                }
-            }
-        }
-        self.group_trailing(count)
+        let count = self.tree.group_count(self.group_interval);
+        self.tree.group_trailing(count)
     }
 
     fn group_until(&mut self, transaction_id: TransactionId) {
-        let mut count = 0;
-        for entry in self.undo_stack.iter().rev() {
-            if entry.transaction_id() == transaction_id {
-                self.group_trailing(count);
-                break;
-            } else if entry.suppress_grouping {
-                break;
-            } else {
-                count += 1;
-            }
+        if let Some(count) = self.tree.group_until_count(transaction_id) {
+            self.tree.group_trailing(count);
         }
-    }
-
-    fn group_trailing(&mut self, n: usize) -> Option<TransactionId> {
-        let new_len = self.undo_stack.len() - n;
-        let (entries_to_keep, entries_to_merge) = self.undo_stack.split_at_mut(new_len);
-        if let Some(last_entry) = entries_to_keep.last_mut() {
-            for entry in &*entries_to_merge {
-                for edit_id in &entry.transaction.edit_ids {
-                    last_entry.transaction.edit_ids.push(*edit_id);
-                }
-            }
-
-            if let Some(entry) = entries_to_merge.last_mut() {
-                last_entry.last_edit_at = entry.last_edit_at;
-            }
-        }
-
-        self.undo_stack.truncate(new_len);
-        self.undo_stack.last().map(|e| e.transaction.id)
     }
 
     fn finalize_last_transaction(&mut self) -> Option<&Transaction> {
-        self.undo_stack.last_mut().map(|entry| {
+        self.tree.current_entry_mut().map(|entry| {
             entry.transaction.edit_ids.shrink_to_fit();
             entry.suppress_grouping = true;
             &entry.transaction
         })
     }
 
+    /// Inserts the transaction between the current state and the next redo,
+    /// so the redo stack is kept.
     fn push_transaction(&mut self, transaction: Transaction, now: Instant) {
         assert_eq!(self.transaction_depth, 0);
-        self.undo_stack.push(HistoryEntry {
+        self.tree.push(HistoryEntry {
             transaction,
             first_edit_at: now,
             last_edit_at: now,
@@ -354,17 +327,12 @@ impl History {
         });
     }
 
-    /// Differs from `push_transaction` in that it does not clear the redo
-    /// stack. Intended to be used to create a parent transaction to merge
-    /// potential child transactions into.
+    /// Like `push_transaction` with an empty transaction. Intended to be used
+    /// to create a parent transaction to merge potential child transactions
+    /// into.
     ///
     /// The caller is responsible for removing it from the undo history using
-    /// `forget_transaction` if no edits are merged into it. Otherwise, if edits
-    /// are merged into this transaction, the caller is responsible for ensuring
-    /// the redo stack is cleared. The easiest way to ensure the redo stack is
-    /// cleared is to create transactions with the usual `start_transaction` and
-    /// `end_transaction` methods and merging the resulting transactions into
-    /// the transaction created by this method
+    /// `forget_transaction` if no edits are merged into it.
     fn push_empty_transaction(
         &mut self,
         start: clock::Global,
@@ -378,103 +346,46 @@ impl History {
             start,
             edit_ids: Vec::new(),
         };
-        self.undo_stack.push(HistoryEntry {
-            transaction,
-            first_edit_at: now,
-            last_edit_at: now,
-            suppress_grouping: false,
-        });
+        self.push_transaction(transaction, now);
         id
     }
 
     fn push_undo(&mut self, op_id: clock::Lamport) {
         assert_ne!(self.transaction_depth, 0);
         if let Some(Operation::Edit(_)) = self.operations.get(&op_id) {
-            let last_transaction = self.undo_stack.last_mut().unwrap();
+            let last_transaction = self.tree.current_entry_mut().unwrap();
             last_transaction.transaction.edit_ids.push(op_id);
         }
     }
 
     fn pop_undo(&mut self) -> Option<&HistoryEntry> {
         assert_eq!(self.transaction_depth, 0);
-        if let Some(entry) = self.undo_stack.pop() {
-            self.redo_stack.push(entry);
-            self.redo_stack.last()
-        } else {
-            None
-        }
+        self.tree.pop_undo()
     }
 
     fn remove_from_undo(&mut self, transaction_id: TransactionId) -> Option<&HistoryEntry> {
         assert_eq!(self.transaction_depth, 0);
-
-        let entry_ix = self
-            .undo_stack
-            .iter()
-            .rposition(|entry| entry.transaction.id == transaction_id)?;
-        let entry = self.undo_stack.remove(entry_ix);
-        self.redo_stack.push(entry);
-        self.redo_stack.last()
+        self.tree.remove_from_undo(transaction_id)
     }
 
-    fn remove_from_undo_until(&mut self, transaction_id: TransactionId) -> &[HistoryEntry] {
+    /// Undoes every transaction down to and including the given one, and
+    /// returns them, the most recent first.
+    fn remove_from_undo_until(&mut self, transaction_id: TransactionId) -> Vec<Transaction> {
         assert_eq!(self.transaction_depth, 0);
-
-        let redo_stack_start_len = self.redo_stack.len();
-        if let Some(entry_ix) = self
-            .undo_stack
-            .iter()
-            .rposition(|entry| entry.transaction.id == transaction_id)
-        {
-            self.redo_stack
-                .extend(self.undo_stack.drain(entry_ix..).rev());
-        }
-        &self.redo_stack[redo_stack_start_len..]
+        self.tree.undo_until(transaction_id)
     }
 
     fn forget(&mut self, transaction_id: TransactionId) -> Option<Transaction> {
         assert_eq!(self.transaction_depth, 0);
-        if let Some(entry_ix) = self
-            .undo_stack
-            .iter()
-            .rposition(|entry| entry.transaction.id == transaction_id)
-        {
-            Some(self.undo_stack.remove(entry_ix).transaction)
-        } else if let Some(entry_ix) = self
-            .redo_stack
-            .iter()
-            .rposition(|entry| entry.transaction.id == transaction_id)
-        {
-            Some(self.redo_stack.remove(entry_ix).transaction)
-        } else {
-            None
-        }
+        self.tree.forget(transaction_id)
     }
 
     fn transaction(&self, transaction_id: TransactionId) -> Option<&Transaction> {
-        let entry = self
-            .undo_stack
-            .iter()
-            .rfind(|entry| entry.transaction.id == transaction_id)
-            .or_else(|| {
-                self.redo_stack
-                    .iter()
-                    .rfind(|entry| entry.transaction.id == transaction_id)
-            })?;
-        Some(&entry.transaction)
+        self.tree.scoped_transaction(transaction_id)
     }
 
     fn transaction_mut(&mut self, transaction_id: TransactionId) -> Option<&mut Transaction> {
-        let entry = self
-            .undo_stack
-            .iter_mut()
-            .rfind(|entry| entry.transaction.id == transaction_id)
-            .or_else(|| {
-                self.redo_stack
-                    .iter_mut()
-                    .rfind(|entry| entry.transaction.id == transaction_id)
-            })?;
-        Some(&mut entry.transaction)
+        self.tree.scoped_transaction_mut(transaction_id)
     }
 
     fn merge_transactions(&mut self, transaction: TransactionId, destination: TransactionId) {
@@ -487,27 +398,14 @@ impl History {
 
     fn pop_redo(&mut self) -> Option<&HistoryEntry> {
         assert_eq!(self.transaction_depth, 0);
-        if let Some(entry) = self.redo_stack.pop() {
-            self.undo_stack.push(entry);
-            self.undo_stack.last()
-        } else {
-            None
-        }
+        self.tree.pop_redo()
     }
 
-    fn remove_from_redo(&mut self, transaction_id: TransactionId) -> &[HistoryEntry] {
+    /// Redoes every transaction up to and including the given one, and
+    /// returns them, the next redo first.
+    fn remove_from_redo(&mut self, transaction_id: TransactionId) -> Vec<Transaction> {
         assert_eq!(self.transaction_depth, 0);
-
-        let undo_stack_start_len = self.undo_stack.len();
-        if let Some(entry_ix) = self
-            .redo_stack
-            .iter()
-            .rposition(|entry| entry.transaction.id == transaction_id)
-        {
-            self.undo_stack
-                .extend(self.redo_stack.drain(entry_ix..).rev());
-        }
-        &self.undo_stack[undo_stack_start_len..]
+        self.tree.redo_until(transaction_id)
     }
 }
 
@@ -1303,11 +1201,16 @@ impl Buffer {
     }
 
     pub fn peek_undo_stack(&self) -> Option<&HistoryEntry> {
-        self.history.undo_stack.last()
+        self.history.tree.peek_undo()
     }
 
     pub fn peek_redo_stack(&self) -> Option<&HistoryEntry> {
-        self.history.redo_stack.last()
+        self.history.tree.peek_redo()
+    }
+
+    /// The buffer's undo history as a tree, undone branches included.
+    pub fn undo_tree(&self) -> &UndoTree {
+        &self.history.tree
     }
 
     pub fn start_transaction(&mut self) -> Option<TransactionId> {
@@ -1370,12 +1273,7 @@ impl Buffer {
     }
 
     pub fn undo_to_transaction(&mut self, transaction_id: TransactionId) -> Vec<Operation> {
-        let transactions = self
-            .history
-            .remove_from_undo_until(transaction_id)
-            .iter()
-            .map(|entry| entry.transaction.clone())
-            .collect::<Vec<_>>();
+        let transactions = self.history.remove_from_undo_until(transaction_id);
 
         transactions
             .into_iter()
@@ -1407,12 +1305,7 @@ impl Buffer {
     }
 
     pub fn redo_to_transaction(&mut self, transaction_id: TransactionId) -> Vec<Operation> {
-        let transactions = self
-            .history
-            .remove_from_redo(transaction_id)
-            .iter()
-            .map(|entry| entry.transaction.clone())
-            .collect::<Vec<_>>();
+        let transactions = self.history.remove_from_redo(transaction_id);
 
         transactions
             .into_iter()
@@ -1847,7 +1740,7 @@ impl Buffer {
 
         let mut ops = Vec::new();
         for _ in 0..rng.random_range(1..=5) {
-            if let Some(entry) = self.history.undo_stack.choose(rng) {
+            if let Some(entry) = self.history.tree.undo_stack().choose(rng) {
                 let transaction = entry.transaction.clone();
                 log::info!(
                     "undoing buffer {:?} transaction {:?}",
@@ -1913,6 +1806,12 @@ impl Deref for Buffer {
 }
 
 impl BufferSnapshot {
+    /// How many times the edit has been undone or redone; odd means undone.
+    /// Toggling a transaction sets each of its edits to this count plus one.
+    pub fn undo_count(&self, edit_id: clock::Lamport) -> u32 {
+        self.undo_map.undo_count(edit_id)
+    }
+
     fn apply_edit_internal(
         &mut self,
         edits: Vec<(Range<usize>, Arc<str>)>,
