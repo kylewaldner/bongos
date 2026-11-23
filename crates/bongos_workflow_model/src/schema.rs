@@ -1,6 +1,9 @@
 //! Typed node output: the JSON schema handed to an agent CLI, and the hand-written check of a result
 //! against the declared fields (D4). Only the five field types exist, so no validator crate is used.
 
+use std::fmt;
+use std::sync::Arc;
+
 use serde_json::{Map, Value, json};
 
 use crate::definition::{FieldType, ItemType, Outcome, OutputField};
@@ -282,4 +285,240 @@ fn kind_of(value: &Value) -> &'static str {
         Value::Array(_) => "a list",
         Value::Object(_) => "an object",
     }
+}
+
+/// A result schema compiled for validation: the checked JSON Schema document (draft 2020-12), the
+/// declared output fields it was built from, and the compiled validator. No `$ref` is ever fetched
+/// from the network or the file system, so compiling and validating make no outside calls.
+#[derive(Clone)]
+pub struct OutputSchema {
+    document: Value,
+    fields: Vec<OutputField>,
+    validator: Arc<jsonschema::Validator>,
+}
+
+impl OutputSchema {
+    /// Compiles `document` as a draft 2020-12 schema. The error is the validator's description of
+    /// what is wrong with the schema.
+    pub fn compile(document: Value, fields: Vec<OutputField>) -> Result<OutputSchema, String> {
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&document)
+            .map_err(|error| error.to_string())?;
+        Ok(OutputSchema {
+            document,
+            fields,
+            validator: Arc::new(validator),
+        })
+    }
+
+    pub fn document(&self) -> &Value {
+        &self.document
+    }
+
+    pub fn fields(&self) -> &[OutputField] {
+        &self.fields
+    }
+}
+
+impl fmt::Debug for OutputSchema {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OutputSchema")
+            .field("document", &self.document)
+            .field("fields", &self.fields)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Two schemas are equal when their document and fields are; the compiled validator is derived
+/// from the document and never compared.
+impl PartialEq for OutputSchema {
+    fn eq(&self, other: &Self) -> bool {
+        self.document == other.document && self.fields == other.fields
+    }
+}
+
+/// One problem found while checking a result against an [`OutputSchema`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct CheckError {
+    /// A JSON Pointer to the offending value (`/findings/2/score`); `/` is the root.
+    pub path: String,
+    /// The value found there; `None` when the value is absent.
+    pub value: Option<Value>,
+    /// What was expected, as readable text ("a string", "no such field").
+    pub expected: String,
+}
+
+/// Checks `value` against `schema` and returns every problem, sorted by path.
+///
+/// Before validating, a top-level property whose value is `null` is dropped when the field list
+/// declares it optional, or when the schema lists it under `properties` but not under `required`.
+/// This lets a strict Codex schema, where an absent optional field is sent as `null`, pass. A
+/// `null` for a required or undeclared property is kept and reported.
+pub fn validate(schema: &OutputSchema, value: &Value) -> Result<(), Vec<CheckError>> {
+    let (normalized, dropped) = drop_null_optionals(schema, value);
+    let value = normalized.as_ref().unwrap_or(value);
+    let mut errors = Vec::new();
+    for error in schema.validator.iter_errors(value) {
+        let parent = error.instance_path().as_str().to_string();
+        match error.kind() {
+            jsonschema::error::ValidationErrorKind::Required { property } => {
+                let name = property.as_str().unwrap_or_default();
+                // A strict schema requires every property; a dropped null is not missing.
+                if parent.is_empty() && dropped.iter().any(|dropped| dropped == name) {
+                    continue;
+                }
+                errors.push(CheckError {
+                    path: pointer(&parent, name),
+                    value: None,
+                    expected: "a value".to_string(),
+                });
+            }
+            jsonschema::error::ValidationErrorKind::AdditionalProperties { unexpected }
+            | jsonschema::error::ValidationErrorKind::UnevaluatedProperties { unexpected } => {
+                for name in unexpected {
+                    errors.push(CheckError {
+                        path: pointer(&parent, name),
+                        value: error.instance().get(name.as_str()).cloned(),
+                        expected: "no such field".to_string(),
+                    });
+                }
+            }
+            kind => errors.push(CheckError {
+                path: root_pointer(parent),
+                value: Some(error.instance().as_ref().clone()),
+                expected: expected_text(kind, &error),
+            }),
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        errors.sort_by(|a, b| a.path.cmp(&b.path));
+        Err(errors)
+    }
+}
+
+/// The value without its droppable `null` properties (`None` when nothing is dropped), and the
+/// names dropped.
+fn drop_null_optionals(schema: &OutputSchema, value: &Value) -> (Option<Value>, Vec<String>) {
+    let Some(object) = value.as_object() else {
+        return (None, Vec::new());
+    };
+    let required = schema
+        .document
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|names| names.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let properties = schema.document.get("properties").and_then(Value::as_object);
+    let droppable = |name: &str| {
+        schema
+            .fields
+            .iter()
+            .any(|field| field.optional && field.name == name)
+            || (properties.is_some_and(|properties| properties.contains_key(name))
+                && !required.contains(&name))
+    };
+    let dropped = object
+        .iter()
+        .filter(|(name, value)| value.is_null() && droppable(name))
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    if dropped.is_empty() {
+        return (None, dropped);
+    }
+    let kept = object
+        .iter()
+        .filter(|(name, _)| !dropped.contains(name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    (Some(Value::Object(kept)), dropped)
+}
+
+fn pointer(parent: &str, name: &str) -> String {
+    format!("{parent}/{}", name.replace('~', "~0").replace('/', "~1"))
+}
+
+fn root_pointer(path: String) -> String {
+    if path.is_empty() {
+        "/".to_string()
+    } else {
+        path
+    }
+}
+
+fn expected_text(
+    kind: &jsonschema::error::ValidationErrorKind,
+    error: &jsonschema::ValidationError<'_>,
+) -> String {
+    use jsonschema::error::{TypeKind, ValidationErrorKind as Kind};
+    match kind {
+        Kind::Type {
+            kind: TypeKind::Single(json_type),
+        } => with_article(&json_type.to_string()),
+        Kind::Type {
+            kind: TypeKind::Multiple(types),
+        } => types
+            .iter()
+            .map(|json_type| with_article(&json_type.to_string()))
+            .collect::<Vec<_>>()
+            .join(" or "),
+        Kind::Enum { options } => format!(
+            "one of {}",
+            options
+                .as_array()
+                .map(|options| options.iter().map(Value::to_string).collect::<Vec<_>>())
+                .unwrap_or_default()
+                .join(", ")
+        ),
+        Kind::Constant { expected_value } => format!("the value {expected_value}"),
+        Kind::Minimum { limit } => format!("at least {limit}"),
+        Kind::Maximum { limit } => format!("at most {limit}"),
+        Kind::ExclusiveMinimum { limit } => format!("more than {limit}"),
+        Kind::ExclusiveMaximum { limit } => format!("less than {limit}"),
+        Kind::MinLength { limit } => format!("at least {limit} characters"),
+        Kind::MaxLength { limit } => format!("at most {limit} characters"),
+        Kind::MinItems { limit } => format!("at least {limit} items"),
+        Kind::MaxItems { limit } => format!("at most {limit} items"),
+        Kind::Pattern { pattern } => format!("a string matching `{pattern}`"),
+        Kind::UniqueItems => "unique items".to_string(),
+        _ => error.to_string(),
+    }
+}
+
+fn with_article(type_name: &str) -> String {
+    match type_name {
+        "array" => "a list".to_string(),
+        "object" => "an object".to_string(),
+        "integer" => "an integer".to_string(),
+        "null" => "null".to_string(),
+        other => format!("a {other}"),
+    }
+}
+
+/// The message for a failed check: one line per error, `Result failed validation at `<path>`:
+/// expected <x>, got <value>`, at most ten, then "and N more" for the rest. Callers pass errors
+/// sorted by path, as [`validate`] returns them.
+pub fn format_errors(errors: &[CheckError]) -> String {
+    const LISTED: usize = 10;
+    let mut lines = errors
+        .iter()
+        .take(LISTED)
+        .map(|error| {
+            let got = error
+                .value
+                .as_ref()
+                .map_or_else(|| "nothing".to_string(), Value::to_string);
+            format!(
+                "Result failed validation at `{}`: expected {}, got {got}",
+                error.path, error.expected
+            )
+        })
+        .collect::<Vec<_>>();
+    if errors.len() > LISTED {
+        lines.push(format!("and {} more", errors.len() - LISTED));
+    }
+    lines.join("\n")
 }

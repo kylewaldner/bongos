@@ -1,7 +1,10 @@
 use serde_json::json;
 
 use crate::definition::{Outcome, OutputField, parse};
-use crate::schema::{TypedValue, check, json_schema, json_schema_strict};
+use crate::schema::{
+    CheckError, OutputSchema, TypedValue, check, format_errors, json_schema, json_schema_strict,
+    validate,
+};
 
 /// The output fields of one node declared with `spec`.
 fn output(spec: &str) -> Vec<OutputField> {
@@ -289,4 +292,143 @@ fn every_problem_is_listed() {
         error,
         "missing field 'a'; field 'b': expected a number, got a string; unexpected field 'c'"
     );
+}
+
+fn findings_schema() -> OutputSchema {
+    let document = json!({
+        "type": "object",
+        "properties": {
+            "verdict": { "type": "string", "enum": ["approve", "changes"] },
+            "note": { "type": "string" },
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": { "score": { "type": "number" } },
+                    "required": ["score"],
+                },
+            },
+        },
+        "required": ["verdict", "findings"],
+        "additionalProperties": false,
+    });
+    OutputSchema::compile(document, Vec::new()).unwrap()
+}
+
+fn errors_of(schema: &OutputSchema, value: serde_json::Value) -> Vec<CheckError> {
+    validate(schema, &value).unwrap_err()
+}
+
+#[test]
+fn validate_reports_a_wrong_type_at_a_nested_pointer() {
+    let errors = errors_of(
+        &findings_schema(),
+        json!({ "verdict": "approve", "findings": [{ "score": 1 }, { "score": 2 }, { "score": "high" }] }),
+    );
+    assert_eq!(
+        errors,
+        vec![CheckError {
+            path: "/findings/2/score".to_string(),
+            value: Some(json!("high")),
+            expected: "a number".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn validate_reports_a_missing_field_at_its_own_pointer() {
+    let errors = errors_of(
+        &findings_schema(),
+        json!({ "verdict": "approve", "findings": [{}] }),
+    );
+    assert_eq!(
+        errors,
+        vec![CheckError {
+            path: "/findings/0/score".to_string(),
+            value: None,
+            expected: "a value".to_string(),
+        }]
+    );
+    assert_eq!(
+        format_errors(&errors),
+        "Result failed validation at `/findings/0/score`: expected a value, got nothing"
+    );
+}
+
+#[test]
+fn validate_reports_an_extra_field() {
+    let errors = errors_of(
+        &findings_schema(),
+        json!({ "verdict": "approve", "findings": [], "extra": 7 }),
+    );
+    assert_eq!(
+        format_errors(&errors),
+        "Result failed validation at `/extra`: expected no such field, got 7"
+    );
+}
+
+#[test]
+fn validate_reports_an_enum_miss() {
+    let errors = errors_of(
+        &findings_schema(),
+        json!({ "verdict": "maybe", "findings": [] }),
+    );
+    assert_eq!(
+        format_errors(&errors),
+        "Result failed validation at `/verdict`: expected one of \"approve\", \"changes\", got \"maybe\""
+    );
+}
+
+#[test]
+fn validate_reports_a_root_that_is_not_an_object() {
+    let errors = errors_of(&findings_schema(), json!(["x"]));
+    assert_eq!(
+        errors,
+        vec![CheckError {
+            path: "/".to_string(),
+            value: Some(json!(["x"])),
+            expected: "an object".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn format_errors_lists_ten_then_counts_the_rest() {
+    let findings = (0..11).map(|_| json!({ "score": "x" })).collect::<Vec<_>>();
+    let errors = errors_of(
+        &findings_schema(),
+        json!({ "verdict": "approve", "findings": findings }),
+    );
+    assert_eq!(errors.len(), 11);
+    let message = format_errors(&errors);
+    let lines = message.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 11);
+    assert_eq!(
+        lines[0],
+        "Result failed validation at `/findings/0/score`: expected a number, got \"x\""
+    );
+    assert_eq!(lines[10], "and 1 more");
+}
+
+#[test]
+fn validate_sorts_errors_by_path() {
+    let errors = errors_of(
+        &findings_schema(),
+        json!({ "zzz": 1, "findings": [{ "score": "a" }] }),
+    );
+    let paths = errors.iter().map(|e| e.path.as_str()).collect::<Vec<_>>();
+    assert_eq!(paths, ["/findings/0/score", "/verdict", "/zzz"]);
+}
+
+#[test]
+fn validate_accepts_null_for_an_optional_field() {
+    let fields = output(r#"{ a = { type = "text" }, b = { type = "number", optional = true } }"#);
+    let strict = OutputSchema::compile(json_schema_strict(&fields), fields.clone()).unwrap();
+    assert_eq!(validate(&strict, &json!({ "a": "x", "b": null })), Ok(()));
+    assert_eq!(validate(&strict, &json!({ "a": "x", "b": 2 })), Ok(()));
+    // A required field set to null is still an error.
+    assert!(validate(&strict, &json!({ "a": null, "b": null })).is_err());
+    // Non-strict schema: a property outside `required` may be null too.
+    let loose = OutputSchema::compile(json_schema(&fields), Vec::new()).unwrap();
+    assert_eq!(validate(&loose, &json!({ "a": "x", "b": null })), Ok(()));
 }
