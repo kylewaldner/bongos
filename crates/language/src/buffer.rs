@@ -1288,6 +1288,26 @@ impl Buffer {
         }
     }
 
+    /// Returns a new read-only buffer entity that has no file, is not
+    /// subscribed to this buffer, has the same text and language, and starts
+    /// with a fresh text history. Edits applied to the copy never reach this
+    /// buffer. The copy parses in its own context, so this buffer receives no
+    /// events from it.
+    pub fn detached_copy(&self, cx: &mut App) -> Entity<Buffer> {
+        let text = self.text.branch();
+        let language = self.language.clone();
+        let language_registry = self.language_registry();
+        cx.new(|cx| {
+            let mut copy = Self::build(text, None, Capability::ReadOnly);
+            copy.language = language;
+            if let Some(language_registry) = language_registry {
+                copy.set_language_registry(language_registry);
+            }
+            copy.reparse(cx, true);
+            copy
+        })
+    }
+
     pub fn branch(&mut self, cx: &mut Context<Self>) -> Entity<Self> {
         let this = cx.entity();
         cx.new(|cx| {
@@ -3234,8 +3254,8 @@ impl Buffer {
 
     pub fn undo_operations(&mut self, counts: HashMap<Lamport, u32>, cx: &mut Context<Buffer>) {
         let was_dirty = self.is_dirty();
-        let operation = self.text.undo_operations(counts);
         let old_version = self.version.clone();
+        let operation = self.text.undo_operations(counts);
         self.send_operation(Operation::Buffer(operation), true, cx);
         self.did_edit(&old_version, was_dirty, BufferEditSource::User, cx);
     }

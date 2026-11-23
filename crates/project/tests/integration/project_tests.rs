@@ -14532,3 +14532,29 @@ mod disable_ai_settings_tests {
         });
     }
 }
+
+#[gpui::test]
+async fn test_detached_copy_is_not_in_buffer_store(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/dir", json!({ "a.txt": "a-contents" }))
+        .await;
+    let project = Project::test(fs.clone(), ["/dir".as_ref()], cx).await;
+    let buffer = project
+        .update(cx, |p, cx| p.open_local_buffer("/dir/a.txt", cx))
+        .await
+        .unwrap();
+
+    let buffer_store = project.read_with(cx, |project, _| project.buffer_store().clone());
+    let count_before = buffer_store.read_with(cx, |store, _| store.buffers().count());
+
+    let copy = buffer.update(cx, |buffer, cx| buffer.detached_copy(cx));
+    let buffer_id = buffer.read_with(cx, |buffer, _| buffer.remote_id());
+    assert_eq!(copy.read_with(cx, |copy, _| copy.remote_id()), buffer_id);
+
+    buffer_store.read_with(cx, |store, _| {
+        assert_eq!(store.buffers().count(), count_before);
+        assert_eq!(store.get(buffer_id), Some(buffer.clone()));
+    });
+}

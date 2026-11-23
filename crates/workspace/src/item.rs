@@ -1394,6 +1394,7 @@ pub mod test {
         serialize: Option<Box<dyn Fn() -> Option<Task<anyhow::Result<()>>>>>,
         focus_handle: gpui::FocusHandle,
         pub child_focus_handles: Vec<gpui::FocusHandle>,
+        pub render_count: Cell<usize>,
     }
 
     impl project::ProjectItem for TestProjectItem {
@@ -1486,6 +1487,7 @@ pub mod test {
                 focus_handle: cx.focus_handle(),
                 serialize: None,
                 child_focus_handles: Vec::new(),
+                render_count: Cell::new(0),
             }
         }
 
@@ -1552,6 +1554,7 @@ pub mod test {
 
     impl Render for TestItem {
         fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.render_count.set(self.render_count.get() + 1);
             let parent = gpui::div().track_focus(&self.focus_handle(cx));
             self.child_focus_handles
                 .iter()
@@ -1678,6 +1681,7 @@ pub mod test {
                         .iter()
                         .map(|_| cx.focus_handle())
                         .collect(),
+                    render_count: Default::default(),
                 }
             })))
         }
