@@ -903,10 +903,25 @@ mod socket {
     /// Serves one connection of the project's socket: the hello, then each request answered
     /// with `answer(&command)`. Ends when the client closes.
     fn serve(listener: UnixListener, version: &'static str, answer: fn(&Value) -> Value) {
+        serve_protocol(
+            listener,
+            version,
+            bongos_version::ENGINE_HOST_PROTOCOL,
+            answer,
+        );
+    }
+
+    /// `serve` for a host that runs `protocol`.
+    fn serve_protocol(
+        listener: UnixListener,
+        version: &'static str,
+        protocol: u32,
+        answer: fn(&Value) -> Value,
+    ) {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let stream = stream.unwrap();
-                serve_connection(stream, version, answer);
+                serve_connection(stream, version, protocol, answer);
             }
         });
     }
@@ -914,6 +929,7 @@ mod socket {
     fn serve_connection(
         stream: std::os::unix::net::UnixStream,
         version: &str,
+        protocol: u32,
         answer: fn(&Value) -> Value,
     ) {
         {
@@ -922,12 +938,12 @@ mod socket {
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();
             let hello: Value = serde_json::from_str(&line).unwrap();
-            if hello["bongos_version"] != version {
+            if hello["bongos_version"] != version || hello["protocol"] != protocol {
                 writeln!(writer, "{}", json!({ "message": "refused", "text": format!("the engine host runs bongos {version}; stop it with bongos host stop when its jobs end") })).unwrap();
                 return;
             }
             assert_eq!(hello["client"], "cli");
-            writeln!(writer, "{}", json!({ "message": "welcome", "protocol": 1, "bongos_version": version, "writer_pid": 1, "mode": "host", "generation": 0 })).unwrap();
+            writeln!(writer, "{}", json!({ "message": "welcome", "protocol": protocol, "bongos_version": version, "writer_pid": 1, "mode": "host", "generation": 0 })).unwrap();
             loop {
                 line.clear();
                 if reader.read_line(&mut line).unwrap() == 0 {
@@ -1006,6 +1022,30 @@ mod socket {
         let outcome = execute(&["lanes".to_string(), "stop".to_string()], &env);
         assert_eq!(outcome.code, EXIT_PROTOCOL);
         assert!(outcome.stderr.contains("bongos host stop"), "{outcome:?}");
+    }
+
+    #[test]
+    fn a_stale_cli_with_an_old_protocol_is_exit_four() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("p1.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        // The same dev version string on both sides; the host runs a newer protocol than the
+        // shared constant the CLI says hello with.
+        serve_protocol(
+            listener,
+            "0.1.0+stable",
+            bongos_version::ENGINE_HOST_PROTOCOL + 1,
+            |_| json!({ "ok": null }),
+        );
+        let env = FakeSocketEnv {
+            inner: RealEnv {
+                program: PathBuf::from("/nonexistent"),
+                bongos_version: "0.1.0+stable".to_string(),
+            },
+            socket: path,
+        };
+        let outcome = execute(&["lanes".to_string(), "stop".to_string()], &env);
+        assert_eq!(outcome.code, EXIT_PROTOCOL, "{outcome:?}");
     }
 
     /// The machine of two timers that fire at once: the real start of a host with `program`, the

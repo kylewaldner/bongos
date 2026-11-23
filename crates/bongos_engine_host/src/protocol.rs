@@ -8,7 +8,7 @@ use bongos_project_repo_model::Author;
 use serde::{Deserialize, Serialize};
 
 /// The protocol this build speaks.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = bongos_version::ENGINE_HOST_PROTOCOL;
 
 /// The longest line either side reads; a longer one ends the connection.
 pub const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
