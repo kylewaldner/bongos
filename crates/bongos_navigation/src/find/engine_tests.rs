@@ -296,7 +296,7 @@ async fn matches_past_2000_rows_are_counted_in_one_more_row(cx: &mut TestAppCont
 async fn the_more_count_is_a_floor_once_zeds_search_hit_its_cap(cx: &mut TestAppContext) {
     let project = project(json!({ "a.txt": "needle\n".repeat(2_050) }), cx).await;
     let a = open(&project, path!("/root/a.txt"), cx).await;
-    let mut search = fake_search(cx);
+    let search = fake_search(cx);
     search
         .results
         .send(SearchResult::Buffer {
