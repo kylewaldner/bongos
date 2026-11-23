@@ -3368,6 +3368,17 @@ impl Buffer {
         self.text.set_group_interval(group_interval);
     }
 
+    /// Protects an undo node, and the path from the root to it, from pruning.
+    /// See [`text::Buffer::pin_undo_node`].
+    pub fn pin_undo_node(&mut self, id: text::UndoNodeId) -> bool {
+        self.text.pin_undo_node(id)
+    }
+
+    /// Releases one pin of an undo node. See [`text::Buffer::unpin_undo_node`].
+    pub fn unpin_undo_node(&mut self, id: text::UndoNodeId) -> bool {
+        self.text.unpin_undo_node(id)
+    }
+
     // TODO: see if ep can use this instead of Buffer::branch
     pub fn snapshot_with_edits<I, S, T>(
         &mut self,
