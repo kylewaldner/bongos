@@ -1,4 +1,10 @@
-use std::{cmp, path::PathBuf, process::ExitStatus, sync::Arc, time::Duration};
+use std::{
+    cmp,
+    path::PathBuf,
+    process::ExitStatus,
+    sync::{Arc, atomic::AtomicUsize},
+    time::Duration,
+};
 
 use crate::{
     TerminalView, default_working_directory,
@@ -85,12 +91,22 @@ pub struct TerminalPanel {
     assistant_enabled: bool,
     assistant_tab_bar_button: Option<AnyView>,
     active: bool,
+    /// The workspace's activation clock, shared with every pane of this panel.
+    pub(crate) pane_history_timestamp: Arc<AtomicUsize>,
 }
 
 impl TerminalPanel {
     pub fn new(workspace: &Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let project = workspace.project();
-        let pane = new_terminal_pane(workspace.weak_handle(), project.clone(), false, window, cx);
+        let pane_history_timestamp = workspace.pane_history_timestamp();
+        let pane = new_terminal_pane(
+            workspace.weak_handle(),
+            project.clone(),
+            false,
+            pane_history_timestamp.clone(),
+            window,
+            cx,
+        );
         let center = PaneGroup::new(pane.clone());
         let terminal_panel = Self {
             center,
@@ -103,6 +119,7 @@ impl TerminalPanel {
             assistant_enabled: false,
             assistant_tab_bar_button: None,
             active: false,
+            pane_history_timestamp,
         };
         terminal_panel.apply_tab_bar_buttons(&terminal_panel.active_pane, cx);
         terminal_panel
@@ -417,8 +434,14 @@ impl TerminalPanel {
                         else {
                             return;
                         };
-                        let new_pane =
-                            new_terminal_pane(self.workspace.clone(), project, false, window, cx);
+                        let new_pane = new_terminal_pane(
+                            self.workspace.clone(),
+                            project,
+                            false,
+                            self.pane_history_timestamp.clone(),
+                            window,
+                            cx,
+                        );
                         new_pane.update(cx, |pane, cx| {
                             pane.add_item(item, true, true, None, window, cx);
                         });
@@ -450,6 +473,7 @@ impl TerminalPanel {
         let workspace = workspace.read(cx);
         let database_id = workspace.database_id();
         let weak_workspace = self.workspace.clone();
+        let pane_history_timestamp = self.pane_history_timestamp.clone();
         let project = workspace.project().clone();
         let active_pane = &self.active_pane;
         let terminal_view = if clone {
@@ -505,7 +529,14 @@ impl TerminalPanel {
                             cx,
                         )
                     }));
-                    let pane = new_terminal_pane(weak_workspace, project, is_zoomed, window, cx);
+                    let pane = new_terminal_pane(
+                        weak_workspace,
+                        project,
+                        is_zoomed,
+                        pane_history_timestamp,
+                        window,
+                        cx,
+                    );
                     terminal_panel.apply_tab_bar_buttons(&pane, cx);
                     pane.update(cx, |pane, cx| {
                         pane.add_item(terminal_view, true, true, None, window, cx);
@@ -1202,6 +1233,7 @@ pub fn new_terminal_pane(
     workspace: WeakEntity<Workspace>,
     project: Entity<Project>,
     zoomed: bool,
+    pane_history_timestamp: Arc<AtomicUsize>,
     window: &mut Window,
     cx: &mut Context<TerminalPanel>,
 ) -> Entity<Pane> {
@@ -1210,7 +1242,7 @@ pub fn new_terminal_pane(
         let mut pane = Pane::new(
             workspace.clone(),
             project.clone(),
-            Default::default(),
+            pane_history_timestamp,
             None,
             workspace::NewTerminal::default().boxed_clone(),
             false,
@@ -1826,7 +1858,9 @@ mod tests {
             .update(cx, |multi_workspace, window, cx| {
                 let workspace = multi_workspace.workspace().downgrade();
                 terminal_panel.update(cx, |panel, cx| {
-                    let new_pane = new_terminal_pane(workspace, project, false, window, cx);
+                    let timestamp = panel.pane_history_timestamp.clone();
+                    let new_pane =
+                        new_terminal_pane(workspace, project, false, timestamp, window, cx);
                     panel
                         .center
                         .split(&first[0], &new_pane, SplitDirection::Right, cx);
@@ -1837,6 +1871,160 @@ mod tests {
 
         let panes = terminal_panel.read_with(cx, |panel, cx| Panel::panes(panel, cx));
         assert_eq!(panes, vec![first[0].clone(), new_pane]);
+    }
+
+    /// A workspace with a terminal panel in its bottom dock, closed, and the panel's first pane.
+    async fn workspace_with_terminal_panel(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Workspace>,
+        Entity<TerminalPanel>,
+        &mut gpui::VisualTestContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| TerminalPanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+        });
+        cx.run_until_parked();
+        (workspace, panel, cx)
+    }
+
+    /// Splits a second pane off the panel's first one, as `test_panel_lists_its_split_panes` does.
+    fn split_terminal_panel(
+        workspace: &Entity<Workspace>,
+        panel: &Entity<TerminalPanel>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Entity<Pane> {
+        workspace.update_in(cx, |workspace, window, cx| {
+            let project = workspace.project().clone();
+            let weak = workspace.weak_handle();
+            panel.update(cx, |panel, cx| {
+                let first = panel.active_pane.clone();
+                let timestamp = panel.pane_history_timestamp.clone();
+                let new_pane = new_terminal_pane(weak, project, false, timestamp, window, cx);
+                panel
+                    .center
+                    .split(&first, &new_pane, SplitDirection::Right, cx);
+                new_pane
+            })
+        })
+    }
+
+    #[gpui::test]
+    async fn test_terminal_panes_stamp_on_the_workspace_clock(cx: &mut TestAppContext) {
+        let (workspace, panel, cx) = workspace_with_terminal_panel(cx).await;
+        let second = split_terminal_panel(&workspace, &panel, cx);
+        let first = panel.read_with(cx, |panel, _| panel.active_pane.clone());
+        let clock = workspace.read_with(cx, |workspace, _| workspace.pane_history_timestamp());
+        let load = || clock.load(std::sync::atomic::Ordering::SeqCst);
+
+        for pane in [&first, &second] {
+            let before = load();
+            workspace.update_in(cx, |workspace, window, cx| {
+                let project = workspace.project().clone();
+                let terminal = cx.new(|cx| {
+                    terminal::TerminalBuilder::new_display_only(
+                        Default::default(),
+                        terminal::terminal_settings::AlternateScroll::On,
+                        None,
+                        0,
+                        cx.background_executor(),
+                        util::paths::PathStyle::local(),
+                    )
+                    .subscribe(cx)
+                });
+                let view = cx.new(|cx| {
+                    TerminalView::new(
+                        terminal,
+                        workspace.weak_handle(),
+                        None,
+                        project.downgrade(),
+                        window,
+                        cx,
+                    )
+                });
+                pane.update(cx, |pane, cx| {
+                    pane.add_item(Box::new(view), true, false, None, window, cx)
+                });
+            });
+            assert!(load() > before, "adding an item stamps the workspace clock");
+            let stamped = pane.read_with(cx, |pane, _| {
+                pane.last_activation_timestamp().expect("an activation")
+            });
+            assert!(stamped >= before && stamped < load());
+        }
+
+        // A pane takes focus only once it is drawn, so open the dock first.
+        let before = load();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.reveal_pane(&second, window, cx)
+        });
+        cx.run_until_parked();
+        second.update_in(cx, |pane, window, cx| {
+            window.focus(&pane.focus_handle(cx), cx)
+        });
+        cx.run_until_parked();
+        let focused = second
+            .read_with(cx, |pane, _| pane.focus_timestamp())
+            .expect("focus stamps the pane");
+        assert!(focused > before && focused <= load());
+    }
+
+    #[gpui::test]
+    async fn test_item_panes_lists_center_then_dock_panes(cx: &mut TestAppContext) {
+        let (workspace, panel, cx) = workspace_with_terminal_panel(cx).await;
+        let second = split_terminal_panel(&workspace, &panel, cx);
+        let first = panel.read_with(cx, |panel, _| panel.active_pane.clone());
+
+        let bottom = workspace.read_with(cx, |workspace, cx| {
+            let dock = workspace.bottom_dock().read(cx);
+            assert!(!dock.is_open());
+            dock.panel::<TerminalPanel>().is_some()
+        });
+        assert!(bottom, "the terminal panel sits in the bottom dock");
+
+        let center = workspace.read_with(cx, |workspace, _| workspace.center_panes());
+        let listed = workspace.read_with(cx, |workspace, cx| workspace.item_panes(cx));
+        let mut expected = center;
+        expected.extend([first, second]);
+        assert_eq!(listed, expected);
+    }
+
+    #[gpui::test]
+    async fn test_reveal_pane_opens_the_dock_holding_it(cx: &mut TestAppContext) {
+        let (workspace, panel, cx) = workspace_with_terminal_panel(cx).await;
+        let second = split_terminal_panel(&workspace, &panel, cx);
+        let center = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+
+        let visible = |pane: &Entity<Pane>, cx: &mut gpui::VisualTestContext| {
+            workspace.read_with(cx, |workspace, cx| workspace.pane_is_visible(pane, cx))
+        };
+        assert!(visible(&center, cx));
+        assert!(!visible(&second, cx));
+
+        // A center pane needs no revealing.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.reveal_pane(&center, window, cx)
+        });
+        assert!(workspace.read_with(cx, |workspace, cx| {
+            !workspace.bottom_dock().read(cx).is_open()
+        }));
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.reveal_pane(&second, window, cx)
+        });
+        cx.run_until_parked();
+        assert!(workspace.read_with(cx, |workspace, cx| {
+            workspace.bottom_dock().read(cx).is_open()
+        }));
+        assert!(visible(&second, cx));
+        assert!(visible(&center, cx));
     }
 
     #[cfg(unix)]

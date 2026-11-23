@@ -9,7 +9,7 @@
 //! terminal` does that. The view shown (the list, or a chat) is saved under the `view` key, and a
 //! new panel shows it again once the index lists the chat (see [`crate::view_state`]).
 
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicUsize};
 
 use bongos_work::WorkStore;
 use bongos_work_model::layout;
@@ -46,6 +46,8 @@ pub struct ChatPanel {
     /// (by a command).
     project: Entity<Project>,
     fs: Arc<dyn Fs>,
+    /// The workspace's activation clock, shared with the panes of every session.
+    pane_history_timestamp: Arc<AtomicUsize>,
     focus_handle: FocusHandle,
     list: Entity<ChatListView>,
     sessions: HashMap<String, Entity<SessionView>>,
@@ -62,6 +64,7 @@ impl ChatPanel {
         workspace: WeakEntity<Workspace>,
         project: Entity<Project>,
         fs: Arc<dyn Fs>,
+        pane_history_timestamp: Arc<AtomicUsize>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -87,6 +90,7 @@ impl ChatPanel {
             workspace,
             project,
             fs,
+            pane_history_timestamp,
             focus_handle: cx.focus_handle(),
             list,
             sessions: HashMap::default(),
@@ -167,8 +171,10 @@ impl ChatPanel {
         if !self.sessions.contains_key(chat_id) {
             let workspace = self.workspace.clone();
             let fs = self.fs.clone();
+            let clock = self.pane_history_timestamp.clone();
             let id = chat_id.to_string();
-            let session = cx.new(|cx| SessionView::new(id, workspace, project, fs, window, cx));
+            let session =
+                cx.new(|cx| SessionView::new(id, workspace, project, fs, clock, window, cx));
             self._subscriptions.push(cx.subscribe(
                 &session,
                 |this, _, event: &SessionViewEvent, cx| match event {
@@ -311,7 +317,8 @@ fn sync_panel(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
             let weak = cx.entity().downgrade();
             let fs = workspace.app_state().fs.clone();
             let project = workspace.project().clone();
-            let panel = cx.new(|cx| ChatPanel::new(weak, project, fs, window, cx));
+            let clock = workspace.pane_history_timestamp();
+            let panel = cx.new(|cx| ChatPanel::new(weak, project, fs, clock, window, cx));
             workspace.add_panel(panel, window, cx);
         }
         (false, Some(panel)) => workspace.remove_panel(&panel, window, cx),
