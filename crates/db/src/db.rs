@@ -294,6 +294,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier};
     use std::thread;
 
     use sqlez::domain::Domain;
@@ -360,11 +361,15 @@ mod tests {
         );
     }
 
-    /// Test that DB exists but corrupted (causing recreate)
-    #[gpui::test(iterations = 30)]
-    async fn test_simultaneous_db_corruption(cx: &mut gpui::TestAppContext) {
-        cx.executor().allow_parking();
-
+    /// Test that opening a database whose stored migrations conflict with the
+    /// domain's migrations from many threads at once falls back to the in-memory
+    /// database for every opener.
+    ///
+    /// This is a plain test, not a gpui test: the setup does real sqlite file I/O
+    /// on a worker thread, and the gpui test scheduler gives up parking after a
+    /// fixed deadline when the disk is busy.
+    #[test]
+    fn test_simultaneous_db_corruption() {
         enum CorruptedDB {}
 
         impl Domain for CorruptedDB {
@@ -380,38 +385,48 @@ mod tests {
             const MIGRATIONS: &[&str] = &[sql!(CREATE TABLE test2(value);)]; // But different migration
         }
 
-        let tempdir = tempfile::Builder::new()
-            .prefix("DbTests")
-            .tempdir()
-            .unwrap();
-        {
-            // Setup the bad database
-            let corrupt_db =
-                open_db::<CorruptedDB>(tempdir.path(), release_channel::ReleaseChannel::Dev).await;
-            assert!(corrupt_db.persistent());
-        }
+        const THREADS: usize = 10;
 
-        // Try to connect to it a bunch of times at once
-        let mut guards = vec![];
-        for _ in 0..10 {
-            let tmp_path = tempdir.path().to_path_buf();
-            let guard = thread::spawn(move || {
-                let good_db = gpui::block_on(open_db::<GoodDB>(
-                    tmp_path.as_path(),
+        for _ in 0..3 {
+            let tempdir = tempfile::Builder::new()
+                .prefix("DbTests")
+                .tempdir()
+                .unwrap();
+            {
+                // Setup the bad database
+                let corrupt_db = gpui::block_on(open_db::<CorruptedDB>(
+                    tempdir.path(),
                     release_channel::ReleaseChannel::Dev,
                 ));
-                assert!(
-                    good_db.select_row::<usize>("SELECT * FROM test2").unwrap()()
-                        .unwrap()
-                        .is_none()
-                );
-            });
+                assert!(corrupt_db.persistent());
+            }
 
-            guards.push(guard);
-        }
+            // Try to connect to it a bunch of times at once
+            let barrier = Arc::new(Barrier::new(THREADS));
+            let mut guards = vec![];
+            for _ in 0..THREADS {
+                let tmp_path = tempdir.path().to_path_buf();
+                let barrier = barrier.clone();
+                let guard = thread::spawn(move || {
+                    barrier.wait();
+                    let good_db = gpui::block_on(open_db::<GoodDB>(
+                        tmp_path.as_path(),
+                        release_channel::ReleaseChannel::Dev,
+                    ));
+                    assert!(!good_db.persistent());
+                    assert!(
+                        good_db.select_row::<usize>("SELECT * FROM test2").unwrap()()
+                            .unwrap()
+                            .is_none()
+                    );
+                });
 
-        for guard in guards.into_iter() {
-            assert!(guard.join().is_ok());
+                guards.push(guard);
+            }
+
+            for guard in guards.into_iter() {
+                assert!(guard.join().is_ok());
+            }
         }
     }
 }
