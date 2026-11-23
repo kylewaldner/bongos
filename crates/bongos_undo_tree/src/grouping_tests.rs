@@ -224,6 +224,35 @@ async fn a_run_is_one_step_with_the_prompt_guard_active(cx: &mut TestAppContext)
     assert_eq!(undo_steps(&editor, cx), 1);
 }
 
+/// Opens a disk-loaded buffer with a non-zero interval (as in the app, where the buffer observer
+/// does not see it), shows it in a full editor and returns the interval afterwards.
+async fn interval_after_showing(
+    cx: &mut TestAppContext,
+    grouping: UndoGroupingContent,
+) -> Duration {
+    let Setup { project, buffer } = open_buffer(cx, grouping, false).await;
+    let interval = Duration::from_millis(300);
+    buffer.update(cx, |buffer, _| buffer.set_group_interval(interval));
+    let (_editor, cx) = cx.add_window_view({
+        let buffer = buffer.clone();
+        |window, cx| Editor::for_buffer(buffer, Some(project), window, cx)
+    });
+    cx.run_until_parked();
+    buffer.read_with(cx, |buffer, _| buffer.transaction_group_interval())
+}
+
+#[gpui::test]
+async fn emacs_zeroes_the_interval_of_a_disk_loaded_buffer(cx: &mut TestAppContext) {
+    let interval = interval_after_showing(cx, UndoGroupingContent::Emacs).await;
+    assert_eq!(interval, Duration::ZERO);
+}
+
+#[gpui::test]
+async fn zed_keeps_the_interval_of_a_disk_loaded_buffer(cx: &mut TestAppContext) {
+    let interval = interval_after_showing(cx, UndoGroupingContent::Zed).await;
+    assert_eq!(interval, Duration::from_millis(300));
+}
+
 #[gpui::test]
 async fn zed_keeps_the_time_grouping(cx: &mut TestAppContext) {
     let (editor, cx) = open_editor(cx, UndoGroupingContent::Zed, false).await;
