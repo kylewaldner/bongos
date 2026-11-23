@@ -14538,7 +14538,8 @@ async fn test_detached_copy_is_not_in_buffer_store(cx: &mut gpui::TestAppContext
     init_test(cx);
 
     let fs = FakeFs::new(cx.executor());
-    fs.insert_tree("/dir", json!({ "a.txt": "a-contents" })).await;
+    fs.insert_tree("/dir", json!({ "a.txt": "a-contents" }))
+        .await;
     let project = Project::test(fs.clone(), ["/dir".as_ref()], cx).await;
     let buffer = project
         .update(cx, |p, cx| p.open_local_buffer("/dir/a.txt", cx))

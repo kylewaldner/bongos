@@ -39812,29 +39812,25 @@ fn test_transaction_selections_by_transaction_id(cx: &mut TestAppContext) {
         editor.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
             s.select_ranges([MultiBufferOffset(2)..MultiBufferOffset(4)])
         });
+        let anchors_before = editor.selections.disjoint_anchors_arc();
         let transaction_id = editor.start_transaction_at(now, window, cx).unwrap();
         editor.insert("cd", window, cx);
         editor.end_transaction_at(now, cx);
+        let anchors_after = editor.selections.disjoint_anchors_arc();
 
         let (before, after) = editor.transaction_selections(transaction_id).unwrap();
-        let snapshot = editor.buffer().read(cx).snapshot(cx);
-        let before_ranges: Vec<_> = before
-            .iter()
-            .map(|selection| selection.range().to_offset(&snapshot))
-            .collect();
-        let after_ranges: Vec<_> = after
-            .unwrap()
-            .iter()
-            .map(|selection| selection.range().to_offset(&snapshot))
-            .collect();
-        assert_eq!(before_ranges, vec![MultiBufferOffset(2)..MultiBufferOffset(4)]);
-        assert_eq!(after_ranges, vec![MultiBufferOffset(4)..MultiBufferOffset(4)]);
+        assert_eq!(before, anchors_before);
+        assert_eq!(after, Some(anchors_after));
     });
 
     // A transaction this editor did not start has no entry.
     let foreign_id = buffer.update(cx, |buffer, cx| {
         buffer.start_transaction_at(now + Duration::from_secs(10), cx);
-        buffer.edit([(MultiBufferOffset(0)..MultiBufferOffset(0), "z")], None, cx);
+        buffer.edit(
+            [(MultiBufferOffset(0)..MultiBufferOffset(0), "z")],
+            None,
+            cx,
+        );
         buffer.end_transaction_at(now + Duration::from_secs(10), cx)
     });
     _ = editor.update(cx, |editor, _, _| {

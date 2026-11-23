@@ -4285,7 +4285,9 @@ fn test_formatted_chunks(cx: &mut gpui::App) {
 fn test_undo_operations_reparses_emits_edited_and_notifies(cx: &mut TestAppContext) {
     cx.update(|cx| init_settings(cx, |_| {}));
     let buffer = cx.new(|cx| Buffer::local("abc", cx));
-    buffer.update(cx, |buffer, cx| buffer.set_language(Some(Arc::new(json_lang())), cx));
+    buffer.update(cx, |buffer, cx| {
+        buffer.set_language(Some(Arc::new(json_lang())), cx)
+    });
     let timestamp = buffer
         .update(cx, |buffer, cx| buffer.edit([(3..3, "def")], None, cx))
         .unwrap();
@@ -4323,13 +4325,15 @@ fn test_undo_operations_reparses_emits_edited_and_notifies(cx: &mut TestAppConte
 fn test_detached_copy_has_no_file_is_read_only_and_keeps_language(cx: &mut TestAppContext) {
     cx.update(|cx| init_settings(cx, |_| {}));
     let buffer = cx.new(|cx| Buffer::local("abc", cx));
-    buffer.update(cx, |buffer, cx| buffer.set_language(Some(Arc::new(json_lang())), cx));
+    buffer.update(cx, |buffer, cx| {
+        buffer.set_language(Some(Arc::new(json_lang())), cx)
+    });
 
     let copy = buffer.update(cx, |buffer, cx| buffer.detached_copy(cx));
     assert!(copy.file().is_none());
     assert!(copy.read_only());
     assert_eq!(copy.capability(), Capability::ReadOnly);
-    assert_eq!(copy.language().map(|l| l.name()), Some("JSON".into()));
+    assert_eq!(copy.language().map(|l| l.name()), Some("Json".into()));
     assert_eq!(copy.text(), "abc");
     assert_eq!(copy.remote_id(), buffer.read_with(cx, |b, _| b.remote_id()));
 }
