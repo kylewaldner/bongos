@@ -48,7 +48,7 @@ pub struct InstanceResult {
 pub struct RunInfo {
     pub id: String,
     pub workflow: String,
-    pub todo: TodoRef,
+    pub todo: Option<TodoRef>,
     pub task_id: String,
     pub task_dir: PathBuf,
     /// The task's branch.
@@ -64,6 +64,9 @@ pub struct RunInfo {
 pub struct Paths {
     pub worktree: PathBuf,
     pub scratch: PathBuf,
+    /// The repository trees of the run besides `worktree`, by repository. A run on a snapshot
+    /// has no repository tree, so it is always empty there.
+    pub trees: BTreeMap<String, PathBuf>,
 }
 
 /// What [`build`] needs about the run besides its state.
@@ -71,7 +74,7 @@ pub struct Paths {
 pub struct RunIdentity {
     pub id: String,
     pub workflow: String,
-    pub todo: TodoRef,
+    pub todo: Option<TodoRef>,
     pub task_id: String,
     pub task_dir: PathBuf,
     pub branch: String,

@@ -84,6 +84,7 @@ pub(crate) fn binding(root: &std::path::Path, workflow: &str) -> RunBinding {
             branch: None,
         },
         inputs: Vec::new(),
+        setup: Default::default(),
     }
 }
 

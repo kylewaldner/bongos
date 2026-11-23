@@ -344,10 +344,13 @@ pub(crate) struct BackupEngine {
     /// `None` reads the overrides registered in the app.
     overrides: Mutex<Option<Arc<ProjectValueOverrides>>>,
     /// Serializes snapshots and thinning, which both move the state branch.
-    branch_lock: futures::lock::Mutex<()>,
+    pub(crate) branch_lock: futures::lock::Mutex<()>,
     /// One push at a time; never held by a snapshot.
-    push_lock: futures::lock::Mutex<()>,
-    stopped: AtomicBool,
+    pub(crate) push_lock: futures::lock::Mutex<()>,
+    pub(crate) stopped: AtomicBool,
+    /// Set while the writer is released to another process ([`ProjectRepo::release_writer`]):
+    /// the timer is stopped then only until a take-back.
+    pub(crate) released: AtomicBool,
     push_timeout: Mutex<Option<PushTimeout>>,
     /// `None` reads the activity sources registered in the app.
     activity: Mutex<Option<Vec<Arc<dyn ActivitySource>>>>,
@@ -362,6 +365,7 @@ impl Default for BackupEngine {
             branch_lock: futures::lock::Mutex::new(()),
             push_lock: futures::lock::Mutex::new(()),
             stopped: AtomicBool::new(false),
+            released: AtomicBool::new(false),
             push_timeout: Mutex::new(None),
             activity: Mutex::new(None),
         }
@@ -443,13 +447,22 @@ impl ProjectRepo {
     }
 
     /// Stops the backup timer: from now on no snapshot, push, thinning or copy starts. Part of
-    /// the host's shutdown, before the host lock is dropped.
+    /// the host's shutdown, before the host lock is dropped, and of a writer that moved for
+    /// good. Stops them for good even while the writer is released, so the timer ends.
     pub fn stop_backups(&self) {
+        self.engine.backup.released.store(false, Ordering::SeqCst);
         self.engine.backup.stopped.store(true, Ordering::SeqCst);
     }
 
     pub fn backups_stopped(&self) -> bool {
         self.engine.backup.stopped.load(Ordering::SeqCst)
+    }
+
+    /// Whether the backups are stopped only because the writer is released to another process:
+    /// a take-back ([`ProjectRepo::retake_writer`]) starts them again, so the timer waits
+    /// instead of ending.
+    pub fn backups_released(&self) -> bool {
+        self.engine.backup.released.load(Ordering::SeqCst)
     }
 
     /// Whether the timer's snapshots are held after `project: add existing` (see

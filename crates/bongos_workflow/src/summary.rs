@@ -83,7 +83,7 @@ impl Summary {
             workflow: definition.name.clone(),
             layer,
             description: definition.description.clone(),
-            start: definition.start.value.clone(),
+            start: definition.start_node().to_string(),
             nodes: definition
                 .nodes
                 .iter()

@@ -20,7 +20,8 @@
 //! - `node output invalid`: no result, no structured result, or one that fails the schema.
 //!
 //! The process environment is cleared, then given only `PATH`, `HOME`, `LANG` and `TMPDIR` from
-//! the base environment and the node's `BONGOS_*` names ([`ENV_NAMES`]); no secret is added.
+//! the base environment, the run's own edits (a lane run's variables among them, none for any
+//! other run) and the node's `BONGOS_*` names ([`ENV_NAMES`]); no secret is added.
 //!
 //! Recorded against Claude Code 2.1.322: `--max-turns` and `--append-system-prompt-file` work but
 //! are missing from `--help` ([`HIDDEN_FLAGS`]); `--allowedTools` only pre-approves tools, so the
@@ -37,7 +38,7 @@ use std::time::{Duration, Instant};
 use bongos_chat::model::{Agent, Capabilities, HiddenFlag, version_at_least};
 use bongos_chat::{AgentCommand, Health, HealthState, find_program, fix_logged_out, fix_not_found};
 use bongos_workflow_model::definition::{AgentKind, Node, OutputField};
-use bongos_workflow_model::{Definition, Failure, FailureReason, NodeKey, schema};
+use bongos_workflow_model::{Definition, EnvEdit, Failure, FailureReason, NodeKey, schema};
 use serde_json::Value;
 
 use crate::mcp;
@@ -203,6 +204,8 @@ pub struct ClaudeNode {
     pub node_result: PathBuf,
     /// The session id passed with `--session-id` (a UUID).
     pub session_id: String,
+    /// The run's edits to the environment ([`crate::runtime::RunSetup::env_edits`]).
+    pub env: Vec<EnvEdit>,
 }
 
 /// The Claude CLI as the runner uses it: the configured command (04's `chats.agents.claude`), the
@@ -339,8 +342,8 @@ fn lacks(caps: &Capabilities, flag: &str) -> String {
     format!("Claude Code {version} lacks {flag}; update it")
 }
 
-/// The environment of a try: `PATH`, `HOME`, `LANG` and `TMPDIR` from `base` when set, and the
-/// node's [`ENV_NAMES`]. Nothing else.
+/// The environment of a try: `PATH`, `HOME`, `LANG` and `TMPDIR` from `base` when set, the run's
+/// edits, and the node's [`ENV_NAMES`]. Nothing else.
 pub fn launch_env(
     base: &BTreeMap<String, String>,
     run: &str,
@@ -356,6 +359,7 @@ pub fn launch_env(
             task_dir: &node.task_dir,
             worktree: &node.worktree,
             node_result: &node.node_result,
+            edits: &node.env,
         },
     )
 }
@@ -366,6 +370,9 @@ pub(crate) struct NodeEnv<'a> {
     pub task_dir: &'a Path,
     pub worktree: &'a Path,
     pub node_result: &'a Path,
+    /// The run's edits, applied after the passed variables and before [`ENV_NAMES`], which no
+    /// edit changes.
+    pub edits: &'a [EnvEdit],
 }
 
 pub(crate) fn node_env(
@@ -379,6 +386,7 @@ pub(crate) fn node_env(
         .filter(|(name, _)| PASSED_ENV.contains(&name.as_str()))
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect();
+    apply_env_edits(&mut env, node.edits);
     let path = |path: &Path| path.to_string_lossy().into_owned();
     for (name, value) in [
         ("BONGOS_RUN_ID", run.to_string()),
@@ -391,6 +399,32 @@ pub(crate) fn node_env(
         env.insert(name.to_string(), value);
     }
     env
+}
+
+/// Applies `edits` to `env` in order: `Set` replaces a variable, `Unset` removes it and
+/// `PrependPath` puts its directories before the current `PATH`.
+pub fn apply_env_edits(env: &mut BTreeMap<String, String>, edits: &[EnvEdit]) {
+    for edit in edits {
+        match edit {
+            EnvEdit::Set { name, value } => {
+                env.insert(name.clone(), value.clone());
+            }
+            EnvEdit::Unset { name } => {
+                env.remove(name);
+            }
+            EnvEdit::PrependPath { dirs } => {
+                let current = env.get("PATH").cloned().unwrap_or_default();
+                let mut paths: Vec<PathBuf> = dirs.clone();
+                // An empty entry would put the working directory on `PATH`.
+                paths.extend(
+                    std::env::split_paths(&current).filter(|path| !path.as_os_str().is_empty()),
+                );
+                if let Ok(joined) = std::env::join_paths(paths) {
+                    env.insert("PATH".to_string(), joined.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
 }
 
 /// How one try ended, read from its stream: the typed result or the failure, with what it cost.

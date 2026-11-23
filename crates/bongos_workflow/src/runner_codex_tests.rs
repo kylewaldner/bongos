@@ -141,6 +141,7 @@ fn node(definition: &Definition, root: &Path) -> CodexNode {
         task_id: "task-1".to_string(),
         task_dir: root.join("task"),
         node_result: try_dir.join("node-result.json"),
+        env: Vec::new(),
     }
 }
 

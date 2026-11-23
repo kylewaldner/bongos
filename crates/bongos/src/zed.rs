@@ -22,6 +22,10 @@ mod keybindings_tests;
 #[cfg(test)]
 mod kill_ring_keymap_tests;
 #[cfg(test)]
+mod lanes_keymap_tests;
+#[cfg(test)]
+mod lanes_view_keymap_tests;
+#[cfg(test)]
 mod linear_keymap_tests;
 #[cfg(target_os = "macos")]
 pub(crate) mod mac_only_instance;
@@ -501,6 +505,12 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
 
     init_cursor_hide_mode(cx);
 
+    // Closing the last window with live runs, from the platform or the CloseWindow action,
+    // does what `lanes.on_last_window_close` says first, and closes the window afterwards.
+    cx.set_global(workspace::CloseWindowGuard(std::rc::Rc::new(
+        bongos_lanes::close_window_after_lanes,
+    )));
+
     cx.observe_new(|_multi_workspace: &mut MultiWorkspace, window, cx| {
         let Some(window) = window else {
             return;
@@ -767,6 +777,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         bongos_linear::register(workspace);
         bongos_workflow::register(workspace);
         bongos_checks::register(workspace);
+        bongos_lanes::register(workspace);
         let language_offer = cx.new(|_| bongos_extensions::offer::LanguageOffer::new());
         let extension_build_status = cx.new(|cx| {
             bongos_extensions::status_item::ExtensionBuildStatus::new(workspace.weak_handle(), cx)
@@ -5677,6 +5688,8 @@ mod tests {
                 "kotlin",
                 "language_selector",
                 "languages",
+                "lanes",
+                "lanes_view",
                 "line_ending_selector",
                 "linear",
                 "lsp_tool",

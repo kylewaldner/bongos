@@ -26,6 +26,7 @@ pub mod outcomes;
 pub mod picker;
 pub mod process;
 pub mod project_sources;
+pub mod remote;
 pub mod run_view;
 pub mod runner_claude;
 pub mod runner_codex;
@@ -46,9 +47,13 @@ use gpui::App;
 pub use actions::{WorkflowToast, action_types, init_palette, register, workflow};
 pub use builtin_nodes::{BuiltinNode, BuiltinNodes, BuiltinStart};
 pub use completion::{CompletionHook, CompletionHooks};
+pub use definitions::{ValidationHook, ValidationHooks};
 pub use engine::{EngineRoots, EngineRunner, SharedLifecycle, WorkflowEngine};
-pub use lifecycle::{Refusal, RefusalKind, RunId, RunStatus, StartRequest, WorkflowEvent};
+pub use lifecycle::{
+    Refusal, RefusalKind, RunId, RunStatus, RunTree, StartRequest, StartSubject, WorkflowEvent,
+};
 pub use node_status::{NodeStatus, NodeStatusSource, NodeStatusSources};
+pub use remote::{InstalledWorkflowRemote, WorkflowPayload, WorkflowRemote, WorkflowVerb, execute};
 pub use runs_panel::{RunsPanel, init_panel};
 pub use settings::WorkflowsSettings;
 pub use status_item::WorkflowStatus;
@@ -76,6 +81,12 @@ mod definitions_tests;
 mod dispatch_flow_tests;
 #[cfg(test)]
 mod dispatch_tests;
+#[cfg(test)]
+mod drain_tests;
+#[cfg(test)]
+mod handover_tests;
+#[cfg(test)]
+mod instances_tests;
 #[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]

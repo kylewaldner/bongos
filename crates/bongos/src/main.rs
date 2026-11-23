@@ -1,6 +1,9 @@
 // Disable command line from opening on release mode
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod engine_host;
+#[cfg(test)]
+mod engine_host_tests;
 mod zed;
 
 #[cfg(all(test, not(target_os = "windows")))]
@@ -293,6 +296,16 @@ fn main() {
         return;
     }
 
+    // The engine host never opens a window and is not the app's single instance.
+    if let Some(project_id) = args.engine_host.clone() {
+        let mode = match args.read.clone() {
+            Some(words) => engine_host::Mode::Read(words),
+            None if args.probe => engine_host::Mode::Probe,
+            None => engine_host::Mode::Host,
+        };
+        engine_host::run(project_id, mode);
+    }
+
     if args.system_specs {
         let system_specs = system_specs::SystemSpecs::new_stateless(
             app_version,
@@ -556,6 +569,27 @@ fn main() {
             cx,
         );
         bongos_language_status::init(paths::logs_dir(), cx);
+        // Before the projects open: the first process to open one holds its writer (and serves its
+        // socket while lanes are on), a later one attaches to it.
+        bongos_engine_host::install_window(
+            bongos_engine_host::WindowHosting {
+                bongos_version: release_channel::AppVersion::global(cx).to_string(),
+                log: paths::log_file().clone(),
+                hosts_dir: bongos_engine_host::default_hosts_dir(),
+                lanes_enabled: std::rc::Rc::new(|cx| {
+                    <bongos_lanes::LanesSettings as settings::Settings>::get_global(cx).enabled
+                }),
+                handover_times: std::rc::Rc::new(|cx| {
+                    let host =
+                        &<bongos_lanes::LanesSettings as settings::Settings>::get_global(cx).host;
+                    bongos_engine_host::HandoverTimes {
+                        start_timeout: host.start_timeout,
+                        handover_timeout: host.handover_timeout,
+                    }
+                }),
+            },
+            cx,
+        );
         bongos_work::init(
             fs.clone(),
             bongos_work::WorkDirs::new(util::paths::home_dir(), paths::data_dir()),
@@ -577,6 +611,8 @@ fn main() {
         bongos_linear::init_client(cx);
         bongos_workflow::init(cx);
         bongos_checks::init(cx);
+        bongos_lanes::init(cx);
+        bongos_engine_host::init(cx);
         let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
         let workspace_store = cx.new(|cx| WorkspaceStore::new(client.clone(), cx));
 
@@ -677,6 +713,7 @@ fn main() {
         bongos_linear::init_palette(cx);
         bongos_workflow::init_palette(cx);
         bongos_checks::init_palette(cx);
+        bongos_lanes::init_palette(cx);
         let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
             enterprise_uri: language::language_settings::all_language_settings(None, cx)
                 .edit_predictions
@@ -1675,6 +1712,28 @@ struct Args {
 
     #[arg(long, hide = true)]
     dump_all_actions: bool,
+
+    /// Runs a headless host of the workflow engine for one project, with no window.
+    #[arg(long, hide = true, value_name = "PROJECT_ID")]
+    engine_host: Option<String>,
+
+    /// With `--engine-host`, exits 0 once the engine is initialized and its settings are on.
+    #[arg(long, hide = true, requires = "engine_host")]
+    probe: bool,
+
+    /// With `--engine-host`, runs one read mode (its name, then its arguments, which may start
+    /// with `--`) against the project's store opened for reading only, prints its output and
+    /// exits.
+    #[arg(
+        long,
+        hide = true,
+        requires = "engine_host",
+        conflicts_with = "probe",
+        num_args = 1..,
+        allow_hyphen_values = true,
+        value_names = ["NAME", "ARGS"]
+    )]
+    read: Option<Vec<String>>,
 
     /// Output current environment variables as JSON to stdout
     #[arg(long, hide = true)]

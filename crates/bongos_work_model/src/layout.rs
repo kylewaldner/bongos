@@ -22,6 +22,8 @@ pub const RUNS_DIR: &str = "runs";
 pub const WORKFLOWS_DIR: &str = "workflows";
 /// The directory of a task's proposal files, `<n>.proposal.txt`.
 pub const PROPOSALS_DIR: &str = "proposals";
+/// The project-level documents in a project's definitions tree.
+pub const DOCUMENTS_DIR: &str = "documents";
 pub const PROJECTS_DIR: &str = "projects";
 pub const ONEOFFS_DIR: &str = "oneoffs";
 /// The suffix of a link file such as `design.link.toml`.

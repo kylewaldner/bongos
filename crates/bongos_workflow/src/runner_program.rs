@@ -84,8 +84,8 @@
 //!   runner reruns it after the interval, until a result other than the value or until the
 //!   give-up time passes ("wait timed out").
 //!
-//! The environment is the agent runners' (`PATH`, `HOME`, `LANG`, the node's `BONGOS_*` names)
-//! plus `BONGOS_STATE` and `BONGOS_RESULT`; `TMPDIR` points at `tmp/` in the node's scratch
+//! The environment is the agent runners' (`PATH`, `HOME`, `LANG`, the run's own edits, the node's
+//! `BONGOS_*` names) plus `BONGOS_STATE` and `BONGOS_RESULT`; `TMPDIR` points at `tmp/` in the node's scratch
 //! directory, the one temporary directory both layers let it write. A program costs nothing.
 
 use std::collections::{BTreeMap, HashMap};
@@ -140,6 +140,14 @@ pub const MIN_PYTHON: (u32, u32) = (3, 8);
 
 /// What to do when no usable interpreter is found.
 pub const INTERPRETER_FIX: &str = "install Python 3.8+ or set workflows.programs.python";
+
+/// Why a program of a snapshot run does not start when the OS sandbox is unavailable.
+pub const SNAPSHOT_NEEDS_SANDBOX: &str =
+    "a program of a snapshot run needs the OS sandbox to keep the snapshot read-only";
+
+/// Why a program of a run in a project's work directory does not start when the OS sandbox is
+/// unavailable.
+pub const WORK_DIR_NEEDS_SANDBOX: &str = "a program of a project run with no repository needs the OS sandbox to keep the project's records read-only";
 
 /// Why a node with MCP permissions does not start in v1.
 pub const MCP_REFUSAL: &str = "MCP from program nodes needs the bongos MCP server (feature 21)";
@@ -319,8 +327,18 @@ pub struct ProgramNode {
     pub polls: Option<PollPlan>,
     /// The state document; its `paths` are `worktree` and `scratch`.
     pub state: StateDoc,
-    /// The node's worktree: the working directory, writable.
+    /// The node's worktree: the working directory, writable unless `read_only_worktree`.
     pub worktree: PathBuf,
+    /// The worktree is a snapshot the run reads and never writes: it is left out of the writable
+    /// paths, so only the scratch directory (and `extra_writable`) can be written.
+    pub read_only_worktree: bool,
+    /// The script never runs without the OS sandbox: its worktree is a work directory beside
+    /// records only the sandbox keeps it from writing.
+    pub needs_sandbox: bool,
+    /// More writable directories: the named directories of a lane run.
+    pub extra_writable: Vec<PathBuf>,
+    /// The run's edits to the environment.
+    pub env: Vec<bongos_workflow_model::EnvEdit>,
     /// The node's scratch directory, writable; holds `$BONGOS_RESULT` and `TMPDIR`.
     pub scratch: PathBuf,
     /// The repository's common git directory, writable so the script can commit.
@@ -371,12 +389,18 @@ impl ProgramNode {
         }
     }
 
-    /// The paths the script may write, an allowlist: the worktree, the scratch directory and, in
-    /// a linked worktree, the common git directory's `objects/`, `refs/` and `logs/` and the
-    /// worktree's own git directory. The rest of the common git directory (`config`, `hooks/`,
-    /// `commondir`, `packed-refs`, other worktrees' git directories) is never writable.
+    /// The paths the script may write, an allowlist: the worktree (unless it is a read-only
+    /// snapshot), the scratch directory, the extra directories of a lane run and, in a linked
+    /// worktree, the common git directory's `objects/`, `refs/` and `logs/` and the worktree's own
+    /// git directory. The rest of the common git directory (`config`, `hooks/`, `commondir`,
+    /// `packed-refs`, other worktrees' git directories) is never writable.
     pub fn writable_paths(&self) -> Vec<PathBuf> {
-        let mut paths = vec![self.worktree.clone(), self.scratch.clone()];
+        let mut paths = Vec::new();
+        if !self.read_only_worktree {
+            paths.push(self.worktree.clone());
+        }
+        paths.push(self.scratch.clone());
+        paths.extend(self.extra_writable.iter().cloned());
         paths.extend(self.git_writable_paths());
         if cfg!(target_os = "linux") {
             paths.extend(self.git_mount_points());
@@ -1017,6 +1041,7 @@ pub fn launch_env(
             task_dir: &node.task_dir,
             worktree: &node.worktree,
             node_result: &node.node_result,
+            edits: &node.env,
         },
     );
     let path = |path: &Path| path.to_string_lossy().into_owned();
@@ -1491,12 +1516,7 @@ impl ProgramRunner {
             sandbox_note,
         } = self
             .wrap(&node, path(&self.interpreter.program), args, env)
-            .map_err(|error| {
-                refuse(
-                    FailureReason::PermissionDenied,
-                    format!("could not hide the reflogs in the sandbox: {error}"),
-                )
-            })?;
+            .map_err(|error| refuse(FailureReason::PermissionDenied, error))?;
         let git = GitGuard::take(&node, sandbox.is_some());
         write_summary(&dir, &json!({ "pass": number, "sandbox": sandbox_note }));
 
@@ -1569,7 +1589,8 @@ impl ProgramRunner {
 
     /// The command to spawn: inside the OS sandbox when it can be created, else as it is with
     /// the reason it is not sandboxed. A sandbox that can be created but whose reflog directories
-    /// cannot be covered refuses the start (the error) rather than running without it.
+    /// cannot be covered, and a read-only worktree with no sandbox, refuse the start (the error)
+    /// rather than running without it.
     fn wrap(
         &self,
         node: &ProgramNode,
@@ -1600,7 +1621,9 @@ impl ProgramRunner {
             let mut wrapped = futures::executor::block_on(sandbox.wrap(&command))
                 .map_err(|error| error.to_string())?;
             if let Err(error) = hide_in_bubblewrap(&mut wrapped.args, &hidden) {
-                refused = Some(error.clone());
+                refused = Some(format!(
+                    "could not hide the reflogs in the sandbox: {error}"
+                ));
                 return Err(error);
             }
             Ok((wrapped, sandbox))
@@ -1616,6 +1639,14 @@ impl ProgramRunner {
                 sandbox: Some(sandbox),
                 sandbox_note: "sandboxed".to_string(),
             },
+            // Only the OS sandbox keeps a snapshot read-only: the shim alone lets listed
+            // commands write it, so such a program never runs without the sandbox.
+            Err(reason) if node.read_only_worktree => {
+                return Err(format!("{SNAPSHOT_NEEDS_SANDBOX}: {reason}"));
+            }
+            Err(reason) if node.needs_sandbox => {
+                return Err(format!("{WORK_DIR_NEEDS_SANDBOX}: {reason}"));
+            }
             Err(reason) => {
                 log::warn!("workflows: a program runs without the OS sandbox: {reason}");
                 Launch {

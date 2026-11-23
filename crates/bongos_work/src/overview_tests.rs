@@ -14,7 +14,9 @@ use settings::{SettingsStore, WorkRepositoryContent};
 use tempfile::TempDir;
 
 use crate::command_tests::{harness, seed, wait_until};
-use crate::overview::{RepositoryRow, RootProblem, RootSource, dump_text, old_root_tasks, row};
+use crate::overview::{
+    RepositoryRow, RootLayer, RootLayers, RootProblem, RootSource, dump_text, old_root_tasks, row,
+};
 use crate::worktree_tests::{init_repository, leaf, test_repository};
 use crate::worktrees::Layout;
 use crate::{Repository, Stats};
@@ -41,7 +43,7 @@ fn invoicing(base: &Path, worktree_root: Option<&str>) -> Repository {
 }
 
 fn row_of(repository: &Repository, layout: &Layout) -> RepositoryRow {
-    row(repository, layout, Vec::new(), false)
+    row(repository, layout, None, Vec::new(), false)
 }
 
 #[test]
@@ -437,4 +439,56 @@ async fn the_old_worktree_notice_stays_hidden_once_dismissed(cx: &mut TestAppCon
     })
     .await;
     assert!(!shows(&restarted, cx), "it stays hidden after a restart");
+}
+
+fn profile_layer(repository: &str, _cx: &gpui::App) -> Option<RootLayer> {
+    (repository == "invoicing").then(|| RootLayer {
+        template: Some("/fast/{repo}".to_string()),
+        source: RootSource::Profile {
+            name: "build-box".to_string(),
+        },
+    })
+}
+
+#[gpui::test]
+fn the_screen_labels_the_layer_that_won(cx: &mut TestAppContext) {
+    let (_temp, base) = base();
+    let layout = layout_in(&base, Some("~/trees/{repo}"));
+    let invoicing = row_of(&invoicing(&base, None), &layout);
+    let other = row_of(&test_repository("other", "/nowhere", None), &layout);
+    cx.update(|cx| {
+        // With nothing registered the settings layer shows.
+        let settings = RootLayers::winning(&invoicing, cx);
+        assert_eq!(settings.source, RootSource::Default);
+        assert_eq!(settings.template.as_deref(), Some("~/trees/{repo}"));
+        RootLayers::register(profile_layer, cx);
+        let winner = RootLayers::winning(&invoicing, cx);
+        assert_eq!(winner.source.label(), "from project profile build-box");
+        assert_eq!(winner.template.as_deref(), Some("/fast/{repo}"));
+        // A repository no source decides keeps the settings layer and root.
+        assert_eq!(RootLayers::winning(&other, cx), settings);
+    });
+}
+
+#[test]
+fn a_layer_above_the_settings_gives_the_rows_root_preview_and_problem() {
+    let (_temp, base) = base();
+    let layout = layout_in(&base, Some("~/trees/{repo}"));
+    let repository = invoicing(&base, None);
+    let layer = RootLayer {
+        template: Some("/fast/{repo}/{slug}".to_string()),
+        source: RootSource::Project,
+    };
+    let row = row(&repository, &layout, Some(&layer), Vec::new(), false);
+    assert_eq!(row.root_source, RootSource::Project);
+    assert_eq!(row.template.as_deref(), Some("/fast/{repo}/{slug}"));
+    assert_eq!(row.preview, "/fast/invoicing/<task>");
+
+    let broken = RootLayer {
+        template: Some("/fast/{nope}".to_string()),
+        source: RootSource::Project,
+    };
+    let row = self::row(&repository, &layout, Some(&broken), Vec::new(), false);
+    assert!(row.preview.is_empty());
+    assert!(matches!(row.problem, Some(RootProblem::Template(_))));
 }

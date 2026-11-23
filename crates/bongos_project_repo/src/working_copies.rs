@@ -183,6 +183,20 @@ impl ProjectRepo {
         now: DateTime<Utc>,
     ) -> Result<(), AbandonRefused> {
         let failed = |error: anyhow::Error| AbandonRefused::Failed(format!("{error:#}"));
+        let holds_writer = self
+            .state
+            .as_ref()
+            .and_then(|state| state.writer())
+            .is_some();
+        if !holds_writer && self.sink().is_some() {
+            // Another process holds the writer: it abandons the change.
+            self.send_command(crate::sink::RepoCommand::Abandon {
+                change_id: change_id.to_string(),
+            })
+            .await
+            .map_err(failed)?;
+            return Ok(());
+        }
         let writer = self
             .state
             .as_ref()

@@ -630,3 +630,61 @@ async fn an_undrain_starts_the_drained_checks_key_again_with_no_other_event(
     assert_eq!(world.lines("runs"), ["3", "4"], "parts 1 and 2 were kept");
     assert!(runtime.runner().started.is_empty());
 }
+
+// A checks key in flight whose checks do not run (its try waits in the built-in's worker, here
+// because the drain came before the worker took the start) is named by the drain all the same:
+// `ChecksDrained` parks it, its waiting try stops, and the runs' drain resolves with no check
+// ever started.
+#[gpui::test]
+async fn a_drain_names_a_waiting_checks_key_which_then_does_not_hold_the_runs_drain(
+    cx: &mut TestAppContext,
+) {
+    use bongos_workflow::NodeStatusSource as _;
+    use bongos_workflow_model::Event;
+
+    cx.executor().allow_parking();
+    let world = World::with_checks(cx, true, FakeClock::manual(), DRAIN_CHECKS);
+    let (node, status) = cx.update(|cx| ChecksNode::new(&world.engine, cx));
+    let builtins = BuiltinNodes::default();
+    builtins.insert("checks", node);
+    let mut runtime = Runtime::new(limits(4), Agents::default());
+    runtime.set_builtins(builtins);
+    let logs = TempDir::new().unwrap();
+    runtime.add(spec(logs.path(), 1, VERIFY)).unwrap();
+    runtime.tick();
+    assert_eq!(runtime.in_flight(&run_id(1)), [verify_key()]);
+
+    // The engine drains before the worker took the key's start: the try waits in the worker.
+    let drain = world.engine.update(cx, |engine, cx| engine.drain(cx));
+    cx.run_until_parked();
+    let line = |cx: &mut TestAppContext| {
+        cx.update(|cx| status.status(&run_id(1), &verify_key(), cx))
+            .map(|status| status.line)
+    };
+    assert_eq!(
+        line(cx).as_deref(),
+        Some("waiting: checks are moving to another process")
+    );
+    assert!(engine_idle(&world, cx), "no check of the key runs");
+    let mut drain = std::pin::pin!(drain);
+    let drained = futures::FutureExt::now_or_never(drain.as_mut()).expect("the drain resolved");
+    assert_eq!(drained, [(run_id(1), verify_key())]);
+
+    // The runs' drain waits on the key until the run records it drained, then resolves.
+    let mut runs_drained = runtime.drain();
+    assert_eq!(runs_drained.try_recv(), Ok(None));
+    runtime.checks_drained(&run_id(1), &verify_key()).unwrap();
+    assert_eq!(runs_drained.try_recv(), Ok(Some(())));
+    assert!(runtime.in_flight(&run_id(1)).is_empty());
+    assert!(matches!(
+        runtime.events(&run_id(1)).and_then(|events| events.last()),
+        Some(Event::ChecksDrained { key }) if *key == verify_key()
+    ));
+    // Its waiting try stopped: nothing waits and nothing starts, nor is anything reported.
+    cx.run_until_parked();
+    runtime.tick();
+    assert_eq!(line(cx), None);
+    assert!(engine_idle(&world, cx));
+    assert_eq!(state(&runtime, 1).finished, []);
+    assert!(world.lines("runs").is_empty(), "no part ever ran");
+}

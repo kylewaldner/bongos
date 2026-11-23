@@ -1,0 +1,6 @@
+schema = 1
+name = "lanes"
+description = "Run the project's lanes"
+# A dispatcher: it has no nodes or ends, and a project runs at most one at a time.
+dispatcher = true
+instances = 1

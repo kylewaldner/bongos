@@ -1,7 +1,9 @@
 //! Tests of the program node kind: a script run through [`ProgramNodes`] reads its state document
-//! and routes by its result, and `@remote` in a node's network list becomes the host of the task
-//! repository's push remote. Each run test skips when no Python 3.8+ is on `PATH`. The OS sandbox
-//! is replaced by a probe that says it is unavailable; the clock is fake; every directory is a
+//! and routes by its result, `@remote` in a node's network list becomes the host of the task
+//! repository's push remote, a program of a snapshot run never runs without the OS sandbox, and a
+//! program of a lane run gets the lane's variables and may write its named directories. Each run
+//! test skips when no Python 3.8+ is on `PATH`. The OS sandbox is replaced by a probe that says
+//! it is unavailable; the clock is fake; every directory is a
 //! temp dir.
 
 use std::collections::BTreeMap;
@@ -11,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bongos_workflow_model::inputs::{Input, InputValue};
-use bongos_workflow_model::{Failure, FailureReason, NodeKey, RunState, parse};
+use bongos_workflow_model::{EnvEdit, Failure, FailureReason, NodeKey, RunState, parse};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -19,7 +21,7 @@ use crate::dispatch::{NodeKind, RunnerSnapshot};
 use crate::dispatch_program::{NO_ORIGIN, ProgramNodes, remote_hosts, task_remote_hosts};
 use crate::dispatch_tests::binding;
 use crate::runner_program::{Clock, Interpreter, SandboxProbe};
-use crate::runtime::{NodeStart, RunBinding};
+use crate::runtime::{Finish, NodeStart, RunBinding, RunSetup};
 use crate::worktrees::Git;
 
 const FLOW: &str = r#"
@@ -241,4 +243,174 @@ fn a_task_repository_with_no_origin_fails_the_node() {
     assert_eq!(failure.reason, FailureReason::PermissionDenied);
     assert_eq!(failure.detail, NO_ORIGIN);
     assert_eq!(failure.node, Some(NodeKey::new("check", 1)));
+}
+
+const PLAIN_FLOW: &str = r#"
+schema = 1
+name = "plain"
+start = "check"
+
+[nodes.check]
+kind = "program"
+script = "check.py"
+output = { status = { type = "choice", values = ["ready", "waiting"] } }
+routes = [{ to = "done" }]
+
+[ends.done]
+kind = "success"
+"#;
+
+/// Writes what the script sees to `seen.json` in its scratch, writes `scratch.txt` there too,
+/// then tries `changed.txt` in its worktree and in each named lane directory, as `<path>: ok` or
+/// `<path>: denied` lines in `writes.txt` in its scratch.
+const PROBE_SCRIPT: &str = "import json, os\n\
+state = json.load(open(os.environ['BONGOS_STATE']))\n\
+scratch = os.environ['TMPDIR']\n\
+seen = {'env': dict(os.environ), 'paths': state['paths']}\n\
+open(os.path.join(scratch, 'seen.json'), 'w').write(json.dumps(seen))\n\
+open(os.path.join(scratch, 'scratch.txt'), 'w').write('mine')\n\
+targets = [os.environ['BONGOS_WORKTREE']] + [v for k, v in os.environ.items() if k.startswith('BONGOS_LANE_DIR_')]\n\
+lines = []\n\
+for target in targets:\n    \
+path = os.path.join(target, 'changed.txt')\n    \
+try:\n        \
+open(path, 'w').write('x')\n        \
+lines.append(path + ': ok')\n    \
+except PermissionError:\n        \
+lines.append(path + ': denied')\n\
+open(os.path.join(scratch, 'writes.txt'), 'w').write('\\n'.join(lines))\n\
+with open(os.environ['BONGOS_RESULT'], 'w') as result:\n    \
+json.dump({'status': 'ready'}, result)\n";
+
+/// Starts [`PROBE_SCRIPT`] as the `check` node of `binding`.
+fn start_probe(
+    kind: &mut ProgramNodes,
+    binding: &RunBinding,
+    snapshot: &RunnerSnapshot,
+) -> Result<(), Failure> {
+    let definition_dir = binding.attempt_dir.join("definition/0");
+    fs::create_dir_all(&definition_dir).unwrap();
+    fs::write(definition_dir.join("check.py"), PROBE_SCRIPT).unwrap();
+    let definition = parse(PLAIN_FLOW).unwrap();
+    let key = NodeKey::new("check", 1);
+    let state = RunState::default();
+    kind.start(
+        &NodeStart {
+            run: "run-1",
+            definition: &definition,
+            key: &key,
+            try_number: 1,
+            state: &state,
+            budget_left_usd: None,
+            binding: Some(binding),
+        },
+        binding,
+        snapshot,
+    )
+    .map(|_| ())
+}
+
+/// Runs [`PROBE_SCRIPT`] as the `check` node of `binding` and returns how it finished, what it
+/// saw and what its writes did.
+fn probe(binding: &RunBinding, snapshot: &RunnerSnapshot) -> (Finish, Value, String) {
+    let mut kind = kind();
+    start_probe(&mut kind, binding, snapshot).unwrap();
+    let key = NodeKey::new("check", 1);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let finish = loop {
+        if let Some(finish) = kind.poll().pop() {
+            break finish;
+        }
+        assert!(Instant::now() < deadline, "the program did not finish");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let scratch = binding
+        .worktree
+        .run_dir
+        .join(crate::worktrees::SCRATCH_DIR)
+        .join("check")
+        .join(key.branch_label())
+        .join("1-1")
+        .join(crate::worktrees::SCRATCH_TMP_DIR);
+    let seen: Value =
+        serde_json::from_str(&fs::read_to_string(scratch.join("seen.json")).unwrap()).unwrap();
+    assert_eq!(
+        fs::read_to_string(scratch.join("scratch.txt")).unwrap(),
+        "mine",
+        "the scratch directory is writable"
+    );
+    let writes = fs::read_to_string(scratch.join("writes.txt")).unwrap_or_default();
+    (finish, seen, writes)
+}
+
+#[test]
+fn a_program_of_a_snapshot_run_never_runs_without_the_os_sandbox() {
+    let root = TempDir::new().unwrap();
+    let Some(snapshot) = snapshot(root.path()) else {
+        return;
+    };
+    let mut binding = binding(root.path(), "plain");
+    let tree = root.path().join("snapshot");
+    fs::create_dir_all(&tree).unwrap();
+    fs::write(tree.join("task.toml"), "goal = \"Tidy\"\n").unwrap();
+    binding.worktree.path = tree.clone();
+    binding.worktree.branch = String::new();
+    binding.setup.snapshot = true;
+
+    // The probe says the sandbox is unavailable: the shim alone cannot keep the snapshot
+    // read-only, so the node fails before the script runs.
+    let mut kind = kind();
+    let failure = start_probe(&mut kind, &binding, &snapshot).unwrap_err();
+    assert_eq!(failure.reason, FailureReason::PermissionDenied);
+    assert!(
+        failure
+            .detail
+            .starts_with(crate::runner_program::SNAPSHOT_NEEDS_SANDBOX),
+        "{}",
+        failure.detail
+    );
+    assert_eq!(failure.node, Some(NodeKey::new("check", 1)));
+    assert!(kind.poll().is_empty(), "nothing was started");
+    assert!(!tree.join("changed.txt").exists());
+    assert_eq!(
+        fs::read_dir(&tree).unwrap().count(),
+        1,
+        "the snapshot is as it was"
+    );
+}
+
+#[test]
+fn a_program_of_a_lane_run_gets_its_variables_and_may_write_its_named_directories() {
+    let root = TempDir::new().unwrap();
+    let Some(snapshot) = snapshot(root.path()) else {
+        return;
+    };
+    let mut binding = binding(root.path(), "plain");
+    fs::create_dir_all(&binding.worktree.path).unwrap();
+    let target = root.path().join("lane-target");
+    fs::create_dir_all(&target).unwrap();
+    binding.setup = RunSetup {
+        lane: Some(bongos_workflow_model::LaneRef {
+            id: "lane-1".to_string(),
+            kind: "build".to_string(),
+        }),
+        lane_dirs: [("build-target".to_string(), target.clone())].into(),
+        env: vec![EnvEdit::Set {
+            name: "CARGO_TARGET_DIR".to_string(),
+            value: target.to_string_lossy().into_owned(),
+        }],
+        ..RunSetup::default()
+    };
+
+    let (finish, seen, writes) = probe(&binding, &snapshot);
+    assert_eq!(finish.outcome, Ok(json!({ "status": "ready" })));
+    let env = &seen["env"];
+    assert_eq!(env["BONGOS_LANE"], json!("lane-1"));
+    assert_eq!(env["BONGOS_LANE_KIND"], json!("build"));
+    assert_eq!(env["BONGOS_LANE_DIR_BUILD_TARGET"], json!(target));
+    assert_eq!(env["CARGO_TARGET_DIR"], json!(target));
+    assert_eq!(env["BONGOS_WORKTREE"], json!(binding.worktree.path));
+    assert!(target.join("changed.txt").exists());
+    assert!(binding.worktree.path.join("changed.txt").exists());
+    assert!(!writes.contains("denied"), "{writes}");
 }

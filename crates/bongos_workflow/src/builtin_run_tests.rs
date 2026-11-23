@@ -93,6 +93,7 @@ fn binding(dir: &Path) -> RunBinding {
             branch: Some("task".to_string()),
         },
         inputs: Vec::new(),
+        setup: Default::default(),
     }
 }
 

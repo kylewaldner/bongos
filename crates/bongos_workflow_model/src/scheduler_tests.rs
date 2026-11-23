@@ -1197,3 +1197,15 @@ fn a_cycle_reached_by_a_cross_edge_is_bounded_by_the_loop_bound() {
     );
     assert_eq!(run.starts_of("a"), 2);
 }
+
+#[test]
+fn the_scheduler_never_drives_a_dispatcher() {
+    let dispatcher = definition("schema = 1\nname = \"lanes\"\ndispatcher = true\n");
+    let state = replay(&[Event::Created, Event::Queued]);
+    assert_eq!(step(&dispatcher, &state, &Limits::default(), 4), Vec::new());
+    assert!(
+        plan(&dispatcher, &state, &Limits::default())
+            .ready
+            .is_empty()
+    );
+}

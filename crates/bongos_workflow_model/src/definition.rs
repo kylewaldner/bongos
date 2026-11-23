@@ -18,6 +18,8 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "name",
     "description",
     "start",
+    "dispatcher",
+    "instances",
     "inputs",
     "defaults",
     "nodes",
@@ -96,7 +98,16 @@ pub struct Definition {
     pub schema: u32,
     pub name: String,
     pub description: Option<String>,
-    pub start: Located<String>,
+    /// The first node. Always set on a definition that is not a dispatcher (parse requires it);
+    /// a dispatcher has none.
+    pub start: Option<Located<String>>,
+    /// A dispatcher definition: it declares no nodes or ends and is never driven by the scheduler.
+    pub dispatcher: bool,
+    /// How many runs of this definition may be active at once in a project; `None` is no limit.
+    /// A dispatcher's is always 1 (a written 0 is kept so validation reports it).
+    pub instances: Option<u32>,
+    /// The line `instances` was written on.
+    pub instances_line: Option<usize>,
     pub inputs: Vec<Input>,
     pub defaults: Settings,
     pub nodes: Vec<Node>,
@@ -111,6 +122,16 @@ impl Definition {
 
     pub fn end(&self, name: &str) -> Option<&End> {
         self.ends.iter().find(|end| end.name == name)
+    }
+
+    /// The name of the first node; empty for a dispatcher.
+    pub fn start_node(&self) -> &str {
+        self.start.as_ref().map_or("", |start| start.value.as_str())
+    }
+
+    /// The line `start` was written on; 1 when there is none.
+    pub fn start_line(&self) -> usize {
+        self.start.as_ref().map_or(1, |start| start.line)
     }
 
     pub fn warnings(&self) -> Vec<Warning> {
@@ -372,7 +393,12 @@ struct RawDefinition {
     name: String,
     #[serde(default)]
     description: Option<String>,
-    start: Spanned<String>,
+    #[serde(default)]
+    start: Option<Spanned<String>>,
+    #[serde(default)]
+    dispatcher: bool,
+    #[serde(default)]
+    instances: Option<Spanned<u32>>,
     #[serde(default)]
     inputs: HashMap<String, Spanned<RawInput>>,
     #[serde(default)]
@@ -631,14 +657,25 @@ pub fn parse(text: &str) -> Result<Definition, ParseError> {
         .collect::<Vec<_>>();
     ends.sort_by_key(|(start, _)| *start);
 
+    if raw.start.is_none() && !raw.dispatcher {
+        return Err(lines.error(None, "missing field `start`"));
+    }
+    let instances_line = raw.instances.as_ref().map(|value| lines.line_of(value));
+    let mut instances = raw.instances.map(Spanned::into_inner);
+    // "A lane-using workflow is limited to one": a dispatcher's limit is 1 whatever is written,
+    // but a written 0 stays so validation reports it.
+    if raw.dispatcher && instances != Some(0) {
+        instances = Some(1);
+    }
+
     Ok(Definition {
         schema: *raw.schema.get_ref(),
         name: raw.name,
         description: raw.description,
-        start: Located {
-            line: lines.line_of(&raw.start),
-            value: raw.start.into_inner(),
-        },
+        start: raw.start.map(|start| located(start, &lines)),
+        dispatcher: raw.dispatcher,
+        instances,
+        instances_line,
         inputs: inputs.into_iter().map(|(_, input)| input).collect(),
         defaults: raw.defaults.convert(&lines),
         nodes: nodes.into_iter().map(|(_, node)| node).collect(),

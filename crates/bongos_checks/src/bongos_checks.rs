@@ -66,7 +66,7 @@ pub use evidence_store::{
 pub use exporter::{ChecksExporter, EXPORT_NAMESPACE};
 pub use holds::{
     CHECKING, CHECKS_CHIPS_SOURCE, CHECKS_HOLD_SOURCE, ChecksChips, ChecksHoldSource, ChecksHolds,
-    read_hold_rows, read_holds,
+    owing_tasks, owing_tasks_in, read_hold_rows, read_holds,
 };
 pub use host::{
     CHECKS_NAMESPACE, ChecksAccess, ChecksCommand, ChecksForwarder, ChecksForwarderRegistry,
