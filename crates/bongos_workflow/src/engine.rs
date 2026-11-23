@@ -394,6 +394,11 @@ impl WorkflowEngine {
         let Some(tree) = self.writes.tree(cx) else {
             return;
         };
+        // A tree with no project yet (the engine host's project is still opening) holds no run to
+        // load, and loading now would leave the runs of the project unloaded for good.
+        if tree.projects.is_empty() {
+            return;
+        }
         if !self.ticker.load_pending.swap(false, Ordering::SeqCst) {
             return;
         }

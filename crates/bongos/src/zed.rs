@@ -20,6 +20,8 @@ mod keybindings_tests;
 #[cfg(test)]
 mod kill_ring_keymap_tests;
 #[cfg(test)]
+mod lanes_keymap_tests;
+#[cfg(test)]
 mod linear_keymap_tests;
 #[cfg(target_os = "macos")]
 pub(crate) mod mac_only_instance;

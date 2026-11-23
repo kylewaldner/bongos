@@ -61,6 +61,7 @@ pub struct LanesPayload {
     /// Why an adopt.
     pub reason: Option<String>,
     /// The person agreed to drop a halted job's unreadable work.
+    #[serde(default)]
     pub confirm_drop: bool,
     /// A start bounded to this group (`task: run` on a group): the lanes take only leaves under it.
     #[serde(default)]

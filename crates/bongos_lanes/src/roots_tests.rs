@@ -46,7 +46,8 @@ fn lanes_answer_the_root_of_a_hand_start_only_while_on(cx: &mut TestAppContext) 
         LaneTables::set("project-1", Arc::new(table(LOCATED)), cx);
     });
 
-    // Off by default: no answer, so the user's settings decide as before.
+    // Switched off: no answer, so the user's settings decide as before.
+    set_enabled(cx, false);
     assert_eq!(root(cx, "project-1"), None);
 
     set_enabled(cx, true);

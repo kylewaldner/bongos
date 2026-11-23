@@ -1,4 +1,4 @@
-//! Tests of the `lanes` settings and actions: off by default, hidden and toasting while off.
+//! Tests of the `lanes` settings and actions: on by default, hidden and toasting while off.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -62,13 +62,13 @@ fn palette_hidden(name: &str, cx: &mut TestAppContext) -> bool {
 }
 
 #[gpui::test]
-fn lanes_settings_are_off_by_default(cx: &mut TestAppContext) {
+fn lanes_settings_are_on_by_default(cx: &mut TestAppContext) {
     use_default_settings(cx);
     cx.update(|cx| {
         assert_eq!(
             *LanesSettings::get_global(cx),
             LanesSettings {
-                enabled: false,
+                enabled: true,
                 reevaluate_interval: Duration::from_secs(60),
                 exit_when_idle: false,
                 on_interruption: LanesOnInterruption::Ask,
@@ -112,27 +112,27 @@ fn lanes_user_settings_override_the_defaults(cx: &mut TestAppContext) {
             Duration::from_secs(15),
             "an unset key keeps its default"
         );
-        assert!(!settings.enabled);
+        assert!(settings.enabled);
     });
 }
 
 #[gpui::test]
-fn lanes_actions_are_hidden_while_off_and_shown_while_on(cx: &mut TestAppContext) {
+fn lanes_actions_are_shown_by_default_and_hidden_while_off(cx: &mut TestAppContext) {
     cx.update(|cx| command_palette_hooks::init(cx));
     use_default_settings(cx);
     cx.update(crate::init_palette);
 
     assert_eq!(NAMES.len(), action_types().len(), "every action is listed");
     for name in NAMES {
-        assert!(palette_hidden(name, cx), "{name} is hidden by default");
-    }
-    cx.update(|cx| set_enabled(cx, true));
-    for name in NAMES {
-        assert!(!palette_hidden(name, cx), "{name} shows while on");
+        assert!(!palette_hidden(name, cx), "{name} shows by default");
     }
     cx.update(|cx| set_enabled(cx, false));
     for name in NAMES {
-        assert!(palette_hidden(name, cx), "{name} is hidden again while off");
+        assert!(palette_hidden(name, cx), "{name} is hidden while off");
+    }
+    cx.update(|cx| set_enabled(cx, true));
+    for name in NAMES {
+        assert!(!palette_hidden(name, cx), "{name} shows again while on");
     }
 }
 
@@ -182,6 +182,7 @@ fn toasts(workspace: &gpui::Entity<Workspace>, cx: &mut VisualTestContext) -> Ve
 async fn lanes_dispatch_by_name_shows_the_off_toast_while_off(cx: &mut TestAppContext) {
     let (workspace, cx) = workspace_with_actions(cx).await;
     assert_eq!(OFF_MESSAGE, "Lanes are off (lanes.enabled)");
+    cx.update(|_, cx| set_enabled(cx, false));
     assert_eq!(toasts(&workspace, cx), vec![OFF_MESSAGE; NAMES.len()]);
 
     // While on, the commands of the engine host say this window does not reach it; accept graph,

@@ -1614,7 +1614,7 @@ pub struct LanesSettingsContent {
     /// Whether lanes are on. While it is off, no engine host starts and it only says "lanes are
     /// off (lanes.enabled)".
     ///
-    /// Default: false
+    /// Default: true
     pub enabled: Option<bool>,
     /// Seconds between two looks at the project for work a lane could take.
     ///

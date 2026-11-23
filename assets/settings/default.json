@@ -2948,9 +2948,9 @@
     },
   },
   "lanes": {
-    // Whether lanes are on. While it is off, no engine host starts and it only says "lanes
-    // are off (lanes.enabled)".
-    "enabled": false,
+    // Whether lanes are on. On by default. While it is off, no engine host starts and it only
+    // says "lanes are off (lanes.enabled)".
+    "enabled": true,
     // Seconds between two looks at the project for work a lane could take.
     "reevaluate_interval": 60,
     // Whether the engine host exits once every lane is idle and nothing is left to take.

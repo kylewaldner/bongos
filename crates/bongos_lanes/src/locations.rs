@@ -51,9 +51,20 @@ impl LocationInputs {
     /// central directory.
     pub fn from_app(project_id: &str, cx: &gpui::App) -> Result<Self, String> {
         use settings::Settings as _;
+        // A registered record wins; with none (the app registers none) the per-machine record of
+        // project locations is read from disk.
         let location = cx
             .try_global::<bongos_project_repo::RepositoryLocations>()
             .and_then(|locations| locations.location(project_id).cloned())
+            .or_else(|| {
+                let path = bongos_work::WorkStore::global(cx)
+                    .map(|store| store.read(cx).locations_path())
+                    .unwrap_or_else(bongos_project_repo::RepositoryLocations::default_path);
+                bongos_project_repo::RepositoryLocations::load(path)
+                    .ok()?
+                    .location(project_id)
+                    .cloned()
+            })
             .ok_or_else(|| format!("project {project_id} has no location on this machine"))?;
         let central = bongos_work::central_worktrees_dir(cx)
             .ok_or_else(|| "the central worktree directory is not known".to_string())?;

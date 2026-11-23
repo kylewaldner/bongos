@@ -8,7 +8,7 @@ pub use settings::settings_content::{LanesOnInterruption, LanesOnLastWindowClose
 /// project's `lanes.toml`; machine values come from the project profile.
 #[derive(Clone, Debug, PartialEq, RegisterSetting)]
 pub struct LanesSettings {
-    /// Whether lanes are on (off by default). While false, no engine host starts, no lane takes
+    /// Whether lanes are on (on by default). While false, no engine host starts, no lane takes
     /// work, and every lane command is hidden and only says "Lanes are off (lanes.enabled)".
     pub enabled: bool,
     /// The time between two looks at the project for work a lane could take.

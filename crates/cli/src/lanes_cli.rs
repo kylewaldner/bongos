@@ -986,6 +986,8 @@ pub(crate) mod real {
         moving: Option<serde::de::IgnoredAny>,
     }
 
+    /// The user's settings file; a key it does not set is on, as in the default settings, where
+    /// `lanes`, `work` and `project_repository` are enabled.
     fn user_settings() -> Value {
         std::fs::read_to_string(paths::settings_file())
             .ok()
@@ -1048,19 +1050,17 @@ pub(crate) mod real {
         fn lanes_enabled(&self) -> bool {
             user_settings()["lanes"]["enabled"]
                 .as_bool()
-                .unwrap_or(false)
+                .unwrap_or(true)
         }
 
         fn work_enabled(&self) -> bool {
-            user_settings()["work"]["enabled"]
-                .as_bool()
-                .unwrap_or(false)
+            user_settings()["work"]["enabled"].as_bool().unwrap_or(true)
         }
 
         fn project_repository_enabled(&self) -> bool {
             user_settings()["project_repository"]["enabled"]
                 .as_bool()
-                .unwrap_or(false)
+                .unwrap_or(true)
         }
 
         fn now(&self) -> String {

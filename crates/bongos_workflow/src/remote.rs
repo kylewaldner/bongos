@@ -30,8 +30,10 @@ pub enum WorkflowVerb {
     ClearFinished,
 }
 
-/// What a command acts on and with.
+/// What a command acts on and with. A field the sender leaves out is the default, so the command
+/// line can send only the fields it has.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WorkflowPayload {
     /// The task at point in the sending window.
     pub task_id: Option<String>,

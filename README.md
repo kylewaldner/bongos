@@ -582,6 +582,90 @@ scope = "all"
   `task: complete` still refuses a tree edited after its pass. The `task_checks.tree_key_debounce_ms`
   setting is not used yet.
 
+## Lanes
+
+A lane is a worker that takes one job at a time from a project's tasks and runs a workflow on it, so
+several tasks move forward together without you starting each run. It is on by default;
+`lanes.enabled` set to `false` starts no host, takes no work and hides every lane command and
+the `bongos lanes` words (they say "lanes are off (lanes.enabled)"). Lanes need a project repository
+(`project_repository.enabled`) and the Work view (`work.enabled`). A lane never starts by itself:
+you start them, and they stop at a job boundary, never in the middle of a job.
+
+- **The lane table.** `definitions/lanes/lanes.toml` in the project repository, with `schema = 1`.
+  Each `[[kind]]` is a kind of lane with a `name`, a `count` (lanes `build-1`, `build-2`), the
+  `rules` it may take, `areas` (true unless the kind sets it false), `unattended`, an optional
+  `ahead = { cap = N }` (a free lane of the kind prepares tasks no lane owns yet, at most `cap`
+  at a time, and the area rule does not apply to it) and an optional `binding`. A `[rules.<name>]`
+  says what a lane may take: `work_kind`, `state` (`ready`, `in-progress`, ...), `todo`, and the
+  `workflow` to run (or `use_todo_workflow = true`), with `inputs`, a `staleness` script and a
+  `refresh` workflow. `[[pin]]` sends a `task` to a `lane` or a `kind`. Two tasks whose `areas`
+  tags overlap are not worked on together unless an `[[exempt]]` entry lists the tag in `tags` (or
+  the tasks in `tasks`). `owner = "top"` (default) makes a task's top-level task its owner, `"self"`
+  makes every leaf its own; `on_interruption` is `ask` or `resume`; `dispatcher` names the
+  dispatcher workflow (default `lanes`); `[locations]` sets `worktree_root` and `dirs_root`. An
+  unknown key or a bad value is refused, with its line, when the table lands. A project with no
+  table has one kind `default` with one lane. The table is read at the project's verified commit.
+- **Bindings and tokens.** A kind's `binding` gives its lanes `env` values, named `dirs` (below
+  `<project folder>/lanes/<lane>/<name>` unless `[locations]` or the profile say otherwise),
+  `trees` (`repo`, `mode` of `fresh` or `persistent`, `location`, a `base_tree` with `dirs`) and
+  `floors`. Values in `env` may use these tokens: `{lane}`, `{kind}`, `{lane_index}`, `{project}`
+  (the first 12 hex digits of the project id), `{repo}`, `{live_lanes}`, `{cpus}`, `{dir.<name>}`,
+  and one floored integer division of two numeric tokens or integers, such as `{cpus/live_lanes}`,
+  which is at least 1. An unknown token is refused when the table lands.
+- **Window mode and host mode.** One process holds a project's writer. A window that opens the
+  project first holds it (window mode); `bongos lanes start` from a shell, with or without a
+  display, starts an engine host, a headless process that holds the writer and runs the lanes
+  (host mode; its log is `engine-host-<id>.log` in the logs folder). A window opened while a host
+  runs attaches to it as a client and shows the same lanes at once; closing it leaves the lanes
+  running. `lanes: start` in a window that holds the writer shows a summary of what will run, asks
+  you to confirm, and then hands the writer to a new host; the window becomes a client. Closing the
+  last window while lanes run in it does what `lanes.on_last_window_close` says (`ask`, `keep` or
+  `stop`). A host with no lane running and no client exits after `lanes.host.idle_exit_seconds`
+  (300), or at once when every lane is idle and `lanes.exit_when_idle` is true. A killed host's
+  runs come back interrupted and wait on you (`lanes.on_interruption` or the table's), or are
+  resumed once with `resume`; no run is resumed twice.
+- **Keys.** `C-c f L` is the prefix: `L` shows the Lanes view, `s` starts, `S` stops, `p`
+  pauses a lane, `c` resumes, `d` shows a dry run (what each lane would take next, and why the rest
+  wait), `j` makes a lane look for work now, `o` adopts a halted or stopped task for a free lane (you
+  pick the task, the lane and give a reason, which goes in the task's history) and `a` accepts the
+  current task graph as the recorded one. Every command is also in the palette (`lanes: ...`). The
+  keys are for the Emacs keymap. A lane whose run fails is halted until you adopt its task, resume or
+  stop it.
+- **The command line.** `bongos lanes start [--within <task>]`,
+  `bongos lanes stop [<lane>]`, `bongos lanes pause <lane>`, `bongos lanes resume <lane>`,
+  `bongos lanes status [--json]`, `bongos lanes dry-run [--json] [--lane <lane>]`,
+  `bongos lanes pick --lane <lane> [--json]`, `bongos run <workflow> --task <id|path>
+  [--queue]`, `bongos host status` and `bongos host stop [--now]`. `--project <name|id|path>` picks the
+  project; without it the project whose folder holds the current directory, else the only one.
+  Each command goes to whichever process holds the writer. With no writer, `lanes start` and `run`
+  start a host; `status`, `dry-run` and `pick` read the project's state without one; the others say
+  nothing is running. `bongos run` starts a hand-started run, never a lane run, in a window or a
+  host. `trigger`, `queue`, `pool` and `profile` are reserved words for later features.
+- **`status --json`.** A document with `schema` (`"lanes-status 1"`), `project`, `header` and
+  `lanes`. `header` has `dispatcher` (`not started`, `running`, `pausing` or `ended`), `lanes`,
+  `running`, `idle`, `waiting`, `paused`, `stopped`, `halted`, `table_commit` and `table_wait`. Each
+  lane has `id`, `kind`, `state` (`running`, `idle`, `paused`, `stopped`, `halted` or `waiting`),
+  `reason`, `task`, `goal`, `run`, `workflow`, `run_lifecycle`, `job_started` and `jobs_done`; a field
+  with no value is `null`. `master_split` appears only while master is split. New fields may be
+  added without a new schema name.
+- **Exit codes.** 0 done; 1 refused (the message is on stderr); 2 usage error or project not
+  found; 3 the host could not start (the path of its log is printed); 4 protocol or version
+  mismatch (stop the host with `bongos host stop` when its jobs end, then run the command again).
+- **Settings.** All under `lanes`, user level: `enabled` (true), `reevaluate_interval` (60
+  seconds between looks for work), `exit_when_idle` (false), `on_interruption` (`ask`),
+  `on_last_window_close` (`ask`), `desktop_notifications` (true), `dry_run_limit` (12),
+  `staleness_timeout_seconds` (60), `save_max_file_bytes` (10485760) and `host` with
+  `idle_exit_seconds` (300), `start_timeout_seconds` (15), `handover_timeout_seconds` (1800) and
+  `log_max_bytes` (1048576).
+- **Not there yet.** A lane job runs in the task's own worktree, so a task is started (`task: start`)
+  before a lane can take it; a run in a lane's own tree is refused. `bongos lanes dry-run` and
+  `pick` are answered from the state files only while no process holds the writer (a running host
+  says they are not served yet; use the keys in a window), and `bongos host stop` is refused by a
+  running host: stop its lanes with `bongos lanes stop` and let it exit, or end its process. `lanes
+  start` also accepts `--until`, `--max-jobs` and `--unattended`, which are not carried to the host
+  yet. A lane count lowered on this machine by a project profile stops the extra lane after its
+  current job.
+
 ## Emacs keys
 
 Emacs is the default base keymap, so a fresh install has these keys with no setting. They work in

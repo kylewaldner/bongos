@@ -1537,7 +1537,8 @@ impl<R: Runner> Lifecycle<R> {
             context.checks.validation(),
             Some(context.checks),
         )?;
-        refuse_dispatcher(&name, &definition)?;
+        // A dispatcher is refused on a task but starts on a project: the lanes' dispatcher run
+        // is a project run.
         if let Some(problem) = project_subject_problems(&definition).into_iter().next() {
             return Err(Refusal::new(
                 RefusalKind::NeedsTask,
