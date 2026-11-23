@@ -8,8 +8,8 @@
 # last string and the scenario clears each prompt before it types.
 #   1. M-% foo RET bar RET, then y n q: the first match is replaced, the second is skipped and q
 #      ends. The decision view shows in the strip (the bottom rows change); query-replace.png.
-#   2. C-x u undoes the whole replace in one step.
-#   3. M-% foo RET bar RET, then !: every match is replaced; one C-x u puts them all back.
+#   2. C-/ undoes the whole replace in one step.
+#   3. M-% foo RET bar RET, then !: every match is replaced; one C-/ puts them all back.
 #   4. A region over the first two `foo` lines: ! replaces only inside it.
 #   5. C-s two M-% 2 RET: the search hands over its string and only the replacement is asked; y.
 #   6. C-M-% with a regexp and a group in the replacement, then !.
@@ -99,7 +99,7 @@ sleep 1
 save_expects '\nbar one\nfoo two\nfoo three\nfoo four\n'
 
 # 2. The whole replace is one undo step.
-keys ctrl+x u
+keys ctrl+slash
 sleep 1
 save_expects "$ORIGINAL"
 
@@ -110,7 +110,7 @@ ask alt+percent foo bar
 type_text '!'
 sleep 2
 save_expects '\nbar one\nbar two\nbar three\nbar four\n'
-keys ctrl+x u
+keys ctrl+slash
 sleep 1
 save_expects "$ORIGINAL"
 
@@ -125,7 +125,7 @@ ask alt+percent foo bar
 type_text '!'
 sleep 2
 save_expects '\nbar one\nbar two\nfoo three\nfoo four\n'
-keys ctrl+x u
+keys ctrl+slash
 sleep 1
 save_expects "$ORIGINAL"
 
@@ -142,7 +142,7 @@ sleep 1
 type_text y
 sleep 1
 save_expects '\nfoo one\nfoo 2\nfoo three\nfoo four\n'
-keys ctrl+x u
+keys ctrl+slash
 sleep 1
 save_expects "$ORIGINAL"
 

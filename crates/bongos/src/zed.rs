@@ -47,6 +47,8 @@ pub mod remote_debug;
 #[cfg(test)]
 mod symbol_keymap_tests;
 #[cfg(test)]
+mod undo_tree_keymap_tests;
+#[cfg(test)]
 mod universal_argument_tests;
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
 pub mod visual_tests;

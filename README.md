@@ -613,7 +613,9 @@ C-x C-s, C-x C-w and C-x s, and the command keys (M-x, C-x ...) work everywhere 
 | C-M-k | kill-whole-line |
 | C-M-w | append-next-kill: the next kill is added to the last entry |
 | C-o | open line: insert a newline after the cursor and stay before it |
-| C-/, C-_, C-x u | undo |
+| C-/, C-_ | undo |
+| C-?, M-_ | redo |
+| C-x u | undo tree: open the undo history of the buffer as a tree (see Undo tree) |
 | M-u, M-l, M-c | upcase, downcase, capitalize word |
 | C-t, M-t, C-x C-t | transpose characters, words, lines |
 | M-z, M-Z | zap to char, zap up to char (prompts for the character in the minibuffer) |
@@ -828,6 +830,25 @@ the minibuffer or other small editors. Three commands, each in the command palet
 Type the label characters to jump; the cursor moves there, and into another pane when the label is
 in one. **C-g** or **Escape** cancels the labels and leaves the cursor where it was, and nothing
 you typed is inserted.
+
+### Undo tree
+
+Undo never loses an edit: undoing and then typing starts a branch, and the old text stays reachable.
+**C-x u** (vundo) opens the buffer's undo history as a tree in a pane beside the buffer. **C-/** and
+**C-_** undo, **C-?** and **M-_** redo. With the Emacs keys, typing is grouped as in Emacs: a run of
+up to 20 characters is one undo step, and any command or cursor move ends the run (`undo_tree.grouping`
+is `emacs`; `zed` keeps the time-based grouping). `undo_tree.node_limit` (default 10000) caps the
+nodes the tree keeps.
+
+Keys in the tree:
+
+- **f** and **b** move to the child and the parent state, **n** and **p** to the next and previous
+  branch below the same parent. The buffer shows the state under the cursor as you move.
+- **m** marks a state and **u** removes the mark. **d** shows a diff between the marked state (or the
+  state the tree was opened at) and the state under the cursor.
+- **RET** commits the state under the cursor as the buffer's text and closes the tree; one undo
+  returns to the text from before. **q** or **C-g** closes the tree and leaves the buffer, and the
+  caret, as they were before **C-x u**.
 
 ## Keybinding profiles
 
