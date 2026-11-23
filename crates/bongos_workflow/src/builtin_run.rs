@@ -242,6 +242,7 @@ impl MergeNode {
             workflow: binding.workflow.clone(),
             todo: binding.task_id.clone(),
             style,
+            job: false,
         })
     }
 }

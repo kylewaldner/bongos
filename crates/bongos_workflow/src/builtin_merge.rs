@@ -60,6 +60,10 @@ pub struct MergeRequest {
     /// The name of the todo the run works on.
     pub todo: String,
     pub style: MergeStyle,
+    /// Whether jobs wrote the task worktree (a lane's tree): every git command of the merge then
+    /// gets the job tree protections (no hook, driver or external diff the tree could name). A
+    /// person's task worktree is not a job tree, so this is `false` for it.
+    pub job: bool,
 }
 
 impl MergeRequest {
@@ -108,7 +112,7 @@ pub async fn merge(git: &Git, request: &MergeRequest) -> Result<Merged, MergeRef
     let worktree = At {
         git_dir: &task_git_dir,
         directory: &request.task_worktree,
-        job: false,
+        job: request.job,
     };
     if git.is_dirty(worktree).await? {
         return Err(MergeRefusal::DirtyTaskWorktree);

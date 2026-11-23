@@ -10,6 +10,9 @@
 //! git runs in a tree by discovery: the tree's git directory comes from the repository's own
 //! record, a crashed job's private git is recovered first ([`crate::lane_git`]), and every command
 //! runs through `SafeGit` as a job tree. Nothing here deletes a tree or pushes anything.
+//!
+//! Behavior changes: no hook runs at a job start (reset, save or the success merge, which the
+//! shipped merge runs with `job: true`), and `status` runs with `--ignore-submodules=all`.
 
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
@@ -1083,6 +1086,7 @@ pub async fn merge_in_lane_tree(
             workflow: request.workflow.clone(),
             todo: request.todo.clone(),
             style: request.style,
+            job: true,
         },
     )
     .await?;

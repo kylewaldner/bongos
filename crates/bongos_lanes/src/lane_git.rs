@@ -7,6 +7,16 @@
 //! private git is recovered first, and every command is built by `SafeGit` for that git directory
 //! and the tree as a job tree. Nothing here reads the tree's `.git` for a decision except to check
 //! that it still names the directory the record gave.
+//!
+//! Behavior changes this brings: no hook runs in a lane tree at a job start, reset or merge (every
+//! command is a job tree command, `core.hooksPath=/dev/null`), and `status` runs with
+//! `--ignore-submodules=all`, so a changed submodule does not make a tree dirty.
+//!
+//! The recovery of a crashed job's private git ([`recover`]) holds the tree's lock only while it
+//! runs, not during the reset commands that follow. That is safe only under this rule: a lane
+//! never resets a tree and starts a job on it at once; a job starts on the tree only under the
+//! lane's own lease (feature 48 D10), so no other job can take its private git between the
+//! recovery and the reset. No locking is added here.
 
 use std::fs::{canonicalize, read_dir, read_to_string, symlink_metadata};
 use std::path::{Path, PathBuf};

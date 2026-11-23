@@ -639,12 +639,17 @@ pub async fn create_run(
 /// used as it is, and the run's own directory (its fan-out worktrees and scratch) is made where a
 /// fresh run's would be. Refuses a task with no branch, a tree that is missing or has another
 /// branch checked out, and a disk with less than `workflows.min_free_disk_mb` free.
+///
+/// `common_dir` is the repository's git common directory as the lane read it in the person's own
+/// checkout; git never runs by discovery in the lane's tree, which jobs wrote. Without it the
+/// directory is read in the task's own worktree, and a task with none is refused.
 pub async fn lane_run(
     git: &Git,
     task: &TaskCheckout,
     run_id: &str,
     attempt: u32,
     path: &Path,
+    common_dir: Option<&Path>,
     settings: &WorkflowsSettings,
     free_space: &dyn Fn(&Path) -> Option<u64>,
 ) -> Result<RunWorktree, WorktreeError> {
@@ -661,7 +666,9 @@ pub async fn lane_run(
     let branch = run_branch_name(task_branch, run_id, attempt);
     // Earlier jobs wrote the lane's tree, so its `.git` is not trusted: the git directory is the
     // linked one under the repository's common directory that names the tree.
-    let common = lane_common_dir(git, task, path).await.map_err(refused)?;
+    let common = lane_common_dir(git, task, common_dir)
+        .await
+        .map_err(refused)?;
     let git_dir =
         linked_git_dir_from_record(path, &common).map_err(|error| refused(format!("{error:#}")))?;
     let at = At {
@@ -703,23 +710,32 @@ pub async fn lane_run(
     })
 }
 
-/// The common git directory of the repository of a lane's tree at `path`: read in the task's own
-/// worktree when it has one (the person's tree, trusted as [`create_run`] trusts it), else in the
-/// lane's tree, which `bongos_lanes` made and reset before the run (its own git directory record
-/// is the hand-off of the lane-tree step).
-async fn lane_common_dir(git: &Git, task: &TaskCheckout, path: &Path) -> Result<PathBuf, String> {
-    let from = match &task.worktree {
-        Some(worktree) if worktree.is_dir() => worktree.as_path(),
-        _ => path,
+/// The common git directory of the repository of a lane's tree: the one the lane read in the
+/// person's own checkout when it has it, else read in the task's own worktree (the person's tree,
+/// trusted as [`create_run`] trusts it). Git never runs in the lane's tree, which jobs wrote.
+async fn lane_common_dir(
+    git: &Git,
+    task: &TaskCheckout,
+    common_dir: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let common = match (common_dir, &task.worktree) {
+        (Some(common), _) => common.to_path_buf(),
+        (None, Some(worktree)) if worktree.is_dir() => PathBuf::from(
+            git.run(
+                worktree,
+                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+        ),
+        (None, _) => {
+            return Err(
+                "no trusted git directory is known for the lane's tree: the run names none and \
+                 the task has no worktree"
+                    .to_string(),
+            );
+        }
     };
-    let common = git
-        .run(
-            from,
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-    let common = PathBuf::from(common);
     common
         .canonicalize()
         .map_err(|error| format!("{}: {error}", common.display()))
