@@ -1339,6 +1339,15 @@ struct DispatchingKeystrokes {
 /// Collects everything project-related for a certain window opened.
 /// In some way, is a counterpart of a window, as the [`WindowHandle`] could be downcast into `Workspace`.
 ///
+/// Where an open that was not given a pane would show its item (see `Workspace::open_target`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum OpenTarget {
+    /// Show it in this existing pane.
+    Pane(Entity<Pane>),
+    /// Show it in a new pane split to the right of this one.
+    SplitRightOf(Entity<Pane>),
+}
+
 /// A `Workspace` usually consists of 1 or more projects, a central pane group, 3 docks and a status bar.
 /// The `Workspace` owns everybody's state and serves as a default, "global context",
 /// that can be used to register a global action to be triggered from any place in the window.
@@ -4605,8 +4614,18 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<Pane> {
+        match self.open_target(&preferred, cx) {
+            OpenTarget::Pane(pane) => pane,
+            OpenTarget::SplitRightOf(to_split) => {
+                self.split_pane(to_split, SplitDirection::Right, window, cx)
+            }
+        }
+    }
+
+    /// The read-only half of `pane_for_open`: where an open would go, splitting nothing.
+    pub fn open_target(&self, preferred: &Entity<Pane>, cx: &App) -> OpenTarget {
         if !preferred.read(cx).is_dedicated() {
-            return preferred;
+            return OpenTarget::Pane(preferred.clone());
         }
         let center_panes = self.center.panes();
         let recent = center_panes
@@ -4614,14 +4633,79 @@ impl Workspace {
             .filter(|pane| !pane.read(cx).is_dedicated())
             .max_by_key(|pane| pane.read(cx).last_activation_timestamp());
         if let Some(pane) = recent {
-            return (*pane).clone();
+            return OpenTarget::Pane((*pane).clone());
         }
-        let to_split = if center_panes.contains(&&preferred) {
-            preferred
+        let to_split = if center_panes.contains(&preferred) {
+            preferred.clone()
         } else {
             self.center.last_pane()
         };
-        self.split_pane(to_split, SplitDirection::Right, window, cx)
+        OpenTarget::SplitRightOf(to_split)
+    }
+
+    /// The shared clock that orders pane activations and focus across the workspace.
+    pub fn pane_history_timestamp(&self) -> Arc<AtomicUsize> {
+        self.pane_history_timestamp.clone()
+    }
+
+    /// Every pane that can hold items: center panes in tree order, then the panes of every panel
+    /// in the left, right and bottom docks, open or not. Each pane appears once.
+    pub fn item_panes(&self, cx: &App) -> Vec<Entity<Pane>> {
+        let mut panes: Vec<Entity<Pane>> = self.center.panes().into_iter().cloned().collect();
+        for dock in [&self.left_dock, &self.right_dock, &self.bottom_dock] {
+            for panel in dock.read(cx).panels() {
+                for pane in panel.panes(cx) {
+                    if !panes.contains(&pane) {
+                        panes.push(pane);
+                    }
+                }
+            }
+        }
+        panes
+    }
+
+    /// Whether `pane` is on screen: a center pane, or a dock pane whose dock is open on the panel
+    /// holding it.
+    pub fn pane_is_visible(&self, pane: &Entity<Pane>, cx: &App) -> bool {
+        if self.center.panes().contains(&pane) {
+            return true;
+        }
+        [&self.left_dock, &self.right_dock, &self.bottom_dock]
+            .into_iter()
+            .any(|dock| {
+                let dock = dock.read(cx);
+                dock.is_open()
+                    && dock
+                        .active_panel()
+                        .is_some_and(|panel| panel.panes(cx).contains(pane))
+            })
+    }
+
+    /// Makes a dock pane visible by opening its dock on the panel holding it. Does nothing for a
+    /// center pane.
+    pub fn reveal_pane(
+        &mut self,
+        pane: &Entity<Pane>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for dock in [
+            self.left_dock.clone(),
+            self.right_dock.clone(),
+            self.bottom_dock.clone(),
+        ] {
+            let panel_ix = dock
+                .read(cx)
+                .panels()
+                .position(|panel| panel.panes(cx).contains(pane));
+            if let Some(panel_ix) = panel_ix {
+                dock.update(cx, |dock, cx| {
+                    dock.activate_panel(panel_ix, window, cx);
+                    dock.set_open(true, window, cx);
+                });
+                return;
+            }
+        }
     }
 
     pub fn add_item_to_active_pane(
