@@ -38,8 +38,9 @@ pub struct Promise {
 const LINUX: Promise = Promise {
     title: "Jobs are confined",
     body: "Jobs (workflow programs, agent steps and task checks) can write only to their job \
-           tree, their scratch directory and the directories they declare. They never get your \
-           repository's shared git data: bongos brings back their commits and branches after \
+           tree, their scratch directory and the directories they declare; agent steps may also \
+           write the agent CLI's own state directories (such as ~/.claude and ~/.codex). They \
+           never get your repository's shared git data: bongos brings back their commits and branches after \
            each run and checks them. Git run by bongos and by the editor never uses \
            configuration or pointers a job wrote.",
 };
@@ -47,7 +48,8 @@ const LINUX: Promise = Promise {
 const MACOS: Promise = Promise {
     title: "Jobs are confined by path",
     body: "Jobs can write only to their job tree, their scratch directory and the directories \
-           they declare; macOS enforces this by path. Reads are not restricted, and a process a \
+           they declare, and agent steps may also write the agent CLI's own state directories \
+           (such as ~/.claude and ~/.codex); macOS enforces this by path. Reads are not restricted, and a process a \
            job leaves running may outlive it, so what keeps job-written files from running code \
            on your machine is bongos's import and git handling rather than an isolated view of \
            the disk.",
@@ -56,8 +58,8 @@ const MACOS: Promise = Promise {
 const UNCONFINED: Promise = Promise {
     title: "Jobs are not confined",
     body: "No sandbox is available here, so bongos promises no confinement for jobs. Install \
-           Bubblewrap (Linux) to get it. Whether a job may run without a sandbox is decided by \
-           the workflow sandbox setting.",
+           Bubblewrap (Linux) to get it. Program and agent steps run unsandboxed (and the log \
+           says so), while task checks refuse to start.",
 };
 
 /// The promise for a platform and whether its sandbox is available.

@@ -1114,7 +1114,7 @@ fn work_page(token_set: bool, (agent_steps, task_checks): (bool, bool)) -> Setti
             text(promise.title, Some(promise.body)),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Confine Agent Steps",
-                description: "Run agent steps inside the sandbox. Off by default for now: the Claude Code CLI needs its config directory inside a writable path before it works confined.",
+                description: "Run agent steps inside the sandbox. Off by default until the confined Claude Code CLI is verified with a logged-in session and user-scoped MCP servers.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("confinement.agent_steps"),

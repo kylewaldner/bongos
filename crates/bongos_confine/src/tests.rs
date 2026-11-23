@@ -625,10 +625,13 @@ fn promise_text_per_platform() {
     let macos = promise(Platform::MacOs, SandboxAvailability::Available);
     assert!(macos.body.contains("macOS enforces this by path"));
     assert!(macos.body.contains("Reads are not restricted"));
+    assert!(linux.body.contains("agent CLI's own state directories"));
+    assert!(macos.body.contains("agent CLI's own state directories"));
 
     let unconfined = promise(Platform::Linux, SandboxAvailability::Unavailable);
     assert!(unconfined.body.starts_with("No sandbox is available here"));
     assert!(unconfined.body.contains("Install Bubblewrap (Linux)"));
+    assert!(unconfined.body.contains("task checks refuse to start"));
     assert_eq!(
         promise(Platform::Other, SandboxAvailability::Available),
         unconfined
