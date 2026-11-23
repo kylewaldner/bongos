@@ -128,14 +128,22 @@ fn a_pick_answers_for_one_lane_and_skips_a_task_with_an_active_run() {
     let lane = LaneId::new("build", 1);
     let state = LanesState::default();
 
-    let (text, doc) = pick_answer(Pick::One, Some(&lane), &loaded(vec![busy.clone(), free]), &state)
-        .unwrap();
+    let (text, doc) = pick_answer(
+        Pick::One,
+        Some(&lane),
+        &loaded(vec![busy.clone(), free]),
+        &state,
+    )
+    .unwrap();
     assert!(text.starts_with("build-1: would start b with w"), "{text}");
     assert_eq!(doc["lane"], "build-1");
     assert!(doc["outcome"].is_object(), "{doc}");
 
     let (text, _) = pick_answer(Pick::One, Some(&lane), &loaded(vec![busy]), &state).unwrap();
-    assert!(text.starts_with("build-1: nothing to do (a waits: "), "{text}");
+    assert!(
+        text.starts_with("build-1: nothing to do (a waits: "),
+        "{text}"
+    );
     assert!(text.contains("is active"), "{text}");
 
     assert!(pick_answer(Pick::One, None, &loaded(Vec::new()), &state).is_err());

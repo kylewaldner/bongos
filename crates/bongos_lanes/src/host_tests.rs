@@ -56,7 +56,10 @@ fn a_start_takes_its_bound_job_count_and_unattended_override_from_the_command_li
     assert_eq!(start.bound, Some(PickBound::Within(TaskId::new("g1"))));
     assert_eq!(start.unattended, Some(true));
     let start = start_request(&LanesPayload::default(), Author::System).unwrap();
-    assert_eq!((start.bound, start.max_jobs, start.unattended), (None, None, None));
+    assert_eq!(
+        (start.bound, start.max_jobs, start.unattended),
+        (None, None, None)
+    );
 
     // Both bounds, no jobs, or an override that is neither on nor off are refused.
     let both = LanesPayload {

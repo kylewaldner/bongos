@@ -860,7 +860,10 @@ fn start_action(
 
 /// Asks for the bound of a start, then its value, then the unattended override, then starts.
 fn ask_start_bound(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
-    let labels = START_BOUND_CHOICES.iter().map(ToString::to_string).collect();
+    let labels = START_BOUND_CHOICES
+        .iter()
+        .map(ToString::to_string)
+        .collect();
     let then = Box::new(
         move |index: usize,
               workspace: &mut Workspace,
@@ -917,7 +920,14 @@ fn ask_start_unattended(
             start_within(workspace, options, window, cx);
         },
     );
-    pick(workspace, "Unattended".to_string(), labels, then, window, cx);
+    pick(
+        workspace,
+        "Unattended".to_string(),
+        labels,
+        then,
+        window,
+        cx,
+    );
 }
 
 /// `lanes: start` with `options` (`task: run` on a group bounds it within the group).

@@ -2734,7 +2734,6 @@ impl<R: Runner> Lifecycle<R> {
             .map_err(worktree_refusal)
     }
 
-
     /// Writes attempt `n` of `entry` (the definition copy, `run.toml`) and hands it to the
     /// runtime.
     fn begin_attempt(

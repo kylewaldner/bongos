@@ -262,10 +262,7 @@ async fn a_prepared_job_runs_in_its_lane_tree_reset_onto_its_run_branch_with_the
     cx.executor().allow_parking();
     let fixture = Fixture::build(ENV_TABLE, |_| None);
     let request = lane_job(&fixture, ENV_TABLE, Some(fixture.task_job(RUN_1, None)));
-    let setup = cx
-        .update(|cx| prepare_lane_job(request, cx))
-        .await
-        .unwrap();
+    let setup = cx.update(|cx| prepare_lane_job(request, cx)).await.unwrap();
     let tip = fixture.tip();
     let target = fixture.locations.get("target").unwrap().path.clone();
     assert!(
@@ -300,14 +297,15 @@ async fn a_prepared_job_runs_in_its_lane_tree_reset_onto_its_run_branch_with_the
         ENV_TABLE,
         Some(fixture.task_job(RUN_2, Some(last(RUN_1, LastEnd::Halted)))),
     );
-    cx.update(|cx| prepare_lane_job(request, cx))
-        .await
-        .unwrap();
+    cx.update(|cx| prepare_lane_job(request, cx)).await.unwrap();
     assert!(!tip.join("left.txt").exists());
     assert_eq!(
         git(
             &fixture.app,
-            &["show", &format!("{}:left.txt", run_branch_name(TASK_BRANCH, RUN_1, 1))]
+            &[
+                "show",
+                &format!("{}:left.txt", run_branch_name(TASK_BRANCH, RUN_1, 1))
+            ]
         ),
         "left by the halted run"
     );
@@ -321,10 +319,7 @@ async fn a_job_with_no_lane_tree_runs_fresh_with_the_lane_env_and_a_missing_root
     let fixture = Fixture::build(ENV_TABLE, |_| None);
     // No repository for the job (a task with no branch): a fresh run worktree.
     let request = lane_job(&fixture, ENV_TABLE, None);
-    let setup = cx
-        .update(|cx| prepare_lane_job(request, cx))
-        .await
-        .unwrap();
+    let setup = cx.update(|cx| prepare_lane_job(request, cx)).await.unwrap();
     assert_eq!(setup.tree, bongos_workflow::RunTree::default());
     assert!(setup.trees.is_none());
     assert_eq!(setup.lane_dirs.len(), 1);

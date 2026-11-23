@@ -463,7 +463,10 @@ pub fn prepare_lane_job(
             })
             .await?;
         for (repo, saved) in &started.saved {
-            log::info!("lanes: {lane} saved the work left in its tree of {repo}: {}", saved.history());
+            log::info!(
+                "lanes: {lane} saved the work left in its tree of {repo}: {}",
+                saved.history()
+            );
         }
         let setup = LaneTreeSetup {
             binding,

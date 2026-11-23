@@ -887,8 +887,7 @@ impl ProjectLanesHost {
             .lane_table(commit)
             .map_err(|error| WaitReason::Environment(format!("the lane table: {error}")))?;
         let profile = LaneProfiles::source(cx);
-        let table_lanes =
-            crate::locations::table_lane_ids(&table, &project, profile.as_deref());
+        let table_lanes = crate::locations::table_lane_ids(&table, &project, profile.as_deref());
         let state = self
             .repo
             .state()

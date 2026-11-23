@@ -462,17 +462,33 @@ async fn a_lane_run_uses_the_lane_tree_on_its_run_branch_and_refuses_another_bra
     assert!(run.run_dir.is_dir());
 
     // The tree must be on this run's branch: another run's id names another branch.
-    let refused = lane_run(git, &fixture.task, OTHER_RUN_ID, 1, &tree, &settings(), &plenty)
-        .await
-        .unwrap_err();
+    let refused = lane_run(
+        git,
+        &fixture.task,
+        OTHER_RUN_ID,
+        1,
+        &tree,
+        &settings(),
+        &plenty,
+    )
+    .await
+    .unwrap_err();
     assert!(
         refused.to_string().contains("not the run branch"),
         "{refused}"
     );
     let missing = fixture.root.join("lanes").join("lane-build-2");
-    let refused = lane_run(git, &fixture.task, RUN_ID, 1, &missing, &settings(), &plenty)
-        .await
-        .unwrap_err();
+    let refused = lane_run(
+        git,
+        &fixture.task,
+        RUN_ID,
+        1,
+        &missing,
+        &settings(),
+        &plenty,
+    )
+    .await
+    .unwrap_err();
     assert!(refused.to_string().contains("missing"), "{refused}");
 }
 
