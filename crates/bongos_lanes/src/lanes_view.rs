@@ -77,7 +77,7 @@ impl LanesViewSections {
 }
 
 /// The actions of the Lanes view on the row at point. The keys (`enter`, `p`, `c`, `S`, `o`, `d`,
-/// `g`) are bound to them separately; each acts on the row the point is on.
+/// `g`, `t`) are bound to them separately; each acts on the row the point is on.
 pub mod lanes_view {
     use gpui::actions;
 
@@ -394,14 +394,14 @@ impl LanesView {
         Some((lane.id.clone(), lane.task.clone(), lane.run.clone()))
     }
 
-    /// `enter`: asks to open the task of the row at point.
+    /// `t`: asks to open the task of the row at point.
     pub fn open_task(&mut self, cx: &mut Context<Self>) {
         if let Some((_, Some(task), _)) = self.lane_at_point() {
             cx.emit(LanesViewCommand::OpenTask(task));
         }
     }
 
-    /// `o`: asks to open the run of the lane at point.
+    /// `enter`: asks to open the run of the lane at point.
     pub fn open_run(&mut self, cx: &mut Context<Self>) {
         if let Some((_, _, Some(run))) = self.lane_at_point() {
             cx.emit(LanesViewCommand::OpenRun(run));

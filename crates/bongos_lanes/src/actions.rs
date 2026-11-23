@@ -1184,8 +1184,7 @@ fn open_run_record(
     cx: &mut Context<Workspace>,
 ) {
     // An id that is not one path component names no run directory.
-    let one_component =
-        !(run.is_empty() || run == "." || run == ".." || run.contains(['/', '\\']));
+    let one_component = !(run.is_empty() || run == "." || run == ".." || run.contains(['/', '\\']));
     let tree = bongos_work::WorkStore::global(cx).and_then(|store| store.read(cx).snapshot());
     let path = tree.as_deref().filter(|_| one_component).and_then(|tree| {
         tree.tasks().into_iter().find_map(|task| {
