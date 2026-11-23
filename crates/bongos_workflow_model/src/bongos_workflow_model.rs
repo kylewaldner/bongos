@@ -5,6 +5,7 @@
 //! [`schema`] types node results. [`record`] is the run record (`run.toml` and the checkpoint log,
 //! replayed into the run state), [`failure`] the closed list of failure reasons, [`inputs`] resolves
 //! a definition's inputs against a task, and [`state_doc`] builds what a program node reads.
+//! [`unsandboxed`] decides how a program starts when no OS sandbox is available.
 //! [`scheduler`] decides what a run does next from its definition and replayed state; `fake` (feature
 //! `test-support`) drives it with scripted results.
 
@@ -21,6 +22,7 @@ pub mod scheduler;
 pub mod schema;
 pub mod state_doc;
 pub mod template;
+pub mod unsandboxed;
 pub mod validate;
 
 pub use definition::{Definition, ParseError, Warning, parse};
@@ -30,8 +32,8 @@ pub use inputs::{InputValue, resolve};
 pub use layers::{Layer, LayerDirs, Resolution, Resolved};
 pub use layout::{GraphLayout, LayoutArc, LayoutEdge, LayoutNode, layout};
 pub use record::{
-    Event, LaneRef, NodeKey, ParsedLog, RunState, RunSubject, RunToml, RunTreeRecord,
-    UnattendedChoice, UnattendedSource, append, parse_log, repair, replay,
+    ConsentAnswer, ConsentPending, Event, LaneRef, NodeKey, ParsedLog, RunState, RunSubject,
+    RunToml, RunTreeRecord, UnattendedChoice, UnattendedSource, append, parse_log, repair, replay,
 };
 pub use scheduler::{
     Command, FreshRetryRefusal, Limits, Plan, check_fresh_retry, plan, resume_set, retry_set, step,
@@ -64,5 +66,7 @@ mod schema_tests;
 mod state_doc_tests;
 #[cfg(test)]
 mod template_tests;
+#[cfg(test)]
+mod unsandboxed_tests;
 #[cfg(test)]
 mod validate_tests;

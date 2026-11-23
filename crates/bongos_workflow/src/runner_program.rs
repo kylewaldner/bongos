@@ -175,6 +175,9 @@ pub struct ProgramSettings {
     pub wait_give_up_days: u32,
     /// `workflows.programs.allow_network`.
     pub allow_network: bool,
+    /// `workflows.programs.unsandboxed`: what a start does with no OS sandbox, before the
+    /// project's key tightens it. Nothing reads it yet.
+    pub unsandboxed: bongos_workflow_model::unsandboxed::Mode,
 }
 
 impl Default for ProgramSettings {
@@ -186,6 +189,7 @@ impl Default for ProgramSettings {
             max_output_mb: 10,
             poll_interval_minutes: 5,
             wait_give_up_days: 7,
+            unsandboxed: bongos_workflow_model::unsandboxed::Mode::Fallback,
         }
     }
 }

@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
+use bongos_workflow_model::unsandboxed::Mode;
 use bongos_workflow_model::{Ceilings, Limits, ValidationContext};
-use settings::{RegisterSetting, Settings, SettingsContent};
+use settings::{RegisterSetting, Settings, SettingsContent, WorkflowUnsandboxed};
 
 use crate::runner_claude::AgentDefaults;
 use crate::runner_program::ProgramSettings;
@@ -171,7 +172,21 @@ impl Settings for WorkflowsSettings {
                 wait_give_up_days: workflows
                     .wait_give_up_days
                     .unwrap_or(program_defaults.wait_give_up_days),
+                unsandboxed: programs
+                    .unsandboxed
+                    .map(unsandboxed_mode)
+                    .unwrap_or(program_defaults.unsandboxed),
             },
         }
+    }
+}
+
+/// The model's mode for the `workflows.programs.unsandboxed` setting.
+pub fn unsandboxed_mode(setting: WorkflowUnsandboxed) -> Mode {
+    match setting {
+        WorkflowUnsandboxed::Fallback => Mode::Fallback,
+        WorkflowUnsandboxed::Ask => Mode::Ask,
+        WorkflowUnsandboxed::Refuse => Mode::Refuse,
+        WorkflowUnsandboxed::Allow => Mode::Allow,
     }
 }
