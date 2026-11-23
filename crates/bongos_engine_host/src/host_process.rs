@@ -101,6 +101,10 @@ pub fn take_host_writer(
 /// dispatcher is running).
 pub type HostBusy = Rc<dyn Fn(&App) -> bool>;
 
+/// What a stop at the job boundary asks first, so that [`HostBusy`] can turn false: the lanes'
+/// dispatcher picks no new job, lets its running jobs finish and then ends.
+pub type HostDrain = Rc<dyn Fn(&mut App)>;
+
 /// How the engine host process serves its project.
 #[derive(Clone)]
 pub struct HostProcessOptions {
@@ -127,11 +131,13 @@ impl EngineHostProcess {
     /// Serves `repo`, whose writer this process holds, as its engine host: `host.json` in host
     /// mode, the socket (a stale one left by a dead writer is removed first), the engine access
     /// of the project. Once idle for `options.idle_exit` it stops serving ([`stop_serving`]) and
-    /// calls `on_exit`.
+    /// calls `on_exit`; asked to stop at the job boundary, it calls `drain` and then waits until
+    /// no run is active and `busy` is false.
     pub fn start(
         repo: ProjectRepo,
         options: HostProcessOptions,
         busy: HostBusy,
+        drain: HostDrain,
         on_exit: Box<dyn FnOnce(&mut App)>,
         cx: &mut App,
     ) -> Result<()> {
@@ -197,6 +203,8 @@ impl EngineHostProcess {
                 Some(at_job_boundary) => {
                     log::info!("engine host of {id} stopping: asked to stop");
                     if at_job_boundary {
+                        // Nothing else stops the dispatcher, which would keep starting jobs.
+                        cx.update(|cx| drain(cx));
                         wait_until_no_runs(&busy, cx).await;
                     }
                     "the engine host was stopped"

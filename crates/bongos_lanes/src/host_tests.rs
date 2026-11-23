@@ -1,4 +1,5 @@
-//! The author a `lanes:` command is recorded as, by whom it came from.
+//! The author a `lanes:` command is recorded as, by whom it came from, and the last run of a lane
+//! tree a job's reset is told of.
 
 use bongos_lanes_model::Author;
 use bongos_project_repo::{ClientKind, PeerIdentity, peer_identity};
@@ -77,4 +78,51 @@ fn a_start_takes_its_bound_job_count_and_unattended_override_from_the_command_li
         serde_json::from_value::<LanesPayload>(serde_json::json!({ "unattended": "maybe" }))
             .is_err()
     );
+}
+
+#[test]
+fn a_run_still_using_the_lane_tree_makes_the_job_wait_and_an_ended_one_is_its_last_run() {
+    use bongos_lanes_model::WaitReason;
+    use bongos_workflow::RunStatus;
+
+    use crate::host::last_run_of;
+    use crate::lane_tree::LastEnd;
+
+    const RUN: &str = "01890a5d-ac96-774b-bcce-b30209000001";
+    let of = |status| last_run_of(RUN.to_string(), "task/x-run-09000001-1".to_string(), status);
+    for status in [
+        RunStatus::Queued,
+        RunStatus::Running,
+        RunStatus::Pausing,
+        RunStatus::Paused,
+        RunStatus::WaitingOnYou,
+    ] {
+        match of(status) {
+            Err(WaitReason::Environment(text)) => {
+                assert!(text.contains("still uses the lane tree"), "{text}");
+                assert!(text.contains(status.label()), "{text}");
+            }
+            other => panic!("{status:?}: {other:?}"),
+        }
+    }
+    for (status, end) in [
+        (RunStatus::Halted, LastEnd::Halted),
+        (RunStatus::Failed, LastEnd::Failed),
+        (RunStatus::Cancelled, LastEnd::Cancelled),
+        (RunStatus::Succeeded, LastEnd::Succeeded),
+    ] {
+        let last = of(status).unwrap();
+        assert_eq!((last.run_id.as_str(), last.end), (RUN, end));
+        assert_eq!(last.run_branch, "task/x-run-09000001-1");
+    }
+}
+
+#[gpui::test]
+fn with_no_run_engine_the_last_run_is_unknown(cx: &mut gpui::TestAppContext) {
+    use bongos_lanes_model::LaneId;
+
+    use crate::host::last_lane_run;
+
+    let last = cx.update(|cx| last_lane_run(&LaneId::new("build", 1), "run", cx));
+    assert_eq!(last, Ok(None));
 }

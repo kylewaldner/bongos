@@ -47,8 +47,8 @@ pub use host_file::{
     move_in_progress_by, process_is, read_host_file, system_process_check, write_host_file,
 };
 pub use host_process::{
-    BUSY_RECHECK, EngineHostProcess, HostBusy, HostProcessOptions, held_by_message, host_is_busy,
-    open_host_writer, stop_serving, take_host_writer, wait_until_idle,
+    BUSY_RECHECK, EngineHostProcess, HostBusy, HostDrain, HostProcessOptions, held_by_message,
+    host_is_busy, open_host_writer, stop_serving, take_host_writer, wait_until_idle,
 };
 pub use participants::{WriterParticipant, WriterParticipants};
 pub use protocol::{

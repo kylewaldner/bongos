@@ -684,17 +684,134 @@ struct Changes {
 /// save goes on the run branch when the tree is on the last run's branch and the new run does not
 /// reuse that branch, else at `refs/bongos/saved/<lane>/<run id>`; never on any other branch.
 /// No hook runs and nothing is signed.
+///
+/// A last run that is not known (none given, or the tree is on another run's run branch, as after
+/// that run's record was cleared) never lets work go: the tree is saved as left by an unrecorded
+/// run, at a saved ref, whatever the given run's end. Commits only a detached `HEAD` holds are kept
+/// at a saved ref too.
 async fn save(git: &Git, request: &ResetRequest) -> Result<Option<Saved>, String> {
-    let Some(last) = &request.last else {
-        return Ok(None);
-    };
-    let Some(word) = last.end.saved_as() else {
-        return Ok(None);
-    };
     if request.second {
         return Ok(None);
     }
     let tree = request.location()?.path.as_path();
+    let current = git
+        .run(tree, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .await
+        .unwrap_or_default();
+    let unrecorded = LastRun {
+        run_id: UNRECORDED.to_string(),
+        run_branch: String::new(),
+        end: LastEnd::Halted,
+    };
+    let last = match &request.last {
+        Some(last) if !on_other_run_branch(&current, &last.run_id) => last,
+        _ => &unrecorded,
+    };
+    let saved = save_changes(git, request, tree, last).await?;
+    if !current.is_empty()
+        || matches!(
+            &saved,
+            Some(Saved {
+                commit: Some(_),
+                ..
+            })
+        )
+    {
+        return Ok(saved);
+    }
+    // Detached: a commit made there is on no branch, and the reset would leave it behind.
+    let head = git
+        .run(tree, &["rev-parse", "--verify", "HEAD^{commit}"])
+        .await
+        .map_err(git_error)?;
+    let holders = git
+        .run(
+            tree,
+            &[
+                "for-each-ref",
+                "--count=1",
+                "--contains",
+                &head,
+                "--format=%(refname)",
+            ],
+        )
+        .await
+        .map_err(git_error)?;
+    if !holders.is_empty() {
+        return Ok(saved);
+    }
+    let name = saved_ref(git, tree, request, last, &head).await?;
+    Ok(Some(Saved {
+        commit: Some((head, SaveTarget::Ref(name))),
+        skipped: saved.map(|saved| saved.skipped).unwrap_or_default(),
+    }))
+}
+
+/// The run id of a save whose last run is not known.
+pub const UNRECORDED: &str = "unrecorded";
+
+/// Whether `branch` is the run branch (`<task>-run-<short>-<attempt>`) of a run other than `run_id`.
+fn on_other_run_branch(branch: &str, run_id: &str) -> bool {
+    let Some((rest, attempt)) = branch.rsplit_once('-') else {
+        return false;
+    };
+    let Some((_, short)) = rest.rsplit_once("-run-") else {
+        return false;
+    };
+    let is_run_branch = !attempt.is_empty()
+        && attempt.chars().all(|c| c.is_ascii_digit())
+        && short.len() == 8
+        && short.chars().all(|c| c.is_ascii_hexdigit());
+    is_run_branch && short != short_id(run_id)
+}
+
+/// Keeps `commit` at a new ref `refs/bongos/saved/<lane>/<run id>` (`-2`, `-3`, ... when taken).
+async fn saved_ref(
+    git: &Git,
+    tree: &Path,
+    request: &ResetRequest,
+    last: &LastRun,
+    commit: &str,
+) -> Result<String, String> {
+    let base = format!("{SAVED_REFS}/{}/{}", request.locations.lane, last.run_id);
+    let mut number = 1u32;
+    loop {
+        let name = if number == 1 {
+            base.clone()
+        } else {
+            format!("{base}-{number}")
+        };
+        let taken = git
+            .run(tree, &["rev-parse", "-q", "--verify", &name])
+            .await
+            .is_ok();
+        if !taken {
+            // An empty old value: the ref must not exist yet.
+            git.run(tree, &no_hooks(&["update-ref", &name, commit, ""]))
+                .await
+                .map_err(git_error)?;
+            return Ok(name);
+        }
+        number += 1;
+    }
+}
+
+/// The save of the changes in `tree` left by `last`, when its end says to save them.
+async fn save_changes(
+    git: &Git,
+    request: &ResetRequest,
+    tree: &Path,
+    last: &LastRun,
+) -> Result<Option<Saved>, String> {
+    let Some(word) = last.end.saved_as() else {
+        return Ok(None);
+    };
+    let word = if last.run_id == UNRECORDED {
+        "an unrecorded run".to_string()
+    } else {
+        format!("{word} run {}", last.run_id)
+    };
+    let word = word.as_str();
     let refused = |why: String| {
         format!(
             "saving the work of run {} failed: {why}; nothing was reset",
@@ -869,7 +986,7 @@ async fn commit_saved(
     if let Some(staged) = staged
         && staged != top_tree
     {
-        let message = format!("staged work left by {word} run {}", last.run_id);
+        let message = format!("staged work left by {word}");
         top = commit(&staged, &top, &message).await?;
         top_tree = staged;
     }
@@ -902,7 +1019,7 @@ async fn commit_saved(
     }
     let written = run(&["write-tree"]).await?;
     if written != top_tree {
-        let message = format!("work left by {word} run {}", last.run_id);
+        let message = format!("work left by {word}");
         top = commit(&written, &top, &message).await?;
     }
     if top == parent {
@@ -927,27 +1044,8 @@ async fn commit_saved(
             .map_err(git_error)?;
         return Ok(Some((commit, SaveTarget::Branch(current))));
     }
-    let base = format!("{SAVED_REFS}/{}/{}", request.locations.lane, last.run_id);
-    let mut number = 1u32;
-    loop {
-        let name = if number == 1 {
-            base.clone()
-        } else {
-            format!("{base}-{number}")
-        };
-        let taken = git
-            .run(tree, &["rev-parse", "-q", "--verify", &name])
-            .await
-            .is_ok();
-        if !taken {
-            // An empty old value: the ref must not exist yet.
-            git.run(tree, &no_hooks(&["update-ref", &name, &commit, ""]))
-                .await
-                .map_err(git_error)?;
-            return Ok(Some((commit, SaveTarget::Ref(name))));
-        }
-        number += 1;
-    }
+    let name = saved_ref(git, tree, request, last, &commit).await?;
+    Ok(Some((commit, SaveTarget::Ref(name))))
 }
 
 /// What a lane's success merge brings the run branch into.

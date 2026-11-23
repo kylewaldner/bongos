@@ -99,7 +99,7 @@ pub use gate_notify::{notify_open_gates, observe_gates};
 pub use hooks::{AFTER_TREE_CREATED, BEFORE_JOB, BeforeJob, JobEnd, JobHook, JobHookCx, JobHooks};
 pub use host::{
     HOST_PREFIX, HostDispatcher, LanesPayload, ProjectLanesHost, WINDOW_PREFIX, dispatcher_running,
-    ensure_window_lanes, live_facts, live_facts_on_disk, register_host,
+    drain_dispatcher, ensure_window_lanes, live_facts, live_facts_on_disk, register_host,
 };
 pub use job_trees::{
     CurrentJobTrees, ExtraRepositories, JobRepositories, JobRepository, JobStart, JobTrees,

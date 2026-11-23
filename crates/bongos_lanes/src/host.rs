@@ -451,6 +451,17 @@ pub fn dispatcher_running(cx: &App) -> bool {
     running_dispatcher(cx).is_some()
 }
 
+/// Asks the dispatcher this process runs to stop every lane: no new job is picked, running jobs
+/// finish, and its run ends once every lane is at rest. Nothing happens with no dispatcher.
+pub fn drain_dispatcher(cx: &mut App) {
+    let Some(dispatcher) = running_dispatcher(cx) else {
+        return;
+    };
+    if let Err(error) = dispatcher.stop(LaneTarget::All, Author::System, cx) {
+        log::error!("lanes: stopping the lanes for the engine host's stop: {error:#}");
+    }
+}
+
 /// The only project repository open here, which this process must hold the writer of.
 fn sole_writer_repo(cx: &App) -> Result<ProjectRepo> {
     let repos = OpenProjectRepos::listed(cx);
@@ -909,12 +920,20 @@ impl ProjectLanesHost {
             .map(|tree| (*tree).clone())
             .unwrap_or_default();
         let forbidden = forbidden_for(lane, &inputs, &all, &tree);
-        let primary = self
-            .task_repository(job, &inputs, cx)
-            .map(|(name, path, branch)| {
-                let last = last_lane_run(lane, &job.run_id, cx);
-                JobRepository::for_task(name, path, &branch, &job.run_id, 1, last)
-            });
+        let primary = match self.task_repository(job, &inputs, cx) {
+            Some((name, path, branch)) => {
+                let last = last_lane_run(lane, &job.run_id, cx)?;
+                Some(JobRepository::for_task(
+                    name,
+                    path,
+                    &branch,
+                    &job.run_id,
+                    1,
+                    last,
+                ))
+            }
+            None => None,
+        };
         let values = TokenValues {
             lane: lane.to_string(),
             kind: lane.kind.clone(),
@@ -1016,13 +1035,20 @@ impl ProjectLanesHost {
 }
 
 /// The run that last used `lane`'s tree before the job `current`: the newest run the lane
-/// started in its tree, with the branch its attempt there had and how it ended. A run still active
-/// counts as halted, so its work is saved before any reset. `None` with no such run loaded.
-fn last_lane_run(lane: &LaneId, current: &str, cx: &App) -> Option<LastRun> {
-    let engine = cx.try_global::<WorkflowEngine>()?;
+/// started in its tree, with the branch its attempt there had and how it ended. `None` with no such
+/// run loaded; the reset then saves whatever the tree holds as left by an unrecorded run. A run
+/// still queued, running, paused or waiting on you uses the tree: the job waits.
+pub(crate) fn last_lane_run(
+    lane: &LaneId,
+    current: &str,
+    cx: &App,
+) -> Result<Option<LastRun>, WaitReason> {
+    let Some(engine) = cx.try_global::<WorkflowEngine>() else {
+        return Ok(None);
+    };
     let lifecycle = engine.lifecycle();
     let lane_id = lane.to_string();
-    let (run, branch) = lifecycle
+    let Some((run, branch)) = lifecycle
         .all_runs()
         .into_iter()
         .filter(|run| run != current)
@@ -1040,19 +1066,40 @@ fn last_lane_run(lane: &LaneId, current: &str, cx: &App) -> Option<LastRun> {
                 .find(|attempt| std::path::Path::new(&attempt.worktree) == path)?;
             Some((run.clone(), attempt.branch.clone()))
         })
-        .max_by(|(a, _), (b, _)| a.cmp(b))?;
-    let end = match lifecycle.status(&run)? {
+        .max_by(|(a, _), (b, _)| a.cmp(b))
+    else {
+        return Ok(None);
+    };
+    let Some(status) = lifecycle.status(&run) else {
+        return Ok(None);
+    };
+    last_run_of(run, branch, status).map(Some)
+}
+
+/// The last run of a lane tree from its status; a run that still uses the tree is a wait.
+pub(crate) fn last_run_of(
+    run: String,
+    branch: String,
+    status: RunStatus,
+) -> Result<LastRun, WaitReason> {
+    let end = match status {
         RunStatus::Succeeded => LastEnd::Succeeded,
         RunStatus::Failed => LastEnd::Failed,
         RunStatus::Cancelled => LastEnd::Cancelled,
-        RunStatus::Halted
-        | RunStatus::Queued
+        RunStatus::Halted => LastEnd::Halted,
+        RunStatus::Queued
         | RunStatus::Running
         | RunStatus::Pausing
         | RunStatus::Paused
-        | RunStatus::WaitingOnYou => LastEnd::Halted,
+        | RunStatus::WaitingOnYou => {
+            return Err(WaitReason::Environment(format!(
+                "run {} still uses the lane tree ({}); nothing was reset",
+                short_run(&run),
+                status.label()
+            )));
+        }
     };
-    Some(LastRun {
+    Ok(LastRun {
         run_id: run,
         run_branch: branch,
         end,
