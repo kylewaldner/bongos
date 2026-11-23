@@ -15080,6 +15080,7 @@ dependencies = [
  "agent_skills",
  "anyhow",
  "audio",
+ "bongos_confine",
  "bongos_linear",
  "bongos_work",
  "cloud_api_types",

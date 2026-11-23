@@ -21,6 +21,7 @@ agent_settings.workspace = true
 agent_skills.workspace = true
 anyhow.workspace = true
 audio.workspace = true
+bongos_confine.workspace = true
 bongos_linear.workspace = true
 bongos_work.workspace = true
 cloud_api_types.workspace = true
