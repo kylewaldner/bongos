@@ -556,7 +556,7 @@ fn test_undo_redo() {
     buffer.edit([(3..5, "cd")]);
     assert_eq!(buffer.text(), "1abcdef234");
 
-    let entries = buffer.history.undo_stack.clone();
+    let entries = buffer.history.undo_stack();
     assert_eq!(entries.len(), 3);
 
     buffer.undo_or_redo(entries[0].transaction.clone());
@@ -625,8 +625,8 @@ fn test_history() {
     buffer.undo();
     assert_eq!(buffer.text(), "12cde6");
 
-    // Redo stack gets cleared after performing an edit.
-    buffer.start_transaction_at(now);
+    // An edit after undo starts a new branch; the redo chain below it is empty.
+    let transaction_x = buffer.start_transaction_at(now).unwrap();
     buffer.edit([(0..0, "X")]);
     buffer.end_transaction_at(now);
     assert_eq!(buffer.text(), "X12cde6");
@@ -637,15 +637,28 @@ fn test_history() {
     buffer.undo();
     assert_eq!(buffer.text(), "123456");
 
-    // Transactions can be grouped manually.
+    // Manual grouping never crosses a fork: the undone "ab" transaction is a
+    // sibling of the "X" transaction, so "X" stays its own step.
     buffer.redo();
     buffer.redo();
     assert_eq!(buffer.text(), "X12cde6");
     buffer.group_until_transaction(transaction_1);
     buffer.undo();
-    assert_eq!(buffer.text(), "123456");
+    assert_eq!(buffer.text(), "12cde6");
     buffer.redo();
     assert_eq!(buffer.text(), "X12cde6");
+
+    // Transactions can be grouped manually.
+    now += buffer.transaction_group_interval() + Duration::from_millis(1);
+    buffer.start_transaction_at(now);
+    buffer.edit([(0..0, "Y")]);
+    buffer.end_transaction_at(now).unwrap();
+    assert_eq!(buffer.text(), "YX12cde6");
+    buffer.group_until_transaction(transaction_x);
+    buffer.undo();
+    assert_eq!(buffer.text(), "12cde6");
+    buffer.redo();
+    assert_eq!(buffer.text(), "YX12cde6");
 }
 
 #[test]
