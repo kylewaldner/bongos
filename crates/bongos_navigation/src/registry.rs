@@ -1,7 +1,7 @@
 //! The open navigation sessions, one per workspace, and the echo for an in-session action when
 //! none is open.
 
-use std::{collections::HashMap, rc::Rc};
+use std::{any::Any, collections::HashMap, rc::Rc};
 
 use gpui::{App, Context, EntityId, Global, Window};
 use workspace::{MinibufferMessageKind, MinibufferRouting, Workspace};
@@ -10,7 +10,10 @@ use workspace::{MinibufferMessageKind, MinibufferRouting, Workspace};
 pub const NO_PICKER: &str = "No navigation picker";
 
 /// A live navigation session, as the registry sees it.
-pub trait SessionHandle {}
+pub trait SessionHandle {
+    /// The session itself, for the in-session actions that know its type.
+    fn as_any(&self) -> &dyn Any;
+}
 
 #[derive(Default)]
 struct Registry {
