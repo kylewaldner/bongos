@@ -1281,7 +1281,10 @@ fn a_declared_directory_in_the_data_folder_is_allowed_only_in_a_lane_dir() {
         data.join("checks-scratch/out"),
     ] {
         let reason = check(&refused).unwrap_err();
-        assert!(reason.contains("overlaps the bongos data folder"), "{reason}");
+        assert!(
+            reason.contains("overlaps the bongos data folder"),
+            "{reason}"
+        );
     }
 }
 
