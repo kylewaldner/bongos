@@ -43,7 +43,9 @@ pub fn snippet(line: &str, match_range: Range<usize>, max_chars: usize) -> Snipp
     let match_chars = line[start..end].chars().count();
     let room = max_chars.saturating_sub(match_chars) / 2;
     let before: Vec<usize> = line[..start].char_indices().map(|(i, _)| i).collect();
-    let from = if before.len() > room {
+    let from = if room == 0 {
+        start
+    } else if before.len() > room {
         before[before.len() - room]
     } else {
         0
