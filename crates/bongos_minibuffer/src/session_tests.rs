@@ -328,6 +328,25 @@ async fn minibuffer_stream_drops_a_late_batch_for_an_old_query(cx: &mut TestAppC
 }
 
 #[gpui::test]
+async fn minibuffer_closing_the_session_cancels_the_running_pass(cx: &mut TestAppContext) {
+    let (workspace, mut cx) = window(cx, &[HOST]).await;
+    let log = Shared::default();
+    let calls = Calls::default();
+    let cx = &mut cx;
+    open_session(&workspace, cx, session(&log, streaming(&calls)));
+    cx.simulate_input("a");
+    assert!(!calls.borrow().last().unwrap().1.is_cancelled());
+
+    cx.dispatch_action(minibuffer::Cancel);
+    cx.run_until_parked();
+    assert!(view(&workspace, cx).is_none(), "the session closed");
+    assert!(
+        calls.borrow().last().unwrap().1.is_cancelled(),
+        "closing stops the search of the last query"
+    );
+}
+
+#[gpui::test]
 async fn minibuffer_preview_gets_highlight_then_cancelled(cx: &mut TestAppContext) {
     let (workspace, mut cx) = window(cx, &[HOST]).await;
     let log = Shared::default();

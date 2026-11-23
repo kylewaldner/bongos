@@ -16,7 +16,7 @@ use bongos_navigation_model::scope::{self, ScopeToken};
 use futures::channel::mpsc;
 use futures::{FutureExt as _, select_biased};
 use gpui::{App, AsyncApp, Context, Entity, SharedString, Window};
-use language::{Buffer, Point};
+use language::{Bias, Buffer, Point};
 use project::Project;
 use project::project_search::SearchResults;
 use project::search::{SearchQuery, SearchResult};
@@ -111,14 +111,23 @@ impl FindRequest {
                 _ => None,
             })
             .collect();
-        match (dirs.is_empty(), globs.is_empty()) {
-            (true, _) => globs.into_iter().map(str::to_string).collect(),
-            (false, true) => dirs.into_iter().map(|dir| format!("{dir}/**")).collect(),
-            (false, false) => dirs
-                .iter()
-                .flat_map(|dir| globs.iter().map(move |glob| format!("{dir}/{glob}")))
-                .collect(),
+        // A glob with a `/` is already a path pattern: it is not joined under a directory token
+        // (only under the base directory, which narrows everything).
+        let (paths, names): (Vec<&str>, Vec<&str>) =
+            globs.into_iter().partition(|glob| glob.contains('/'));
+        let mut include: Vec<String> = paths.into_iter().map(|glob| join_base(base, glob)).collect();
+        match (dirs.is_empty(), names.is_empty()) {
+            (true, _) => include.extend(names.into_iter().map(str::to_string)),
+            (false, true) if include.is_empty() => {
+                include.extend(dirs.into_iter().map(|dir| format!("{dir}/**")))
+            }
+            (false, true) => {}
+            (false, false) => include.extend(
+                dirs.iter()
+                    .flat_map(|dir| names.iter().map(move |glob| format!("{dir}/{glob}"))),
+            ),
         }
+        include
     }
 
     fn exclude_globs(&self) -> Vec<String> {
@@ -175,8 +184,22 @@ pub enum FindRow {
         range: Range<Anchor>,
         line: u32,
     },
-    /// The matches past [`MAX_ROWS`], which are not shown.
-    More { count: usize },
+    /// The matches past [`MAX_ROWS`], which are not shown. `at_least` is set when Zed's search
+    /// hit its own cap, so `count` is a floor.
+    More { count: usize, at_least: bool },
+}
+
+fn join_base(base: Option<&str>, glob: &str) -> String {
+    match base {
+        Some(base) => format!("{base}/{glob}"),
+        None => glob.to_string(),
+    }
+}
+
+/// The text of the [`FindRow::More`] row.
+fn more_label(count: usize, at_least: bool) -> String {
+    let plus = if at_least { "+" } else { "" };
+    format!("{count}{plus} more matches: RET opens them all")
 }
 
 /// Where a search stands, for the session's status.
@@ -273,6 +296,8 @@ pub(crate) async fn stream(
     let stale = |tx: &mpsc::Sender<Vec<Candidate>>| cancel.is_cancelled() || tx.is_closed();
     let mut shown = 0;
     let mut more = 0;
+    // Zed stops its search at a cap of matches; the count of the rest is then a floor.
+    let mut limit_reached = false;
     loop {
         let next = select_biased! {
             _ = cancel.cancelled().fuse() => return,
@@ -284,8 +309,13 @@ pub(crate) async fn stream(
         let Ok(result) = next else {
             break;
         };
-        let SearchResult::Buffer { buffer, ranges } = result else {
-            continue;
+        let (buffer, ranges) = match result {
+            SearchResult::Buffer { buffer, ranges } => (buffer, ranges),
+            SearchResult::LimitReached => {
+                limit_reached = true;
+                continue;
+            }
+            SearchResult::WaitingForScan | SearchResult::Searching => continue,
         };
         let room = MAX_ROWS - shown;
         let batch = cx.update(|cx| buffer_rows(&buffer, &ranges, room, full_paths, cx));
@@ -297,8 +327,11 @@ pub(crate) async fn stream(
     }
     if more > 0 {
         let row = Candidate::new(
-            format!("{more} more matches: RET opens them all"),
-            FindRow::More { count: more },
+            more_label(more, limit_reached),
+            FindRow::More {
+                count: more,
+                at_least: limit_reached,
+            },
         );
         if !send(&mut tx, vec![row], &cancel).await {
             return;
@@ -349,17 +382,28 @@ fn buffer_rows(
             let start = range.start.to_point(&snapshot);
             let end = range.end.to_point(&snapshot);
             let line_len = snapshot.line_len(start.row);
-            let line: String = snapshot
-                .text_for_range(Point::new(start.row, 0)..Point::new(start.row, line_len))
-                .collect();
             let match_end = if end.row == start.row {
                 end.column
             } else {
                 line_len
             };
+            // Only the bytes around the match are copied, so a huge line costs no more than a
+            // short one. The window holds more than the snippet can use on each side (a character
+            // is at most 4 bytes), so the snippet reads as it would from the whole line.
+            let reach = (SNIPPET_CHARS * 4 + 4) as u32;
+            let match_end = match_end.min(start.column.saturating_add(reach));
+            let from = snapshot.clip_point(
+                Point::new(start.row, start.column.saturating_sub(reach)),
+                Bias::Right,
+            );
+            let to = snapshot.clip_point(
+                Point::new(start.row, match_end.saturating_add(reach).min(line_len)),
+                Bias::Left,
+            );
+            let line: String = snapshot.text_for_range(from..to).collect();
             let snippet = rows::snippet(
                 &line,
-                start.column as usize..match_end as usize,
+                (start.column - from.column) as usize..(match_end - from.column) as usize,
                 SNIPPET_CHARS,
             );
             let line_number = start.row + 1;

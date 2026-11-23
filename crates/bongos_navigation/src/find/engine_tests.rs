@@ -281,9 +281,55 @@ async fn matches_past_2000_rows_are_counted_in_one_more_row(cx: &mut TestAppCont
         .count();
     assert_eq!(matches, 2_000);
     let last = rows.last().unwrap();
-    assert!(matches!(find_row(last), FindRow::More { count: 50 }));
+    assert!(matches!(
+        find_row(last),
+        FindRow::More {
+            count: 50,
+            at_least: false
+        }
+    ));
     assert_eq!(last.primary.as_ref(), "50 more matches: RET opens them all");
     assert_eq!(batches.len(), 41, "one batch per file, then the more row");
+}
+
+#[gpui::test]
+async fn the_more_count_is_a_floor_once_zeds_search_hit_its_cap(cx: &mut TestAppContext) {
+    let project = project(json!({ "a.txt": "needle\n".repeat(2_050) }), cx).await;
+    let a = open(&project, path!("/root/a.txt"), cx).await;
+    let mut search = fake_search(cx);
+    search
+        .results
+        .send(SearchResult::Buffer {
+            ranges: needles(&a, cx),
+            buffer: a,
+        })
+        .await
+        .unwrap();
+    search.results.send(SearchResult::LimitReached).await.unwrap();
+    search.results.close();
+    let batches: Vec<Vec<Candidate>> = search.rows.collect().await;
+    let last = batches.last().unwrap().last().unwrap();
+    assert!(matches!(
+        find_row(last),
+        FindRow::More {
+            count: 50,
+            at_least: true
+        }
+    ));
+    assert_eq!(last.primary.as_ref(), "50+ more matches: RET opens them all");
+    assert_eq!(more_label(50, false), "50 more matches: RET opens them all");
+}
+
+#[gpui::test]
+async fn a_huge_line_gives_the_same_snippet_as_a_short_one(cx: &mut TestAppContext) {
+    let line = format!("{}needle{}", "x".repeat(500_000), "y".repeat(500_000));
+    let project = project(json!({ "a.txt": line }), cx).await;
+    let (rx, _) = start(&project, find("needle"), &Cancel::new(), cx);
+    let batches: Vec<Vec<Candidate>> = rx.collect().await;
+    let row = &batches[0][0];
+    let expected = format!("a.txt:1  …{}needle{}…", "x".repeat(97), "y".repeat(97));
+    assert_eq!(row.primary.as_ref(), expected);
+    assert_eq!(&row.primary[row.highlights[0].clone()], "needle");
 }
 
 #[gpui::test]
@@ -311,6 +357,16 @@ async fn a_directory_a_glob_and_a_negated_glob_filter_the_files(cx: &mut TestApp
     );
     let batches: Vec<Vec<Candidate>> = rx.collect().await;
     assert_eq!(paths(&batches), ["src/main/A.kt", "src/main/deep/D.kt"]);
+
+    // A glob with a `/` is not joined under the directory token.
+    assert_eq!(
+        find("needle -- src/main src/**/*.kt").include_globs(),
+        ["src/**/*.kt"]
+    );
+    assert_eq!(
+        find("needle -- src/main *.kt").include_globs(),
+        ["src/main/*.kt"]
+    );
 }
 
 #[gpui::test]
