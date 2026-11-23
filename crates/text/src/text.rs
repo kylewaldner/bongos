@@ -7,6 +7,8 @@ mod patch;
 mod selection;
 pub mod subscription;
 #[cfg(test)]
+mod surgery_tests;
+#[cfg(test)]
 mod tests;
 mod undo_map;
 mod undo_tree;
@@ -388,12 +390,22 @@ impl History {
         self.tree.scoped_transaction_mut(transaction_id)
     }
 
-    fn merge_transactions(&mut self, transaction: TransactionId, destination: TransactionId) {
-        if let Some(transaction) = self.forget(transaction)
-            && let Some(destination) = self.transaction_mut(destination)
-        {
-            destination.edit_ids.extend(transaction.edit_ids);
+    /// Forgets `transaction` and moves its edits into `destination`. Returns
+    /// the forgotten transaction, or `None` without changing anything when
+    /// either id is not on the undo or redo view.
+    fn merge_transactions(
+        &mut self,
+        transaction: TransactionId,
+        destination: TransactionId,
+    ) -> Option<Transaction> {
+        self.transaction(destination)?;
+        let transaction = self.forget(transaction)?;
+        if let Some(destination) = self.transaction_mut(destination) {
+            destination
+                .edit_ids
+                .extend(transaction.edit_ids.iter().copied());
         }
+        Some(transaction)
     }
 
     fn pop_redo(&mut self) -> Option<&HistoryEntry> {
