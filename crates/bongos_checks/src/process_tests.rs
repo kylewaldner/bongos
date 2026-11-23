@@ -1270,7 +1270,7 @@ fn a_declared_directory_in_the_data_folder_is_allowed_only_in_a_lane_dir() {
 
     for refused in [
         data.clone(),
-        root.clone(),
+        root,
         data.join("projects"),
         project.clone(),
         project.join("lanes"),
