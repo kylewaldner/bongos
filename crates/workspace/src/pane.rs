@@ -18,7 +18,7 @@ use anyhow::Result;
 use collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use futures::{StreamExt, stream::FuturesUnordered};
 use gpui::{
-    Action, Anchor, AnyElement, App, AsyncWindowContext, ClickEvent, ClipboardItem, Context, Div,
+    Action, Anchor, AnyElement, AnyView, App, AsyncWindowContext, ClickEvent, ClipboardItem, Context, Div,
     DragMoveEvent, Entity, EntityId, EventEmitter, ExternalPaths, FocusHandle, FocusOutEvent,
     Focusable, KeyContext, MouseButton, NavigationDirection, Pixels, Point, PromptLevel, Render,
     ScrollHandle, Subscription, Task, TaskExt, WeakEntity, WeakFocusHandle, Window, actions,
@@ -408,6 +408,7 @@ pub struct Pane {
     dedicated: bool,
     was_focused: bool,
     active_item_index: usize,
+    content_override: Option<AnyView>,
     preview_item_id: Option<EntityId>,
     last_focus_handle_by_item: HashMap<EntityId, WeakFocusHandle>,
     nav_history: NavHistory,
@@ -589,6 +590,7 @@ impl Pane {
             badge: None,
             dedicated: false,
             active_item_index: 0,
+            content_override: None,
             preview_item_id: None,
             max_tabs,
             use_max_tabs,
@@ -1389,6 +1391,18 @@ impl Pane {
         self.items
             .iter()
             .filter_map(|item| item.to_any_view().downcast().ok())
+    }
+
+    /// Sets a view that the pane draws instead of the active item's content.
+    /// The tab bar is unchanged. Passing `None` shows the active item again;
+    /// focus is not moved either way.
+    pub fn set_content_override(&mut self, view: Option<AnyView>, cx: &mut Context<Self>) {
+        self.content_override = view;
+        cx.notify();
+    }
+
+    pub fn content_override(&self) -> Option<&AnyView> {
+        self.content_override.as_ref()
     }
 
     pub fn active_item(&self) -> Option<Box<dyn ItemHandle>> {
@@ -4537,7 +4551,11 @@ impl Render for Pane {
                                 .size_full()
                                 .overflow_hidden()
                                 .child(self.toolbar.clone())
-                                .child(item.to_any_view())
+                                .child(
+                                    self.content_override
+                                        .clone()
+                                        .unwrap_or_else(|| item.to_any_view()),
+                                )
                         } else {
                             div.id("pane_placeholder")
                                 .h_flex()
@@ -7776,6 +7794,77 @@ mod tests {
         .await
         .unwrap();
         assert_item_labels(&pane, ["C*"], cx);
+    }
+
+    struct CountingView {
+        renders: Rc<Cell<usize>>,
+    }
+
+    impl Render for CountingView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.renders.set(self.renders.get() + 1);
+            div()
+        }
+    }
+
+    #[gpui::test]
+    async fn test_content_override_draws_instead_of_active_item(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        add_labeled_item(&pane, "A", false, cx);
+        add_labeled_item(&pane, "B", false, cx);
+        cx.run_until_parked();
+
+        let renders = Rc::new(Cell::new(0));
+        let view = cx.new(|_| CountingView {
+            renders: renders.clone(),
+        });
+        pane.update(cx, |pane, cx| {
+            pane.set_content_override(Some(view.into()), cx)
+        });
+        cx.run_until_parked();
+
+        assert!(renders.get() > 0);
+        assert!(pane.read_with(cx, |pane, _| pane.content_override().is_some()));
+        assert_item_labels(&pane, ["A", "B*"], cx);
+    }
+
+    #[gpui::test]
+    async fn test_clearing_content_override_shows_item_with_focus_unmoved(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        add_labeled_item(&pane, "A", false, cx);
+        cx.run_until_parked();
+
+        let renders = Rc::new(Cell::new(0));
+        let view = cx.new(|_| CountingView {
+            renders: renders.clone(),
+        });
+        pane.update(cx, |pane, cx| {
+            pane.set_content_override(Some(view.into()), cx)
+        });
+        cx.run_until_parked();
+        let focused_before = cx.update(|window, cx| window.focused(cx));
+        let renders_while_overridden = renders.get();
+
+        pane.update(cx, |pane, cx| pane.set_content_override(None, cx));
+        cx.run_until_parked();
+
+        assert!(pane.read_with(cx, |pane, _| pane.content_override().is_none()));
+        assert_eq!(renders.get(), renders_while_overridden);
+        let focused_after = cx.update(|window, cx| window.focused(cx));
+        assert_eq!(focused_before, focused_after);
+        assert_item_labels(&pane, ["A*"], cx);
     }
 
     #[gpui::test]

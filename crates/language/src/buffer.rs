@@ -1288,6 +1288,19 @@ impl Buffer {
         }
     }
 
+    /// Returns a read-only copy of this buffer that has no file, is not
+    /// subscribed to this buffer, and shares its text history and language.
+    /// Edits applied to the copy never reach this buffer.
+    pub fn detached_copy(&self, cx: &mut Context<Self>) -> Buffer {
+        let mut copy = Self::build(self.text.branch(), None, Capability::ReadOnly);
+        copy.language = self.language.clone();
+        if let Some(language_registry) = self.language_registry() {
+            copy.set_language_registry(language_registry);
+        }
+        copy.reparse(cx, true);
+        copy
+    }
+
     pub fn branch(&mut self, cx: &mut Context<Self>) -> Entity<Self> {
         let this = cx.entity();
         cx.new(|cx| {
@@ -3234,8 +3247,8 @@ impl Buffer {
 
     pub fn undo_operations(&mut self, counts: HashMap<Lamport, u32>, cx: &mut Context<Buffer>) {
         let was_dirty = self.is_dirty();
-        let operation = self.text.undo_operations(counts);
         let old_version = self.version.clone();
+        let operation = self.text.undo_operations(counts);
         self.send_operation(Operation::Buffer(operation), true, cx);
         self.did_edit(&old_version, was_dirty, BufferEditSource::User, cx);
     }
