@@ -198,30 +198,36 @@ impl UndoTree {
     /// The transactions to toggle to move the buffer from the state of `from`
     /// to the state of `to`: those from `from` up to the closest common
     /// ancestor (to undo), then those from that ancestor down to `to` (to
-    /// redo). Empty when either id is unknown.
+    /// redo). Empty when either id is unknown. Takes time linear in the depths
+    /// of the two nodes.
     pub fn toggles(&self, from: UndoNodeId, to: UndoNodeId) -> Vec<TransactionId> {
-        let (Some(from), Some(to)) = (self.ix_of(from), self.ix_of(to)) else {
+        let (Some(mut from), Some(mut to)) = (self.ix_of(from), self.ix_of(to)) else {
             return Vec::new();
         };
-        let from_path = self.ancestors(from);
-        let to_path = self.ancestors(to);
-        let common = from_path
-            .iter()
-            .find(|ix| to_path.contains(ix))
-            .copied()
-            .unwrap_or(ROOT_IX);
-        let mut toggles = Vec::new();
-        for ix in from_path.iter().take_while(|ix| **ix != common) {
-            toggles.extend(self.transaction_id_of(*ix));
+        let mut from_depth = self.ancestors(from).len();
+        let mut to_depth = self.ancestors(to).len();
+        let mut up = Vec::new();
+        let mut down = Vec::new();
+        while from_depth > to_depth {
+            up.push(from);
+            from = self.n(from).parent.expect("deeper than the other node");
+            from_depth -= 1;
         }
-        let down = to_path
-            .iter()
-            .take_while(|ix| **ix != common)
-            .collect::<Vec<_>>();
-        for ix in down.into_iter().rev() {
-            toggles.extend(self.transaction_id_of(*ix));
+        while to_depth > from_depth {
+            down.push(to);
+            to = self.n(to).parent.expect("deeper than the other node");
+            to_depth -= 1;
         }
-        toggles
+        while from != to {
+            up.push(from);
+            down.push(to);
+            from = self.n(from).parent.expect("the root is a common ancestor");
+            to = self.n(to).parent.expect("the root is a common ancestor");
+        }
+        up.into_iter()
+            .chain(down.into_iter().rev())
+            .filter_map(|ix| self.transaction_id_of(ix))
+            .collect()
     }
 
     // Views used by the history.
