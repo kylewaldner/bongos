@@ -2,6 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod engine_host;
+#[cfg(test)]
+mod engine_host_tests;
 mod zed;
 
 #[cfg(all(test, not(target_os = "windows")))]

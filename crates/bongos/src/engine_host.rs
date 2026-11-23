@@ -11,6 +11,7 @@
 //! is off or the project cannot be read, 2 no read mode of that name is registered.
 
 use std::io::Write as _;
+use std::path::Path;
 use std::{process, rc::Rc, sync::Arc};
 
 use anyhow::anyhow;
@@ -24,7 +25,7 @@ use bongos_project_repo::{
 };
 use bongos_work::{OpenedProject, ProjectOpening};
 use fs::{Fs, RealFs};
-use gpui::{App, UpdateGlobal as _};
+use gpui::{App, Task, UpdateGlobal as _};
 use parking_lot::Mutex;
 use release_channel::{AppCommitSha, AppVersion};
 use settings::{Settings, SettingsStore};
@@ -66,27 +67,84 @@ pub enum Mode {
     Read(Vec<String>),
 }
 
+/// How the process ends early: its exit code and the line it prints on stderr.
+#[derive(Debug)]
+pub(crate) struct Exit {
+    pub(crate) code: i32,
+    pub(crate) message: String,
+}
+
+impl Exit {
+    fn new(code: i32, message: impl std::fmt::Display) -> Self {
+        Self {
+            code,
+            message: format!("bongos engine host: {message}"),
+        }
+    }
+
+    fn exit(self) -> ! {
+        eprintln!("{}", self.message);
+        process::exit(self.code)
+    }
+}
+
 fn fail(code: i32, message: impl std::fmt::Display) -> ! {
-    eprintln!("bongos engine host: {message}");
-    process::exit(code)
+    Exit::new(code, message).exit()
+}
+
+/// What the process goes on to do once its settings are checked.
+pub(crate) enum Started {
+    /// The probe: every setting the engine host needs is on.
+    Ready,
+    /// Become the engine host of the project.
+    Host,
+    /// The read mode runs; the task ends with what it prints.
+    Read(Task<anyhow::Result<String>>),
 }
 
 /// Reads the user settings file once; a missing file counts as empty.
 fn load_user_settings(cx: &mut App) {
-    let text = match std::fs::read_to_string(paths::settings_file()) {
+    let path = paths::settings_file();
+    let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => "{}".to_string(),
-        Err(error) => fail(
-            1,
-            format!("cannot read {}: {error}", paths::settings_file().display()),
-        ),
+        Err(error) => fail(1, format!("cannot read {}: {error}", path.display())),
     };
-    let parsed = SettingsStore::update_global(cx, |store, cx| store.set_user_settings(&text, cx));
+    if let Err(exit) = apply_user_settings(&text, path, cx) {
+        exit.exit();
+    }
+}
+
+/// Applies the text of the user settings file at `path`.
+pub(crate) fn apply_user_settings(text: &str, path: &Path, cx: &mut App) -> Result<(), Exit> {
+    let parsed = SettingsStore::update_global(cx, |store, cx| store.set_user_settings(text, cx));
     if let Err(error) = parsed.result() {
-        fail(
-            1,
-            format!("{}: {error:#}", paths::settings_file().display()),
-        );
+        return Err(Exit::new(1, format!("{}: {error:#}", path.display())));
+    }
+    Ok(())
+}
+
+/// Checks the settings `mode` needs and, for a read mode, starts it. `locations` is the record of
+/// project repositories.
+pub(crate) fn start(
+    project_id: &str,
+    mode: Mode,
+    locations: Option<&Path>,
+    cx: &mut App,
+) -> Result<Started, Exit> {
+    let checked = |cx: &App| match first_setting_off(cx) {
+        Some(message) => Err(Exit::new(1, message)),
+        None => Ok(()),
+    };
+    match mode {
+        Mode::Probe => checked(&*cx).map(|()| Started::Ready),
+        Mode::Host => checked(&*cx).map(|()| Started::Host),
+        Mode::Read(words) => {
+            if let Some(message) = first_read_setting_off(cx) {
+                return Err(Exit::new(1, message));
+            }
+            read(project_id, &words, locations, cx).map(Started::Read)
+        }
     }
 }
 
@@ -122,31 +180,40 @@ pub fn run(project_id: String, mode: Mode) -> ! {
         bongos_lanes::init(cx);
         bongos_engine_host::init(cx);
 
-        match mode {
-            Mode::Read(words) => {
-                if let Some(message) = first_read_setting_off(cx) {
-                    fail(1, message);
-                }
-                read(&project_id, &words, locations, cx);
-                return;
+        match start(&project_id, mode, locations.as_deref(), cx) {
+            Err(exit) => exit.exit(),
+            Ok(Started::Ready) => {
+                println!("engine host ready");
+                process::exit(0);
             }
-            Mode::Host | Mode::Probe => {}
+            Ok(Started::Host) => host(&project_id, locations.as_deref(), cx),
+            Ok(Started::Read(running)) => cx
+                .spawn(async move |_| match running.await {
+                    Ok(output) => {
+                        let mut stdout = std::io::stdout().lock();
+                        let written = writeln!(stdout, "{}", output.trim_end_matches('\n'))
+                            .and_then(|()| stdout.flush());
+                        if let Err(error) = written {
+                            fail(1, format!("writing the output: {error}"));
+                        }
+                        process::exit(0);
+                    }
+                    Err(error) => fail(1, format!("{error:#}")),
+                })
+                .detach(),
         }
-        if let Some(message) = first_setting_off(cx) {
-            fail(1, message);
-        }
-        if matches!(mode, Mode::Probe) {
-            println!("engine host ready");
-            process::exit(0);
-        }
-        host(&project_id, locations, cx);
     });
     process::exit(0)
 }
 
-/// Runs the read mode named by the first of `words` against the project's store, opened for
-/// reading only, prints its output and exits.
-fn read(project_id: &str, words: &[String], locations: Option<std::path::PathBuf>, cx: &mut App) {
+/// Starts the read mode named by the first of `words` against the project's store, opened for
+/// reading only; the task ends with the mode's output.
+fn read(
+    project_id: &str,
+    words: &[String],
+    locations: Option<&Path>,
+    cx: &mut App,
+) -> Result<Task<anyhow::Result<String>>, Exit> {
     // Work's startup opens every known project, by default as its writer. A read mode never takes
     // a project's writer lock, so every such open is refused here (before that startup task runs,
     // which is once this setup returns); the mode reads through its own reader below.
@@ -158,38 +225,26 @@ fn read(project_id: &str, words: &[String], locations: Option<std::path::PathBuf
     });
     ProjectOpening::install(refuse, None, cx);
     let Some((name, args)) = words.split_first() else {
-        fail(2, "--read needs the name of a read mode");
+        return Err(Exit::new(2, "--read needs the name of a read mode"));
     };
     if !ReadModes::is_registered(name, cx) {
-        eprintln!("bongos: no read mode {name} is registered");
-        process::exit(2);
+        return Err(Exit {
+            code: 2,
+            message: format!("bongos: no read mode {name} is registered"),
+        });
     }
-    let location = find_location(project_id, locations);
+    let location = find_location(project_id, locations)?;
     ReadProject::set(location.clone(), cx);
-    let reader = match StateStore::open_reader(&location) {
-        Ok(reader) => reader,
-        Err(error) => fail(1, format!("{error:#}")),
-    };
+    let reader =
+        StateStore::open_reader(&location).map_err(|error| Exit::new(1, format!("{error:#}")))?;
     let Some(running) = ReadModes::run(name, args, &reader, cx) else {
-        fail(2, format!("no read mode {name} is registered"));
+        return Err(Exit::new(2, format!("no read mode {name} is registered")));
     };
-    cx.spawn(async move |_| {
+    Ok(cx.spawn(async move |_| {
         // The mode was handed the reader for the call only; it stays open until the answer is in.
         let _reader = reader;
-        match running.await {
-            Ok(output) => {
-                let mut stdout = std::io::stdout().lock();
-                let written = writeln!(stdout, "{}", output.trim_end_matches('\n'))
-                    .and_then(|()| stdout.flush());
-                if let Err(error) = written {
-                    fail(1, format!("writing the output: {error}"));
-                }
-                process::exit(0);
-            }
-            Err(error) => fail(1, format!("{error:#}")),
-        }
-    })
-    .detach();
+        running.await
+    }))
 }
 
 /// Sends this process's log to the project's engine host log, rotated at
@@ -218,33 +273,35 @@ fn init_log(project_id: &str, cx: &App) {
 }
 
 /// The location of project `project_id` in the record of project repositories.
-fn find_location(project_id: &str, locations: Option<std::path::PathBuf>) -> Location {
+fn find_location(project_id: &str, locations: Option<&Path>) -> Result<Location, Exit> {
     let Some(path) = locations else {
-        fail(1, "this build keeps no record of project repositories");
+        return Err(Exit::new(
+            1,
+            "this build keeps no record of project repositories",
+        ));
     };
-    let record = match RepositoryLocations::load(path) {
-        Ok(record) => record,
-        Err(error) => fail(1, format!("reading the project repositories: {error}")),
-    };
-    match record
+    let record = RepositoryLocations::load(path)
+        .map_err(|error| Exit::new(1, format!("reading the project repositories: {error}")))?;
+    record
         .locations()
         .iter()
         .find(|location| location.id == project_id)
-    {
-        Some(location) => location.clone(),
-        None => fail(1, format!("no project repository {project_id} is known")),
-    }
+        .cloned()
+        .ok_or_else(|| Exit::new(1, format!("no project repository {project_id} is known")))
 }
 
 /// Becomes the engine host of `project_id`: takes its writer (or exits when another live process
 /// holds it), opens only that project, and serves it once it is open.
-fn host(project_id: &str, locations: Option<std::path::PathBuf>, cx: &mut App) {
+fn host(project_id: &str, locations: Option<&Path>, cx: &mut App) {
     init_log(project_id, cx);
     log::info!(
         "engine host of {project_id} starting (pid {})",
         process::id()
     );
-    let location = find_location(project_id, locations);
+    let location = match find_location(project_id, locations) {
+        Ok(location) => location,
+        Err(exit) => exit.exit(),
+    };
     // After every feature registered its state hooks: opening the writer seals them. A window
     // that holds the writer is asked to hand it over; this waits (blocking) until it lets go.
     let start_timeout = LanesSettings::get_global(cx).host.start_timeout;
