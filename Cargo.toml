@@ -655,7 +655,7 @@ indoc = "2"
 inventory = "0.3.19"
 itertools = "0.14.0"
 json_dotpath = "1.1"
-jsonschema = "0.37.0"
+jsonschema = { version = "0.37.0", default-features = false }
 jsonwebtoken = "10.0"
 jupyter-protocol = "1.4.0"
 jupyter-websocket-client = "1.1.0"
