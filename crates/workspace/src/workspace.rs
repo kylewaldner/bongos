@@ -1336,9 +1336,6 @@ struct DispatchingKeystrokes {
     task: Option<Shared<Task<()>>>,
 }
 
-/// Collects everything project-related for a certain window opened.
-/// In some way, is a counterpart of a window, as the [`WindowHandle`] could be downcast into `Workspace`.
-///
 /// Where an open that was not given a pane would show its item (see `Workspace::open_target`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum OpenTarget {
@@ -1348,6 +1345,9 @@ pub enum OpenTarget {
     SplitRightOf(Entity<Pane>),
 }
 
+/// Collects everything project-related for a certain window opened.
+/// In some way, is a counterpart of a window, as the [`WindowHandle`] could be downcast into `Workspace`.
+///
 /// A `Workspace` usually consists of 1 or more projects, a central pane group, 3 docks and a status bar.
 /// The `Workspace` owns everybody's state and serves as a default, "global context",
 /// that can be used to register a global action to be triggered from any place in the window.
