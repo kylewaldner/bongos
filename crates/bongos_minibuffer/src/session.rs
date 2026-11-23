@@ -6,6 +6,7 @@
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -23,7 +24,8 @@ pub type Value = Arc<dyn Any + Send + Sync>;
 
 /// One candidate of a session: the text that is narrowed and shown, an optional second line and
 /// kind, the value the host gets back, and the input that replaces the typed text when the
-/// candidate is confirmed with `descend` set (a directory, as in ivy's `ivy-alt-done`).
+/// candidate is confirmed with `descend` set (a directory, as in ivy's `ivy-alt-done`). A
+/// candidate may also mark parts of its text as highlighted, and be drawn dimmed.
 #[derive(Clone)]
 pub struct Candidate {
     pub primary: SharedString,
@@ -31,6 +33,10 @@ pub struct Candidate {
     pub kind: Option<SharedString>,
     pub value: Value,
     pub descend: Option<String>,
+    /// Byte ranges of `primary` drawn in the highlight color.
+    pub highlights: Vec<Range<usize>>,
+    /// Whether the row is drawn in the muted text color.
+    pub dimmed: bool,
 }
 
 impl Candidate {
@@ -41,6 +47,8 @@ impl Candidate {
             kind: None,
             value: Arc::new(value),
             descend: None,
+            highlights: Vec::new(),
+            dimmed: false,
         }
     }
 
@@ -64,6 +72,19 @@ impl Candidate {
     /// Confirming this candidate puts `input` in the input row instead of ending the session.
     pub fn descend(mut self, input: impl Into<String>) -> Self {
         self.descend = Some(input.into());
+        self
+    }
+
+    /// Draws these byte ranges of the primary text in the highlight color. A range that is out
+    /// of the text or does not fall on character boundaries is not drawn.
+    pub fn highlights(mut self, highlights: Vec<Range<usize>>) -> Self {
+        self.highlights = highlights;
+        self
+    }
+
+    /// Draws the row in the muted text color.
+    pub fn dimmed(mut self) -> Self {
+        self.dimmed = true;
         self
     }
 }
@@ -105,6 +126,7 @@ pub(crate) type PreviewHandler = Rc<dyn Fn(Preview, &mut Window, &mut App)>;
 /// Describes a candidate in a panel under the list, from its value: `None` draws no panel.
 pub(crate) type DetailHandler = Rc<dyn Fn(&Value, &App) -> Option<SharedString>>;
 pub(crate) type InputHandler = Rc<dyn Fn(&str, &SessionHandle, &mut Window, &mut App)>;
+pub(crate) type HistoryEntryHandler = Rc<dyn Fn(&str, &SessionHandle, &mut Window, &mut App)>;
 pub(crate) type ConfirmHandler = Box<dyn FnOnce(Outcome, &mut Window, &mut App)>;
 pub(crate) type CancelHandler = Box<dyn FnOnce(&mut Window, &mut App)>;
 /// Decides whether free input may be answered as it is, for a session that refuses some of it:
@@ -137,6 +159,7 @@ pub struct Session {
     on_preview: Option<PreviewHandler>,
     detail: Option<DetailHandler>,
     on_input: Option<InputHandler>,
+    on_history_entry: Option<HistoryEntryHandler>,
     on_confirm: Option<ConfirmHandler>,
     on_cancel: Option<CancelHandler>,
 }
@@ -162,6 +185,7 @@ impl Session {
             on_preview: None,
             detail: None,
             on_input: None,
+            on_history_entry: None,
             on_confirm: None,
             on_cancel: None,
         }
@@ -287,6 +311,16 @@ impl Session {
         self
     }
 
+    /// Runs after M-p or M-n put an entry of the history into the input, with that entry. It
+    /// does not run when M-n goes back past the newest entry to the input that was typed.
+    pub fn on_history_entry(
+        mut self,
+        handler: impl Fn(&str, &SessionHandle, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_history_entry = Some(Rc::new(handler));
+        self
+    }
+
     pub fn on_confirm(
         mut self,
         handler: impl FnOnce(Outcome, &mut Window, &mut App) + 'static,
@@ -332,6 +366,7 @@ pub(crate) struct Core {
     pub(crate) on_preview: Option<PreviewHandler>,
     pub(crate) detail: Option<DetailHandler>,
     pub(crate) on_input: Option<InputHandler>,
+    pub(crate) on_history_entry: Option<HistoryEntryHandler>,
     on_confirm: RefCell<Option<ConfirmHandler>>,
     on_cancel: RefCell<Option<CancelHandler>>,
 }
@@ -457,6 +492,38 @@ impl SessionHandle {
             .ok();
     }
 
+    /// Asks the source again for the current input, as a new pass: a batch the previous pass
+    /// sends later is dropped. A fixed list is narrowed again.
+    pub fn refresh(&self, window: &mut Window, cx: &mut App) {
+        if self.core.done.get() {
+            return;
+        }
+        self.view
+            .update(cx, |view, cx| view.refresh(window, cx))
+            .ok();
+    }
+
+    /// The value of the selected candidate, if one is shown.
+    pub fn selected(&self, cx: &App) -> Option<Value> {
+        if self.core.done.get() {
+            return None;
+        }
+        let view = self.view.upgrade()?;
+        view.read(cx).picker.read(cx).delegate.selected_value()
+    }
+
+    /// Replaces the candidates of a fixed list, keeping the input, which narrows the new list.
+    /// The selection keeps its row, or the last one when the new list is shorter. A session with
+    /// a dynamic source ignores this.
+    pub fn set_candidates(&self, candidates: Vec<Candidate>, window: &mut Window, cx: &mut App) {
+        if self.core.done.get() {
+            return;
+        }
+        self.view
+            .update(cx, |view, cx| view.set_candidates(candidates, window, cx))
+            .ok();
+    }
+
     /// Ends the session as a cancel: `on_cancel` runs, as it does for C-g.
     pub fn close(&self, window: &mut Window, cx: &mut App) {
         self.core.finish(Finish::Cancel, true, window, cx);
@@ -488,6 +555,7 @@ pub fn open(
         on_preview,
         detail,
         on_input,
+        on_history_entry,
         on_confirm,
         on_cancel,
     } = session;
@@ -509,6 +577,7 @@ pub fn open(
         on_preview,
         detail,
         on_input,
+        on_history_entry,
         on_confirm: RefCell::new(on_confirm),
         on_cancel: RefCell::new(on_cancel),
     });

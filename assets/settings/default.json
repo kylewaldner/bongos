@@ -2730,6 +2730,13 @@
     // key sequence.
     "key_hint_delay": 500,
   },
+  // Settings for the navigation pickers: the buffer switcher, go to file and find in files.
+  "navigation": {
+    // Whether the buffer switcher lists recently closed files after the open buffers.
+    "include_recent_closed": true,
+    // The largest file, in bytes, that a picker preview shows (default 2 MiB).
+    "preview_max_file_size": 2097152,
+  },
   // Settings for the Work view: projects and tasks kept as files under ~/.bongos.
   "work": {
     // Whether the Work view is on. While it is off, bongos neither reads nor
