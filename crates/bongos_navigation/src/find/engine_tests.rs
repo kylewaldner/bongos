@@ -168,11 +168,7 @@ async fn rows_read_path_line_and_snippet_with_the_match_highlighted(cx: &mut Tes
 
 #[gpui::test]
 async fn the_first_files_rows_arrive_before_the_search_completes(cx: &mut TestAppContext) {
-    let project = project(
-        json!({ "a.txt": "a needle\n", "b.txt": "b needle\n" }),
-        cx,
-    )
-    .await;
+    let project = project(json!({ "a.txt": "a needle\n", "b.txt": "b needle\n" }), cx).await;
     let a = open(&project, path!("/root/a.txt"), cx).await;
     let b = open(&project, path!("/root/b.txt"), cx).await;
     let mut search = fake_search(cx);
@@ -214,11 +210,7 @@ async fn the_first_files_rows_arrive_before_the_search_completes(cx: &mut TestAp
 async fn setting_cancel_or_dropping_the_receiver_ends_the_task_and_drops_the_search(
     cx: &mut TestAppContext,
 ) {
-    let project = project(
-        json!({ "a.txt": "a needle\n", "b.txt": "b needle\n" }),
-        cx,
-    )
-    .await;
+    let project = project(json!({ "a.txt": "a needle\n", "b.txt": "b needle\n" }), cx).await;
     let a = open(&project, path!("/root/a.txt"), cx).await;
     let b = open(&project, path!("/root/b.txt"), cx).await;
 
@@ -347,7 +339,12 @@ async fn an_invalid_regex_sends_nothing_and_reports_the_reason(cx: &mut TestAppC
         regex: true,
         ..Flags::default()
     };
-    let (rx, statuses) = start(&project, FindRequest::new("needle(", flags), &Cancel::new(), cx);
+    let (rx, statuses) = start(
+        &project,
+        FindRequest::new("needle(", flags),
+        &Cancel::new(),
+        cx,
+    );
     let batches: Vec<Vec<Candidate>> = rx.collect().await;
     cx.run_until_parked();
     assert!(batches.is_empty());
