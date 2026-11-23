@@ -2807,7 +2807,9 @@ dependencies = [
  "bongos_minibuffer",
  "bongos_minibuffer_model",
  "bongos_navigation_model",
+ "bongos_window",
  "command_palette_hooks",
+ "db",
  "editor",
  "fs",
  "futures 0.3.32",
@@ -2823,6 +2825,7 @@ dependencies = [
  "ui",
  "util",
  "workspace",
+ "zed_actions",
 ]
 
 [[package]]
