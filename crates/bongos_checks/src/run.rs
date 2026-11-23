@@ -162,6 +162,9 @@ pub struct CheckRun {
     /// Makes the write at the end of this part fail.
     #[cfg(test)]
     pub fail_part_end: Option<u32>,
+    /// Stands in for the OS sandbox probe of a confined part.
+    #[cfg(test)]
+    pub sandbox_probe: Option<process::SandboxProbe>,
 }
 
 /// How a part's wait for its pools ended.
@@ -1002,6 +1005,8 @@ impl CheckRun {
             on_start: None,
             confinement: self.settings.confine.then(|| PartConfinement {
                 records_dir: Some(self.output_dir.clone()),
+                #[cfg(test)]
+                probe: self.sandbox_probe.clone(),
                 ..PartConfinement::default()
             }),
         }

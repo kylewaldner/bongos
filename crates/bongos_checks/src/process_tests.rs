@@ -745,7 +745,7 @@ fn shell(name: &str, script: &str) -> CheckDecl {
 }
 
 /// Serializes the tests that point the process-wide job roots registry at their own folder.
-static REGISTRY: Mutex<()> = Mutex::new(());
+pub(crate) static REGISTRY: Mutex<()> = Mutex::new(());
 
 /// Makes the job roots registry of this test's own folder, for as long as the returned guard is
 /// held (the whole test): the registry is process-wide, so tests running as threads take turns.
@@ -1091,6 +1091,10 @@ fn a_sandbox_that_cannot_be_created_is_a_start_failure_and_nothing_runs() {
     match outcome.verdict {
         Verdict::NoVerdict(NoVerdictReason::StartFailed(reason)) => {
             assert!(reason.contains("no sandbox in this test"), "{reason}");
+            assert!(
+                reason.ends_with("(install Bubblewrap or set confinement.task_checks to false)"),
+                "{reason}"
+            );
         }
         other => panic!("expected a start failure, got {other:?}"),
     }
@@ -1185,7 +1189,15 @@ fn declared_dirs_refusal(fixture: &Fixture, dirs: &[&Path]) -> String {
     let outcome = block_on(run_part(spec));
     assert!(!marker.exists(), "the check ran");
     match outcome.verdict {
-        Verdict::NoVerdict(NoVerdictReason::StartFailed(reason)) => reason,
+        Verdict::NoVerdict(NoVerdictReason::StartFailed(reason)) => {
+            // The hint is for a sandbox the OS cannot make, not for a refused declaration.
+            assert!(
+                reason.starts_with("the sandbox cannot be created: "),
+                "{reason}"
+            );
+            assert!(!reason.contains("Bubblewrap"), "{reason}");
+            reason
+        }
         other => panic!("expected a start failure, got {other:?}"),
     }
 }

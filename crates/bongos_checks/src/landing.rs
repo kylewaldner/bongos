@@ -399,6 +399,8 @@ async fn run_landing(plan: LandingPlan) -> CheckOutcome {
         decl: plan.decl,
         #[cfg(test)]
         fail_part_end: None,
+        #[cfg(test)]
+        sandbox_probe: None,
     };
     match check_run.run().await {
         Ok(record) => outcome_of(&record, &output_dir),

@@ -70,7 +70,7 @@ impl Default for WorkflowsSettings {
             programs: ProgramSettings::default(),
             agent_confinement: AgentConfinementSettings {
                 agent_steps: false,
-                claude_state_paths: vec!["~/.claude".to_string(), "~/.claude.json".to_string()],
+                claude_state_paths: vec!["~/.claude".to_string()],
                 codex_state_paths: vec!["~/.codex".to_string()],
             },
         }

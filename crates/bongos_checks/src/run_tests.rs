@@ -160,6 +160,7 @@ impl Fixture {
             clock: FakeClock::automatic(),
             on_live: None,
             fail_part_end: None,
+            sandbox_probe: None,
         }
     }
 
@@ -1053,4 +1054,41 @@ fn check_runs_racing_for_two_slots_never_hold_more() {
     assert_eq!(state.binds.len(), 9);
     drop(state);
     pool.assert_all_released();
+}
+
+#[test]
+fn check_run_a_confined_part_goes_through_the_probe_with_its_tree() {
+    let fixture = fixture();
+    // The job roots registry is process-wide: take turns with the other tests that make one.
+    let _registry = crate::process_tests::REGISTRY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    util::job_roots::init(&fixture.output.join("registry").join("roots.json")).unwrap();
+    let seen: Arc<std::sync::Mutex<Vec<PathBuf>>> = Arc::default();
+    let mut run = fixture.check_run(CheckDecl {
+        name: "tests".to_string(),
+        run: Some("checks/part-log".to_string()),
+        ..CheckDecl::default()
+    });
+    run.settings.confine = true;
+    let recorder = seen.clone();
+    run.sandbox_probe = Some(Arc::new(move |_, tree: &Path| {
+        recorder.lock().unwrap().push(tree.to_path_buf());
+        Err("no sandbox in this test".to_string())
+    }));
+    let record = fixture.run(run);
+
+    match &record.verdict {
+        Verdict::NoVerdict(NoVerdictReason::StartFailed(reason)) => {
+            assert!(reason.contains("no sandbox in this test"), "{reason}");
+            assert!(reason.contains("install Bubblewrap"), "{reason}");
+        }
+        other => panic!("expected the probe's start failure, got {other:?}"),
+    }
+    // The probe saw the part's tree (once per try, the run reruns a no verdict), and the part
+    // never ran.
+    let seen = seen.lock().unwrap();
+    assert!(!seen.is_empty());
+    assert!(seen.iter().all(|tree| *tree == fixture.tree), "{seen:?}");
+    assert!(fixture.runs().is_empty());
 }
