@@ -2735,7 +2735,7 @@
     // The most nodes the undo tree keeps. Values below 100 count as 100.
     "node_limit": 10000,
     // How edits are grouped into undo states: "emacs" or "zed".
-    "grouping": "zed",
+    "grouping": "emacs",
   },
   // Settings for the Work view: projects and tasks kept as files under ~/.bongos.
   "work": {
