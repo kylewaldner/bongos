@@ -626,7 +626,7 @@ you start them, and they stop at a job boundary, never in the middle of a job.
   resumed once with `resume`; no run is resumed twice.
 - **Keys.** `C-c f L` is the prefix: `L` shows the Lanes view, `s` starts, `S` stops, `p`
   pauses a lane, `c` resumes, `d` shows a dry run (what each lane would take next, and why the rest
-  wait), `j` makes a lane look for work now, `o` adopts a halted or stopped task for a free lane (you
+  wait), `j` shows what a lane would take next (it only prints; it changes nothing), `o` adopts a halted or stopped task for a free lane (you
   pick the task, the lane and give a reason, which goes in the task's history) and `a` accepts the
   current task graph as the recorded one. Every command is also in the palette (`lanes: ...`). The
   keys are for the Emacs keymap. A lane whose run fails is halted until you adopt its task, resume or
@@ -657,14 +657,11 @@ you start them, and they stop at a job boundary, never in the middle of a job.
   `staleness_timeout_seconds` (60), `save_max_file_bytes` (10485760) and `host` with
   `idle_exit_seconds` (300), `start_timeout_seconds` (15), `handover_timeout_seconds` (1800) and
   `log_max_bytes` (1048576).
-- **Not there yet.** A lane job runs in the task's own worktree, so a task is started (`task: start`)
-  before a lane can take it; a run in a lane's own tree is refused. `bongos lanes dry-run` and
-  `pick` are answered from the state files only while no process holds the writer (a running host
-  says they are not served yet; use the keys in a window), and `bongos host stop` is refused by a
-  running host: stop its lanes with `bongos lanes stop` and let it exit, or end its process. `lanes
-  start` also accepts `--until`, `--max-jobs` and `--unattended`, which are not carried to the host
-  yet. A lane count lowered on this machine by a project profile stops the extra lane after its
-  current job.
+- **In the Lanes view.** On the row at point: `enter` opens the run's record (`run.toml`), `t`
+  focuses the task, `p` pauses, `c` resumes, `S` stops the lane, `o` adopts, `d` shows a dry run
+  and `g` refreshes. A lane job runs in the lane's own trees. `dry-run` and `pick` are served by
+  whichever process holds the writer (a running host answers them), and `lanes start` carries
+  `--until`, `--max-jobs` and `--unattended` to the host.
 
 ## Emacs keys
 

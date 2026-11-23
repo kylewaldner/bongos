@@ -225,18 +225,18 @@
       "^": "proposal::Up",
     },
   },
-  // The Lanes view, on the row at point. `a` adopts through the same prompt as `lanes: adopt`.
+  // The Lanes view, on the row at point. `o` adopts through the same prompt as `lanes: adopt`.
   {
     "context": "LanesView",
     "bindings": {
-      "enter": "lanes_view::OpenTask",
+      "enter": "lanes_view::OpenRun",
       "p": "lanes_view::PauseLane",
       "c": "lanes_view::ContinueLane",
       "S": "lanes_view::StopLane",
-      "o": "lanes_view::OpenRun",
+      "o": "lanes::Adopt",
       "d": "lanes_view::DryRun",
       "g": "lanes_view::Refresh",
-      "a": "lanes::Adopt",
+      "t": "lanes_view::OpenTask",
       "n": "menu::SelectNext",
     },
   },

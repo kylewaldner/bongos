@@ -1175,8 +1175,43 @@ pub fn register(workspace: &mut Workspace) {
     register_action::<lanes::Dump>(workspace);
 }
 
+/// Opens the `run.toml` of run `run` in the active pane, found under the `runs` directory of a
+/// task of the loaded work tree.
+fn open_run_record(
+    workspace: &mut Workspace,
+    run: &str,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    // An id that is not one path component names no run directory.
+    let one_component =
+        !(run.is_empty() || run == "." || run == ".." || run.contains(['/', '\\']));
+    let tree = bongos_work::WorkStore::global(cx).and_then(|store| store.read(cx).snapshot());
+    let path = tree.as_deref().filter(|_| one_component).and_then(|tree| {
+        tree.tasks().into_iter().find_map(|task| {
+            let dir = bongos_work_model::layout::runs_dir(&task.dir).join(run);
+            dir.is_dir().then(|| dir.join("run.toml"))
+        })
+    });
+    let Some(path) = path else {
+        show_toast(workspace, &format!("Run {run} has no record on disk"), cx);
+        return;
+    };
+    let open = workspace.open_abs_path(path, workspace::OpenOptions::default(), window, cx);
+    cx.spawn_in(window, async move |workspace, cx| {
+        if let Err(error) = open.await {
+            workspace
+                .update(cx, |workspace, cx| {
+                    show_toast(workspace, &format!("Could not open the run: {error:#}"), cx)
+                })
+                .ok();
+        }
+    })
+    .detach();
+}
+
 /// Carries out what a key of the view asked for: a command on a lane goes to the writer, the dry
-/// run opens its buffer. Opening a task or a run is left to a listener of the view's events.
+/// run opens its buffer, a task is focused and a run's record is opened.
 pub(crate) fn carry_out_view_command(
     workspace: &mut Workspace,
     _view: &gpui::Entity<crate::lanes_view::LanesView>,
@@ -1189,7 +1224,14 @@ pub(crate) fn carry_out_view_command(
             window.dispatch_action(Box::new(lanes::DryRun), cx);
             return;
         }
-        LanesViewCommand::OpenTask(_) | LanesViewCommand::OpenRun(_) => return,
+        LanesViewCommand::OpenTask(task) => {
+            bongos_work::focus_task(&task.0, workspace, window, cx);
+            return;
+        }
+        LanesViewCommand::OpenRun(run) => {
+            open_run_record(workspace, run, window, cx);
+            return;
+        }
         LanesViewCommand::Pause(lane) => (LanesVerb::Pause, lane),
         LanesViewCommand::Continue(lane) => (LanesVerb::Resume, lane),
         LanesViewCommand::Stop(lane) => (LanesVerb::Stop, lane),

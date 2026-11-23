@@ -191,14 +191,14 @@ Each cell reads `Linux / macOS`. Every command is also in the command palette an
 | `ChatList` | `t` | `chat::ToggleAllTasks` |
 | `ChatList` | `u` | `chat::Restore` |
 | `LandingView` | `r` | `project::ResolveSplit` |
-| `LanesView` | `a` | `lanes::Adopt` |
 | `LanesView` | `c` | `lanes_view::ContinueLane` |
 | `LanesView` | `d` | `lanes_view::DryRun` |
-| `LanesView` | `enter` | `lanes_view::OpenTask` |
+| `LanesView` | `enter` | `lanes_view::OpenRun` |
 | `LanesView` | `g` | `lanes_view::Refresh` |
 | `LanesView` | `n` | `menu::SelectNext` |
-| `LanesView` | `o` | `lanes_view::OpenRun` |
+| `LanesView` | `o` | `lanes::Adopt` |
 | `LanesView` | `p` | `lanes_view::PauseLane` |
+| `LanesView` | `t` | `lanes_view::OpenTask` |
 | `ProposalView` | `^` | `proposal::Up` |
 | `ProposalView` | `enter` | `proposal::Descend` |
 | `RunView` | `a` | `workflow::Approve` |
