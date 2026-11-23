@@ -12,6 +12,7 @@ pub mod settings;
 pub mod switcher;
 pub mod switcher_kill;
 pub mod target;
+#[cfg(test)]
 pub mod test_support;
 
 pub use settings::NavigationSettings;
