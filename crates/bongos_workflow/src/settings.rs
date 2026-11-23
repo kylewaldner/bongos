@@ -69,8 +69,8 @@ impl Default for WorkflowsSettings {
             limits: Limits::default(),
             programs: ProgramSettings::default(),
             agent_confinement: AgentConfinementSettings {
-                agent_steps: false,
-                claude_state_paths: vec!["~/.claude".to_string(), "~/.claude.json".to_string()],
+                agent_steps: true,
+                claude_state_paths: vec!["~/.claude".to_string()],
                 codex_state_paths: vec!["~/.codex".to_string()],
             },
         }
@@ -94,7 +94,7 @@ impl Settings for WorkflowsSettings {
         let state_paths = confinement.agent_state_paths.unwrap_or_default();
         Self {
             agent_confinement: AgentConfinementSettings {
-                agent_steps: confinement.agent_steps.unwrap_or(false),
+                agent_steps: confinement.agent_steps.unwrap_or(true),
                 claude_state_paths: state_paths.claude.unwrap_or_default(),
                 codex_state_paths: state_paths.codex.unwrap_or_default(),
             },

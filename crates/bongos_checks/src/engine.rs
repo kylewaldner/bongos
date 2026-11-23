@@ -1652,6 +1652,8 @@ fn check_run(
         })),
         #[cfg(test)]
         fail_part_end: None,
+        #[cfg(test)]
+        sandbox_probe: None,
     };
     Ok(check_run)
 }

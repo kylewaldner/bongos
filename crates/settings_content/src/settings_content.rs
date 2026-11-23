@@ -1946,10 +1946,9 @@ pub struct TaskChecksSettingsContent {
 #[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
 pub struct ConfinementSettingsContent {
     /// Run agent steps inside the sandbox (writes only to the job tree, scratch, declared
-    /// directories and the agent CLI's own state paths). Off by default for now: the Claude Code
-    /// CLI needs its config directory inside a writable path before it works confined.
+    /// directories and the agent CLI's own state paths).
     ///
-    /// Default: false
+    /// Default: true
     pub agent_steps: Option<bool>,
     /// Run task checks inside the sandbox.
     ///
@@ -1965,7 +1964,10 @@ pub struct ConfinementSettingsContent {
 pub struct ConfinementAgentStatePathsContent {
     /// Paths the Claude Code CLI writes.
     ///
-    /// Default: ["~/.claude", "~/.claude.json"]
+    /// The CLI runs with `CLAUDE_CONFIG_DIR` set to `~/.claude`, so it keeps its login and
+    /// settings there.
+    ///
+    /// Default: ["~/.claude"]
     pub claude: Option<Vec<String>>,
     /// Paths the Codex CLI writes.
     ///

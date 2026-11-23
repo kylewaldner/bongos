@@ -900,15 +900,17 @@ fn confine_command(
     args: &[String],
     env: &BTreeMap<OsString, OsString>,
 ) -> Result<(Command, Confined), NoVerdictReason> {
-    let failed = |why: String| {
+    // The hint names the fix for a sandbox the OS cannot make: only the probe and `Sandbox::new`
+    // say that. The other failures are about the declaration and are not cured by it.
+    let failed =
+        |why: String| NoVerdictReason::StartFailed(format!("the sandbox cannot be created: {why}"));
+    let failed_os = |why: String| {
         NoVerdictReason::StartFailed(format!(
-            "{why} (install Bubblewrap or set confinement.task_checks to false)"
+            "the sandbox cannot be created: {why} (install Bubblewrap or set \
+             confinement.task_checks to false)"
         ))
     };
-    let git_dirs = options
-        .git_dirs
-        .clone()
-        .map_err(|why| failed(format!("the sandbox cannot be created: {why}")))?;
+    let git_dirs = options.git_dirs.clone().map_err(&failed)?;
     let mut declared_dirs = spec.env.declared_dirs().to_vec();
     check_declared_dirs(
         &declared_dirs,
@@ -916,10 +918,9 @@ fn confine_command(
         &spec.tree,
         scratch,
     )
-    .map_err(|why| failed(format!("the sandbox cannot be created: {why}")))?;
+    .map_err(failed)?;
     // Only once they are checked.
-    make_declared_dirs(&mut declared_dirs)
-        .map_err(|why| failed(format!("the sandbox cannot be created: {why}")))?;
+    make_declared_dirs(&mut declared_dirs).map_err(failed)?;
     let declaration = JobDeclaration {
         kind: JobKind::Check,
         trees: vec![JobTree {
@@ -936,8 +937,8 @@ fn confine_command(
         git_dirs,
         records_dir: None,
     };
-    let confinement = Confinement::build(&declaration, &host)
-        .map_err(|error| failed(format!("the sandbox cannot be created: {error}")))?;
+    let confinement =
+        Confinement::build(&declaration, &host).map_err(|error| failed(error.to_string()))?;
     // From here the guard finishes the confinement on every path out.
     let mut confined = Confined {
         confinement,
@@ -948,9 +949,8 @@ fn confine_command(
         Some(probe) => probe(&policy, &spec.tree),
         None => Sandbox::can_create(&policy, Some(&spec.tree)).map_err(|error| error.to_string()),
     };
-    probed.map_err(|why| failed(format!("the sandbox cannot be created: {why}")))?;
-    let mut sandbox = Sandbox::new(policy)
-        .map_err(|error| failed(format!("the sandbox cannot be created: {error}")))?;
+    probed.map_err(failed_os)?;
+    let mut sandbox = Sandbox::new(policy).map_err(|error| failed_os(error.to_string()))?;
     let lossy = |text: &OsStr| text.to_string_lossy().into_owned();
     let command = CommandAndArgs {
         program: lossy(program.as_os_str()),
@@ -962,7 +962,7 @@ fn confine_command(
         cwd: Some(spec.tree.clone()),
     };
     let wrapped = futures::executor::block_on(sandbox.wrap(&command))
-        .map_err(|error| failed(format!("the sandbox cannot be created: {error}")))?;
+        .map_err(|error| failed(error.to_string()))?;
     confined._sandbox = Some(sandbox);
     let mut process = Command::new(&wrapped.program);
     process

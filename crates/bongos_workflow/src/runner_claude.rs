@@ -371,6 +371,20 @@ pub fn launch_env(
     )
 }
 
+/// The environment of a confined try: `env` plus `CLAUDE_CONFIG_DIR` set to `<HOME>/.claude`, so
+/// the CLI writes only under that directory (a bound `~/.claude.json` fails on its lock and
+/// temporary files in a read-only home). Without a `HOME` the variable is left unset.
+pub(crate) fn confined_env(mut env: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    if let Some(home) = env.get("HOME").filter(|home| !home.is_empty()) {
+        let dir = Path::new(home).join(".claude");
+        env.insert(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            dir.to_string_lossy().into_owned(),
+        );
+    }
+    env
+}
+
 /// The per-node values behind [`ENV_NAMES`]; shared with the Codex runner.
 pub(crate) struct NodeEnv<'a> {
     pub task_id: &'a str,
@@ -809,6 +823,7 @@ impl ClaudeRunner {
                 (command, None)
             }
             Some(job) => {
+                let env = confined_env(env);
                 let prepared = agent_confinement::prepare(
                     job,
                     key,

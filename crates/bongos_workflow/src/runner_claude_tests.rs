@@ -26,7 +26,7 @@ use crate::agent_confinement::{AgentJob, CONFINEMENT_LOG};
 use crate::process::ProcessRecord;
 use crate::runner_claude::{
     AgentDefaults, ClaudeCli, ClaudeNode, ClaudeRunner, ENV_NAMES, Exit, NodeCaps, PASSED_ENV,
-    RESULT_FILE, classify, launch_env,
+    RESULT_FILE, classify, confined_env, launch_env,
 };
 use crate::runner_program::{SandboxProbe, os_sandbox_probe};
 use crate::runtime::{Finish, RunSpec, Runner, Runtime};
@@ -623,6 +623,29 @@ fn a_lane_run_adds_its_variables_and_edits_and_no_edit_changes_the_node_names() 
     let env = launch_env(&base, "run-1", &key("triage"), &node);
     assert!(env.keys().all(|name| !name.starts_with("BONGOS_LANE")));
     assert!(edits_only.writable_dirs().is_empty());
+}
+
+#[test]
+fn a_confined_try_points_the_cli_config_at_home_dot_claude() {
+    let home = "/job/home";
+    let base = BTreeMap::from([("HOME".to_string(), home.to_string())]);
+
+    // Unconfined: the launch environment has no CLAUDE_CONFIG_DIR.
+    let root = TempDir::new().unwrap();
+    let node = node(&definition(), "triage", root.path(), 1);
+    let plain = launch_env(&base, "run-1", &key("triage"), &node);
+    assert!(!plain.contains_key("CLAUDE_CONFIG_DIR"));
+    assert!(!PASSED_ENV.contains(&"CLAUDE_CONFIG_DIR"));
+
+    // Confined: the variable is `<HOME>/.claude`, the rest is unchanged.
+    let confined = confined_env(plain.clone());
+    assert_eq!(confined["CLAUDE_CONFIG_DIR"], "/job/home/.claude");
+    let mut without = confined;
+    without.remove("CLAUDE_CONFIG_DIR");
+    assert_eq!(without, plain);
+
+    // No HOME: nothing to point at, so it stays unset.
+    assert!(!confined_env(BTreeMap::new()).contains_key("CLAUDE_CONFIG_DIR"));
 }
 
 #[test]
