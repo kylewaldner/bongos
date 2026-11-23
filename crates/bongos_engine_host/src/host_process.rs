@@ -175,19 +175,65 @@ impl EngineHostProcess {
         EngineAccesses::set(id.clone(), access, cx);
 
         let idle_exit = options.idle_exit;
+        let (stop_sender, mut stop_requests) = mpsc::unbounded::<bool>();
+        cx.set_global(StopRequests(stop_sender));
         let idle = cx.spawn(async move |cx| {
-            wait_until_idle(idle_exit, &busy, poked, cx).await;
-            log::info!(
-                "engine host of {id} stopping: idle for {}s",
-                idle_exit.as_secs()
-            );
+            let requested = {
+                let idle = wait_until_idle(idle_exit, &busy, poked, cx).fuse();
+                futures::pin_mut!(idle);
+                futures::select! {
+                    _ = idle => None,
+                    request = stop_requests.next() => request,
+                }
+            };
+            let reason = match requested {
+                None => {
+                    log::info!(
+                        "engine host of {id} stopping: idle for {}s",
+                        idle_exit.as_secs()
+                    );
+                    "the engine host was idle"
+                }
+                Some(at_job_boundary) => {
+                    log::info!("engine host of {id} stopping: asked to stop");
+                    if at_job_boundary {
+                        wait_until_no_runs(&busy, cx).await;
+                    }
+                    "the engine host was stopped"
+                }
+            };
             cx.update(|cx| {
-                stop_serving("the engine host was idle", cx);
+                stop_serving(reason, cx);
                 on_exit(cx);
             });
         });
         cx.set_global(Self { _idle: idle });
         Ok(())
+    }
+}
+
+/// Where `host stop` asks this process to stop: `true` waits for the jobs at their boundary.
+struct StopRequests(mpsc::UnboundedSender<bool>);
+
+impl Global for StopRequests {}
+
+/// The way to ask this engine host process to stop (what `HostCtl::Stop` does), or `None` in a
+/// process that is not one.
+pub(crate) fn stop_request(cx: &App) -> Option<mpsc::UnboundedSender<bool>> {
+    cx.try_global::<StopRequests>()
+        .map(|requests| requests.0.clone())
+}
+
+/// Resolves once no run is active and `busy` says nothing is, on the executor's clock. Clients do
+/// not count: the one that asked to stop is connected.
+async fn wait_until_no_runs(busy: &HostBusy, cx: &mut AsyncApp) {
+    let executor = cx.background_executor().clone();
+    while cx.update(|cx| {
+        cx.try_global::<WorkflowEngine>()
+            .is_some_and(|engine| !engine.active_runs().is_empty())
+            || busy(cx)
+    }) {
+        executor.timer(BUSY_RECHECK).await;
     }
 }
 

@@ -158,6 +158,12 @@ impl EngineServer {
         let status = serde_json::to_value(&info)?;
         let requests_task = cx.spawn(async move |cx| {
             while let Some((connection, id, command)) = requests.next().await {
+                let stop = match &command {
+                    HostCommand::Host(crate::protocol::HostCtl::Stop { at_job_boundary }) => cx
+                        .update(|cx| crate::host_process::stop_request(cx))
+                        .map(|sender| (sender, *at_job_boundary)),
+                    _ => None,
+                };
                 let reply = cx.update(|cx| {
                     crate::commands::dispatch(&repo, command, &connection.peer, status.clone(), cx)
                 });
@@ -167,7 +173,11 @@ impl EngineServer {
                             Ok(value) => HostResult::Ok(value),
                             Err(error) => HostResult::Refused(format!("{error:#}")),
                         };
+                        let accepted = matches!(result, HostResult::Ok(_));
                         connection.send(&ServerMessage::Reply { id, result });
+                        if let (true, Some((sender, at_job_boundary))) = (accepted, stop) {
+                            sender.unbounded_send(at_job_boundary).ok();
+                        }
                     })
                     .detach();
             }

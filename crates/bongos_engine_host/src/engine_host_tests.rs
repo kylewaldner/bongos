@@ -863,6 +863,52 @@ async fn an_idle_engine_host_exits_and_removes_its_files(cx: &mut TestAppContext
     assert!(!socket.exists());
 }
 
+// `host stop` is answered, then the engine host stops serving, exits and removes its files, with a
+// client still attached and long before the idle time.
+#[gpui::test]
+async fn a_stop_command_stops_the_engine_host_after_answering(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let exited = start_host_process(&fixture, cx);
+    let socket = live_host(fixture.location())
+        .and_then(|info| info.socket)
+        .expect("a socket");
+    let client = fixture.connect(ClientKind::Cli, cx);
+    wait_for(cx, |cx| host_connections(cx) == 1);
+
+    let answer = client
+        .request(HostCommand::Host(crate::protocol::HostCtl::Stop {
+            at_job_boundary: false,
+        }))
+        .await
+        .unwrap();
+    assert_eq!(answer["stopping"], json!(true));
+
+    wait_for(cx, |_| exited.get());
+    assert!(read_host_file(fixture.location()).is_none());
+    assert!(!socket.exists());
+}
+
+// A process that is not an engine host process refuses `host stop`.
+#[gpui::test]
+async fn a_stop_command_is_refused_outside_an_engine_host_process(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = fixture();
+    let local = EngineAccess::Local(fixture.repo.clone());
+    let error = cx
+        .update(|cx| {
+            local.request(
+                HostCommand::Host(crate::protocol::HostCtl::Stop {
+                    at_job_boundary: false,
+                }),
+                cx,
+            )
+        })
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("not an engine host process"));
+}
+
 // A connected client keeps the host from idling; once it goes, the idle time starts then.
 #[gpui::test]
 async fn a_connected_client_keeps_the_engine_host_running(cx: &mut TestAppContext) {
