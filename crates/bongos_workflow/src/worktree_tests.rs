@@ -128,6 +128,7 @@ impl Fixture {
             workflow: "build".to_string(),
             todo: "write tests".to_string(),
             style,
+            job: false,
         }
     }
 }
@@ -457,9 +458,18 @@ async fn a_lane_run_uses_the_lane_tree_on_its_run_branch_and_refuses_another_bra
     )
     .await;
 
-    let run = lane_run(git, &fixture.task, RUN_ID, 1, &tree, &settings(), &plenty)
-        .await
-        .unwrap();
+    let run = lane_run(
+        git,
+        &fixture.task,
+        RUN_ID,
+        1,
+        &tree,
+        None,
+        &settings(),
+        &plenty,
+    )
+    .await
+    .unwrap();
     assert_eq!(run.path, tree);
     assert_eq!(run.branch, branch);
     let expected_dir = fixture
@@ -475,6 +485,7 @@ async fn a_lane_run_uses_the_lane_tree_on_its_run_branch_and_refuses_another_bra
         OTHER_RUN_ID,
         1,
         &tree,
+        None,
         &settings(),
         &plenty,
     )
@@ -491,12 +502,76 @@ async fn a_lane_run_uses_the_lane_tree_on_its_run_branch_and_refuses_another_bra
         RUN_ID,
         1,
         &missing,
+        None,
         &settings(),
         &plenty,
     )
     .await
     .unwrap_err();
     assert!(refused.to_string().contains("missing"), "{refused}");
+}
+
+#[gpui::test]
+async fn a_lane_run_trusts_the_given_common_dir_and_never_discovers_one_in_the_lane_tree(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let fixture = Fixture::new().await;
+    let git = &fixture.git;
+    let tree = fixture.root.join("lanes").join("lane-build-1");
+    let branch = run_branch_name(TASK_BRANCH, RUN_ID, 1);
+    git_out(
+        git,
+        &fixture.repository,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            &branch,
+            &tree.to_string_lossy(),
+            TASK_BRANCH,
+        ],
+    )
+    .await;
+    let common = fixture.repository.join(".git");
+    let no_worktree = TaskCheckout {
+        worktree: None,
+        ..fixture.task.clone()
+    };
+
+    // With a task that has no worktree of its own, the given common directory is the only way.
+    let run = lane_run(
+        git,
+        &no_worktree,
+        RUN_ID,
+        1,
+        &tree,
+        Some(&common),
+        &settings(),
+        &plenty,
+    )
+    .await
+    .unwrap();
+    assert_eq!(run.path, tree);
+
+    // Without one, git is never asked in the lane's tree: the run is refused.
+    let refused = lane_run(
+        git,
+        &no_worktree,
+        RUN_ID,
+        1,
+        &tree,
+        None,
+        &settings(),
+        &plenty,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        refused.to_string().contains("no trusted git directory"),
+        "{refused}"
+    );
 }
 
 #[gpui::test]

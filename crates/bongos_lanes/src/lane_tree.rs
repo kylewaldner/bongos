@@ -6,8 +6,13 @@
 //! `-x`) and `git checkout --force -B <run branch> <start>`. Before git writes anything, the path
 //! is checked to be the lane's own resolved tree, and not a primary checkout, a task worktree or
 //! another lane's location, both as written and with links resolved; then git itself must agree
-//! that it is a linked worktree of the repository. Nothing here takes a lock, deletes a tree or
-//! pushes anything.
+//! that it is a linked worktree of the repository. A job may have written the tree's `.git`, so no
+//! git runs in a tree by discovery: the tree's git directory comes from the repository's own
+//! record, a crashed job's private git is recovered first ([`crate::lane_git`]), and every command
+//! runs through `SafeGit` as a job tree. Nothing here deletes a tree or pushes anything.
+//!
+//! Behavior changes: no hook runs at a job start (reset, save or the success merge, which the
+//! shipped merge runs with `job: true`), and `status` runs with `--ignore-submodules=all`.
 
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
@@ -18,6 +23,7 @@ use bongos_workflow::builtin_merge::{self, MergeRefusal, MergeRequest, MergeStyl
 use bongos_workflow::worktrees::{Git, GitError, short_id};
 
 use crate::create::{create_below_existing, lexical};
+use crate::lane_git::{self, LaneGit};
 use crate::locations::{LaneLocation, LaneLocations, Place, tree_name};
 use crate::prepare::{MakeTree, TreeRequest};
 
@@ -149,52 +155,6 @@ pub(crate) fn check_apart_from_tips(tree: &Path, locations: &LaneLocations) -> R
                 item.path.display()
             ));
         }
-    }
-    Ok(())
-}
-
-/// Checks with git that `tree` is a linked worktree of the repository whose primary checkout is
-/// `repository`, with its own top at `tree` (not a directory inside another checkout).
-async fn check_linked_worktree(git: &Git, tree: &Path, repository: &Path) -> Result<(), String> {
-    let top = git
-        .run(
-            tree,
-            &["rev-parse", "--path-format=absolute", "--show-toplevel"],
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-    if resolved(Path::new(&top)) != resolved(tree) {
-        return Err(format!(
-            "{} is not a git worktree of its own (git's top is {top}); nothing was reset",
-            tree.display()
-        ));
-    }
-    let common_of = async |dir: &Path| {
-        git.run(
-            dir,
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        )
-        .await
-        .map(|text| resolved(Path::new(&text)))
-        .map_err(|error| error.to_string())
-    };
-    let common = common_of(tree).await?;
-    if common != common_of(repository).await? {
-        return Err(format!(
-            "{} is not a worktree of {}; nothing was reset",
-            tree.display(),
-            repository.display()
-        ));
-    }
-    let own_dir = git
-        .run(tree, &["rev-parse", "--path-format=absolute", "--git-dir"])
-        .await
-        .map_err(|error| error.to_string())?;
-    if resolved(Path::new(&own_dir)) == common {
-        return Err(format!(
-            "{} is a primary checkout, not a lane tree; nothing was reset",
-            tree.display()
-        ));
     }
     Ok(())
 }
@@ -411,22 +371,19 @@ pub async fn save_left_work(git: &Git, request: &ResetRequest) -> Result<Option<
         return Err(unreadable(error.to_string()));
     }
     check_own_tree(tree, &location.path, &request.forbidden).map_err(SaveError::Failed)?;
-    check_linked_worktree(git, tree, &request.repository)
+    let lane = LaneGit::open(git, tree, &request.repository, false)
         .await
         .map_err(SaveError::Failed)?;
-    let saved = save(git, request).await.map_err(SaveError::Failed)?;
+    let saved = save(&lane, request).await.map_err(SaveError::Failed)?;
     if let Some(Saved {
         commit: Some((_, SaveTarget::Branch(_))),
         ..
     }) = &saved
     {
         // Only the index: the files on disk stay as the run left them.
-        git.run(
-            tree,
-            &no_hooks(&["-c", "submodule.recurse=false", "reset", "-q"]),
-        )
-        .await
-        .map_err(|error| SaveError::Failed(git_error(error)))?;
+        lane.run(&["reset", "-q"])
+            .await
+            .map_err(|error| SaveError::Failed(git_error(error)))?;
     }
     Ok(saved)
 }
@@ -468,26 +425,23 @@ pub async fn reset_tree(git: &Git, request: &ResetRequest) -> Result<ResetOutcom
         // Made now: check it again as it is on disk.
         check_own_tree(tree, &location.path, &request.forbidden)?;
     }
-    check_linked_worktree(git, tree, &request.repository).await?;
+    let lane = LaneGit::open(git, tree, &request.repository, added).await?;
 
     if request.second {
-        return reset_second(git, request, tree, added).await;
+        return reset_second(&lane, request, added).await;
     }
 
-    let head = git
-        .run(
-            tree,
-            &[
-                "rev-parse",
-                "--verify",
-                "--end-of-options",
-                &format!("{}^{{commit}}", request.start),
-            ],
-        )
+    let head = lane
+        .run(&[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{}^{{commit}}", request.start),
+        ])
         .await
         .map_err(git_error)?;
     let branch_ref = format!("refs/heads/{}", request.run_branch);
-    if let Some(existing) = branch_at(git, tree, &branch_ref).await
+    if let Some(existing) = branch_at(&lane, &branch_ref).await
         && existing != head
     {
         return Err(format!(
@@ -497,11 +451,11 @@ pub async fn reset_tree(git: &Git, request: &ResetRequest) -> Result<ResetOutcom
         ));
     }
 
-    let saved = save(git, request).await?;
+    let saved = save(&lane, request).await?;
 
     // Checked again after the save: `checkout -B` below must never move a branch off a commit
     // the save (or anything else) put on it.
-    if let Some(existing) = branch_at(git, tree, &branch_ref).await
+    if let Some(existing) = branch_at(&lane, &branch_ref).await
         && existing != head
     {
         return Err(format!(
@@ -512,28 +466,20 @@ pub async fn reset_tree(git: &Git, request: &ResetRequest) -> Result<ResetOutcom
         ));
     }
 
-    // A user's `submodule.recurse` must not make the reset touch submodule work.
-    git.run(
-        tree,
-        &["-c", "submodule.recurse=false", "reset", "-q", "--hard"],
-    )
-    .await
-    .map_err(git_error)?;
-    clean_tree(git, request, tree).await?;
-    git.run(
-        tree,
-        &[
-            "-c",
-            "submodule.recurse=false",
-            "checkout",
-            "-q",
-            "--force",
-            "--no-track",
-            "-B",
-            &request.run_branch,
-            &head,
-        ],
-    )
+    // The job tree's commands never recurse into submodules, whatever the user's configuration.
+    lane.run(&["reset", "-q", "--hard"])
+        .await
+        .map_err(git_error)?;
+    clean_tree(&lane, request).await?;
+    lane.run(&[
+        "checkout",
+        "-q",
+        "--force",
+        "--no-track",
+        "-B",
+        &request.run_branch,
+        &head,
+    ])
     .await
     .map_err(git_error)?;
     Ok(ResetOutcome { added, saved, head })
@@ -541,13 +487,13 @@ pub async fn reset_tree(git: &Git, request: &ResetRequest) -> Result<ResetOutcom
 
 /// `git clean -fd` in `tree`, keeping the binding's named directories of this tree that sit inside
 /// it (and, as always, ignored files).
-async fn clean_tree(git: &Git, request: &ResetRequest, tree: &Path) -> Result<(), String> {
+async fn clean_tree(lane: &LaneGit, request: &ResetRequest) -> Result<(), String> {
     let mut clean = vec!["clean".to_string(), "-q".to_string(), "-fd".to_string()];
-    for dir in inside(tree, &request.named_dirs()) {
+    for dir in inside(lane.tree(), &request.named_dirs()) {
         clean.push(format!("--exclude=/{dir}/"));
     }
     let clean: Vec<&str> = clean.iter().map(String::as_str).collect();
-    git.run(tree, &clean).await.map_err(git_error)?;
+    lane.run(&clean).await.map_err(git_error)?;
     Ok(())
 }
 
@@ -555,20 +501,16 @@ async fn clean_tree(git: &Git, request: &ResetRequest, tree: &Path) -> Result<()
 /// --hard` and `git clean -fd` where it stands. It holds no authored work, so nothing is saved,
 /// and it never takes a branch (the tip tree has the run branch), so `HEAD` stays where it is.
 async fn reset_second(
-    git: &Git,
+    lane: &LaneGit,
     request: &ResetRequest,
-    tree: &Path,
     added: bool,
 ) -> Result<ResetOutcome, String> {
-    git.run(
-        tree,
-        &["-c", "submodule.recurse=false", "reset", "-q", "--hard"],
-    )
-    .await
-    .map_err(git_error)?;
-    clean_tree(git, request, tree).await?;
-    let head = git
-        .run(tree, &["rev-parse", "--verify", "HEAD^{commit}"])
+    lane.run(&["reset", "-q", "--hard"])
+        .await
+        .map_err(git_error)?;
+    clean_tree(lane, request).await?;
+    let head = lane
+        .run(&["rev-parse", "--verify", "HEAD^{commit}"])
         .await
         .map_err(git_error)?;
     Ok(ResetOutcome {
@@ -579,8 +521,8 @@ async fn reset_second(
 }
 
 /// The commit `branch_ref` is at, `None` when it does not exist.
-async fn branch_at(git: &Git, tree: &Path, branch_ref: &str) -> Option<String> {
-    git.run(tree, &["rev-parse", "-q", "--verify", branch_ref])
+async fn branch_at(lane: &LaneGit, branch_ref: &str) -> Option<String> {
+    lane.run(&["rev-parse", "-q", "--verify", branch_ref])
         .await
         .ok()
 }
@@ -649,14 +591,6 @@ fn changed_paths(status: &[u8]) -> Vec<PathBuf> {
     paths
 }
 
-/// Git arguments with no hook run: a save must not be stopped or changed by the user's hooks.
-fn no_hooks<'a>(args: &[&'a str]) -> Vec<&'a str> {
-    ["-c", "core.hooksPath=/dev/null"]
-        .into_iter()
-        .chain(args.iter().copied())
-        .collect()
-}
-
 /// Writes `paths` NUL-separated, as `--pathspec-file-nul` reads them.
 fn write_pathspec(file: &Path, paths: &[&Path]) -> Result<(), String> {
     let mut list = Vec::new();
@@ -690,13 +624,12 @@ struct Changes {
 /// branch) never lets work go: the tree is saved as left by an unrecorded
 /// run, at a saved ref, whatever the given run's end. Commits only a detached `HEAD` holds are kept
 /// at a saved ref too.
-async fn save(git: &Git, request: &ResetRequest) -> Result<Option<Saved>, String> {
+async fn save(lane: &LaneGit, request: &ResetRequest) -> Result<Option<Saved>, String> {
     if request.second {
         return Ok(None);
     }
-    let tree = request.location()?.path.as_path();
-    let current = git
-        .run(tree, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+    let current = lane
+        .run(&["symbolic-ref", "--quiet", "--short", "HEAD"])
         .await
         .unwrap_or_default();
     let unrecorded = LastRun {
@@ -708,7 +641,7 @@ async fn save(git: &Git, request: &ResetRequest) -> Result<Option<Saved>, String
     // that run's own branch holds work no run recorded.
     let stray = match &request.last {
         Some(last) if last.end == LastEnd::Succeeded && current != last.run_branch => {
-            git.is_dirty_discovering(tree).await.map_err(git_error)?
+            lane.is_dirty().await.map_err(git_error)?
         }
         _ => false,
     };
@@ -716,7 +649,7 @@ async fn save(git: &Git, request: &ResetRequest) -> Result<Option<Saved>, String
         Some(last) if !stray && !on_other_run_branch(&current, &last.run_id) => last,
         _ => &unrecorded,
     };
-    let saved = save_changes(git, request, tree, last).await?;
+    let saved = save_changes(lane, request, last).await?;
     if !current.is_empty()
         || matches!(
             &saved,
@@ -729,27 +662,24 @@ async fn save(git: &Git, request: &ResetRequest) -> Result<Option<Saved>, String
         return Ok(saved);
     }
     // Detached: a commit made there is on no branch, and the reset would leave it behind.
-    let head = git
-        .run(tree, &["rev-parse", "--verify", "HEAD^{commit}"])
+    let head = lane
+        .run(&["rev-parse", "--verify", "HEAD^{commit}"])
         .await
         .map_err(git_error)?;
-    let holders = git
-        .run(
-            tree,
-            &[
-                "for-each-ref",
-                "--count=1",
-                "--contains",
-                &head,
-                "--format=%(refname)",
-            ],
-        )
+    let holders = lane
+        .run(&[
+            "for-each-ref",
+            "--count=1",
+            "--contains",
+            &head,
+            "--format=%(refname)",
+        ])
         .await
         .map_err(git_error)?;
     if !holders.is_empty() {
         return Ok(saved);
     }
-    let name = saved_ref(git, tree, request, last, &head).await?;
+    let name = saved_ref(lane, request, last, &head).await?;
     Ok(Some(Saved {
         commit: Some((head, SaveTarget::Ref(name))),
         skipped: saved.map(|saved| saved.skipped).unwrap_or_default(),
@@ -776,8 +706,7 @@ fn on_other_run_branch(branch: &str, run_id: &str) -> bool {
 
 /// Keeps `commit` at a new ref `refs/bongos/saved/<lane>/<run id>` (`-2`, `-3`, ... when taken).
 async fn saved_ref(
-    git: &Git,
-    tree: &Path,
+    lane: &LaneGit,
     request: &ResetRequest,
     last: &LastRun,
     commit: &str,
@@ -790,13 +719,13 @@ async fn saved_ref(
         } else {
             format!("{base}-{number}")
         };
-        let taken = git
-            .run(tree, &["rev-parse", "-q", "--verify", &name])
+        let taken = lane
+            .run(&["rev-parse", "-q", "--verify", &name])
             .await
             .is_ok();
         if !taken {
             // An empty old value: the ref must not exist yet.
-            git.run(tree, &no_hooks(&["update-ref", &name, commit, ""]))
+            lane.run(&["update-ref", &name, commit, ""])
                 .await
                 .map_err(git_error)?;
             return Ok(name);
@@ -807,11 +736,11 @@ async fn saved_ref(
 
 /// The save of the changes in `tree` left by `last`, when its end says to save them.
 async fn save_changes(
-    git: &Git,
+    lane: &LaneGit,
     request: &ResetRequest,
-    tree: &Path,
     last: &LastRun,
 ) -> Result<Option<Saved>, String> {
+    let tree = lane.tree();
     let Some(word) = last.end.saved_as() else {
         return Ok(None);
     };
@@ -827,20 +756,16 @@ async fn save_changes(
             last.run_id
         )
     };
-    // No optional locks: the status must not rewrite the tree's index.
-    let status = git
-        .output(
-            tree,
-            &no_hooks(&[
-                "--no-optional-locks",
-                "status",
-                "--porcelain",
-                "-z",
-                "--untracked-files=all",
-                "--ignored=no",
-                "--no-renames",
-            ]),
-        )
+    // `status` runs with no optional locks: it must not rewrite the tree's index.
+    let status = lane
+        .output(&[
+            "status",
+            "--porcelain",
+            "-z",
+            "--untracked-files=all",
+            "--ignored=no",
+            "--no-renames",
+        ])
         .await
         .map_err(|error| refused(error.to_string()))?;
     if !status.status.success() {
@@ -884,20 +809,9 @@ async fn save_changes(
         }));
     }
 
-    let index = git
-        .run(
-            tree,
-            &[
-                "rev-parse",
-                "--path-format=absolute",
-                "--git-path",
-                "bongos-save-index",
-            ],
-        )
-        .await
-        .map_err(|error| refused(error.to_string()))?;
-    let files = SaveFiles::at(PathBuf::from(index));
-    let result = commit_saved(git, request, last, word, &files, &changes).await;
+    // The tree's own git directory (per worktree, not the shared one).
+    let files = SaveFiles::at(lane.git_dir().join("bongos-save-index"));
+    let result = commit_saved(lane, request, last, word, &files, &changes).await;
     for file in files.all() {
         std::fs::remove_file(file).ok();
     }
@@ -929,14 +843,13 @@ impl SaveFiles {
 }
 
 async fn commit_saved(
-    git: &Git,
+    lane: &LaneGit,
     request: &ResetRequest,
     last: &LastRun,
     word: &str,
     files: &SaveFiles,
     changes: &Changes,
 ) -> Result<Option<(String, SaveTarget)>, String> {
-    let tree = request.location()?.path.as_path();
     for file in files.all() {
         match std::fs::remove_file(file) {
             Ok(()) => {}
@@ -944,22 +857,18 @@ async fn commit_saved(
             Err(error) => return Err(format!("removing {}: {error}", file.display())),
         }
     }
-    let own_index = git
-        .run(
-            tree,
-            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
-        )
-        .await
-        .map_err(git_error)?;
-    let saving = git
-        .clone()
-        .env("GIT_INDEX_FILE", &files.index)
-        .env("GIT_LITERAL_PATHSPECS", "1")
-        .env("GIT_AUTHOR_NAME", SAVE_NAME)
-        .env("GIT_AUTHOR_EMAIL", SAVE_EMAIL)
-        .env("GIT_COMMITTER_NAME", SAVE_NAME)
-        .env("GIT_COMMITTER_EMAIL", SAVE_EMAIL);
-    let run = async |args: &[&str]| saving.run(tree, &no_hooks(args)).await.map_err(git_error);
+    let own_index = lane.git_dir().join("index");
+    let saving = lane.with_git(
+        lane.git()
+            .clone()
+            .env("GIT_INDEX_FILE", &files.index)
+            .env("GIT_LITERAL_PATHSPECS", "1")
+            .env("GIT_AUTHOR_NAME", SAVE_NAME)
+            .env("GIT_AUTHOR_EMAIL", SAVE_EMAIL)
+            .env("GIT_COMMITTER_NAME", SAVE_NAME)
+            .env("GIT_COMMITTER_EMAIL", SAVE_EMAIL),
+    );
+    let run = async |args: &[&str]| saving.run(args).await.map_err(git_error);
     let commit = async |written: &str, parent: &str, message: &str| {
         run(&[
             "commit-tree",
@@ -990,7 +899,7 @@ async fn commit_saved(
             run(&["write-tree"]).await.ok()
         }
         Err(error) if error.kind() == ErrorKind::NotFound => None,
-        Err(error) => return Err(format!("copying {own_index}: {error}")),
+        Err(error) => return Err(format!("copying {}: {error}", own_index.display())),
     };
     if let Some(staged) = staged
         && staged != top_tree
@@ -1036,8 +945,8 @@ async fn commit_saved(
     }
     let commit = top;
 
-    let current = git
-        .run(tree, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+    let current = lane
+        .run(&["symbolic-ref", "--quiet", "--short", "HEAD"])
         .await
         .unwrap_or_default();
     // Only a branch the last run made is ever moved by a save.
@@ -1048,12 +957,12 @@ async fn commit_saved(
     // the save then goes to a saved ref, so moving the branch cannot drop it.
     if run_made && current == last.run_branch && current != request.run_branch {
         let name = format!("refs/heads/{current}");
-        git.run(tree, &no_hooks(&["update-ref", &name, &commit, &parent]))
+        lane.run(&["update-ref", &name, &commit, &parent])
             .await
             .map_err(git_error)?;
         return Ok(Some((commit, SaveTarget::Branch(current))));
     }
-    let name = saved_ref(git, tree, request, last, &commit).await?;
+    let name = saved_ref(lane, request, last, &commit).await?;
     Ok(Some((commit, SaveTarget::Ref(name))))
 }
 
@@ -1105,13 +1014,18 @@ pub enum LaneMerged {
     Nothing,
 }
 
-/// The worktree (other than `tree`) that has `branch` checked out, if any.
+/// The worktree (other than `tree`) that has `branch` checked out, if any. Asked of the user's
+/// own checkout `repository`: the list is the same from every worktree, and no git runs in the
+/// lane tree by discovery.
 async fn checked_out_elsewhere(
     git: &Git,
+    repository: &Path,
     tree: &Path,
     branch: &str,
 ) -> Result<Option<PathBuf>, GitError> {
-    let list = git.run(tree, &["worktree", "list", "--porcelain"]).await?;
+    let list = git
+        .run(repository, &["worktree", "list", "--porcelain"])
+        .await?;
     let wanted = format!("branch refs/heads/{branch}");
     let here = resolved(tree);
     let mut current: Option<PathBuf> = None;
@@ -1145,38 +1059,34 @@ pub async fn merge_in_lane_tree(
         lane_tree(&request.locations, &request.repo, false).map_err(LaneMergeError::NotOwnTree)?;
     let tree = location.path.as_path();
     check_own_tree(tree, &location.path, &request.forbidden).map_err(LaneMergeError::NotOwnTree)?;
-    check_linked_worktree(git, tree, &request.repository)
+    let lane = LaneGit::open(git, tree, &request.repository, false)
         .await
         .map_err(LaneMergeError::NotOwnTree)?;
-    if let Some(path) = checked_out_elsewhere(git, tree, &target).await? {
+    if let Some(path) = checked_out_elsewhere(git, &request.repository, tree, &target).await? {
         return Err(LaneMergeError::CheckedOutElsewhere {
             branch: target,
             path,
         });
     }
-    if git.is_dirty_discovering(tree).await? {
+    if lane.is_dirty().await? {
         return Err(LaneMergeError::Dirty);
     }
-    git.run(tree, &["checkout", "-q", &target, "--"]).await?;
+    lane.run(&["checkout", "-q", &target, "--"]).await?;
     // The shipped merge names the lane tree's git directory, which it trusts only as a linked
     // worktree of the repository's common directory, read in the person's own checkout.
-    let common = git
-        .run(
-            &request.repository,
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        )
-        .await?;
+    let common = lane_git::common_dir(git, &request.repository).await?;
     let merged = builtin_merge::merge(
         git,
         &MergeRequest {
             task_worktree: location.path.clone(),
-            run_git_dir: PathBuf::from(common),
+            run_git_dir: common,
             task_branch: target,
             run_branch: request.run_branch.clone(),
             run_id: request.run_id.clone(),
             workflow: request.workflow.clone(),
             todo: request.todo.clone(),
             style: request.style,
+            job: true,
         },
     )
     .await?;

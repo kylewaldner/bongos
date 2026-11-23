@@ -171,16 +171,19 @@ pub struct JobSetup {
 }
 
 impl JobSetup {
-    /// The setup of a job in `trees` (from [`crate::start_job_trees`]) with the lane's
-    /// environment edits (from [`crate::tip_env`]) and named directories.
+    /// The setup of a job in `trees` (from [`crate::start_job_trees`]) with the repository's
+    /// trusted git common directory, the lane's environment edits (from [`crate::tip_env`]) and
+    /// named directories.
     pub fn in_lane_tree(
         trees: JobTrees,
+        common_dir: PathBuf,
         env: Vec<EnvEdit>,
         lane_dirs: BTreeMap<String, PathBuf>,
     ) -> Self {
         Self {
             tree: RunTree::Lane {
                 path: trees.primary().to_path_buf(),
+                common_dir: Some(common_dir),
                 base: None,
                 start: None,
                 merge_into: None,

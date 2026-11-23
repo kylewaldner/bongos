@@ -94,10 +94,13 @@ pub enum RunTree {
         base: Option<String>,
         merge_into: Option<String>,
     },
-    /// A lane's tree at `path`. `base` is the second tree's path, `start` the ref the run branch
-    /// is created from and `merge_into` the branch the success merge targets.
+    /// A lane's tree at `path`. `common_dir` is the repository's git common directory, read in
+    /// the person's own checkout (git never runs by discovery in the lane's tree, which jobs
+    /// wrote). `base` is the second tree's path, `start` the ref the run branch is created from
+    /// and `merge_into` the branch the success merge targets.
     Lane {
         path: PathBuf,
+        common_dir: Option<PathBuf>,
         base: Option<PathBuf>,
         start: Option<String>,
         merge_into: Option<String>,
@@ -419,13 +422,15 @@ pub trait RunWorktrees: Send {
     }
 
     /// The run worktree of a task run in a lane's tree at `path`, which the lane already put on
-    /// the run branch ([`worktrees::lane_run`]). By default no run is made in a lane's tree.
+    /// the run branch ([`worktrees::lane_run`]); `common_dir` is the repository's trusted git
+    /// common directory. By default no run is made in a lane's tree.
     fn lane(
         &mut self,
         _task: &TaskCheckout,
         _run_id: &str,
         _attempt: u32,
         path: &Path,
+        _common_dir: Option<&Path>,
         _settings: &WorkflowsSettings,
     ) -> Result<RunWorktree, WorktreeError> {
         Err(WorktreeError::Io {
@@ -484,6 +489,7 @@ impl RunWorktrees for GitWorktrees {
         run_id: &str,
         attempt: u32,
         path: &Path,
+        common_dir: Option<&Path>,
         settings: &WorkflowsSettings,
     ) -> Result<RunWorktree, WorktreeError> {
         let free_space = self.free_space.clone();
@@ -493,6 +499,7 @@ impl RunWorktrees for GitWorktrees {
             run_id,
             attempt,
             path,
+            common_dir,
             settings,
             &move |path: &Path| free_space(path),
         ))
@@ -1606,8 +1613,10 @@ impl<R: Runner> Lifecycle<R> {
         let checkout = TaskCheckout::from_task(task.slug.clone(), file);
         let id = request.run_id.clone().unwrap_or_else(new_id);
         let (worktree, tree_record) = match &request.tree {
-            RunTree::Lane { path, .. } => {
-                let worktree = self.lane_worktree(&checkout, &id, path)?;
+            RunTree::Lane {
+                path, common_dir, ..
+            } => {
+                let worktree = self.lane_worktree(&checkout, &id, path, common_dir.as_deref())?;
                 let record = RunTreeRecord::Lane {
                     path: worktree.path.clone(),
                     run_dir: worktree.run_dir.clone(),
@@ -3026,9 +3035,10 @@ impl<R: Runner> Lifecycle<R> {
         checkout: &TaskCheckout,
         run: &str,
         path: &Path,
+        common_dir: Option<&Path>,
     ) -> Result<RunWorktree, Refusal> {
         self.worktrees
-            .lane(checkout, run, 1, path, &self.settings)
+            .lane(checkout, run, 1, path, common_dir, &self.settings)
             .map_err(worktree_refusal)
     }
 

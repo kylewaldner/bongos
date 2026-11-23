@@ -82,7 +82,7 @@ impl Git {
     /// [`Git::output`] in a tree with an explicit git directory: the command is built by
     /// [`SafeGit`], so git never discovers its repository from a `.git` in the tree. A job tree
     /// also gets the job tree protections (no hook, driver or external diff the tree could name).
-    pub(crate) async fn output_at(&self, at: At<'_>, args: &[&str]) -> Result<Output, GitError> {
+    pub async fn output_at(&self, at: At<'_>, args: &[&str]) -> Result<Output, GitError> {
         let error = |message: String| GitError {
             args: args.join(" "),
             message,
@@ -109,7 +109,7 @@ impl Git {
     }
 
     /// [`Git::run`] in a tree with an explicit git directory; see [`Git::output_at`].
-    pub(crate) async fn run_at(&self, at: At<'_>, args: &[&str]) -> Result<String, GitError> {
+    pub async fn run_at(&self, at: At<'_>, args: &[&str]) -> Result<String, GitError> {
         let output = self.output_at(at, args).await?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -121,22 +121,8 @@ impl Git {
         }
     }
 
-    /// Whether `directory`'s worktree has uncommitted changes, untracked files included, with git
-    /// discovering its repository from the tree. Only for trees outside this crate's job trees
-    /// (the lane trees of `bongos_lanes`, until they record their git directory); every tree in
-    /// this crate goes through [`Git::is_dirty`].
-    pub async fn is_dirty_discovering(&self, directory: &Path) -> Result<bool, GitError> {
-        let status = self
-            .run(
-                directory,
-                &["status", "--porcelain", "--untracked-files=normal"],
-            )
-            .await?;
-        Ok(!status.is_empty())
-    }
-
     /// Whether the worktree at `at` has uncommitted changes, untracked files included.
-    pub(crate) async fn is_dirty(&self, at: At<'_>) -> Result<bool, GitError> {
+    pub async fn is_dirty(&self, at: At<'_>) -> Result<bool, GitError> {
         let status = self
             .run_at(at, &["status", "--porcelain", "--untracked-files=normal"])
             .await?;
@@ -182,9 +168,10 @@ impl Git {
 }
 
 /// A worktree and the git directory bongos recorded for it, which every host git command in it
-/// names explicitly (see [`Git::output_at`]).
+/// names explicitly (see [`Git::output_at`]). The git directory comes from the caller's own record
+/// of the tree, never from a `.git` in it.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct At<'a> {
+pub struct At<'a> {
     pub git_dir: &'a Path,
     pub directory: &'a Path,
     /// Whether a job may have written the tree: a run or branch worktree. The task worktree is
@@ -652,12 +639,17 @@ pub async fn create_run(
 /// used as it is, and the run's own directory (its fan-out worktrees and scratch) is made where a
 /// fresh run's would be. Refuses a task with no branch, a tree that is missing or has another
 /// branch checked out, and a disk with less than `workflows.min_free_disk_mb` free.
+///
+/// `common_dir` is the repository's git common directory as the lane read it in the person's own
+/// checkout; git never runs by discovery in the lane's tree, which jobs wrote. Without it the
+/// directory is read in the task's own worktree, and a task with none is refused.
 pub async fn lane_run(
     git: &Git,
     task: &TaskCheckout,
     run_id: &str,
     attempt: u32,
     path: &Path,
+    common_dir: Option<&Path>,
     settings: &WorkflowsSettings,
     free_space: &dyn Fn(&Path) -> Option<u64>,
 ) -> Result<RunWorktree, WorktreeError> {
@@ -674,9 +666,11 @@ pub async fn lane_run(
     let branch = run_branch_name(task_branch, run_id, attempt);
     // Earlier jobs wrote the lane's tree, so its `.git` is not trusted: the git directory is the
     // linked one under the repository's common directory that names the tree.
-    let common = lane_common_dir(git, task, path).await.map_err(refused)?;
-    let git_dir = linked_git_dir_from_record(path, &common)
-        .map_err(|error| refused(format!("{error:#}")))?;
+    let common = lane_common_dir(git, task, common_dir)
+        .await
+        .map_err(refused)?;
+    let git_dir =
+        linked_git_dir_from_record(path, &common).map_err(|error| refused(format!("{error:#}")))?;
     let at = At {
         git_dir: &git_dir,
         directory: path,
@@ -716,23 +710,32 @@ pub async fn lane_run(
     })
 }
 
-/// The common git directory of the repository of a lane's tree at `path`: read in the task's own
-/// worktree when it has one (the person's tree, trusted as [`create_run`] trusts it), else in the
-/// lane's tree, which `bongos_lanes` made and reset before the run (its own git directory record
-/// is the hand-off of the lane-tree step).
-async fn lane_common_dir(git: &Git, task: &TaskCheckout, path: &Path) -> Result<PathBuf, String> {
-    let from = match &task.worktree {
-        Some(worktree) if worktree.is_dir() => worktree.as_path(),
-        _ => path,
+/// The common git directory of the repository of a lane's tree: the one the lane read in the
+/// person's own checkout when it has it, else read in the task's own worktree (the person's tree,
+/// trusted as [`create_run`] trusts it). Git never runs in the lane's tree, which jobs wrote.
+async fn lane_common_dir(
+    git: &Git,
+    task: &TaskCheckout,
+    common_dir: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let common = match (common_dir, &task.worktree) {
+        (Some(common), _) => common.to_path_buf(),
+        (None, Some(worktree)) if worktree.is_dir() => PathBuf::from(
+            git.run(
+                worktree,
+                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+        ),
+        (None, _) => {
+            return Err(
+                "no trusted git directory is known for the lane's tree: the run names none and \
+                 the task has no worktree"
+                    .to_string(),
+            );
+        }
     };
-    let common = git
-        .run(
-            from,
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-    let common = PathBuf::from(common);
     common
         .canonicalize()
         .map_err(|error| format!("{}: {error}", common.display()))

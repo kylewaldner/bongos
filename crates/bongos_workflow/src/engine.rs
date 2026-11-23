@@ -1884,6 +1884,7 @@ fn merge_request(context: &SettleContext) -> Option<MergeRequest> {
         workflow: context.workflow.clone(),
         todo: context.todo.name.clone(),
         style: MergeStyle::default(),
+        job: false,
     })
 }
 
