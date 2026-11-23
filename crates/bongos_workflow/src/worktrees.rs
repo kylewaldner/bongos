@@ -82,7 +82,7 @@ impl Git {
     /// [`Git::output`] in a tree with an explicit git directory: the command is built by
     /// [`SafeGit`], so git never discovers its repository from a `.git` in the tree. A job tree
     /// also gets the job tree protections (no hook, driver or external diff the tree could name).
-    pub(crate) async fn output_at(&self, at: At<'_>, args: &[&str]) -> Result<Output, GitError> {
+    pub async fn output_at(&self, at: At<'_>, args: &[&str]) -> Result<Output, GitError> {
         let error = |message: String| GitError {
             args: args.join(" "),
             message,
@@ -109,7 +109,7 @@ impl Git {
     }
 
     /// [`Git::run`] in a tree with an explicit git directory; see [`Git::output_at`].
-    pub(crate) async fn run_at(&self, at: At<'_>, args: &[&str]) -> Result<String, GitError> {
+    pub async fn run_at(&self, at: At<'_>, args: &[&str]) -> Result<String, GitError> {
         let output = self.output_at(at, args).await?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -121,22 +121,8 @@ impl Git {
         }
     }
 
-    /// Whether `directory`'s worktree has uncommitted changes, untracked files included, with git
-    /// discovering its repository from the tree. Only for trees outside this crate's job trees
-    /// (the lane trees of `bongos_lanes`, until they record their git directory); every tree in
-    /// this crate goes through [`Git::is_dirty`].
-    pub async fn is_dirty_discovering(&self, directory: &Path) -> Result<bool, GitError> {
-        let status = self
-            .run(
-                directory,
-                &["status", "--porcelain", "--untracked-files=normal"],
-            )
-            .await?;
-        Ok(!status.is_empty())
-    }
-
     /// Whether the worktree at `at` has uncommitted changes, untracked files included.
-    pub(crate) async fn is_dirty(&self, at: At<'_>) -> Result<bool, GitError> {
+    pub async fn is_dirty(&self, at: At<'_>) -> Result<bool, GitError> {
         let status = self
             .run_at(at, &["status", "--porcelain", "--untracked-files=normal"])
             .await?;
@@ -182,9 +168,10 @@ impl Git {
 }
 
 /// A worktree and the git directory bongos recorded for it, which every host git command in it
-/// names explicitly (see [`Git::output_at`]).
+/// names explicitly (see [`Git::output_at`]). The git directory comes from the caller's own record
+/// of the tree, never from a `.git` in it.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct At<'a> {
+pub struct At<'a> {
     pub git_dir: &'a Path,
     pub directory: &'a Path,
     /// Whether a job may have written the tree: a run or branch worktree. The task worktree is
@@ -675,8 +662,8 @@ pub async fn lane_run(
     // Earlier jobs wrote the lane's tree, so its `.git` is not trusted: the git directory is the
     // linked one under the repository's common directory that names the tree.
     let common = lane_common_dir(git, task, path).await.map_err(refused)?;
-    let git_dir = linked_git_dir_from_record(path, &common)
-        .map_err(|error| refused(format!("{error:#}")))?;
+    let git_dir =
+        linked_git_dir_from_record(path, &common).map_err(|error| refused(format!("{error:#}")))?;
     let at = At {
         git_dir: &git_dir,
         directory: path,
