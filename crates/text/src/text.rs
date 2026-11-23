@@ -4,6 +4,8 @@ pub mod locator;
 pub mod network;
 pub mod operation_queue;
 mod patch;
+#[cfg(test)]
+mod prune_tests;
 mod selection;
 pub mod subscription;
 #[cfg(test)]
@@ -45,7 +47,7 @@ pub use subscription::*;
 pub use sum_tree::Bias;
 use sum_tree::{Dimensions, FilterCursor, SumTree, Summary, TreeMap, TreeSet};
 use undo_map::UndoMap;
-pub use undo_tree::{UndoNode, UndoNodeId, UndoTree};
+pub use undo_tree::{DEFAULT_UNDO_NODE_LIMIT, MIN_UNDO_NODE_LIMIT, UndoNode, UndoNodeId, UndoTree};
 use util::debug_panic;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -327,6 +329,7 @@ impl History {
             last_edit_at: now,
             suppress_grouping: false,
         });
+        self.tree.prune();
     }
 
     /// Like `push_transaction` with an empty transaction. Intended to be used
@@ -1225,6 +1228,43 @@ impl Buffer {
         &self.history.tree
     }
 
+    /// Sets how many nodes the undo tree keeps, at least
+    /// [`MIN_UNDO_NODE_LIMIT`], and prunes it down to the new limit. Pruning
+    /// removes the oldest leaves that nothing needs, only undone states that
+    /// are not on the path to the current node, on the path to a pinned node
+    /// or on the redo chain. The tree can stay over the limit when every leaf
+    /// is needed. Nodes are pruned the same way whenever a transaction is
+    /// added and the tree is over its limit.
+    pub fn set_undo_node_limit(&mut self, limit: usize) {
+        self.history.tree.set_limit(limit);
+    }
+
+    /// Protects an undo node, and the path from the root to it, from pruning.
+    /// Pins nest: a node pinned twice needs two [`Buffer::unpin_undo_node`]
+    /// calls. Returns `false` and pins nothing when the node is not in the
+    /// tree, for instance because it was pruned.
+    pub fn pin_undo_node(&mut self, id: UndoNodeId) -> bool {
+        self.history.tree.pin(id)
+    }
+
+    /// Releases one pin of an undo node. Returns `false` and does nothing
+    /// when the node is not in the tree or has no pin, so an unbalanced
+    /// unpin is ignored.
+    pub fn unpin_undo_node(&mut self, id: UndoNodeId) -> bool {
+        self.history.tree.unpin(id)
+    }
+
+    /// Makes the current state the root of a fresh undo tree: every other
+    /// node is dropped and every pin cleared, so [`Buffer::undo`] and
+    /// [`Buffer::redo`] return `None` until a new transaction ends. The text
+    /// and the edits in the buffer are untouched, and the count of pruned
+    /// nodes is kept, because nothing is pruned here. Must not be called
+    /// inside a transaction.
+    pub fn reset_undo_tree(&mut self) {
+        assert_eq!(self.history.transaction_depth, 0);
+        self.history.tree.reset();
+    }
+
     pub fn start_transaction(&mut self) -> Option<TransactionId> {
         self.start_transaction_at(Instant::now())
     }
@@ -1242,6 +1282,7 @@ impl Buffer {
         if let Some(entry) = self.history.end_transaction(now) {
             let since = entry.transaction.start.clone();
             let id = self.history.group().unwrap();
+            self.history.tree.prune();
             Some((id, since))
         } else {
             None
