@@ -346,13 +346,20 @@ mod tests {
             .prefix("DbTests")
             .tempdir()
             .unwrap();
+        // block_on, not .await: real disk I/O must not park the test scheduler,
+        // whose 15 s parking cap is wall clock.
         {
-            let corrupt_db =
-                open_db::<CorruptedDB>(tempdir.path(), release_channel::ReleaseChannel::Dev).await;
+            let corrupt_db = gpui::block_on(open_db::<CorruptedDB>(
+                tempdir.path(),
+                release_channel::ReleaseChannel::Dev,
+            ));
             assert!(corrupt_db.persistent());
         }
 
-        let good_db = open_db::<GoodDB>(tempdir.path(), release_channel::ReleaseChannel::Dev).await;
+        let good_db = gpui::block_on(open_db::<GoodDB>(
+            tempdir.path(),
+            release_channel::ReleaseChannel::Dev,
+        ));
         assert!(
             good_db.select_row::<usize>("SELECT * FROM test2").unwrap()()
                 .unwrap()
@@ -385,9 +392,12 @@ mod tests {
             .tempdir()
             .unwrap();
         {
-            // Setup the bad database
-            let corrupt_db =
-                open_db::<CorruptedDB>(tempdir.path(), release_channel::ReleaseChannel::Dev).await;
+            // Setup the bad database. block_on, not .await: real disk I/O must not park
+            // the test scheduler, whose 15 s parking cap is wall clock.
+            let corrupt_db = gpui::block_on(open_db::<CorruptedDB>(
+                tempdir.path(),
+                release_channel::ReleaseChannel::Dev,
+            ));
             assert!(corrupt_db.persistent());
         }
 
