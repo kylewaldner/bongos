@@ -812,6 +812,7 @@ fn main() {
         bongos_minibuffer::init(cx);
         bongos_emacs::init(cx);
         bongos_window::init(cx);
+        bongos_navigation::init(cx);
         bongos_avy::init(cx);
         bongos_isearch::init(cx);
         bongos_query_replace::init(cx);

@@ -224,6 +224,7 @@ impl VsCodeSettings {
             workspace: self.workspace_settings_content(),
             which_key: None,
             minibuffer: None,
+            navigation: None,
             work: None,
             chats: None,
             prompts: None,

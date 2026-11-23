@@ -2062,6 +2062,7 @@ dependencies = [
  "bongos_languages",
  "bongos_linear",
  "bongos_minibuffer",
+ "bongos_navigation",
  "bongos_net",
  "bongos_project_repo",
  "bongos_prompts",
@@ -2794,6 +2795,21 @@ dependencies = [
  "nucleo",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "bongos_navigation"
+version = "0.1.0"
+dependencies = [
+ "bongos_emacs",
+ "command_palette_hooks",
+ "editor",
+ "gpui",
+ "project",
+ "settings",
+ "theme",
+ "theme_settings",
+ "workspace",
 ]
 
 [[package]]
