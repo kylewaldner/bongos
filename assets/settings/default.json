@@ -3019,8 +3019,9 @@
   },
   "confinement": {
     // Run agent steps inside the sandbox (writes only to the job tree, scratch, declared
-    // directories and the agent CLI's own state paths below).
-    "agent_steps": true,
+    // directories and the agent CLI's own state paths below). Off until the confined Claude Code
+    // CLI is verified with a logged-in session and user-scoped MCP servers.
+    "agent_steps": false,
     // Run task checks inside the sandbox.
     "task_checks": true,
     // Paths each agent CLI must write to keep its session and login; ~ is the job's HOME.

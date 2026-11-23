@@ -1946,9 +1946,10 @@ pub struct TaskChecksSettingsContent {
 #[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
 pub struct ConfinementSettingsContent {
     /// Run agent steps inside the sandbox (writes only to the job tree, scratch, declared
-    /// directories and the agent CLI's own state paths).
+    /// directories and the agent CLI's own state paths). Off by default until the confined Claude
+    /// Code CLI is verified with a logged-in session and user-scoped MCP servers.
     ///
-    /// Default: true
+    /// Default: false
     pub agent_steps: Option<bool>,
     /// Run task checks inside the sandbox.
     ///

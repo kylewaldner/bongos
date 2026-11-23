@@ -456,8 +456,9 @@ definition. The keys are for the Emacs keymap; every command is also in the pale
   are not restricted, and a process a job leaves running may outlive it. With no sandbox available,
   jobs are not confined; install Bubblewrap (Linux) to get it. Without a usable sandbox, task
   checks do not run until Bubblewrap is installed or `confinement.task_checks` is set to false. Two switches turn it on per kind of
-  job: `confinement.task_checks` (on by default) and `confinement.agent_steps` (both on by
-  default; a confined Claude Code CLI runs with `CLAUDE_CONFIG_DIR` set to `~/.claude`). Each switch that is off adds a line to the section, for example `Agent steps are
+  job: `confinement.task_checks` (on by default) and `confinement.agent_steps` (off by
+  default until the confined Claude Code CLI is verified with a logged-in session and user-scoped
+  MCP servers; a confined Claude Code CLI runs with `CLAUDE_CONFIG_DIR` set to `~/.claude`). Each switch that is off adds a line to the section, for example `Agent steps are
   not confined (confinement.agent_steps is off)`. `confinement.agent_state_paths` names the paths
   each agent CLI must write to keep its session and login, `~` being the job's HOME; its defaults
   are `claude` with `["~/.claude"]` and `codex` with `["~/.codex"]`. To add a

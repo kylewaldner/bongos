@@ -99,7 +99,7 @@ pub(crate) fn confinement_switches(cx: &App) -> (bool, bool) {
         .clone()
         .unwrap_or_default();
     (
-        confinement.agent_steps.unwrap_or(true),
+        confinement.agent_steps.unwrap_or(false),
         confinement.task_checks.unwrap_or(true),
     )
 }

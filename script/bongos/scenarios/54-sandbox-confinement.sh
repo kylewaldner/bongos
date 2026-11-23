@@ -5,13 +5,12 @@
 # as the other scenarios read their views through a dump action.
 #
 #   1. The settings window opens (ctrl+comma) on settings.json `{}`. The section shows the Linux
-#      promise "Jobs are confined" and the beginning of its body and the two switches; both
-#      `confinement.task_checks` and `confinement.agent_steps` are on by default and have no line.
-#      The scenario fails if Bubblewrap cannot run here (the title would read "Jobs are not
-#      confined"); it is never skipped.
-#   2. confinement.agent_steps set to false: the line "Agent steps are not confined
-#      (confinement.agent_steps is off)" appears while the window stays open.
-#   3. confinement.agent_steps set to true: the line goes.
+#      promise "Jobs are confined" and the beginning of its body, the two switches, and the line
+#      "Agent steps are not confined (confinement.agent_steps is off)" (agent_steps is off by
+#      default); `confinement.task_checks` is on and has no line. The scenario fails if Bubblewrap
+#      cannot run here (the title would read "Jobs are not confined"); it is never skipped.
+#   2. confinement.agent_steps set to true: the line goes while the window stays open.
+#   3. confinement.agent_steps set to false: the line returns.
 # Deviations: the switches are changed through settings.json, which the running app reloads and
 # which rebuilds the open page, instead of a click on each switch; the Work entry of the window is
 # clicked by position for the screenshot only, and the text is read from the dump.
@@ -85,7 +84,7 @@ shot confinement-settings
 say "smoke: screenshot $RUN/confinement-settings.png"
 
 # 1. The defaults.
-wait_for_line absent
+wait_for_line present
 cp "$DUMP_FILE" "$RUN/confinement-default.txt"
 grep -qxF "line: Jobs are confined" "$DUMP_FILE" ||
   fail "the promise title is not 'Jobs are confined' (is Bubblewrap usable here?): $(cat "$DUMP_FILE")"
@@ -94,20 +93,20 @@ grep -q "^body: Jobs (workflow programs, agent steps and task checks) can write 
 grep -qxF "switch: Confine Agent Steps" "$DUMP_FILE" || fail "no agent steps switch: $(cat "$DUMP_FILE")"
 grep -qxF "switch: Confine Task Checks" "$DUMP_FILE" || fail "no task checks switch: $(cat "$DUMP_FILE")"
 grep -qxF "confinement.task_checks: true" "$DUMP_FILE" || fail "confinement.task_checks is not on by default: $(cat "$DUMP_FILE")"
-grep -qxF "confinement.agent_steps: true" "$DUMP_FILE" || fail "confinement.agent_steps is not on by default: $(cat "$DUMP_FILE")"
+grep -qxF "confinement.agent_steps: false" "$DUMP_FILE" || fail "confinement.agent_steps is not off by default: $(cat "$DUMP_FILE")"
 if grep -q "Task checks are not confined" "$DUMP_FILE"; then
   fail "a task checks line is shown while the switch is on: $(cat "$DUMP_FILE")"
 fi
 
-# 2. agent_steps off: the line appears.
-write_settings '{ "confinement": { "agent_steps": false } }'
-wait_for_line present
-grep -qxF "confinement.agent_steps: false" "$DUMP_FILE" || fail "agent_steps did not read false: $(cat "$DUMP_FILE")"
-
-# 3. agent_steps on again: the line goes.
+# 2. agent_steps on: the line goes.
 write_settings '{ "confinement": { "agent_steps": true } }'
 wait_for_line absent
 grep -qxF "confinement.agent_steps: true" "$DUMP_FILE" || fail "agent_steps did not read true: $(cat "$DUMP_FILE")"
+
+# 3. agent_steps off again: the line returns.
+write_settings '{ "confinement": { "agent_steps": false } }'
+wait_for_line present
+grep -qxF "confinement.agent_steps: false" "$DUMP_FILE" || fail "agent_steps did not read false: $(cat "$DUMP_FILE")"
 
 xdo windowfocus --sync "$MAIN_WIN"
 quit_app
