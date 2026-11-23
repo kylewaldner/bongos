@@ -11,7 +11,7 @@ use gpui::{
     KeyContext, SharedString, Subscription, Task, prelude::*,
 };
 use picker::{Direction, Picker, PickerAction, PickerDelegate};
-use ui::{ListItem, ListItemSpacing, prelude::*};
+use ui::{HighlightedLabel, ListItem, ListItemSpacing, prelude::*};
 use workspace::{DismissDecision, ModalView};
 
 use crate::session::{Candidate, Core, DynamicSource, Finish, Outcome, Preview, Source, Value};
@@ -90,6 +90,26 @@ impl SessionView {
     pub(crate) fn set_input(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.picker
             .update(cx, |picker, cx| picker.set_query(text, window, cx));
+    }
+
+    /// Runs the source again for the current input, as a new pass.
+    pub(crate) fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.picker
+            .update(cx, |picker, cx| picker.refresh(window, cx));
+    }
+
+    /// Replaces a fixed list and narrows it again for the current input.
+    pub(crate) fn set_candidates(
+        &mut self,
+        candidates: Vec<Candidate>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.picker.update(cx, |picker, cx| {
+            if picker.delegate.replace_candidates(candidates) {
+                picker.refresh(window, cx);
+            }
+        });
     }
 
     fn run_action(
@@ -196,6 +216,9 @@ pub struct SessionDelegate {
     /// The input that was typed before the history was walked, and the entry shown from it.
     history_saved: String,
     history_shown: Option<String>,
+    /// The row to keep selected (clamped to the list) by the next pass, instead of the first:
+    /// set when the host replaces a fixed list.
+    keep_selection: Option<usize>,
 }
 
 impl SessionDelegate {
@@ -222,6 +245,7 @@ impl SessionDelegate {
             history_position: None,
             history_saved: String::new(),
             history_shown: None,
+            keep_selection: None,
         };
         this.select_initial();
         this
@@ -254,6 +278,30 @@ impl SessionDelegate {
     pub(crate) fn detail_text(&self, cx: &App) -> Option<SharedString> {
         let detail = self.core.detail.as_ref()?;
         detail(&self.candidate(self.selected)?.value, cx)
+    }
+
+    /// How the row `ix` draws its primary text: the highlighted byte indices and the color.
+    #[cfg(test)]
+    pub(crate) fn row_style(&self, ix: usize) -> Option<(Vec<usize>, Color)> {
+        self.candidate(ix).map(primary_style)
+    }
+
+    /// Replaces the list of a fixed source, keeping the selected row for the next pass. Returns
+    /// whether it did: a dynamic source keeps its candidates.
+    fn replace_candidates(&mut self, candidates: Vec<Candidate>) -> bool {
+        if matches!(self.kind, Kind::Dynamic(_)) {
+            return false;
+        }
+        let narrower = Narrower::new(texts(
+            candidates
+                .iter()
+                .map(|candidate| candidate.primary.as_ref()),
+        ));
+        self.kind = Kind::Fixed(Arc::new(Mutex::new(narrower)));
+        self.items = candidates;
+        self.shown = Shown::All;
+        self.keep_selection = Some(self.selected);
+        true
     }
 
     pub(crate) fn selected_value(&self) -> Option<Value> {
@@ -385,6 +433,7 @@ impl PickerDelegate for SessionDelegate {
         self.cancel = Cancel::new();
         self.generation += 1;
         let generation = self.generation;
+        let keep_selection = self.keep_selection.take();
         if self.history_shown.as_deref() != Some(query.as_str()) {
             self.history_position = None;
             self.history_shown = None;
@@ -396,7 +445,10 @@ impl PickerDelegate for SessionDelegate {
             Kind::Fixed(narrower) => {
                 if query.trim().is_empty() {
                     self.shown = Shown::All;
-                    self.select_initial();
+                    match keep_selection {
+                        Some(ix) => self.selected = ix.min(self.len().saturating_sub(1)),
+                        None => self.select_initial(),
+                    }
                     self.highlight(window, cx);
                     return Task::ready(());
                 }
@@ -417,8 +469,9 @@ impl PickerDelegate for SessionDelegate {
                             if picker.delegate.generation != generation {
                                 return;
                             }
+                            let last = matches.len().saturating_sub(1);
                             picker.delegate.shown = Shown::Matches(matches);
-                            picker.delegate.selected = 0;
+                            picker.delegate.selected = keep_selection.map_or(0, |ix| ix.min(last));
                             picker.delegate.highlight(window, cx);
                             cx.notify();
                         })
@@ -466,8 +519,8 @@ impl PickerDelegate for SessionDelegate {
         &mut self,
         direction: Direction,
         query: &str,
-        _: &mut Window,
-        _: &mut App,
+        window: &mut Window,
+        cx: &mut App,
     ) -> Option<String> {
         let next = match (direction, self.history_position) {
             (Direction::Up, None) => {
@@ -484,6 +537,16 @@ impl PickerDelegate for SessionDelegate {
                 let entry = self.history.get(position)?.to_string();
                 self.history_position = Some(position);
                 self.history_shown = Some(entry.clone());
+                if let Some(on_history_entry) = self.core.on_history_entry.clone() {
+                    // Deferred, so that it runs once the picker has put the entry in the input.
+                    let core = self.core.clone();
+                    let shown = entry.clone();
+                    window.defer(cx, move |window, cx| {
+                        if !core.done.get() {
+                            on_history_entry(&shown, &core.handle(), window, cx);
+                        }
+                    });
+                }
                 entry
             }
             None => {
@@ -578,6 +641,7 @@ impl PickerDelegate for SessionDelegate {
         _: &mut Context<Picker<Self>>,
     ) -> Option<Self::ListItem> {
         let candidate = self.candidate(ix)?;
+        let (highlights, color) = primary_style(candidate);
         Some(
             ListItem::new(ix)
                 .inset(true)
@@ -586,7 +650,10 @@ impl PickerDelegate for SessionDelegate {
                 .child(
                     h_flex()
                         .gap_2()
-                        .child(Label::new(candidate.primary.clone()))
+                        .child(
+                            HighlightedLabel::new(candidate.primary.clone(), highlights)
+                                .color(color),
+                        )
                         .children(candidate.secondary.clone().map(|secondary| {
                             Label::new(secondary)
                                 .color(Color::Muted)
@@ -618,4 +685,33 @@ impl SessionDelegate {
         };
         Some(Finish::Confirm { outcome, history })
     }
+}
+
+/// The byte indices of `candidate`'s primary text drawn in the highlight color, and the color of
+/// the rest of it. Ranges outside the text or off character boundaries are left out.
+fn primary_style(candidate: &Candidate) -> (Vec<usize>, Color) {
+    let text = candidate.primary.as_ref();
+    let mut indices: Vec<usize> = candidate
+        .highlights
+        .iter()
+        .filter(|range| {
+            range.start < range.end
+                && range.end <= text.len()
+                && text.is_char_boundary(range.start)
+                && text.is_char_boundary(range.end)
+        })
+        .flat_map(|range| {
+            text[range.clone()]
+                .char_indices()
+                .map(move |(offset, _)| range.start + offset)
+        })
+        .collect();
+    indices.sort_unstable();
+    indices.dedup();
+    let color = if candidate.dimmed {
+        Color::Muted
+    } else {
+        Color::Default
+    };
+    (indices, color)
 }
