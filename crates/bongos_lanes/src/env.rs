@@ -16,6 +16,17 @@ pub fn tip_env(
     edits(binding, values, profile)
 }
 
+/// The names in `base_tree.dirs` of `repo`'s second tree.
+pub fn base_dir_names(binding: &Binding, repo: &str) -> Vec<String> {
+    binding
+        .trees
+        .iter()
+        .filter(|tree| tree.repo == repo)
+        .filter_map(|tree| tree.base_tree.as_ref())
+        .flat_map(|base| base.dirs.iter().map(|dir| dir.value.clone()))
+        .collect()
+}
+
 /// The edits of a job in `repo`'s second tree: as [`tip_env`], except that `{dir.<name>}` is the
 /// `<name>-base` directory for each name in that tree's `base_tree.dirs`.
 pub fn second_tree_env(
@@ -25,13 +36,7 @@ pub fn second_tree_env(
     values: &TokenValues,
     profile: &[EnvEdit],
 ) -> Result<Vec<EnvEdit>, TokenError> {
-    let base_dirs: Vec<String> = binding
-        .trees
-        .iter()
-        .filter(|tree| tree.repo == repo)
-        .filter_map(|tree| tree.base_tree.as_ref())
-        .flat_map(|base| base.dirs.iter().map(|dir| dir.value.clone()))
-        .collect();
+    let base_dirs = base_dir_names(binding, repo);
     let values = TokenValues {
         dirs: locations.dir_values(&base_dirs),
         ..values.clone()
