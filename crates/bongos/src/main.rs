@@ -776,6 +776,7 @@ fn main() {
         bongos_emacs::init(cx);
         bongos_window::init(cx);
         bongos_avy::init(cx);
+        bongos_undo_tree::init(cx);
         bongos_isearch::init(cx);
         bongos_query_replace::init(cx);
         zed::install_isearch_kill_source(cx);
