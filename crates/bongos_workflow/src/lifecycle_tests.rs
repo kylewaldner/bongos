@@ -2183,7 +2183,7 @@ fn a_task_run_in_a_lane_tree_works_there_and_keeps_its_run_directory_across_a_re
     assert_eq!(
         record.tree,
         Some(RunTreeRecord::Lane {
-            path: tree.clone(),
+            path: tree,
             run_dir: binding.worktree.run_dir.clone(),
         })
     );
