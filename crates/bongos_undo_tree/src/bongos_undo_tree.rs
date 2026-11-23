@@ -6,11 +6,14 @@
 pub mod actions;
 pub mod adapter;
 pub mod grouping;
+pub mod limit;
 pub mod preview;
 pub mod settings;
 
 #[cfg(test)]
 mod grouping_tests;
+#[cfg(test)]
+mod limit_tests;
 #[cfg(test)]
 mod preview_tests;
 #[cfg(test)]
@@ -27,6 +30,7 @@ pub use settings::{UndoGrouping, UndoTreeSettings};
 /// the `undo_tree.grouping` setting asks for.
 pub fn init(cx: &mut App) {
     grouping::init(cx);
+    limit::init(cx);
     for name in actions::IGNORED {
         declare(cx, name, Meaning::Ignored);
     }

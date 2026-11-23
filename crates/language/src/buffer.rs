@@ -3368,6 +3368,19 @@ impl Buffer {
         self.text.set_group_interval(group_interval);
     }
 
+    /// Sets how many nodes the undo tree keeps; see [`text::Buffer::set_undo_node_limit`].
+    pub fn set_undo_node_limit(&mut self, limit: usize) {
+        self.text.set_undo_node_limit(limit);
+    }
+
+    /// Drops the undo history and keeps the text; see [`text::Buffer::reset_undo_tree`]. Does
+    /// nothing inside a transaction.
+    pub fn reset_undo_tree(&mut self) {
+        if self.transaction_depth == 0 {
+            self.text.reset_undo_tree();
+        }
+    }
+
     /// Protects an undo node, and the path from the root to it, from pruning.
     /// See [`text::Buffer::pin_undo_node`].
     pub fn pin_undo_node(&mut self, id: text::UndoNodeId) -> bool {
