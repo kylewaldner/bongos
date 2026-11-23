@@ -2,6 +2,7 @@
 //! context they give.
 
 use bongos_workflow_model::Ceilings;
+use bongos_workflow_model::unsandboxed::Mode;
 use gpui::{App, TestAppContext};
 use settings::{Settings, SettingsStore};
 use std::path::PathBuf;
@@ -33,6 +34,7 @@ fn defaults_are_the_documented_values(cx: &mut TestAppContext) {
     assert_eq!(settings.agents.max_minutes, 30);
     assert_eq!(settings.agents.model, "sonnet");
     assert!(settings.programs.allow_network);
+    assert_eq!(settings.programs.unsandboxed, Mode::Fallback);
     assert_eq!(settings.ceilings, Ceilings::default());
     assert_eq!(settings, WorkflowsSettings::default());
 }
@@ -122,4 +124,28 @@ fn the_validation_context_carries_the_ceilings_and_allow_network(cx: &mut TestAp
     let default = WorkflowsSettings::default().validation_context();
     assert_eq!(default.ceilings, Ceilings::default());
     assert!(default.allow_network);
+}
+
+#[gpui::test]
+fn an_unknown_unsandboxed_value_reads_as_ask_and_the_rest_still_loads(cx: &mut TestAppContext) {
+    let user = workflows(
+        r#""loop_bound": 9,
+        "programs": { "unsandboxed": "sometimes", "allow_network": false, "max_minutes": 3 }"#,
+    );
+    let settings = cx.update(|cx| read(&user, cx));
+    assert_eq!(settings.programs.unsandboxed, Mode::Ask);
+    assert!(!settings.programs.allow_network);
+    assert_eq!(settings.programs.max_minutes, 3);
+    assert_eq!(settings.limits.loop_bound, 9);
+
+    for (value, mode) in [
+        ("fallback", Mode::Fallback),
+        ("ask", Mode::Ask),
+        ("refuse", Mode::Refuse),
+        ("allow", Mode::Allow),
+    ] {
+        let user = workflows(&format!(r#""programs": {{ "unsandboxed": "{value}" }}"#));
+        let settings = cx.update(|cx| read(&user, cx));
+        assert_eq!(settings.programs.unsandboxed, mode, "{value}");
+    }
 }

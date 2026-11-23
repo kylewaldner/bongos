@@ -1870,6 +1870,55 @@ pub struct WorkflowProgramsSettingsContent {
     ///
     /// Default: true
     pub allow_network: Option<bool>,
+    /// What a program node does when no OS sandbox is available: "ask" asks a person to approve
+    /// the run once, "refuse" never runs it, "allow" runs it unsandboxed without asking. A project
+    /// can only tighten this. The script's own audit checks are not a security boundary.
+    ///
+    /// Default: "fallback"
+    pub unsandboxed: Option<WorkflowUnsandboxed>,
+}
+
+/// What a program node does when no OS sandbox is available.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, JsonSchema, MergeFrom)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowUnsandboxed {
+    /// Run without the sandbox and say "not sandboxed" (the behavior before the setting).
+    #[default]
+    Fallback,
+    /// Ask a person to approve the run once.
+    Ask,
+    /// Never run a program without a sandbox.
+    Refuse,
+    /// Run without a sandbox and without asking.
+    Allow,
+}
+
+impl WorkflowUnsandboxed {
+    /// The value a setting string names; an unknown one is `Ask`, the safe answer that still lets
+    /// a person decide.
+    pub fn from_setting(value: &str) -> Self {
+        match value {
+            "fallback" => Self::Fallback,
+            "ask" => Self::Ask,
+            "refuse" => Self::Refuse,
+            "allow" => Self::Allow,
+            other => {
+                log::warn!(
+                    "workflows.programs.unsandboxed: unknown value {other:?}, reading it as \"ask\""
+                );
+                Self::Ask
+            }
+        }
+    }
+}
+
+// Hand-written: serde's derive rejects an unknown value, which would fail the whole settings
+// file; an unknown string reads as `ask` with a warning instead.
+impl<'de> Deserialize<'de> for WorkflowUnsandboxed {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Ok(Self::from_setting(&value))
+    }
 }
 
 /// Settings for task checks.
