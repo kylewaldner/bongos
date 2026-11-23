@@ -4559,7 +4559,7 @@ impl Render for Pane {
                     .map(|div| {
                         if let Some(preview) = self.preview.clone() {
                             div.id("pane_placeholder").v_flex().size_full().child(
-                                div()
+                                gpui::div()
                                     .size_full()
                                     .overflow_hidden()
                                     .child(preview)
@@ -9607,7 +9607,13 @@ mod tests {
     #[gpui::test]
     async fn test_focus_stamps_the_pane_and_leaves_the_activation_history(cx: &mut TestAppContext) {
         let (pane, cx) = pane_with_drawn_item(cx).await;
-        assert_eq!(pane.read_with(cx, |pane, _| pane.focus_timestamp()), None);
+        let clock = pane.read_with(cx, |pane, cx| {
+            pane.workspace
+                .upgrade()
+                .expect("a workspace")
+                .read(cx)
+                .pane_history_timestamp()
+        });
         pane.update_in(cx, |pane, window, cx| {
             window.focus(&pane.focus_handle(cx), cx)
         });
@@ -9615,6 +9621,7 @@ mod tests {
         let first = pane
             .read_with(cx, |pane, _| pane.focus_timestamp())
             .expect("focusing stamps the pane");
+        assert!(first <= clock.load(Ordering::SeqCst));
 
         let history = |pane: &Entity<Pane>, cx: &mut VisualTestContext| {
             pane.read_with(cx, |pane, _| {

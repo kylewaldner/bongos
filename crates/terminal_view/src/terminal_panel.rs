@@ -1960,7 +1960,12 @@ mod tests {
             assert!(stamped >= before && stamped < load());
         }
 
+        // A pane takes focus only once it is drawn, so open the dock first.
         let before = load();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.reveal_pane(&second, window, cx)
+        });
+        cx.run_until_parked();
         second.update_in(cx, |pane, window, cx| {
             window.focus(&pane.focus_handle(cx), cx)
         });
