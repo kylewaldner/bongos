@@ -2801,14 +2801,24 @@ dependencies = [
 name = "bongos_navigation"
 version = "0.1.0"
 dependencies = [
+ "async-channel 2.5.0",
  "bongos_emacs",
+ "bongos_minibuffer",
+ "bongos_minibuffer_model",
+ "bongos_navigation_model",
  "command_palette_hooks",
  "editor",
+ "fs",
+ "futures 0.3.32",
  "gpui",
+ "language",
  "project",
+ "serde_json",
  "settings",
+ "text",
  "theme",
  "theme_settings",
+ "util",
  "workspace",
 ]
 
