@@ -439,6 +439,29 @@ impl WorkflowEngine {
         self.publish(cx);
     }
 
+    /// Reads again, from their records, the runs of the projects another process writes (a
+    /// window that is a client of an engine host), so the Runs panel, the status item, the
+    /// needs-you list and the run view show them ([`Lifecycle::observe_runs`]). Only the runs whose
+    /// files changed are read again; nothing is written, no lock is taken and nothing drives them
+    /// here. A change tells the views, never the engine's observers: those act on runs this
+    /// process drives.
+    pub fn refresh_observed_runs(&self, cx: &mut App) {
+        let held = files_held_elsewhere(cx);
+        let changed = if held.is_empty() {
+            self.lifecycle().observe_runs(&WorkTree::default(), &[])
+        } else {
+            let Some(tree) = self.writes.tree(cx) else {
+                return;
+            };
+            self.lifecycle().observe_runs(&tree, &held)
+        };
+        if changed {
+            NeedsYouRegistry::changed(cx);
+            crate::status_item::changed(cx);
+            crate::run_view::refresh_views(cx);
+        }
+    }
+
     /// One pass of the loop; whether the loop goes on.
     fn loop_pass(&self, cx: &mut App) -> bool {
         if self.ticker.stopped() || !WorkflowsSettings::get_global(cx).enabled {
@@ -446,6 +469,7 @@ impl WorkflowEngine {
         }
         self.ticker.passes.fetch_add(1, Ordering::SeqCst);
         self.load_runs_once(cx);
+        self.refresh_observed_runs(cx);
         if self.tick_runs(cx) {
             self.publish(cx);
         }

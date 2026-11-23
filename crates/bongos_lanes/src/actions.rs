@@ -1210,7 +1210,7 @@ fn open_run_record(
 }
 
 /// Carries out what a key of the view asked for: a command on a lane goes to the writer, the dry
-/// run opens its buffer, a task is focused and a run's record is opened.
+/// run opens its buffer, a task is focused and a run is shown (its record when it is not loaded).
 pub(crate) fn carry_out_view_command(
     workspace: &mut Workspace,
     _view: &gpui::Entity<crate::lanes_view::LanesView>,
@@ -1228,7 +1228,18 @@ pub(crate) fn carry_out_view_command(
             return;
         }
         LanesViewCommand::OpenRun(run) => {
-            open_run_record(workspace, run, window, cx);
+            // The run's view when the engine has the run (driven here, or read from the records
+            // of the process that drives it); its record on disk otherwise.
+            let engine = cx
+                .try_global::<bongos_workflow::WorkflowEngine>()
+                .filter(|engine| engine.lifecycle().shown_record(run).is_some())
+                .cloned();
+            match engine {
+                Some(engine) => {
+                    bongos_workflow::run_view::show(engine, run.clone(), workspace, window, cx)
+                }
+                None => open_run_record(workspace, run, window, cx),
+            }
             return;
         }
         LanesViewCommand::Pause(lane) => (LanesVerb::Pause, lane),

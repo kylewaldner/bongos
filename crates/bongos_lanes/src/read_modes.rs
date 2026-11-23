@@ -14,20 +14,25 @@ use bongos_lanes_model::{
     parse, pick,
 };
 use bongos_project_repo::{
-    CommitId, Git, Location, ProjectRepo, StateHandle, StateReader, StateStore, TreeRef,
+    CommitId, Git, Location, ProjectRepo, StateHandle, StateRead, StateReader, StateStore, TreeRef,
 };
 use bongos_project_repo_model::layout::DEFINITIONS_DIR;
+use bongos_workflow::WorkflowEngine;
 use gpui::{App, AppContext as _, Task};
 use serde_json::{Value, json};
 use settings::Settings as _;
 
-use crate::LanesSettings;
 use crate::accept_graph::{file_at, read_stamp};
 use crate::definitions::{LANES_FILE, LANES_FOLDER};
+use crate::dispatcher::{
+    Dispatcher, DispatcherRecord, JobEngine, RecordedBound, effective_counts, pick_options_with,
+    read_dispatcher_record,
+};
 use crate::lane_control::status_from_read;
 use crate::status_doc::{StatusFacts, status_doc_with};
 use crate::store::read_state;
 use crate::wait_text::WaitTextFormatters;
+use crate::{LaneProfileSource, LaneProfiles, LanesSettings};
 
 /// Serves the read modes `status`, `dry-run` and `pick`.
 pub fn register(cx: &mut App) {
@@ -121,24 +126,117 @@ fn picking(
         if matches!(view, Pick::One) && args.lane.is_none() {
             bail!("name a lane (--lane build-2)");
         }
-        let state = reader.read(|read| read_state(read))?;
+        let read = reader.read(read_pick_state)?;
         let limit = LanesSettings::get_global(cx).dry_run_limit as usize;
-        Ok((args, location(cx)?, state, limit))
+        Ok((args, location(cx)?, read, limit))
     });
     match prepared {
-        Ok((args, location, state, limit)) => cx.background_spawn(async move {
-            let loaded = load(&location, limit).await?;
-            render_pick(view, &args, &loaded, &state)
-        }),
+        Ok((args, location, read, limit)) => {
+            let project = location.id.clone();
+            let loading = cx.background_spawn(async move { load(&location, limit).await });
+            cx.spawn(async move |cx| {
+                let mut loaded = loading.await?;
+                cx.update(|cx| loaded.use_options_now(&read, &project, cx));
+                render_pick(view, &args, &loaded, &read.state)
+            })
+        }
         Err(error) => Task::ready(Err(error)),
     }
+}
+
+/// What a dry run or a pick reads from the store: the lanes state and the dispatcher record,
+/// whose bound applies while its run has not ended.
+pub(crate) struct PickRead {
+    pub(crate) state: LanesState,
+    pub(crate) record: Option<DispatcherRecord>,
+}
+
+/// Reads a [`PickRead`] in one read of the store.
+pub(crate) fn read_pick_state(read: &StateRead) -> Result<PickRead> {
+    Ok(PickRead {
+        state: read_state(read)?,
+        record: read_dispatcher_record(read)?,
+    })
 }
 
 /// What the picker reads besides the run state, at the commit the project shows.
 pub(crate) struct Loaded {
     pub(crate) graph: bongos_lanes_model::PickGraph,
     pub(crate) table: bongos_lanes_model::LaneTable,
+    /// The options: after [`load`] only the waiting limit and the recorded stamp; a dry run or a
+    /// pick sets the rest with [`Loaded::use_options_now`] before it asks the picker.
     pub(crate) options: PickOptions,
+}
+
+impl Loaded {
+    /// Sets the options to those a pick in this process uses now (see [`options_now`]).
+    pub(crate) fn use_options_now(&mut self, read: &PickRead, project: &str, cx: &App) {
+        self.options = options_now(self, read, project, cx);
+    }
+}
+
+/// The options the dispatcher would pick with now: those of the dispatcher this process runs, or
+/// with none the same options built the same way from the effective counts (the profile's
+/// overrides over the table's), the bound of the dispatcher record while its run has not ended,
+/// and the instance use the run engine of this process knows of.
+pub(crate) fn options_now(
+    loaded: &Loaded,
+    read: &PickRead,
+    project: &str,
+    cx: &App,
+) -> PickOptions {
+    let dispatcher = crate::host::running_dispatcher(cx);
+    let engine = cx
+        .try_global::<WorkflowEngine>()
+        .map(|engine| engine as &dyn JobEngine);
+    let profile = LaneProfiles::source(cx);
+    current_options(
+        &OptionSources {
+            dispatcher: dispatcher.as_ref(),
+            engine,
+            profile: profile.as_deref(),
+            project,
+        },
+        loaded,
+        read,
+    )
+}
+
+/// Where [`current_options`] reads the live facts from.
+pub(crate) struct OptionSources<'a> {
+    /// The dispatcher this process runs, whose own options win.
+    pub(crate) dispatcher: Option<&'a Dispatcher>,
+    /// The run engine of this process; with none no instance limit is known.
+    pub(crate) engine: Option<&'a dyn JobEngine>,
+    pub(crate) profile: Option<&'a dyn LaneProfileSource>,
+    pub(crate) project: &'a str,
+}
+
+/// The options of a dry run or a pick over `read` (see [`options_now`]), with the waiting limit
+/// of `loaded`.
+pub(crate) fn current_options(
+    sources: &OptionSources<'_>,
+    loaded: &Loaded,
+    read: &PickRead,
+) -> PickOptions {
+    let mut options = match sources.dispatcher {
+        Some(dispatcher) => dispatcher.pick_options(&read.state, &loaded.graph, &loaded.table),
+        None => pick_options_with(
+            sources.engine,
+            &read.state,
+            &loaded.graph,
+            &loaded.table,
+            effective_counts(&loaded.table, sources.project, sources.profile),
+            read.record
+                .as_ref()
+                .filter(|record| record.ended.is_none())
+                .and_then(|record| record.bound.as_ref())
+                .map(RecordedBound::to_bound),
+            loaded.options.stamp.clone(),
+        ),
+    };
+    options.waiting_limit = loaded.options.waiting_limit;
+    options
 }
 
 pub(crate) async fn load(location: &Location, waiting_limit: usize) -> Result<Loaded> {

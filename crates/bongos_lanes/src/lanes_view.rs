@@ -31,8 +31,7 @@ use workspace::item::{Item, ItemEvent};
 use crate::LanesSettings;
 use crate::lane_control::{LanesStatus, status_from_read};
 use crate::lanes_rows::{LanesViewRows, RowFacts, lanes_view_rows, time_in_job};
-use crate::read_modes::load;
-use crate::store::read_state;
+use crate::read_modes::{load, read_pick_state};
 use crate::wait_text::{WaitTextFn, WaitTextFormatters};
 
 /// One feature's section of the Lanes view (pools, queues).
@@ -175,14 +174,17 @@ impl LanesSource for StoreLanes {
     }
 
     fn dry_run(&self, cx: &App) -> Option<Task<Result<DryRun>>> {
-        let state = self.repo.state()?.read(read_state).ok()?;
+        let read = self.repo.state()?.read(read_pick_state).ok()?;
         let location = self.repo.location().clone();
+        let project = location.id.clone();
         let limit = LanesSettings::get_global(cx).dry_run_limit as usize;
-        Some(cx.background_spawn(async move {
-            let loaded = load(&location, limit).await?;
+        let loading = cx.background_spawn(async move { load(&location, limit).await });
+        Some(cx.spawn(async move |cx| {
+            let mut loaded = loading.await?;
+            cx.update(|cx| loaded.use_options_now(&read, &project, cx));
             Ok(explain(
                 &loaded.graph,
-                &state,
+                &read.state,
                 &loaded.table,
                 &loaded.options,
             ))

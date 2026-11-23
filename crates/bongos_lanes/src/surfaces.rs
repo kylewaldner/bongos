@@ -23,9 +23,8 @@ use crate::dispatcher::PROJECT_UNATTENDED;
 use crate::dry_run::{DryRunInputs, dry_run_buffer_in};
 use crate::lanes_view::{StoreLanes, show_lanes_view};
 use crate::profile::{LaneProfileSource, LaneProfiles};
-use crate::read_modes::load;
+use crate::read_modes::{load, read_pick_state};
 use crate::roots::LaneTables;
-use crate::store::read_state;
 use crate::summary::{
     HandoverNote, KindCount, SummaryInputs, SummarySections, WorkflowSummary, summary_text,
 };
@@ -121,7 +120,10 @@ pub fn dry_run_action(
     let Some(repo) = sole_repo(workspace, cx) else {
         return;
     };
-    let Some(state) = repo.state().and_then(|state| state.read(read_state).ok()) else {
+    let Some(read) = repo
+        .state()
+        .and_then(|state| state.read(read_pick_state).ok())
+    else {
         show_toast(workspace, "The lanes cannot be read", cx);
         return;
     };
@@ -133,12 +135,13 @@ pub fn dry_run_action(
         let loaded = loading.await;
         workspace
             .update_in(cx, |workspace, window, cx| match loaded {
-                Ok(loaded) => {
+                Ok(mut loaded) => {
+                    loaded.use_options_now(&read, &project_id, cx);
                     LaneTables::set(project_id, Arc::new(loaded.table.clone()), cx);
                     let text = dry_run_buffer_in(
                         &DryRunInputs {
                             graph: &loaded.graph,
-                            state: &state,
+                            state: &read.state,
                             table: &loaded.table,
                             options: &loaded.options,
                         },

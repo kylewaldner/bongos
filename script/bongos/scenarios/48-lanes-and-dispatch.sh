@@ -34,7 +34,7 @@
 #      in window mode; `bongos run "fake job" --task <id>` reaches it and no engine host starts;
 #      `lanes: start` (summary, then the confirmation) hands the writer to a new host and the window
 #      becomes a client (`host.json` names the host, the window still runs).
-# Deviations from the brief, each forced by what the build offers today:
+# Where the stages above are checked indirectly, each forced by what the build offers today:
 # - Stage 3 runs before stage 1, so its dry runs see every task free; stage 1 checks that a running
 #   host serves `lanes dry-run` as well.
 # - Stage 2 reads the Lanes view from a screenshot (there is no dump of the view): what is asserted
@@ -598,7 +598,7 @@ step "Lanes 5: build-2 is asked to stop while it runs a job and stops after the 
 # that holds the writer, and a test profile source is code), so the lane is stopped by its own
 # command, which ends a lane at its job boundary the same way.
 quit_app
-status_json
+status_json || fail "status before build-2 is stopped: $(cat "$CLI_ERR")"
 [ "$(lane_field build-2 state)" = running ] || fail "build-2 is not running a job: $(show)"
 cli_ok lanes stop build-2
 show
@@ -611,7 +611,7 @@ say "smoke: build-2 was asked to stop during Build cart totals, ended the job an
 
 # ---------------------------------------------------------------------------------------------
 step "Lanes 6: the host is killed; lanes start again; the interrupted run waits on you; no run id twice"
-status_json
+status_json || fail "status before the kill: $(cat "$CLI_ERR")"
 [ "$(lane_field design-1 state)" = running ] || fail "design-1 does not run a job before the kill: $(show)"
 INTERRUPTED_RUN=$(lane_field design-1 run)
 [ -n "$INTERRUPTED_RUN" ] || fail "design-1 has no run before the kill: $(show)"
@@ -620,7 +620,7 @@ INTERRUPTED_RUN=$(lane_field design-1 run)
 kill -9 "$HOST_PID"
 host_gone() { ! kill -0 "$HOST_PID" 2>/dev/null; }
 host_gone_2() { host_gone; }
-poll 30 "the killed host to be gone" host_gone
+poll 30 "the killed host to be gone" host_gone || fail "the killed host $HOST_PID still runs"
 poll 60 "lanes start to be taken after the kill" lanes_started || fail "lanes start after the kill: $(cat "$CLI_ERR") $(cat "$CLI_OUT")"
 HOST_PID=$(host_json pid)
 interrupted_waits() { status_json && [ "$(lane_field design-1 run_lifecycle)" = waitingonyou ]; }
@@ -683,12 +683,15 @@ host_took_over() { host_mode_is host && [ "$(host_json pid)" != "$APP_PID" ]; }
 poll 90 "the writer to move to an engine host" host_took_over || fail "lanes: start did not hand the writer over: $(cat "$HOST_FILE_GLOB")"
 HOST_PID=$(host_json pid)
 kill -0 "$APP_PID" || fail "the window went away at the handover"
-started_dispatcher() { status_json && grep -q 'dispatcher running' "$CLI_OUT" || grep -q '"dispatcher": "running"' "$CLI_OUT"; }
+started_dispatcher() { status_json && { grep -q 'dispatcher running' "$CLI_OUT" || grep -q '"dispatcher": "running"' "$CLI_OUT"; }; }
 poll 60 "the new host to run the dispatcher" started_dispatcher || fail "the new host does not run lanes: $(cat "$CLI_OUT")"
 shot lanes-after-handover
 say "smoke: lanes: start handed the writer to host $HOST_PID; the window ($APP_PID) is now a client"
 quit_app
 cli lanes stop
-kill "$HOST_PID"
-poll 60 "the last host to exit" host_gone_2
+# The stop may already have ended the host; settings.json is restored before any failure is reported.
+kill "$HOST_PID" 2>/dev/null || true
+LAST_HOST_EXITED=yes
+poll 60 "the last host to exit" host_gone_2 || LAST_HOST_EXITED=no
 cp "$RUN/config-backup/settings-48.json" "$CONFIG_DIR/settings.json"
+[ "$LAST_HOST_EXITED" = yes ] || fail "the last host $HOST_PID did not exit"

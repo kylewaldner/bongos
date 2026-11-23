@@ -98,7 +98,7 @@ async fn prepared_then_picked(
     (harness, dispatcher)
 }
 
-// PRD 16: a stale prepared task runs the refresh first, on the same leaf.
+// A stale prepared task runs the refresh first, on the same leaf.
 #[gpui::test]
 async fn a_stale_prepared_task_runs_the_refresh_first(cx: &mut TestAppContext) {
     let (harness, _dispatcher) = prepared_then_picked(Ok(Staleness::Stale), cx).await;

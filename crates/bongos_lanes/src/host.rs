@@ -53,7 +53,7 @@ use crate::lane_tree::{LastEnd, LastRun, ResetRequest, git_tree_maker};
 use crate::locations::{LocationInputs, check_lanes};
 use crate::prepare::{PrepareRequest, system_free_space};
 use crate::profile::LaneProfiles;
-use crate::read_modes::{Pick, load, pick_answer};
+use crate::read_modes::{Pick, load, pick_answer, read_pick_state};
 use crate::staleness::PinnedTree;
 use crate::store::read_state;
 use crate::task_trees::LaneTaskTrees;
@@ -296,15 +296,18 @@ fn read_pick(
         None => None,
     };
     let repo = sole_writer_repo(cx)?;
-    let state = repo
+    let read = repo
         .state()
         .ok_or_else(|| anyhow!("the project's state is not open"))?
-        .read(read_state)?;
+        .read(read_pick_state)?;
     let location = repo.location().clone();
+    let project = location.id.clone();
     let limit = LanesSettings::get_global(cx).dry_run_limit as usize;
-    Ok(cx.background_spawn(async move {
-        let loaded = load(&location, limit).await?;
-        let (text, doc) = pick_answer(view, lane.as_ref(), &loaded, &state)?;
+    let loading = cx.background_spawn(async move { load(&location, limit).await });
+    Ok(cx.spawn(async move |cx| {
+        let mut loaded = loading.await?;
+        cx.update(|cx| loaded.use_options_now(&read, &project, cx));
+        let (text, doc) = pick_answer(view, lane.as_ref(), &loaded, &read.state)?;
         Ok(json!({ "message": text, "pick": doc }))
     }))
 }
@@ -439,7 +442,7 @@ pub struct HostDispatcher(Option<Dispatcher>);
 impl Global for HostDispatcher {}
 
 /// The dispatcher this process runs, while its run has not ended.
-fn running_dispatcher(cx: &App) -> Option<Dispatcher> {
+pub(crate) fn running_dispatcher(cx: &App) -> Option<Dispatcher> {
     cx.try_global::<HostDispatcher>()?
         .0
         .clone()

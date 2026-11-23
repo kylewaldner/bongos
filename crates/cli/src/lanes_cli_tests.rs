@@ -1011,6 +1011,7 @@ mod socket {
     /// The machine of two timers that fire at once: the real start of a host with `program`, the
     /// real socket, the settings and the project list replaced. Both check for a writer at the
     /// same moment, so both start a host.
+    #[cfg(target_os = "linux")]
     struct TimerEnv {
         project: ProjectRef,
         program: PathBuf,
@@ -1018,6 +1019,7 @@ mod socket {
         both_checked: std::sync::Barrier,
     }
 
+    #[cfg(target_os = "linux")]
     impl Env for TimerEnv {
         fn lanes_enabled(&self) -> bool {
             true
@@ -1076,7 +1078,8 @@ mod socket {
 
     /// A stand-in for the app binary: the first one started wins the lock, announces itself in
     /// `host.json` and stays until `alive` is removed; any other exits at once, as a host refused
-    /// by the lock does.
+    /// by the lock does. It reads its start time from `/proc`, so it runs on Linux only.
+    #[cfg(target_os = "linux")]
     const HOST_SCRIPT: &str = r#"#!/bin/sh
 echo "$$" >> "@DIR@/starts"
 if mkdir "@DIR@/lock" 2>/dev/null; then
@@ -1091,6 +1094,7 @@ fi
 "#;
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn two_scheduled_firings_with_no_writer_both_attach_to_one_host() {
         use std::os::unix::fs::PermissionsExt as _;
 

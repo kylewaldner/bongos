@@ -261,7 +261,13 @@ struct Handovers {
     alive: ProcessCheck,
     /// [`TAKE_BACK_WARN_EVERY`] unless a test sets another.
     warn_every: Duration,
+    /// Whether a handover's start timeout has passed: by the clock unless a test injects a check.
+    start_timeout_passed: Option<StartTimeoutPassed>,
 }
+
+/// Says whether the start timeout of a handover's wait for the host has passed, in place of the
+/// clock. For tests, which end that wait at a point they choose.
+pub type StartTimeoutPassed = Arc<dyn Fn() -> bool + Send + Sync>;
 
 impl Handovers {
     /// Records that `lanes: start` gave up on engine host `pid`, dropping the hosts that ended.
@@ -309,6 +315,7 @@ pub fn install_handovers(
         abandoned: HashMap::new(),
         alive: system_process_check(),
         warn_every: TAKE_BACK_WARN_EVERY,
+        start_timeout_passed: None,
     });
 }
 
@@ -325,6 +332,14 @@ pub fn set_process_check(alive: ProcessCheck, cx: &mut App) {
 pub fn set_take_back_warn_every(every: Duration, cx: &mut App) {
     if cx.has_global::<Handovers>() {
         cx.global_mut::<Handovers>().warn_every = every;
+    }
+}
+
+/// Makes this process's handovers ask `passed` whether the start timeout of the wait for the
+/// host has passed, instead of the clock. For tests, which end that wait when they choose.
+pub fn set_start_timeout_check(passed: StartTimeoutPassed, cx: &mut App) {
+    if cx.has_global::<Handovers>() {
+        cx.global_mut::<Handovers>().start_timeout_passed = Some(passed);
     }
 }
 
@@ -422,6 +437,7 @@ pub(crate) fn serve_handover(
     let client = handovers.client.clone();
     let alive = handovers.alive.clone();
     let warn_every = handovers.warn_every;
+    let start_timeout_passed = handovers.start_timeout_passed.clone();
     let runs = match runs_source.live_runs(repo, cx) {
         Ok(runs) => runs,
         Err(error) => return Task::ready(Err(error)),
@@ -454,6 +470,7 @@ pub(crate) fn serve_handover(
         queue: Arc::new(QueueSink::new(cx.background_executor().clone())),
         alive,
         warn_every,
+        start_timeout_passed,
         ended: Rc::new(Cell::new(false)),
     };
     cx.spawn(async move |cx| {
@@ -519,6 +536,8 @@ struct Move {
     alive: ProcessCheck,
     /// How often a take-back that still cannot get the lock logs it.
     warn_every: Duration,
+    /// Whether the start timeout passed, in place of the clock (tests only).
+    start_timeout_passed: Option<StartTimeoutPassed>,
     /// Set once the move ended here (attached, kept or taken back): a second ending is ignored.
     ended: Rc<Cell<bool>>,
 }
@@ -739,6 +758,7 @@ impl Move {
             executor,
             alive: self.alive.clone(),
             warn_every: self.warn_every,
+            start_timeout_passed: self.start_timeout_passed.clone(),
         }
     }
 
@@ -870,6 +890,7 @@ struct Waiting {
     executor: BackgroundExecutor,
     alive: ProcessCheck,
     warn_every: Duration,
+    start_timeout_passed: Option<StartTimeoutPassed>,
 }
 
 enum NextWriter {
@@ -901,7 +922,11 @@ impl Waiting {
                 }
             }
             let gone = !self.to.is_live_by(alive);
-            if gone || Instant::now() >= deadline {
+            let timed_out = match &self.start_timeout_passed {
+                Some(passed) => passed(),
+                None => Instant::now() >= deadline,
+            };
+            if gone || timed_out {
                 match self.repo.retake_writer() {
                     Ok(()) => {
                         return NextWriter::Back(if gone {

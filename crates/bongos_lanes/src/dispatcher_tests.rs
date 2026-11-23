@@ -722,7 +722,7 @@ async fn a_bounded_start_that_attaches_keeps_its_bound_and_says_lanes_already_ru
     assert!(harness.engine.dispatcher_starts.borrow().is_empty());
 }
 
-// PRD 6: three lanes busy at once.
+// Three lanes busy at once.
 #[gpui::test]
 async fn three_lanes_take_three_tasks_at_once(cx: &mut TestAppContext) {
     let harness = harness(
@@ -862,7 +862,7 @@ fn end_both(harness: &Harness, cx: &mut TestAppContext) {
     cx.run_until_parked();
 }
 
-// PRD 14: two lanes freeing in one tick with two tasks sharing a tag take one.
+// Two lanes freeing in one tick with two tasks sharing a tag take one.
 #[gpui::test]
 async fn two_lanes_freeing_at_once_take_one_of_two_tasks_sharing_a_tag(cx: &mut TestAppContext) {
     let harness = freeing_at_once(false);
@@ -897,7 +897,7 @@ async fn two_lanes_freeing_at_once_take_one_of_two_tasks_sharing_a_tag(cx: &mut 
     );
 }
 
-// PRD 14: with an exemption for the tag, both lanes take one.
+// With an exemption for the tag, both lanes take one.
 #[gpui::test]
 async fn two_lanes_freeing_at_once_take_both_tasks_with_an_exemption(cx: &mut TestAppContext) {
     let harness = freeing_at_once(true);
@@ -911,7 +911,7 @@ async fn two_lanes_freeing_at_once_take_both_tasks_with_an_exemption(cx: &mut Te
     }
 }
 
-// PRD 26: a failed job halts its lane and task, the other lanes go on, and the halted task
+// A failed job halts its lane and task, the other lanes go on, and the halted task
 // blocks its area; a retry makes the lane run again.
 #[gpui::test]
 async fn a_failed_job_halts_its_lane_and_task_and_others_go_on(cx: &mut TestAppContext) {
@@ -982,7 +982,7 @@ async fn a_failed_job_halts_its_lane_and_task_and_others_go_on(cx: &mut TestAppC
     );
 }
 
-// PRD 31: the unattended choice and its source; with nothing set it is the project's, true.
+// The unattended choice and its source; with nothing set it is the project's, true.
 #[gpui::test]
 async fn a_job_records_the_unattended_choice_and_its_source(cx: &mut TestAppContext) {
     let unattended = |harness: &Harness| {

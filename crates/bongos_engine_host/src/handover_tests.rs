@@ -572,7 +572,13 @@ async fn a_cancelled_handover_keeps_the_writer_in_the_window(cx: &mut TestAppCon
 async fn a_host_that_never_takes_the_lock_gives_the_writer_back(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let fixture = fixture();
-    let state = window(&fixture, &["run-1"], 0, Duration::from_millis(100), cx);
+    let state = window(&fixture, &["run-1"], 0, LONG, cx);
+    // The start timeout passes when the test says so, not by the clock.
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let passed = timed_out.clone();
+    cx.update(|cx| {
+        crate::set_start_timeout_check(Arc::new(move || passed.load(Ordering::SeqCst)), cx)
+    });
     let id = fixture.location().id.clone();
     let watch = cx
         .update(|cx| {
@@ -599,6 +605,9 @@ async fn a_host_that_never_takes_the_lock_gives_the_writer_back(cx: &mut TestApp
     wait_for(cx, |_| writer_of(&fixture).is_released());
     let queued = write(&fixture.repo, None, "queued", cx);
     released.await.unwrap();
+    // The write reaches the queue; only then does the start timeout pass.
+    cx.run_until_parked();
+    timed_out.store(true, Ordering::SeqCst);
 
     let Err(error) = watch.done.await.unwrap() else {
         panic!("the window attached to a host that never took the writer");

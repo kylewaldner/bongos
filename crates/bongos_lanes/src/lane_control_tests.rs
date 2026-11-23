@@ -6,7 +6,7 @@ use bongos_lanes_model::{
 };
 use bongos_workflow::RunStatus;
 use futures::channel::mpsc::UnboundedReceiver;
-use gpui::TestAppContext;
+use gpui::{BorrowAppContext, TestAppContext};
 
 use super::{DISPATCHER_RUN, Harness, builds, finish, graph, harness, leaf, start, start_request};
 use crate::StartLanes;
@@ -52,7 +52,7 @@ fn other(text: &str) -> Option<WaitReason> {
     Some(WaitReason::Other(text.to_string()))
 }
 
-// PRD 24 and 25: a stop with no lane stops a waiting lane with no job at once, leaves the halted
+// A stop with no lane stops a waiting lane with no job at once, leaves the halted
 // and the paused lane as they are, and ends the dispatcher when the running lane stops. The next
 // start brings the halted and the paused lane back unchanged.
 #[gpui::test]
@@ -302,7 +302,7 @@ fn assert_bound_end(harness: &Harness, rx: &mut UnboundedReceiver<LaneEvent>) {
     );
 }
 
-// PRD 27: a lane takes no new top-level task after the `until` task, then stops for the bound.
+// A lane takes no new top-level task after the `until` task, then stops for the bound.
 #[gpui::test]
 async fn the_until_bound_stops_the_lane_cleanly(cx: &mut TestAppContext) {
     let harness = harness(&builds(1), graph(vec![leaf("a"), leaf("b")]), &[]);
@@ -318,7 +318,7 @@ async fn the_until_bound_stops_the_lane_cleanly(cx: &mut TestAppContext) {
     assert_bound_end(&harness, &mut rx);
 }
 
-// PRD 27: a lane stops after `max_jobs` jobs.
+// A lane stops after `max_jobs` jobs.
 #[gpui::test]
 async fn the_max_jobs_bound_stops_the_lane_cleanly(cx: &mut TestAppContext) {
     let harness = harness(
@@ -340,7 +340,7 @@ async fn the_max_jobs_bound_stops_the_lane_cleanly(cx: &mut TestAppContext) {
     assert_bound_end(&harness, &mut rx);
 }
 
-// PRD 27: a lane takes only leaves under the `within` group, then stops for the bound.
+// A lane takes only leaves under the `within` group, then stops for the bound.
 #[gpui::test]
 async fn the_within_bound_stops_the_lane_cleanly(cx: &mut TestAppContext) {
     let tasks = vec![leaf("a"), PickTask::group("G", &["g"]), leaf("g")];
@@ -356,4 +356,94 @@ async fn the_within_bound_stops_the_lane_cleanly(cx: &mut TestAppContext) {
 
     assert_eq!(harness.engine.job_tasks(), ["g"]);
     assert_bound_end(&harness, &mut rx);
+}
+
+/// Registers the lanes settings with `lanes.exit_when_idle` set to `on`.
+fn use_exit_when_idle(on: bool, cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        use settings::Settings as _;
+        let store = settings::SettingsStore::new(cx, &settings::default_settings());
+        cx.set_global(store);
+        crate::LanesSettings::register(cx);
+        cx.update_global::<settings::SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |content| {
+                content.lanes.get_or_insert_default().exit_when_idle = Some(on);
+            });
+        });
+    });
+}
+
+/// The timed pass of the dispatcher (the test host looks every 60 seconds), on the test clock.
+fn timed_pass(cx: &mut TestAppContext) {
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(61));
+    cx.run_until_parked();
+}
+
+// With `lanes.exit_when_idle` true the dispatcher's run ends, succeeded, once every lane is idle
+// and nothing is left to take, so the engine host is no longer kept busy. A task that only waits
+// (here a held one) is something left, through the timed passes too.
+#[gpui::test]
+async fn exit_when_idle_ends_the_run_once_nothing_is_left_to_take(cx: &mut TestAppContext) {
+    use_exit_when_idle(true, cx);
+    let mut held = leaf("b");
+    held.held = Some("restore in progress".to_string());
+    let harness = harness(&builds(1), graph(vec![leaf("a"), held]), &[]);
+    let started = start(&harness, start_request(), cx).await;
+    let dispatcher = started.dispatcher.unwrap();
+    let mut rx = dispatcher.subscribe();
+    assert_eq!(harness.engine.job_tasks(), ["a"]);
+
+    harness.update_graph(|tasks| finish(tasks, "a"));
+    harness.set_run("a", RunStatus::Succeeded, cx);
+    assert_eq!(harness.lane("build", 1).state, LaneState::Idle);
+    timed_pass(cx);
+    assert!(!dispatcher.has_ended());
+    assert!(harness.engine.ends.borrow().is_empty());
+    assert!(events(&mut rx).is_empty());
+
+    harness.update_graph(|tasks| {
+        for task in tasks.iter_mut() {
+            task.held = None;
+        }
+        finish(tasks, "b");
+    });
+    timed_pass(cx);
+    assert!(dispatcher.has_ended());
+    let note = crate::lane_control::NOTHING_LEFT.to_string();
+    assert_eq!(
+        *harness.engine.ends.borrow(),
+        [(DISPATCHER_RUN.to_string(), RunEnd::Succeeded, note.clone())]
+    );
+    assert_eq!(
+        events(&mut rx),
+        [LaneEvent::DispatcherEnded {
+            run_id: DISPATCHER_RUN.to_string(),
+            end: RunEnd::Succeeded,
+            note,
+        }]
+    );
+    assert_eq!(
+        dispatcher.status().unwrap().phase,
+        Some(DispatcherPhase::Ended(RunEnd::Succeeded))
+    );
+    assert_eq!(harness.lane("build", 1).state, LaneState::Idle);
+}
+
+// With `lanes.exit_when_idle` false (the default) an idle dispatcher with nothing left keeps
+// running.
+#[gpui::test]
+async fn without_exit_when_idle_an_idle_dispatcher_keeps_running(cx: &mut TestAppContext) {
+    use_exit_when_idle(false, cx);
+    let harness = harness(&builds(1), graph(vec![leaf("a")]), &[]);
+    let started = start(&harness, start_request(), cx).await;
+    let dispatcher = started.dispatcher.unwrap();
+
+    harness.update_graph(|tasks| finish(tasks, "a"));
+    harness.set_run("a", RunStatus::Succeeded, cx);
+    timed_pass(cx);
+
+    assert_eq!(harness.lane("build", 1).state, LaneState::Idle);
+    assert!(!dispatcher.has_ended());
+    assert!(harness.engine.ends.borrow().is_empty());
 }

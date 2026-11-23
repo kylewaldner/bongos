@@ -91,9 +91,9 @@ impl RunData {
     /// The data of `run`, or `None` when the engine does not know it.
     pub fn of(engine: &WorkflowEngine, run: &str, session_limit: usize) -> Option<Self> {
         let lifecycle = engine.lifecycle();
-        let state = lifecycle.state(run)?;
-        let definition = lifecycle.runtime().definition(run)?.clone();
-        let record = lifecycle.record(run)?;
+        let state = lifecycle.shown_state(run)?;
+        let definition = lifecycle.shown_definition(run)?.clone();
+        let record = lifecycle.shown_record(run)?;
         Some(Self {
             run: run.to_string(),
             workflow: record.workflow.clone(),
@@ -106,9 +106,9 @@ impl RunData {
             definition,
             state,
             worktree: lifecycle
-                .worktree(run)
+                .shown_worktree(run)
                 .map(|worktree| worktree.path.clone()),
-            attempt_dir: lifecycle.current_attempt_dir(run),
+            attempt_dir: lifecycle.shown_attempt_dir(run),
             session_limit,
             node_status: BTreeMap::new(),
         })
@@ -1246,8 +1246,8 @@ pub const NO_LOG: &str = "The run has no log yet";
 /// last try that started.
 fn log_target(engine: &WorkflowEngine, run: &str, selected: Option<&Selection>) -> Option<PathBuf> {
     let lifecycle = engine.lifecycle();
-    let state = lifecycle.state(run)?;
-    let attempt = lifecycle.current_attempt_dir(run)?;
+    let state = lifecycle.shown_state(run)?;
+    let attempt = lifecycle.shown_attempt_dir(run)?;
     let matches = |key: &NodeKey| {
         selected.is_none_or(|(node, branch)| &key.node == node && &key.branch == branch)
     };
@@ -1280,7 +1280,7 @@ pub(crate) fn register(workspace: &mut Workspace) {
     on_run::<workflow::OpenRunWorktree>(workspace, |engine, run, workspace, window, cx| {
         let path = engine
             .lifecycle()
-            .worktree(&run)
+            .shown_worktree(&run)
             .map(|worktree| worktree.path.clone());
         match path {
             Some(path) => open_worktree(path, window, cx),
@@ -1353,13 +1353,13 @@ fn show_diff(
         let lifecycle = engine.lifecycle();
         (
             lifecycle
-                .worktree(&run)
+                .shown_worktree(&run)
                 .map(|worktree| worktree.path.clone()),
             lifecycle
-                .task_checkout(&run)
+                .shown_task_checkout(&run)
                 .and_then(|checkout| checkout.branch.clone()),
             lifecycle
-                .worktree(&run)
+                .shown_worktree(&run)
                 .map(|worktree| worktree.branch.clone()),
         )
     };

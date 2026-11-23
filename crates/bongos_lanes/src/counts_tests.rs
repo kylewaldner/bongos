@@ -204,3 +204,171 @@ async fn a_stale_stamp_holds_the_lanes_until_the_accepted_stamp_lands(cx: &mut T
     let _started = start(&unchecked, start_request(), cx).await;
     assert_eq!(unchecked.engine.job_tasks(), ["a"]);
 }
+
+fn table_of(table: &str) -> bongos_lanes_model::LaneTable {
+    parse(&format!("schema = 1\n{table}")).unwrap()
+}
+
+/// What `load` reads at the shown commit: the graph and table, with only the waiting limit and
+/// the stamp in its options.
+fn loaded(harness: &Harness, table: &str) -> crate::read_modes::Loaded {
+    crate::read_modes::Loaded {
+        graph: harness.host.graph.borrow().clone(),
+        table: table_of(table),
+        options: bongos_lanes_model::PickOptions {
+            waiting_limit: Some(10),
+            ..bongos_lanes_model::PickOptions::default()
+        },
+    }
+}
+
+fn pick_read(harness: &Harness) -> crate::read_modes::PickRead {
+    harness
+        .writer
+        .read(crate::read_modes::read_pick_state)
+        .unwrap()
+}
+
+/// The reasons the dry run gives for `lane` doing nothing; `None` when it would start a job.
+fn dry_reasons(
+    loaded: &crate::read_modes::Loaded,
+    read: &crate::read_modes::PickRead,
+    options: &bongos_lanes_model::PickOptions,
+    lane: &str,
+) -> Option<Vec<WaitReason>> {
+    let dry = bongos_lanes_model::explain(&loaded.graph, &read.state, &loaded.table, options);
+    let lane = bongos_lanes_model::LaneId::parse(lane).unwrap();
+    let (_, outcome) = dry
+        .per_lane
+        .into_iter()
+        .find(|(id, _)| *id == lane)
+        .unwrap_or_else(|| panic!("the dry run has no {lane}"));
+    match outcome {
+        bongos_lanes_model::PickOutcome::Nothing { reasons, .. } => {
+            Some(reasons.into_iter().map(|waiting| waiting.reason).collect())
+        }
+        _ => None,
+    }
+}
+
+// The dry run of the process that runs the dispatcher reads the dispatcher's own options: a lane
+// the dispatcher leaves idle at its workflow's instance limit shows that limit in the dry run,
+// and the bound the dispatcher started with applies. With no dispatcher, the same options are
+// built from the run engine.
+#[gpui::test]
+async fn a_dry_run_reads_the_options_the_dispatcher_picks_with(cx: &mut TestAppContext) {
+    let table = builds(2);
+    let harness = harness(&table, graph(vec![leaf("a"), leaf("b")]), &[("w", 1)]);
+    let request = crate::StartLanes {
+        bound: Some(bongos_lanes_model::PickBound::Until(TaskId::new("b"))),
+        ..start_request()
+    };
+    let started = start(&harness, request, cx).await;
+    assert_eq!(harness.engine.job_tasks(), ["a"]);
+    let loaded = loaded(&harness, &table);
+    let read = pick_read(&harness);
+
+    let options = crate::read_modes::current_options(
+        &crate::read_modes::OptionSources {
+            dispatcher: Some(dispatcher(&started)),
+            engine: None,
+            profile: None,
+            project: "project-1",
+        },
+        &loaded,
+        &read,
+    );
+    assert_eq!(options.waiting_limit, Some(10));
+    assert_eq!(
+        options.bound,
+        Some(bongos_lanes_model::PickBound::Until(TaskId::new("b")))
+    );
+    assert_eq!(options.counts.get("build"), Some(&2));
+    assert_eq!(options.instances["w"].limit, Some(1));
+    let reasons = dry_reasons(&loaded, &read, &options, "build-2").unwrap();
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| matches!(reason, WaitReason::InstanceLimit { limit: 1, .. })),
+        "{reasons:?}"
+    );
+
+    // With no dispatcher here, the run engine of this process answers the same use.
+    let engine: &dyn crate::dispatcher::JobEngine = &*harness.engine;
+    let options = crate::read_modes::current_options(
+        &crate::read_modes::OptionSources {
+            dispatcher: None,
+            engine: Some(engine),
+            profile: None,
+            project: "project-1",
+        },
+        &loaded,
+        &read,
+    );
+    assert_eq!(
+        options.bound,
+        Some(bongos_lanes_model::PickBound::Until(TaskId::new("b")))
+    );
+    let reasons = dry_reasons(&loaded, &read, &options, "build-2").unwrap();
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| matches!(reason, WaitReason::InstanceLimit { limit: 1, .. })),
+        "{reasons:?}"
+    );
+
+    // The options `load` alone gives know no limit, so the dry run would start b.
+    assert_eq!(
+        dry_reasons(&loaded, &read, &loaded.options, "build-2"),
+        None
+    );
+}
+
+// In a process with no dispatcher the dry run reads the profile's counts over the table's and
+// the bound of a dispatcher record whose run has not ended.
+#[gpui::test]
+async fn a_dry_run_with_no_dispatcher_reads_the_profile_counts_and_the_recorded_bound(
+    cx: &mut TestAppContext,
+) {
+    let table = builds(1);
+    let harness = harness(&table, graph(vec![leaf("a")]), &[]);
+    let _profile = profile(&[("build", 3)], cx);
+    let mut record = crate::dispatcher::DispatcherRecord {
+        run_id: "0190other".to_string(),
+        host: "other-host".to_string(),
+        started: crate::test_support::SINCE.to_string(),
+        by: bongos_lanes_model::Author::System,
+        bound: Some(crate::dispatcher::RecordedBound::Until(TaskId::new("a"))),
+        unattended: None,
+        definition_commit: None,
+        table_commit: None,
+        table_wait: None,
+        stopped_by: None,
+        ended: None,
+    };
+    harness
+        .writer
+        .transact(|tx| crate::dispatcher::put_dispatcher(tx, &record))
+        .unwrap();
+    let loaded = loaded(&harness, &table);
+    let read = pick_read(&harness);
+
+    let options = cx.update(|cx| crate::read_modes::options_now(&loaded, &read, "project-1", cx));
+    assert_eq!(options.counts.get("build"), Some(&3));
+    assert_eq!(
+        options.bound,
+        Some(bongos_lanes_model::PickBound::Until(TaskId::new("a")))
+    );
+    let dry = bongos_lanes_model::explain(&loaded.graph, &read.state, &loaded.table, &options);
+    assert_eq!(dry.per_lane.len(), 3);
+
+    // Once the recorded run ended its bound no longer applies.
+    record.ended = Some(crate::lane_control::RunEnd::Succeeded);
+    harness
+        .writer
+        .transact(|tx| crate::dispatcher::put_dispatcher(tx, &record))
+        .unwrap();
+    let read = pick_read(&harness);
+    let options = cx.update(|cx| crate::read_modes::options_now(&loaded, &read, "project-1", cx));
+    assert_eq!(options.bound, None);
+}

@@ -303,7 +303,7 @@ async fn an_open_dispatcher_record_whose_run_is_closed_is_only_marked(cx: &mut T
     assert_eq!(dispatcher_of(&harness).ended, Some(RunEnd::Cancelled));
 }
 
-// PRD 32: with `on_interruption = resume` the interrupted run is resumed once, its interruption
+// With `on_interruption = resume` the interrupted run is resumed once, its interruption
 // record written before the resume; a second interruption of the same run waits on you.
 #[gpui::test]
 async fn on_interruption_resume_resumes_once_and_a_second_interruption_waits(

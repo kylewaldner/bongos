@@ -197,7 +197,7 @@ pub enum RefusalKind {
     UnknownTask,
     UnknownProject,
     /// The request asks for something this version cannot do yet (a lane or snapshot tree, a run
-    /// with no task, a dispatcher started as a run).
+    /// with no task, a dispatcher started as a task run).
     Unsupported,
     /// The request itself is wrong: a reserved run id that is not a UUID v7 or is taken, or a
     /// definition commit the layers were not read from.
@@ -1012,6 +1012,38 @@ pub struct Lifecycle<R: Runner> {
     /// The files of the projects whose writer moves to another process now: no run starts under
     /// them ([`Self::refuse_starts_under`]).
     moving: Vec<PathBuf>,
+    /// The runs of the projects another process writes, read from their records to be shown
+    /// ([`Self::observe_runs`]), in start order. Nothing drives them here and no command reaches
+    /// them: every command looks among `runs` only.
+    observed: Vec<ObservedRun>,
+}
+
+/// A run another process drives, as its records on disk say.
+struct ObservedRun {
+    entry: RunEntry,
+    definition: Definition,
+    /// The replayed log of the current attempt.
+    state: RunState,
+    /// What `run.toml`, the current attempt's log and the `cleared` marker looked like when they
+    /// were read: the run is read again once one differs.
+    stamps: [FileStamp; 3],
+}
+
+/// The modification time and length of a file, `None` when it cannot be read.
+type FileStamp = Option<(std::time::SystemTime, u64)>;
+
+fn file_stamp(path: &Path) -> FileStamp {
+    let metadata = fs::metadata(path).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
+}
+
+/// The stamps of the files of run directory `dir` whose current attempt's log is `events`.
+fn run_stamps(dir: &Path, events: &Path) -> [FileStamp; 3] {
+    [
+        file_stamp(&dir.join(RUN_FILE)),
+        file_stamp(events),
+        file_stamp(&dir.join(CLEARED_FILE)),
+    ]
 }
 
 impl<R: Runner> Lifecycle<R> {
@@ -1024,6 +1056,7 @@ impl<R: Runner> Lifecycle<R> {
             statuses: BTreeMap::new(),
             events: Vec::new(),
             moving: Vec::new(),
+            observed: Vec::new(),
         }
     }
 
@@ -1179,6 +1212,181 @@ impl<R: Runner> Lifecycle<R> {
     /// The directory of the current attempt of `run`.
     pub fn current_attempt_dir(&self, run: &str) -> Option<PathBuf> {
         self.entry(run).ok().map(RunEntry::attempt_dir)
+    }
+
+    /// Every run shown in the views, in start order: the runs this process drives, then those it
+    /// reads for another process ([`Self::observe_runs`]).
+    pub fn shown_runs(&self) -> Vec<RunId> {
+        self.runs
+            .iter()
+            .chain(self.observed.iter().map(|observed| &observed.entry))
+            .map(|entry| entry.id.clone())
+            .collect()
+    }
+
+    /// Every active run of [`Self::shown_runs`], in that order.
+    pub fn shown_active_runs(&self) -> Vec<RunId> {
+        self.shown_runs()
+            .into_iter()
+            .filter(|run| {
+                self.shown_state(run)
+                    .is_some_and(|state| RunStatus::of(&state).is_active())
+            })
+            .collect()
+    }
+
+    /// Whether `run` is one another process drives, shown here from its records.
+    pub fn is_observed(&self, run: &str) -> bool {
+        self.observed_run(run).is_some()
+    }
+
+    /// [`Self::state`] of a shown run: for one another process drives, its log as last read.
+    pub fn shown_state(&self, run: &str) -> Option<RunState> {
+        self.state(run).or_else(|| {
+            self.observed_run(run)
+                .map(|observed| observed.state.clone())
+        })
+    }
+
+    /// The definition a shown run runs on.
+    pub fn shown_definition(&self, run: &str) -> Option<&Definition> {
+        self.runtime
+            .definition(run)
+            .or_else(|| self.observed_run(run).map(|observed| &observed.definition))
+    }
+
+    /// [`Self::record`] of a shown run.
+    pub fn shown_record(&self, run: &str) -> Option<&RunToml> {
+        self.shown_entry(run).map(|entry| &entry.record)
+    }
+
+    /// [`Self::task_of`] of a shown run.
+    pub fn shown_task_of(&self, run: &str) -> Option<&str> {
+        self.shown_entry(run).map(|entry| entry.task_id.as_str())
+    }
+
+    /// [`Self::task_checkout`] of a shown run.
+    pub fn shown_task_checkout(&self, run: &str) -> Option<&TaskCheckout> {
+        self.shown_entry(run).map(|entry| &entry.task)
+    }
+
+    /// [`Self::worktree`] of a shown run.
+    pub fn shown_worktree(&self, run: &str) -> Option<&RunWorktree> {
+        self.shown_entry(run).map(|entry| &entry.worktree)
+    }
+
+    /// [`Self::current_attempt_dir`] of a shown run.
+    pub fn shown_attempt_dir(&self, run: &str) -> Option<PathBuf> {
+        self.shown_entry(run).map(RunEntry::attempt_dir)
+    }
+
+    fn observed_run(&self, run: &str) -> Option<&ObservedRun> {
+        self.observed
+            .iter()
+            .find(|observed| observed.entry.id == run)
+    }
+
+    /// The entry of a run this process drives, else of one it shows for another process.
+    fn shown_entry(&self, run: &str) -> Option<&RunEntry> {
+        match self.runs.iter().find(|entry| entry.id == run) {
+            Some(entry) => Some(entry),
+            None => self.observed_run(run).map(|observed| &observed.entry),
+        }
+    }
+
+    /// Reads the runs of every task under `under` (the files folders of the projects whose writer
+    /// another process holds) from their records, to be shown and never driven: no log is opened
+    /// for writing or repaired, no process is touched, no lock is taken, and no event is raised
+    /// for them, so nothing is written for them either. A run whose `run.toml`, current log and
+    /// `cleared` marker look as when last read is kept as it was; any other is read again. A
+    /// cleared run, a run this process drives and a run that cannot be read are left out. With
+    /// `under` empty every observed run is dropped. Whether what is shown changed.
+    pub fn observe_runs(&mut self, tree: &WorkTree, under: &[PathBuf]) -> bool {
+        // `observed` is in id order, as it is left below.
+        let before: Vec<(RunId, RunState, RunToml)> = self
+            .observed
+            .iter()
+            .map(|observed| {
+                (
+                    observed.entry.id.clone(),
+                    observed.state.clone(),
+                    observed.entry.record.clone(),
+                )
+            })
+            .collect();
+        let mut previous: BTreeMap<PathBuf, ObservedRun> = std::mem::take(&mut self.observed)
+            .into_iter()
+            .map(|observed| (observed.entry.dir.clone(), observed))
+            .collect();
+        let mut observed: Vec<ObservedRun> = Vec::new();
+        let mut seen: BTreeSet<RunId> = BTreeSet::new();
+        for task in tree.tasks() {
+            if !under.iter().any(|files| task.dir.starts_with(files)) {
+                continue;
+            }
+            let runs = bongos_work_model::layout::runs_dir(&task.dir);
+            let Ok(listing) = fs::read_dir(&runs) else {
+                continue;
+            };
+            let mut dirs: Vec<PathBuf> = listing
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.is_dir())
+                .collect();
+            dirs.sort();
+            let project = task.id().and_then(|id| project_of(tree, id));
+            for dir in dirs {
+                let kept = previous.remove(&dir).filter(|known| {
+                    let events = known.entry.attempt_dir().join(crate::runtime::EVENTS_FILE);
+                    run_stamps(&dir, &events) == known.stamps
+                });
+                let run = match kept {
+                    Some(known) => known,
+                    None => {
+                        // Stamped before the read, and the log with the length that was read, so
+                        // a write while reading makes the stamps differ and the run is read again.
+                        let record_stamp = file_stamp(&dir.join(RUN_FILE));
+                        let cleared_stamp = file_stamp(&dir.join(CLEARED_FILE));
+                        match self.read_run_state(tree, task, project.clone(), &dir) {
+                            Ok(Some((entry, spec, state, read_len))) => {
+                                let events = spec.attempt_dir.join(crate::runtime::EVENTS_FILE);
+                                let log_stamp =
+                                    file_stamp(&events).map(|(time, _)| (time, read_len));
+                                ObservedRun {
+                                    stamps: [record_stamp, log_stamp, cleared_stamp],
+                                    entry,
+                                    definition: spec.definition,
+                                    state,
+                                }
+                            }
+                            Ok(None) => continue,
+                            Err(reason) => {
+                                log::debug!("workflows: not showing {}: {reason}", dir.display());
+                                continue;
+                            }
+                        }
+                    }
+                };
+                // A cleared run reads as `Ok(None)` above: its marker changes its stamps.
+                if self.runs.iter().any(|entry| entry.id == run.entry.id)
+                    || !seen.insert(run.entry.id.clone())
+                {
+                    continue;
+                }
+                observed.push(run);
+            }
+        }
+        // Run ids are UUID v7, so their order is the order the runs were created in.
+        observed.sort_by(|a, b| a.entry.id.cmp(&b.entry.id));
+        let changed = before.len() != observed.len()
+            || before
+                .iter()
+                .zip(&observed)
+                .any(|((id, state, record), now)| {
+                    *id != now.entry.id || *state != now.state || *record != now.entry.record
+                });
+        self.observed = observed;
+        changed
     }
 
     /// What the runner is given for `run`'s current attempt.
@@ -2035,6 +2243,9 @@ impl<R: Runner> Lifecycle<R> {
             report.orphans.push((entry.id.clone(), orphans));
             self.runs.push(entry);
         }
+        // A run this process drives now is no longer shown from its records.
+        self.observed
+            .retain(|observed| !report.loaded.contains(&observed.entry.id));
         // A run queued at its workflow's instance limit waits again: every active loaded run that
         // has not begun (queued, or halted before it began) is held back, then the queued ones
         // are let start while their workflow has room, oldest first.
@@ -2056,6 +2267,20 @@ impl<R: Runner> Lifecycle<R> {
         project: Option<String>,
         dir: &Path,
     ) -> Result<Option<(RunEntry, RunSpec)>, String> {
+        Ok(self
+            .read_run_state(tree, task, project, dir)?
+            .map(|(entry, spec, _, _)| (entry, spec)))
+    }
+
+    /// [`Self::read_run`] with the replayed log of the current attempt and the number of bytes
+    /// of the log that were read. Only reads.
+    fn read_run_state(
+        &self,
+        tree: &WorkTree,
+        task: &Task,
+        project: Option<String>,
+        dir: &Path,
+    ) -> Result<Option<(RunEntry, RunSpec, RunState, u64)>, String> {
         if dir.join(CLEARED_FILE).exists() {
             return Ok(None);
         }
@@ -2090,9 +2315,8 @@ impl<R: Runner> Lifecycle<R> {
             .map_err(|error| format!("{}: {error}", crate::runtime::EVENTS_FILE))?;
         let parsed =
             bongos_workflow_model::record::parse_log(&bytes).map_err(|error| error.to_string())?;
-        let rev = bongos_workflow_model::record::replay(&parsed.events)
-            .definition_rev
-            .unwrap_or(0);
+        let state = bongos_workflow_model::record::replay(&parsed.events);
+        let rev = state.definition_rev.unwrap_or(0);
         let definition = read_definition(&definition_copy_dir(&attempt_dir, rev))?;
         let mut worktree = attempt_worktree(attempt);
         let checkout = match (&record.tree, &task.file) {
@@ -2152,7 +2376,7 @@ impl<R: Runner> Lifecycle<R> {
             rev,
             setup,
         };
-        Ok(Some((entry, spec)))
+        Ok(Some((entry, spec, state, bytes.len() as u64)))
     }
 
     /// `workflow: clear finished`, the first half: every run that ended succeeded or was
@@ -3020,7 +3244,8 @@ fn project_of(tree: &WorkTree, task_id: &str) -> Option<String> {
         .map(|project| project.slug.clone())
 }
 
-/// A dispatcher is never started as a run: it has no nodes for the scheduler to drive.
+/// A dispatcher is never started as a task run: it has no nodes for the scheduler to drive, and
+/// it starts only as a project run (the lanes' dispatcher run), which does not call this.
 fn refuse_dispatcher(name: &str, definition: &Definition) -> Result<(), Refusal> {
     if definition.dispatcher {
         return Err(Refusal::new(

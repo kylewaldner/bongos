@@ -1560,6 +1560,109 @@ fn load_runs_except_leaves_the_runs_under_a_skipped_folder_alone() {
     assert_eq!(lifecycle.state(&run).unwrap().interrupted.len(), 1);
 }
 
+/// A client window shows the runs of a project another process writes, read from their records:
+/// the Runs panel rows, the status item and the needs-you list see them, nothing drives them, no
+/// command reaches them and none of their files changes; what the host writes later is seen at
+/// the next read, and an unchanged run is not read again as a change.
+#[test]
+fn observe_runs_shows_the_runs_another_process_writes_without_touching_them() {
+    let world = World::new();
+    let files = world.root.join("work/app");
+    let mut host = world.lifecycle();
+    host.runtime_mut()
+        .runner_mut()
+        .script("work", json!({ "summary": "draft", "verdict": "ship" }));
+    let run = world.start(&mut host, with_workflow("reviewed")).unwrap();
+    settle(&mut host);
+    assert_eq!(host.status(&run), Some(RunStatus::Running));
+    let record = fs::read(run_dir_of(&world, &run).join("run.toml")).unwrap();
+    let log = fs::read(events_of(&world, &run)).unwrap();
+
+    let mut client = world.lifecycle();
+    let report = client
+        .load_runs_except(&world.tree, std::slice::from_ref(&files))
+        .unwrap();
+    assert!(report.loaded.is_empty(), "{report:?}");
+    assert!(client.shown_runs().is_empty(), "nothing read yet");
+    assert!(client.observe_runs(&world.tree, std::slice::from_ref(&files)));
+    assert!(client.all_runs().is_empty(), "the client drives no run");
+    assert!(client.state(&run).is_none());
+    assert!(client.is_observed(&run));
+    assert_eq!(client.shown_runs(), vec![run.clone()]);
+    assert_eq!(client.shown_active_runs(), vec![run.clone()]);
+    assert_eq!(client.shown_task_of(&run), Some(LEAF));
+    assert_eq!(client.shown_record(&run).unwrap().workflow, "reviewed");
+    assert!(client.shown_definition(&run).is_some());
+    assert_eq!(
+        client.shown_attempt_dir(&run),
+        Some(attempt_dir(&run_dir_of(&world, &run), 1))
+    );
+    let rows = crate::runs_panel::RunRow::all(&client);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].run, run);
+    assert_eq!(rows[0].status, RunStatus::Running);
+    assert_eq!(rows[0].nodes, vec!["work".to_string()]);
+    assert_eq!(
+        crate::status_item::Summary::of(&client).running,
+        vec!["work".to_string()]
+    );
+    assert!(crate::gates::needs_you(&client).is_empty());
+
+    // Nothing drives it here, no command reaches it, and nothing is written for it.
+    client.tick();
+    assert!(client.runtime().runner().started.is_empty());
+    assert!(client.take_events().is_empty());
+    assert!(client.cancel(&run).is_err());
+    assert!(client.pause(&run).is_err());
+    assert_eq!(fs::read(events_of(&world, &run)).unwrap(), log);
+    assert_eq!(
+        fs::read(run_dir_of(&world, &run).join("run.toml")).unwrap(),
+        record
+    );
+    assert!(
+        !client.observe_runs(&world.tree, std::slice::from_ref(&files)),
+        "no file changed"
+    );
+
+    // The host finishes the step and the run waits at its gate: the next read shows it.
+    finish_all(&mut host);
+    assert!(client.observe_runs(&world.tree, std::slice::from_ref(&files)));
+    assert_eq!(client.shown_state(&run).unwrap().open_gates.len(), 1);
+    let needs = crate::gates::needs_you(&client);
+    assert_eq!(needs.len(), 1, "{needs:?}");
+    assert_eq!(needs[0].task_id, LEAF);
+    assert_eq!(crate::status_item::Summary::of(&client).needing, 1);
+    assert!(client.take_events().is_empty());
+
+    // A cleared run is no longer shown, and neither is any once the project is not another's.
+    fs::write(run_dir_of(&world, &run).join("cleared"), "").unwrap();
+    assert!(client.observe_runs(&world.tree, std::slice::from_ref(&files)));
+    assert!(client.shown_runs().is_empty());
+    fs::remove_file(run_dir_of(&world, &run).join("cleared")).unwrap();
+    assert!(client.observe_runs(&world.tree, std::slice::from_ref(&files)));
+    assert!(client.observe_runs(&world.tree, &[]));
+    assert!(client.shown_runs().is_empty());
+    assert!(!client.is_observed(&run));
+}
+
+/// A run the client takes over (its project's writer came back) is shown once, as its own.
+#[test]
+fn a_run_loaded_here_is_no_longer_shown_from_its_records() {
+    let world = World::new();
+    let files = world.root.join("work/app");
+    let run = seed(&world, "single", mid_node);
+    let mut client = world.lifecycle();
+    assert!(client.observe_runs(&world.tree, std::slice::from_ref(&files)));
+    assert!(client.is_observed(&run));
+    let report = client.load_runs(&world.tree).unwrap();
+    assert_eq!(report.loaded, vec![run.clone()], "{report:?}");
+    assert!(!client.is_observed(&run));
+    assert_eq!(client.shown_runs(), vec![run.clone()]);
+    // A later read leaves a run this process drives alone.
+    client.observe_runs(&world.tree, std::slice::from_ref(&files));
+    assert_eq!(client.shown_runs(), vec![run]);
+}
+
 #[test]
 fn load_runs_skips_a_cleared_run_and_a_corrupt_record() {
     let world = World::new();
@@ -2161,6 +2264,38 @@ fn a_dispatcher_is_never_started_as_a_run() {
         .unwrap_err();
     assert_eq!(refusal.kind, RefusalKind::Unsupported, "{refusal}");
     assert!(lifecycle.all_runs().is_empty());
+}
+
+/// The lanes' dispatcher starts as a project run, the one way a dispatcher runs.
+#[test]
+fn a_dispatcher_starts_as_a_project_run_but_not_as_a_task_run() {
+    let world = World::new();
+    let dir = world.profile().join("lanes");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join(DEFINITION_FILE),
+        "schema = 1\nname = \"lanes\"\ndispatcher = true\n",
+    )
+    .unwrap();
+    let mut lifecycle = world.lifecycle();
+    let refusal = world
+        .start(&mut lifecycle, with_workflow("lanes"))
+        .unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::Unsupported, "{refusal}");
+    assert!(lifecycle.all_runs().is_empty());
+
+    let run = world
+        .start(&mut lifecycle, project_request("lanes"))
+        .unwrap();
+    assert_eq!(lifecycle.all_runs(), vec![run.clone()]);
+    let record = lifecycle.record(&run).unwrap();
+    assert_eq!(record.workflow, "lanes");
+    assert_eq!(
+        record.subject,
+        RunSubject::Project {
+            id: GROUP.to_string()
+        }
+    );
 }
 
 #[test]

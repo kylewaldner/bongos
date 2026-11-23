@@ -59,7 +59,7 @@ use crate::pick_extension::{
 };
 use crate::profile::LaneProfiles;
 use crate::staleness::{PinnedTree, Staleness, StalenessCheck};
-use crate::store::{LANES_NAMESPACE, delete_lane, put_lane, put_owner, read_state_in};
+use crate::store::{LANES_NAMESPACE, delete_lane, put_lane, put_owner, read_state, read_state_in};
 use crate::task_trees::LaneTreeSetup;
 
 /// The key of the dispatcher record in the lanes namespace.
@@ -93,6 +93,16 @@ impl From<&PickBound> for RecordedBound {
         match bound {
             PickBound::Until(task) => Self::Until(task.clone()),
             PickBound::Within(task) => Self::Within(task.clone()),
+        }
+    }
+}
+
+impl RecordedBound {
+    /// The bound a pick applies.
+    pub fn to_bound(&self) -> PickBound {
+        match self {
+            Self::Until(task) => PickBound::Until(task.clone()),
+            Self::Within(task) => PickBound::Within(task.clone()),
         }
     }
 }
@@ -696,8 +706,74 @@ fn start_verified(
     })
 }
 
+/// The options of a pick: the effective `counts`, the `bound`, the recorded `stamp`, and the use
+/// of every workflow's instances that a pick may start (the table's rules, the graph's open todos
+/// and the lane jobs of `state`), a lane job with a reserved run id that has not started counting
+/// as one. The dispatcher and every dry run and pick read their options here.
+///
+/// With no run engine in this process (a read mode) no limit is known and every lane job of a
+/// workflow counts as one of its runs.
+pub(crate) fn pick_options_with(
+    engine: Option<&dyn JobEngine>,
+    state: &LanesState,
+    graph: &PickGraph,
+    table: &LaneTable,
+    counts: BTreeMap<String, u32>,
+    bound: Option<PickBound>,
+    stamp: Option<StampFile>,
+) -> PickOptions {
+    let mut workflows: BTreeSet<String> = table
+        .rules
+        .iter()
+        .filter_map(|rule| {
+            rule.workflow
+                .as_ref()
+                .map(|workflow| workflow.value.clone())
+        })
+        .collect();
+    workflows.extend(
+        graph
+            .leaves()
+            .filter_map(|leaf| leaf.open_todo.as_ref()?.workflow.clone()),
+    );
+    workflows.extend(
+        state
+            .lanes
+            .values()
+            .filter_map(|lane| lane.job.as_ref().map(|job| job.workflow.clone())),
+    );
+    let instances = workflows
+        .into_iter()
+        .map(|workflow| {
+            let usage = match engine {
+                Some(engine) => instance_use(engine, state, &workflow),
+                None => bongos_lanes_model::InstanceUse {
+                    limit: None,
+                    active_runs: state
+                        .lanes
+                        .values()
+                        .filter_map(|lane| lane.job.as_ref())
+                        .filter(|job| job.workflow == workflow)
+                        .map(|job| job.run_id.clone())
+                        .collect(),
+                    reserved: 0,
+                },
+            };
+            (workflow, usage)
+        })
+        .collect();
+    PickOptions {
+        counts,
+        instances,
+        assigned: BTreeMap::new(),
+        bound,
+        waiting_limit: None,
+        stamp,
+    }
+}
+
 /// The lane count of each kind of `table`: the profile's, else the table's.
-fn effective_counts(
+pub(crate) fn effective_counts(
     table: &LaneTable,
     project: &str,
     profile: Option<&dyn crate::LaneProfileSource>,
@@ -1218,6 +1294,47 @@ impl Dispatcher {
         }
     }
 
+    /// Whether nothing is left for the lanes to take (`lanes.exit_when_idle`): no wait handler
+    /// question or recheck and no ahead job's landing is pending, no lane is waiting or holds a
+    /// job, and the picker gives every idle lane nothing but finished tasks or tasks outside the
+    /// bound. A task that waits on something that may still change (a dependency, an instance
+    /// limit, a hold, a stale graph) is something left.
+    pub(crate) fn nothing_left_to_take(&self, cx: &App) -> bool {
+        if !self.0.waits.borrow().is_settled() || !self.0.ahead_landings.borrow().is_empty() {
+            return false;
+        }
+        let parts = self.parts();
+        let Ok(state) = parts.writer.read(read_state) else {
+            return false;
+        };
+        let busy = |lane: &LaneRecord| {
+            lane.job.is_some() || matches!(lane.state, LaneState::Running | LaneState::Waiting)
+        };
+        if state.lanes.is_empty() || state.lanes.values().any(busy) {
+            return false;
+        }
+        let Some(graph) = parts.host.graph(cx) else {
+            return false;
+        };
+        let table = self.0.table.borrow();
+        let options = self.pick_options(&state, &graph, &table);
+        let left_nothing = |reasons: &[bongos_lanes_model::Waiting]| {
+            reasons
+                .iter()
+                .all(|waiting| matches!(waiting.reason, WaitReason::Finished | WaitReason::Bound))
+        };
+        state
+            .lanes
+            .values()
+            .filter(|lane| lane.state == LaneState::Idle)
+            .all(
+                |lane| match pick(&graph, &state, &table, &lane.id(), &options) {
+                    PickOutcome::Nothing { reasons, .. } => left_nothing(&reasons),
+                    PickOutcome::Assign(_) | PickOutcome::Hold(_) => false,
+                },
+            )
+    }
+
     /// Whether the dispatcher's record says its run ended (another handle ended it).
     fn run_ended(&self) -> bool {
         self.parts()
@@ -1502,48 +1619,21 @@ impl Dispatcher {
 
     /// The options of a pick: the effective counts, the bound, and the use of every workflow's
     /// instances, a lane job with a reserved run id that has not started counting as one.
-    fn pick_options(
+    pub(crate) fn pick_options(
         &self,
         state: &LanesState,
         graph: &PickGraph,
         table: &LaneTable,
     ) -> PickOptions {
-        let engine = &self.parts().engine;
-        let mut workflows: BTreeSet<String> = table
-            .rules
-            .iter()
-            .filter_map(|rule| {
-                rule.workflow
-                    .as_ref()
-                    .map(|workflow| workflow.value.clone())
-            })
-            .collect();
-        workflows.extend(
-            graph
-                .leaves()
-                .filter_map(|leaf| leaf.open_todo.as_ref()?.workflow.clone()),
-        );
-        workflows.extend(
-            state
-                .lanes
-                .values()
-                .filter_map(|lane| lane.job.as_ref().map(|job| job.workflow.clone())),
-        );
-        let instances = workflows
-            .into_iter()
-            .map(|workflow| {
-                let usage = instance_use(&**engine, state, &workflow);
-                (workflow, usage)
-            })
-            .collect();
-        PickOptions {
-            counts: self.0.counts.borrow().clone(),
-            instances,
-            assigned: BTreeMap::new(),
-            bound: self.0.config.bound.clone(),
-            waiting_limit: None,
-            stamp: self.0.stamp.borrow().clone(),
-        }
+        pick_options_with(
+            Some(&*self.parts().engine),
+            state,
+            graph,
+            table,
+            self.0.counts.borrow().clone(),
+            self.0.config.bound.clone(),
+            self.0.stamp.borrow().clone(),
+        )
     }
 
     /// The unattended choice of a job on `lane`: the start's, else the lane kind's, else the

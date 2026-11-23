@@ -191,6 +191,7 @@ Each cell reads `Linux / macOS`. Every command is also in the command palette an
 | `ChatList` | `t` | `chat::ToggleAllTasks` |
 | `ChatList` | `u` | `chat::Restore` |
 | `LandingView` | `r` | `project::ResolveSplit` |
+| `LanesView` | `S` | `lanes_view::StopLane` |
 | `LanesView` | `c` | `lanes_view::ContinueLane` |
 | `LanesView` | `d` | `lanes_view::DryRun` |
 | `LanesView` | `enter` | `lanes_view::OpenRun` |

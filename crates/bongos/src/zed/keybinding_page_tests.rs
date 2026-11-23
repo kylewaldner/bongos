@@ -307,6 +307,31 @@ fn page_text(
 /// Contexts of the overrides files that hold a session's own keys, not a panel's.
 const SESSION_CONTEXTS: &[&str] = &["Minibuffer", "QueryReplace"];
 
+/// How the page lists a panel key: a key with no modifier as it is, and a capital letter (`S`,
+/// which parses as `shift-s` and so is not an [`is_panel_key`]) as the capital; `None` for a
+/// binding that is not a panel key.
+fn panel_key_text(binding: &KeyBinding) -> Option<String> {
+    if is_panel_key(binding) {
+        return Some(keys_of(binding).join(" "));
+    }
+    let context = context_of(binding);
+    let bare = !context.is_empty()
+        && context.chars().all(|c| c.is_alphanumeric() || c == '_')
+        && !["Editor", "Workspace", "Pane", "Terminal", "Markdown"].contains(&context.as_str());
+    let [keystroke] = binding.keystrokes() else {
+        return None;
+    };
+    let keystroke = keystroke.inner();
+    let modifiers = &keystroke.modifiers;
+    let lone_shift = modifiers.shift
+        && !modifiers.control
+        && !modifiers.alt
+        && !modifiers.platform
+        && !modifiers.function;
+    let letter = keystroke.key.len() == 1 && keystroke.key.as_bytes()[0].is_ascii_lowercase();
+    (bare && lone_shift && letter).then(|| keystroke.key.to_ascii_uppercase())
+}
+
 /// The panel keys of the specific overrides files, as `(context, key, command)`, sorted; the
 /// Linux and macOS files must hold the same ones.
 fn panel_keys(cx: &TestAppContext) -> Vec<(String, String, String)> {
@@ -314,14 +339,13 @@ fn panel_keys(cx: &TestAppContext) -> Vec<(String, String, String)> {
         let mut keys: Vec<(String, String, String)> = cx
             .update(|cx| KeymapFile::load_asset(path, Some(KeybindSource::Base), cx).unwrap())
             .iter()
-            .filter(|binding| is_panel_key(binding))
             .filter(|binding| !SESSION_CONTEXTS.contains(&context_of(binding).as_str()))
-            .map(|binding| {
-                (
+            .filter_map(|binding| {
+                Some((
                     context_of(binding),
-                    keys_of(binding).join(" "),
+                    panel_key_text(binding)?,
                     binding.action().name().to_string(),
-                )
+                ))
             })
             .collect();
         keys.sort();

@@ -5,7 +5,8 @@
 //! with no job boundary (halted, paused) keeps its state, task and reason when a stop is asked
 //! for. The dispatcher's run ends when every lane is at rest (stopped, halted or paused) and every
 //! job that went through the job hooks got its `after_job`: cancelled when `stop` with no lane
-//! asked for it, succeeded when the lanes stopped for a bound.
+//! asked for it, succeeded when the lanes stopped for a bound. With `lanes.exit_when_idle` true it
+//! also ends, succeeded, once every lane is idle and nothing is left to take.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -20,6 +21,7 @@ use bongos_project_repo::{StateRead, StateTx};
 use futures::channel::mpsc;
 use gpui::App;
 use serde::{Deserialize, Serialize};
+use settings::Settings as _;
 
 use crate::dispatcher::{
     Dispatcher, DispatcherRecord, Lanes, LanesParts, dispatcher_record, held_task, put_dispatcher,
@@ -142,7 +144,7 @@ impl Lanes {
                 dispatcher.end_if_at_rest(cx);
             }
             None => {
-                end_if_at_rest(&self.parts, &self.events, cx)?;
+                end_if_at_rest(&self.parts, &self.events, false, cx)?;
             }
         }
         Ok(())
@@ -188,12 +190,18 @@ impl Dispatcher {
     }
 
     /// Ends the dispatcher's run when every lane is at rest and no job is in the job hooks (one
-    /// still owed its `after_job`, or still in `before_job`). Returns whether it ended.
+    /// still owed its `after_job`, or still in `before_job`). With `lanes.exit_when_idle` true it
+    /// also ends when every lane is idle and nothing is left to take
+    /// ([`Dispatcher::nothing_left_to_take`]), so the engine host is no longer kept busy by it.
+    /// Returns whether it ended.
     pub(crate) fn end_if_at_rest(&self, cx: &mut App) -> bool {
         if !self.0.hooked.borrow().is_empty() {
             return false;
         }
-        match end_if_at_rest(self.parts(), &self.0.config.events, cx) {
+        let exit_when_idle =
+            crate::LanesSettings::try_get(cx).is_some_and(|settings| settings.exit_when_idle);
+        let nothing_left = exit_when_idle && self.nothing_left_to_take(cx);
+        match end_if_at_rest(self.parts(), &self.0.config.events, nothing_left, cx) {
             Ok(ended) => {
                 if ended {
                     // No pass runs any more, so nothing would withdraw the published asks.
@@ -395,18 +403,40 @@ fn status_of(
     }
 }
 
+/// The note of a dispatcher run that ended because nothing was left to take
+/// (`lanes.exit_when_idle`).
+pub const NOTHING_LEFT: &str = "every lane is idle and nothing is left to take";
+
 /// How the dispatcher's run ends with the lanes in `state`, or `None` while a lane is not at
 /// rest. Cancelled when a stop of every lane was asked for; succeeded when the lanes that stopped
-/// all stopped for a bound.
-fn dispatcher_end(state: &LanesState, record: &DispatcherRecord) -> Option<(RunEnd, String)> {
+/// all stopped for a bound. With `nothing_left` (`lanes.exit_when_idle` is true and the dispatcher
+/// found nothing any idle lane could take and nothing pending), it also ends, succeeded, when every
+/// lane not at rest is idle with no job and no stop or pause asked for.
+fn dispatcher_end(
+    state: &LanesState,
+    record: &DispatcherRecord,
+    nothing_left: bool,
+) -> Option<(RunEnd, String)> {
     let at_rest = |lane: &LaneRecord| {
         matches!(
             lane.state,
             LaneState::Stopped | LaneState::Halted | LaneState::Paused
         )
     };
-    if state.lanes.is_empty() || !state.lanes.values().all(at_rest) {
+    if state.lanes.is_empty() {
         return None;
+    }
+    if !state.lanes.values().all(at_rest) {
+        let idle = |lane: &LaneRecord| {
+            lane.state == LaneState::Idle
+                && lane.job.is_none()
+                && lane.stop_requested.is_none()
+                && !lane.pause_requested
+        };
+        let ends = nothing_left
+            && record.stopped_by.is_none()
+            && state.lanes.values().all(|lane| at_rest(lane) || idle(lane));
+        return ends.then(|| (RunEnd::Succeeded, NOTHING_LEFT.to_string()));
     }
     if let Some(who) = &record.stopped_by {
         return Some((RunEnd::Cancelled, format!("stopped by {who}")));
@@ -427,8 +457,14 @@ fn dispatcher_end(state: &LanesState, record: &DispatcherRecord) -> Option<(RunE
     None
 }
 
-/// Ends the dispatcher's run once, when every lane is at rest, and emits the event.
-fn end_if_at_rest(parts: &LanesParts, events: &LaneEvents, cx: &mut App) -> Result<bool> {
+/// Ends the dispatcher's run once, when every lane is at rest (or, with `nothing_left`, idle with
+/// nothing left to take; see [`dispatcher_end`]), and emits the event.
+fn end_if_at_rest(
+    parts: &LanesParts,
+    events: &LaneEvents,
+    nothing_left: bool,
+    cx: &mut App,
+) -> Result<bool> {
     let decided = parts.writer.transact(|tx| {
         let Some(mut record) = dispatcher_record(tx)? else {
             return Ok(None);
@@ -437,7 +473,7 @@ fn end_if_at_rest(parts: &LanesParts, events: &LaneEvents, cx: &mut App) -> Resu
             return Ok(None);
         }
         let state = read_state_in(tx)?;
-        let Some((end, note)) = dispatcher_end(&state, &record) else {
+        let Some((end, note)) = dispatcher_end(&state, &record, nothing_left) else {
             return Ok(None);
         };
         record.ended = Some(end);

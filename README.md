@@ -620,8 +620,10 @@ you start them, and they stop at a job boundary, never in the middle of a job.
   running. `lanes: start` in a window that holds the writer shows a summary of what will run, asks
   you to confirm, and then hands the writer to a new host; the window becomes a client. Closing the
   last window while lanes run in it does what `lanes.on_last_window_close` says (`ask`, `keep` or
-  `stop`). A host with no lane running and no client exits after `lanes.host.idle_exit_seconds`
-  (300), or at once when every lane is idle and `lanes.exit_when_idle` is true. A killed host's
+  `stop`). A host exits once it has had no client, no active run and no lanes' run for
+  `lanes.host.idle_exit_seconds` (300). The lanes' run lasts until the lanes are stopped or reach
+  their bound; with `lanes.exit_when_idle` true it also ends once every lane is idle and nothing
+  is left to take (no task that could still become ready), so the host then exits. A killed host's
   runs come back interrupted and wait on you (`lanes.on_interruption` or the table's), or are
   resumed once with `resume`; no run is resumed twice.
 - **Keys.** `C-c f L` is the prefix: `L` shows the Lanes view, `s` starts, `S` stops, `p`

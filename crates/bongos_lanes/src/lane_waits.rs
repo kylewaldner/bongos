@@ -256,6 +256,11 @@ pub(crate) struct WaitTracking {
 }
 
 impl WaitTracking {
+    /// Whether no question to a wait handler is pending and no recheck is set or due.
+    pub(crate) fn is_settled(&self) -> bool {
+        self.pending.is_empty() && self.rechecks.is_empty() && self.due.is_empty()
+    }
+
     fn next_seq(&mut self) -> u64 {
         self.seq += 1;
         self.seq

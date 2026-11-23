@@ -984,6 +984,9 @@ async fn a_connected_client_keeps_the_engine_host_running(cx: &mut TestAppContex
 
     drop(client);
     wait_for(cx, |cx| host_connections(cx) == 0);
+    // The poke of the client going was sent before the count dropped; the host hears it now,
+    // so the idle time starts before the clock moves.
+    cx.run_until_parked();
     cx.executor()
         .advance_clock(IDLE_EXIT - Duration::from_secs(1));
     cx.run_until_parked();

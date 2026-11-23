@@ -38,9 +38,10 @@ pub use ensure::{
 };
 pub use handover::{
     CANCELLED, DrainChoice, DrainPrompt, EngineRuns, HandoverRequest, HandoverRuns, HandoverTimes,
-    HandoverWatch, MOVING_REFUSAL, QueueSink, TAKE_BACK_WARN_EVERY, did_not_start, expect_handover,
-    install_handovers, is_moving, set_process_check, set_take_back_warn_every, start_handover,
-    take_writer_checked, take_writer_checked_by, take_writer_from_window,
+    HandoverWatch, MOVING_REFUSAL, QueueSink, StartTimeoutPassed, TAKE_BACK_WARN_EVERY,
+    did_not_start, expect_handover, install_handovers, is_moving, set_process_check,
+    set_start_timeout_check, set_take_back_warn_every, start_handover, take_writer_checked,
+    take_writer_checked_by, take_writer_from_window,
 };
 pub use host_file::{
     Alive, HOST_FILE, HostInfo, Moving, ProcessCheck, host_file_path, live_host, move_in_progress,

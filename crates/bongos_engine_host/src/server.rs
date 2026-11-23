@@ -106,10 +106,12 @@ impl Shared {
     }
 
     fn forget(&self, id: u64) {
-        self.connections
-            .lock()
-            .retain(|connection| connection.id != id);
+        // The watchers are told before the lock goes, so whoever sees the connection gone also
+        // finds the poke already sent. Nothing takes the connections while holding the watchers.
+        let mut connections = self.connections.lock();
+        connections.retain(|connection| connection.id != id);
         self.connections_changed();
+        drop(connections);
     }
 
     fn connections_changed(&self) {

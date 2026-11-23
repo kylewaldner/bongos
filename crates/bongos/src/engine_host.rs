@@ -147,6 +147,16 @@ pub fn run(project_id: String, mode: Mode) -> ! {
 /// Runs the read mode named by the first of `words` against the project's store, opened for
 /// reading only, prints its output and exits.
 fn read(project_id: &str, words: &[String], locations: Option<std::path::PathBuf>, cx: &mut App) {
+    // Work's startup opens every known project, by default as its writer. A read mode never takes
+    // a project's writer lock, so every such open is refused here (before that startup task runs,
+    // which is once this setup returns); the mode reads through its own reader below.
+    let refuse = Arc::new(|location: &Location| -> anyhow::Result<OpenedProject> {
+        Err(anyhow!(
+            "a read mode opens no project as writer ({})",
+            location.id
+        ))
+    });
+    ProjectOpening::install(refuse, None, cx);
     let Some((name, args)) = words.split_first() else {
         fail(2, "--read needs the name of a read mode");
     };
