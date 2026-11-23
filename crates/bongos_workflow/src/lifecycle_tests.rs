@@ -1197,10 +1197,10 @@ fn halt_then_resume_reruns_the_node_in_the_same_worktree_with_the_hand_edit() {
         std::slice::from_ref(&key)
     );
 
-    assert_eq!(lifecycle.progressing_runs(), [run.clone()]);
+    assert_eq!(lifecycle.progressing_runs(), std::slice::from_ref(&run));
     lifecycle.halt(&run).unwrap();
     assert_eq!(lifecycle.status(&run), Some(RunStatus::Halted));
-    assert_eq!(lifecycle.active_runs(), [run.clone()]);
+    assert_eq!(lifecycle.active_runs(), std::slice::from_ref(&run));
     assert!(
         lifecycle.progressing_runs().is_empty(),
         "a halted run waits for a person"
