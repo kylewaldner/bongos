@@ -28,6 +28,8 @@ fn main() {
             // In deterministic build environments such as Nix, we inject the commit sha into the build script.
             Some(git_sha)
         }
+        // A dev build embeds no sha (see `skip_git_head_watch`).
+        None if skip_git_head_watch() => None,
         None => {
             if let Some(output) = Command::new("git")
                 .args(["rev-parse", "HEAD"])
@@ -235,6 +237,15 @@ fn prepare_app_icon_x11() {
     println!("cargo:rerun-if-changed={}", icon_path().to_string_lossy());
 }
 
+/// Development scripts set `BONGOS_SKIP_GIT_HEAD_WATCH` so a commit does not rebuild this crate;
+/// release builds leave it unset. Such a build embeds no commit sha (unless `ZED_COMMIT_SHA` is
+/// given): a sha would be as of the last time this script ran, which differs from the one the
+/// `cli` build script embeds, and the engine host refuses a command line whose version differs.
+fn skip_git_head_watch() -> bool {
+    std::env::var("BONGOS_SKIP_GIT_HEAD_WATCH")
+        .is_ok_and(|value| !value.is_empty() && value != "0")
+}
+
 /// Tells cargo to rerun this script when the checked-out commit changes, so the
 /// embedded `ZED_COMMIT_SHA` stays current.
 ///
@@ -266,11 +277,7 @@ fn watch_git_head() {
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=BONGOS_SKIP_GIT_HEAD_WATCH");
-    // Development scripts set this so a commit does not rebuild this crate; the embedded sha
-    // then stays as of the last time this script ran. Release builds leave it unset.
-    if std::env::var("BONGOS_SKIP_GIT_HEAD_WATCH")
-        .is_ok_and(|value| !value.is_empty() && value != "0")
-    {
+    if skip_git_head_watch() {
         return;
     }
     let Some(output) = Command::new("git")

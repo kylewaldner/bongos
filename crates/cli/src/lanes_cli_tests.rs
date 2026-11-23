@@ -601,6 +601,18 @@ fn exit_code_four_is_a_protocol_or_version_mismatch() {
     assert!(outcome.stderr.contains("bongos host stop"));
 }
 
+/// The hello's version must equal the app's built beside it. In a dev build the build scripts of
+/// `cli` and the app rerun at different times, so a commit sha in it would differ from the app's
+/// and every command would be refused (exit 4); such a build embeds none.
+#[test]
+fn a_dev_build_says_a_version_with_no_commit_sha() {
+    let dev = option_env!("BONGOS_SKIP_GIT_HEAD_WATCH")
+        .is_some_and(|value| !value.is_empty() && value != "0");
+    if dev {
+        assert_eq!(option_env!("ZED_COMMIT_SHA"), None);
+    }
+}
+
 #[test]
 fn the_project_is_chosen_by_flag_folder_or_being_the_only_one() {
     let mut fake = Fake::new();
