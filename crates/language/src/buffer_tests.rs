@@ -4330,12 +4330,50 @@ fn test_detached_copy_has_no_file_is_read_only_and_keeps_language(cx: &mut TestA
     });
 
     let copy = buffer.update(cx, |buffer, cx| buffer.detached_copy(cx));
-    assert!(copy.file().is_none());
-    assert!(copy.read_only());
-    assert_eq!(copy.capability(), Capability::ReadOnly);
-    assert_eq!(copy.language().map(|l| l.name()), Some("Json".into()));
-    assert_eq!(copy.text(), "abc");
-    assert_eq!(copy.remote_id(), buffer.read_with(cx, |b, _| b.remote_id()));
+    let original_id = buffer.read_with(cx, |b, _| b.remote_id());
+    cx.run_until_parked();
+    copy.read_with(cx, |copy, _| {
+        assert!(copy.file().is_none());
+        assert!(copy.read_only());
+        assert_eq!(copy.capability(), Capability::ReadOnly);
+        assert_eq!(copy.language().map(|l| l.name()), Some("Json".into()));
+        assert_eq!(copy.text(), "abc");
+        assert_eq!(copy.remote_id(), original_id);
+    });
+}
+
+#[gpui::test]
+async fn test_detached_copy_parses_in_its_own_context(cx: &mut TestAppContext) {
+    cx.update(|cx| init_settings(cx, |_| {}));
+    let buffer = cx.new(|cx| Buffer::local("{\"a\": 1}", cx));
+    buffer.update(cx, |buffer, cx| {
+        buffer.set_language(Some(Arc::new(json_lang())), cx)
+    });
+    cx.run_until_parked();
+
+    let original_events = Arc::new(Mutex::new(Vec::new()));
+    let original_notifications = Arc::new(Mutex::new(0));
+    buffer.update(cx, |_, cx| {
+        let events = original_events.clone();
+        cx.subscribe(&buffer, move |_, _, event, _| {
+            events.lock().push(event.clone())
+        })
+        .detach();
+        let notifications = original_notifications.clone();
+        cx.observe(&buffer, move |_, _, _| *notifications.lock() += 1)
+            .detach();
+    });
+
+    let copy = buffer.update(cx, |buffer, cx| buffer.detached_copy(cx));
+    cx.run_until_parked();
+
+    assert!(original_events.lock().is_empty());
+    assert_eq!(*original_notifications.lock(), 0);
+    buffer.read_with(cx, |buffer, _| assert!(!buffer.is_parsing()));
+    copy.read_with(cx, |copy, _| {
+        assert!(!copy.is_parsing());
+        assert!(copy.snapshot().syntax_layers().next().is_some());
+    });
 }
 
 #[gpui::test]
@@ -4347,10 +4385,7 @@ fn test_editing_detached_copy_never_changes_original(cx: &mut TestAppContext) {
         .unwrap();
 
     // Undo the edit on a copy; the original keeps its text and version.
-    let copy_entity = buffer.update(cx, |buffer, cx| {
-        let copy = buffer.detached_copy(cx);
-        cx.new(|_| copy)
-    });
+    let copy_entity = buffer.update(cx, |buffer, cx| buffer.detached_copy(cx));
     let version_before = buffer.read_with(cx, |b, _| b.version());
     let counts = [(timestamp, u32::MAX)].into_iter().collect();
     copy_entity.update(cx, |copy, cx| copy.undo_operations(counts, cx));

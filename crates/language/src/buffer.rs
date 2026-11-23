@@ -1288,17 +1288,24 @@ impl Buffer {
         }
     }
 
-    /// Returns a read-only copy of this buffer that has no file, is not
-    /// subscribed to this buffer, and shares its text history and language.
-    /// Edits applied to the copy never reach this buffer.
-    pub fn detached_copy(&self, cx: &mut Context<Self>) -> Buffer {
-        let mut copy = Self::build(self.text.branch(), None, Capability::ReadOnly);
-        copy.language = self.language.clone();
-        if let Some(language_registry) = self.language_registry() {
-            copy.set_language_registry(language_registry);
-        }
-        copy.reparse(cx, true);
-        copy
+    /// Returns a new read-only buffer entity that has no file, is not
+    /// subscribed to this buffer, has the same text and language, and starts
+    /// with a fresh text history. Edits applied to the copy never reach this
+    /// buffer. The copy parses in its own context, so this buffer receives no
+    /// events from it.
+    pub fn detached_copy(&self, cx: &mut App) -> Entity<Buffer> {
+        let text = self.text.branch();
+        let language = self.language.clone();
+        let language_registry = self.language_registry();
+        cx.new(|cx| {
+            let mut copy = Self::build(text, None, Capability::ReadOnly);
+            copy.language = language;
+            if let Some(language_registry) = language_registry {
+                copy.set_language_registry(language_registry);
+            }
+            copy.reparse(cx, true);
+            copy
+        })
     }
 
     pub fn branch(&mut self, cx: &mut Context<Self>) -> Entity<Self> {

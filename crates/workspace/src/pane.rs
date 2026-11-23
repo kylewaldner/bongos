@@ -1395,7 +1395,8 @@ impl Pane {
 
     /// Sets a view that the pane draws instead of the active item's content.
     /// The tab bar is unchanged. Passing `None` shows the active item again;
-    /// focus is not moved either way.
+    /// focus is not moved either way. The override only applies while the pane
+    /// has an active item; an empty pane still shows its placeholder.
     pub fn set_content_override(&mut self, view: Option<AnyView>, cx: &mut Context<Self>) {
         self.content_override = view;
         cx.notify();
@@ -7816,8 +7817,10 @@ mod tests {
             cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
         let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
         add_labeled_item(&pane, "A", false, cx);
-        add_labeled_item(&pane, "B", false, cx);
+        let item_b = add_labeled_item(&pane, "B", false, cx);
         cx.run_until_parked();
+        let item_renders_before = item_b.read_with(cx, |item, _| item.render_count.get());
+        assert!(item_renders_before > 0);
 
         let renders = Rc::new(Cell::new(0));
         let view = cx.new(|_| CountingView {
@@ -7829,6 +7832,10 @@ mod tests {
         cx.run_until_parked();
 
         assert!(renders.get() > 0);
+        assert_eq!(
+            item_b.read_with(cx, |item, _| item.render_count.get()),
+            item_renders_before
+        );
         assert!(pane.read_with(cx, |pane, _| pane.content_override().is_some()));
         assert_item_labels(&pane, ["A", "B*"], cx);
     }
@@ -7841,7 +7848,7 @@ mod tests {
         let (workspace, cx) =
             cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
         let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
-        add_labeled_item(&pane, "A", false, cx);
+        let item_a = add_labeled_item(&pane, "A", false, cx);
         cx.run_until_parked();
 
         let renders = Rc::new(Cell::new(0));
@@ -7854,12 +7861,16 @@ mod tests {
         cx.run_until_parked();
         let focused_before = cx.update(|window, cx| window.focused(cx));
         let renders_while_overridden = renders.get();
+        let item_renders_while_overridden = item_a.read_with(cx, |item, _| item.render_count.get());
 
         pane.update(cx, |pane, cx| pane.set_content_override(None, cx));
         cx.run_until_parked();
 
         assert!(pane.read_with(cx, |pane, _| pane.content_override().is_none()));
         assert_eq!(renders.get(), renders_while_overridden);
+        assert!(
+            item_a.read_with(cx, |item, _| item.render_count.get()) > item_renders_while_overridden
+        );
         let focused_after = cx.update(|window, cx| window.focused(cx));
         assert_eq!(focused_before, focused_after);
         assert_item_labels(&pane, ["A*"], cx);

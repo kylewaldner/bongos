@@ -14551,7 +14551,7 @@ async fn test_detached_copy_is_not_in_buffer_store(cx: &mut gpui::TestAppContext
 
     let copy = buffer.update(cx, |buffer, cx| buffer.detached_copy(cx));
     let buffer_id = buffer.read_with(cx, |buffer, _| buffer.remote_id());
-    assert_eq!(copy.remote_id(), buffer_id);
+    assert_eq!(copy.read_with(cx, |copy, _| copy.remote_id()), buffer_id);
 
     buffer_store.read_with(cx, |store, _| {
         assert_eq!(store.buffers().count(), count_before);
