@@ -900,7 +900,11 @@ fn confine_command(
     args: &[String],
     env: &BTreeMap<OsString, OsString>,
 ) -> Result<(Command, Confined), NoVerdictReason> {
-    let failed = |why: String| NoVerdictReason::StartFailed(why);
+    let failed = |why: String| {
+        NoVerdictReason::StartFailed(format!(
+            "{why} (install Bubblewrap or set confinement.task_checks to false)"
+        ))
+    };
     let git_dirs = options
         .git_dirs
         .clone()

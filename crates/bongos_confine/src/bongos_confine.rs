@@ -38,6 +38,26 @@ use util::job_roots::RootLifetime;
 
 pub use promise_text::{Platform, Promise, SandboxAvailability, promise, switch_off_notes};
 
+/// Whether the platform's sandbox can run here, probed once per process. On Linux this runs a
+/// brief `bwrap` probe, so call it off a hot path.
+pub fn sandbox_availability() -> SandboxAvailability {
+    static AVAILABILITY: std::sync::OnceLock<SandboxAvailability> = std::sync::OnceLock::new();
+    *AVAILABILITY.get_or_init(|| {
+        let policy = SandboxPolicy {
+            fs: SandboxFsPolicy::Restricted {
+                writable_paths: vec![std::env::temp_dir()],
+            },
+            network: SandboxNetPolicy::Unrestricted,
+            git: GitSandboxPolicy::default(),
+            read_only_masks: Vec::new(),
+        };
+        match sandbox::Sandbox::can_create(&policy, None) {
+            Ok(()) => SandboxAvailability::Available,
+            Err(_) => SandboxAvailability::Unavailable,
+        }
+    })
+}
+
 /// The rule a refused write broke, quoted in every refusal bongos reports.
 pub const RULE: &str = "write outside the job tree and declared directories refused";
 

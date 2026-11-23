@@ -105,7 +105,7 @@ impl Settings for TaskChecksSettings {
                 .confinement
                 .as_ref()
                 .and_then(|confinement| confinement.task_checks)
-                .unwrap_or(false),
+                .unwrap_or(true),
         }
     }
 }

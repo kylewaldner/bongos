@@ -1946,13 +1946,14 @@ pub struct TaskChecksSettingsContent {
 #[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
 pub struct ConfinementSettingsContent {
     /// Run agent steps inside the sandbox (writes only to the job tree, scratch, declared
-    /// directories and the agent CLI's own state paths).
+    /// directories and the agent CLI's own state paths). Off by default for now: the Claude Code
+    /// CLI needs its config directory inside a writable path before it works confined.
     ///
     /// Default: false
     pub agent_steps: Option<bool>,
     /// Run task checks inside the sandbox.
     ///
-    /// Default: false
+    /// Default: true
     pub task_checks: Option<bool>,
     /// Paths each agent CLI must write to keep its session and login; `~` is the job's HOME.
     pub agent_state_paths: Option<ConfinementAgentStatePathsContent>,
