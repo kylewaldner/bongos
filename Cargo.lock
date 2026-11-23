@@ -2868,14 +2868,18 @@ dependencies = [
 name = "bongos_undo_tree"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bongos_emacs",
  "bongos_prompts",
+ "bongos_undo_tree_model",
  "clock",
+ "collections",
  "db",
  "editor",
  "fs",
  "gpui",
  "language",
+ "lsp",
  "project",
  "release_channel",
  "remote",
