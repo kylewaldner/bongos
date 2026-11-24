@@ -455,6 +455,8 @@ runs:
           rc=0
         fi
         df -h /
+        # where the disk went (a whole-suite gate used about 100 GiB in a first test run and blocked on the 15 GiB floor)
+        timeout 150 du -xh -d1 /mnt/bongos-workspace "$RUNNER_TEMP" "$GITHUB_WORKSPACE" 2>/dev/null | sort -h | tail -14 || true
         # The runner mode reset the workspace to the job's base (a design job: the base's main), where this action
         # may not exist; the runner's post steps read action.yml from the workspace, so put back the commit the
         # workflow started from (the job is over: nothing reads the workspace any more).
