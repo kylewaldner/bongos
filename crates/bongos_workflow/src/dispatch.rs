@@ -6,8 +6,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use bongos_workflow_model::definition::{AgentKind, NodeKind as DefinitionKind};
+use bongos_workflow_model::unsandboxed::{self, Mode};
 use bongos_workflow_model::{Failure, FailureReason, NodeKey};
 
+use crate::agent_confinement::AgentConfinementSettings;
 use crate::dispatch_agent::AgentNodes;
 use crate::dispatch_program::ProgramNodes;
 use crate::lifecycle::agent_of;
@@ -40,6 +42,18 @@ pub struct RunnerSnapshot {
     /// The hosts `@remote` stands for, by run id; a run with no entry takes them from the task
     /// repository's push remote when its node starts.
     pub remote_hosts: BTreeMap<String, Vec<String>>,
+    /// The runs whose project's `runs.unsandboxed` refuses unsandboxed starts, by run id.
+    pub refusing_runs: BTreeSet<String>,
+    /// `confinement.agent_steps` and `confinement.agent_state_paths`.
+    pub agent_confinement: AgentConfinementSettings,
+}
+
+impl RunnerSnapshot {
+    /// The effective `workflows.programs.unsandboxed` mode of `run`: the user setting, or
+    /// `Refuse` when the run's project refuses, whatever the setting.
+    pub fn unsandboxed_mode(&self, run: &str) -> Mode {
+        unsandboxed::effective_mode(self.programs.unsandboxed, self.refusing_runs.contains(run))
+    }
 }
 
 /// A shared, replaceable [`RunnerSnapshot`]: the app sets it, the runner reads a copy.
@@ -200,6 +214,10 @@ impl Runner for AppRunner {
         self.bindings.remove(run);
     }
 
+    fn unsandboxed_mode(&self, run: &str) -> Mode {
+        self.inputs.snapshot().unsandboxed_mode(run)
+    }
+
     fn start_node(&mut self, node: NodeStart<'_>) -> Result<ProcessRecord, Failure> {
         let fail = |reason, detail: String| Failure::new(reason, Some(node.key.clone()), detail);
         let Some(definition_node) = node.definition.node(&node.key.node) else {
@@ -281,5 +299,5 @@ fn merge_into_run(git: &Git, run: &RunWorktree, fan: &str, index: u32) -> Result
             ));
         }
     }
-    futures::executor::block_on(git.run(&run.path, &["rev-parse", "HEAD"])).map_err(git_failure)
+    futures::executor::block_on(git.run_at(run.at(), &["rev-parse", "HEAD"])).map_err(git_failure)
 }

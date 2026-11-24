@@ -256,6 +256,11 @@ pub struct SettingsContent {
     /// Settings for the minibuffer: the strip at the bottom of the window that hosts prompts.
     pub minibuffer: Option<MinibufferSettingsContent>,
 
+    /// Settings for the navigation pickers: the buffer switcher, go to file and find in files.
+    pub navigation: Option<NavigationSettingsContent>,
+    /// Settings for the undo tree: a view of a buffer's undo history as a tree.
+    pub undo_tree: Option<UndoTreeSettingsContent>,
+
     /// Settings for the Work view: projects and tasks kept as files under `~/.bongos`.
     pub work: Option<WorkSettingsContent>,
 
@@ -282,6 +287,9 @@ pub struct SettingsContent {
 
     /// Settings for task checks: scripts and commands that must pass before a task is done.
     pub task_checks: Option<TaskChecksSettingsContent>,
+
+    /// Settings for confining jobs (agent steps and task checks) to their job tree.
+    pub confinement: Option<ConfinementSettingsContent>,
 
     /// Settings related to Vim mode in bongos.
     pub vim: Option<VimSettingsContent>,
@@ -1435,6 +1443,47 @@ pub struct MinibufferSettingsContent {
     pub key_hint_delay: Option<u64>,
 }
 
+/// Settings for the navigation pickers.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct NavigationSettingsContent {
+    /// Whether the buffer switcher lists recently closed files after the open buffers.
+    ///
+    /// Default: true
+    pub include_recent_closed: Option<bool>,
+    /// The largest file, in bytes, that a picker preview shows.
+    ///
+    /// Default: 2097152
+    pub preview_max_file_size: Option<u64>,
+}
+
+/// How edits are grouped into undo states.
+#[derive(
+    Clone, Copy, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq, Eq,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum UndoGroupingContent {
+    /// Group edits the way Emacs does.
+    Emacs,
+    /// Group edits the way the editor always has.
+    #[default]
+    Zed,
+}
+
+/// Settings for the undo tree.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct UndoTreeSettingsContent {
+    /// The most nodes the undo tree keeps. Values below 100 count as 100.
+    ///
+    /// Default: 10000
+    pub node_limit: Option<usize>,
+    /// How edits are grouped into undo states: "emacs" or "zed".
+    ///
+    /// Default: "zed"
+    pub grouping: Option<UndoGroupingContent>,
+}
+
 #[with_fallible_options]
 #[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
 pub struct WorkSettingsContent {
@@ -1870,6 +1919,52 @@ pub struct WorkflowProgramsSettingsContent {
     ///
     /// Default: true
     pub allow_network: Option<bool>,
+    /// What a program node does when no OS sandbox is available: "ask" asks a person to approve
+    /// the run once, "refuse" never runs it, "allow" runs it unsandboxed without asking. A project
+    /// can only tighten this. The script's own audit checks are not a security boundary.
+    ///
+    /// Default: "ask"
+    pub unsandboxed: Option<WorkflowUnsandboxed>,
+}
+
+/// What a program node does when no OS sandbox is available.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, JsonSchema, MergeFrom)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowUnsandboxed {
+    /// Ask a person to approve the run once.
+    #[default]
+    Ask,
+    /// Never run a program without a sandbox.
+    Refuse,
+    /// Run without a sandbox and without asking.
+    Allow,
+}
+
+impl WorkflowUnsandboxed {
+    /// The value a setting string names; an unknown one (a leftover "fallback" included) is `Ask`,
+    /// the safe answer that still lets a person decide.
+    pub fn from_setting(value: &str) -> Self {
+        match value {
+            "ask" => Self::Ask,
+            "refuse" => Self::Refuse,
+            "allow" => Self::Allow,
+            other => {
+                log::warn!(
+                    "workflows.programs.unsandboxed: unknown value {other:?}, reading it as \"ask\""
+                );
+                Self::Ask
+            }
+        }
+    }
+}
+
+// Hand-written: serde's derive rejects an unknown value, which would fail the whole settings
+// file; an unknown string reads as `ask` with a warning instead.
+impl<'de> Deserialize<'de> for WorkflowUnsandboxed {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Ok(Self::from_setting(&value))
+    }
 }
 
 /// Settings for task checks.
@@ -1936,6 +2031,41 @@ pub struct TaskChecksSettingsContent {
     ///
     /// Default: 1000
     pub live_write_ms: Option<u32>,
+}
+
+/// Settings for confining jobs to their job tree, scratch directory and declared directories.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct ConfinementSettingsContent {
+    /// Run agent steps inside the sandbox (writes only to the job tree, scratch, declared
+    /// directories and the agent CLI's own state paths). Off by default until the confined Claude
+    /// Code CLI is verified with a logged-in session and user-scoped MCP servers.
+    ///
+    /// Default: false
+    pub agent_steps: Option<bool>,
+    /// Run task checks inside the sandbox.
+    ///
+    /// Default: true
+    pub task_checks: Option<bool>,
+    /// Paths each agent CLI must write to keep its session and login; `~` is the job's HOME.
+    pub agent_state_paths: Option<ConfinementAgentStatePathsContent>,
+}
+
+/// Paths each agent CLI may write while confined.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct ConfinementAgentStatePathsContent {
+    /// Paths the Claude Code CLI writes.
+    ///
+    /// The CLI runs with `CLAUDE_CONFIG_DIR` set to `~/.claude`, so it keeps its login and
+    /// settings there.
+    ///
+    /// Default: ["~/.claude"]
+    pub claude: Option<Vec<String>>,
+    /// Paths the Codex CLI writes.
+    ///
+    /// Default: ["~/.codex"]
+    pub codex: Option<Vec<String>>,
 }
 
 /// Settings for chat sessions.

@@ -15,6 +15,7 @@ use workspace::Workspace;
 use crate::actions::{LastToast, OFF_MESSAGE};
 use crate::commands::VALIDATE_TITLE;
 use crate::engine::{EngineRoots, WorkflowEngine};
+use crate::remote::{InstalledWorkflowRemote, WorkflowPayload, WorkflowRemote, WorkflowVerb};
 
 const BROKEN: &str = "schema = 1\n\
 name = \"broken\"\n\
@@ -626,6 +627,14 @@ fn approve_offers_as_is_first_then_each_field_of_the_held_result() {
 }
 
 #[test]
+fn a_gate_edit_of_a_schema_data_field_is_refused() {
+    assert_eq!(
+        parse_field(&FieldType::Data, "{\"a\": 1}"),
+        Err("this field cannot be edited here".to_string())
+    );
+}
+
+#[test]
 fn an_edited_value_is_parsed_by_the_type_of_its_field() {
     let text = |type_, line| parse_field(&type_, line);
     assert_eq!(text(FieldType::Text, "hello"), Ok(json!("hello")));
@@ -651,5 +660,189 @@ fn an_edited_value_is_parsed_by_the_type_of_its_field() {
     assert_eq!(
         text(FieldType::List(ItemType::Number), "1, x"),
         Err("'x' is not a number".to_string())
+    );
+}
+
+/// A remote that records the verbs it is sent and answers with `reply`.
+struct RecordingRemote {
+    sent: std::rc::Rc<std::cell::RefCell<Vec<WorkflowVerb>>>,
+    reply: Result<&'static str, &'static str>,
+}
+
+impl WorkflowRemote for RecordingRemote {
+    fn is_remote(&self, _: Option<&str>, _: &gpui::App) -> bool {
+        true
+    }
+
+    fn send(
+        &self,
+        verb: WorkflowVerb,
+        _: WorkflowPayload,
+        _: &mut gpui::App,
+    ) -> gpui::Task<anyhow::Result<String>> {
+        self.sent.borrow_mut().push(verb);
+        gpui::Task::ready(match self.reply {
+            Ok(message) => Ok(message.to_string()),
+            Err(error) => Err(anyhow::anyhow!(error)),
+        })
+    }
+}
+
+#[gpui::test]
+async fn a_remote_run_sends_the_sandbox_verbs_and_shows_a_failed_send(cx: &mut TestAppContext) {
+    let (_env, cx) = env(cx, true).await;
+    let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    cx.update(|_, cx| {
+        InstalledWorkflowRemote::install(
+            std::rc::Rc::new(RecordingRemote {
+                sent: sent.clone(),
+                reply: Ok("sent"),
+            }),
+            cx,
+        )
+    });
+    dispatch("workflow::AllowUnsandboxedOnce", cx);
+    dispatch("workflow::RefuseUnsandboxed", cx);
+    assert_eq!(
+        *sent.borrow(),
+        [
+            WorkflowVerb::AllowUnsandboxedOnce,
+            WorkflowVerb::RefuseUnsandboxed
+        ]
+    );
+    cx.update(|_, cx| assert_eq!(cx.global::<LastToast>().0, "sent"));
+
+    // A failed send shows its error; the ask is the writer's, so it stays open there.
+    cx.update(|_, cx| {
+        InstalledWorkflowRemote::install(
+            std::rc::Rc::new(RecordingRemote {
+                sent: sent.clone(),
+                reply: Err("the host is gone"),
+            }),
+            cx,
+        )
+    });
+    dispatch("workflow::AllowUnsandboxedOnce", cx);
+    assert_eq!(sent.borrow().len(), 3);
+    cx.update(|_, cx| assert_eq!(cx.global::<LastToast>().0, "the host is gone"));
+}
+
+#[gpui::test]
+async fn the_run_view_buttons_send_the_sandbox_verbs_through_a_remote(cx: &mut TestAppContext) {
+    let (env, cx) = env(cx, true).await;
+    let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    cx.update(|_, cx| {
+        InstalledWorkflowRemote::install(
+            std::rc::Rc::new(RecordingRemote {
+                sent: sent.clone(),
+                reply: Ok("sent"),
+            }),
+            cx,
+        )
+    });
+    // A view of a run this process does not hold: the writer is another process.
+    let engine = cx.update(|_, cx| cx.global::<WorkflowEngine>().clone());
+    env.workspace.update_in(cx, |workspace, window, cx| {
+        crate::run_view::show(engine, "held-elsewhere".to_string(), workspace, window, cx)
+    });
+    let view = env
+        .workspace
+        .read_with(cx, |workspace, cx| {
+            workspace.active_item_as::<crate::run_view::RunView>(cx)
+        })
+        .unwrap();
+    view.update_in(cx, |view, window, cx| view.press_consent(true, window, cx));
+    cx.run_until_parked();
+    view.update_in(cx, |view, window, cx| view.press_consent(false, window, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        *sent.borrow(),
+        [
+            WorkflowVerb::AllowUnsandboxedOnce,
+            WorkflowVerb::RefuseUnsandboxed
+        ]
+    );
+    cx.update(|_, cx| assert_eq!(cx.global::<LastToast>().0, "sent"));
+
+    // A failed send shows its error as a toast.
+    cx.update(|_, cx| {
+        InstalledWorkflowRemote::install(
+            std::rc::Rc::new(RecordingRemote {
+                sent: sent.clone(),
+                reply: Err("the host is gone"),
+            }),
+            cx,
+        )
+    });
+    view.update_in(cx, |view, window, cx| view.press_consent(true, window, cx));
+    cx.run_until_parked();
+    assert_eq!(sent.borrow().len(), 3);
+    cx.update(|_, cx| assert_eq!(cx.global::<LastToast>().0, "the host is gone"));
+}
+
+/// A remote that records the verb and run of every send.
+struct RunRecordingRemote {
+    sent: std::rc::Rc<std::cell::RefCell<Vec<(WorkflowVerb, Option<String>)>>>,
+}
+
+impl WorkflowRemote for RunRecordingRemote {
+    fn is_remote(&self, _: Option<&str>, _: &gpui::App) -> bool {
+        true
+    }
+
+    fn send(
+        &self,
+        verb: WorkflowVerb,
+        payload: WorkflowPayload,
+        _: &mut gpui::App,
+    ) -> gpui::Task<anyhow::Result<String>> {
+        self.sent.borrow_mut().push((verb, payload.run));
+        gpui::Task::ready(Ok("sent".to_string()))
+    }
+}
+
+#[gpui::test]
+async fn a_press_on_a_view_behind_another_answers_its_own_run(cx: &mut TestAppContext) {
+    let (env, cx) = env(cx, true).await;
+    let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    cx.update(|_, cx| {
+        InstalledWorkflowRemote::install(
+            std::rc::Rc::new(RunRecordingRemote { sent: sent.clone() }),
+            cx,
+        )
+    });
+    let engine = cx.update(|_, cx| cx.global::<WorkflowEngine>().clone());
+    let mut views = Vec::new();
+    for run in ["run-a", "run-b"] {
+        let engine = engine.clone();
+        env.workspace.update_in(cx, |workspace, window, cx| {
+            crate::run_view::show(engine, run.to_string(), workspace, window, cx)
+        });
+        views.push(
+            env.workspace
+                .read_with(cx, |workspace, cx| {
+                    workspace.active_item_as::<crate::run_view::RunView>(cx)
+                })
+                .unwrap(),
+        );
+    }
+    // The view of run-b is in front; the press lands on the view of run-a.
+    let front = env.workspace.read_with(cx, |workspace, cx| {
+        crate::run_view::active_run(workspace, cx)
+    });
+    assert_eq!(front.as_deref(), Some("run-b"));
+    views[0].update_in(cx, |view, window, cx| view.press_consent(true, window, cx));
+    cx.run_until_parked();
+    views[0].update_in(cx, |view, window, cx| view.press_consent(false, window, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        *sent.borrow(),
+        [
+            (
+                WorkflowVerb::AllowUnsandboxedOnce,
+                Some("run-a".to_string())
+            ),
+            (WorkflowVerb::RefuseUnsandboxed, Some("run-a".to_string())),
+        ]
     );
 }

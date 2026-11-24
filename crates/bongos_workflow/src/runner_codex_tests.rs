@@ -7,7 +7,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use bongos_confine::{HostGit, RULE, TreeAccess, TreeGit};
 
 use bongos_chat::model::{Agent, Capabilities};
 use bongos_chat::{AgentCommand, Health, HealthState};
@@ -17,11 +20,13 @@ use bongos_workflow_model::{
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+use crate::agent_confinement::{AgentJob, CONFINEMENT_LOG};
 use crate::runner_claude::{AgentDefaults, ENV_NAMES, NodeCaps, PASSED_ENV};
 use crate::runner_codex::{
     CodexCli, CodexNode, CodexRunner, Exit, RESULT_FILE, SCHEMA_FILE, classify, launch_env,
     own_model, sandbox_for, stdin_text,
 };
+use crate::runner_program::SandboxProbe;
 use crate::runtime::Finish;
 
 const FAKE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test-fixtures/fake-codex-exec");
@@ -129,6 +134,8 @@ fn node(definition: &Definition, root: &Path) -> CodexNode {
         caps: NodeCaps::resolve(definition, declared, &AgentDefaults::default()),
         model: own_model(definition, declared),
         output: declared.output.clone(),
+        schema: declared.schema.clone(),
+        schema_text: declared.schema.document().to_string(),
         mcp_exclude: Vec::new(),
         mcp_installed: ["broken", "github", "linear"]
             .iter()
@@ -141,6 +148,7 @@ fn node(definition: &Definition, root: &Path) -> CodexNode {
         task_id: "task-1".to_string(),
         task_dir: root.join("task"),
         node_result: try_dir.join("node-result.json"),
+        confinement: None,
         env: Vec::new(),
     }
 }
@@ -294,15 +302,15 @@ fn an_excluded_server_is_disabled_even_when_the_node_names_it() {
 #[test]
 fn the_schema_file_requires_every_property_for_strict_mode() {
     let (finish, root) = run_one("success", |node| {
-        node.output = parse(&TRIAGE.replace(
+        let edited = parse(&TRIAGE.replace(
             r#"why = { type = "text" }"#,
             r#"why = { type = "text", optional = true }"#,
         ))
-        .unwrap()
-        .node("triage")
-        .unwrap()
-        .output
-        .clone();
+        .unwrap();
+        let edited = edited.node("triage").unwrap();
+        node.output = edited.output.clone();
+        node.schema = edited.schema.clone();
+        node.schema_text = edited.schema.document().to_string();
     });
     assert!(finish.outcome.is_ok());
     let written: Value = serde_json::from_str(
@@ -337,7 +345,7 @@ fn the_schema_file_holds_the_declared_output() {
     let declared = definition();
     assert_eq!(
         written,
-        json_schema_strict(&declared.node("triage").unwrap().output)
+        json_schema_strict(declared.node("triage").unwrap().schema.document())
     );
     assert_eq!(written["additionalProperties"], json!(false));
     assert_eq!(
@@ -678,4 +686,67 @@ fn a_stopped_try_is_never_reported() {
     runner.stop(&[("run-1".to_string(), key())]);
     assert!(runner.in_flight().is_empty());
     assert!(runner.poll().is_empty());
+}
+
+#[test]
+fn a_confined_try_gets_the_confinement_line_and_its_scratch() {
+    let root = TempDir::new().unwrap();
+    let log_arg = root.path().join("log").to_string_lossy().into_owned();
+    let probe: SandboxProbe = Arc::new(|_, _| Err("bwrap not found (test)".to_string()));
+    let mut runner = CodexRunner::new(
+        cli(
+            &["--fake-scenario", "success", "--fake-log", &log_arg],
+            root.path(),
+        ),
+        base_env(root.path()),
+    )
+    .with_sandbox_probe(probe);
+    let mut codex_node = node(&definition(), root.path());
+    let scratch = root.path().join("scratch/triage/1-1");
+    codex_node.confinement = Some(AgentJob {
+        scratch: scratch.clone(),
+        declared_dirs: Vec::new(),
+        tree_access: TreeAccess::Writable,
+        tree_git: TreeGit::None,
+        host_git: HostGit::default(),
+        state_paths: vec!["~/.codex".to_string()],
+    });
+    runner.start("run-1", &key(), 1, codex_node).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let finish = loop {
+        if let Some(finish) = runner.poll().pop() {
+            break finish;
+        }
+        assert!(Instant::now() < deadline, "the fake did not finish");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(finish.outcome.is_ok(), "{:?}", finish.outcome);
+    assert!(finish.confinement_refusals.is_empty());
+    let stdin = std::fs::read_to_string(root.path().join("log/stdin")).unwrap();
+    let (context, prompt) = stdin.split_once("\n\n---\n\n").unwrap();
+    assert!(
+        context.starts_with("Task context: the goal.\n"),
+        "{context}"
+    );
+    assert!(context.ends_with(&format!("({RULE}).")), "{context}");
+    assert_eq!(prompt, "Triage the task.\n");
+    let env = std::fs::read_to_string(root.path().join("log/env")).unwrap();
+    assert!(
+        env.lines()
+            .any(|line| line == format!("TMPDIR={}", scratch.join("tmp").display())),
+        "{env}"
+    );
+    let log = std::fs::read_to_string(
+        root.path()
+            .join("record/nodes/triage/1-1")
+            .join(CONFINEMENT_LOG),
+    )
+    .unwrap();
+    assert!(
+        log.lines()
+            .next()
+            .unwrap()
+            .starts_with("warning: the agent state path ~/.codex"),
+        "{log}"
+    );
 }

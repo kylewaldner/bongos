@@ -12,9 +12,9 @@ use std::rc::Rc;
 use crate::WorkflowsSettings;
 use crate::actions::OFF_MESSAGE;
 use crate::engine::WorkflowEngine;
-use crate::lifecycle::{Refusal, RunId, StartRequest};
+use crate::lifecycle::{BY_PERSON, Refusal, RunId, StartRequest};
 
-/// The commands of the workflow engine a window sends to the writer.
+/// The commands of the workflow engine a window (or the command line) sends to the writer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum WorkflowVerb {
@@ -28,7 +28,18 @@ pub enum WorkflowVerb {
     Approve,
     Revise,
     ClearFinished,
+    /// Answers the run's pending sandbox ask with "run this once without a sandbox".
+    AllowUnsandboxedOnce,
+    /// Answers the run's pending sandbox ask with "stop".
+    RefuseUnsandboxed,
 }
+
+/// The refusal of an allow from a peer that cannot attest a person.
+pub const ALLOW_NEEDS_PERSON: &str =
+    "allowing a run without a sandbox needs a person at a bongos window";
+
+/// Who answered a sandbox ask from a peer that cannot attest a person (a refusal only).
+pub const BY_PEER: &str = "command line";
 
 /// What a command acts on and with. A field the sender leaves out is the default, so the command
 /// line can send only the fields it has.
@@ -104,12 +115,19 @@ fn refused(refusal: Refusal) -> String {
 }
 
 /// Runs `verb` in this process's engine, as the writer. Resolves with the text to show: what
-/// was done, or the engine's refusal.
+/// was done, or the engine's refusal. `person` is whether the sender may attest a person at a
+/// bongos window (the host passes `may_attest_person` of its peer): an allow to run without the
+/// sandbox from any other sender is refused before anything is read; a refusal is taken from
+/// anyone.
 pub fn execute(
     verb: WorkflowVerb,
     payload: WorkflowPayload,
+    person: bool,
     cx: &mut App,
 ) -> Result<String, String> {
+    if verb == WorkflowVerb::AllowUnsandboxedOnce && !person {
+        return Err(ALLOW_NEEDS_PERSON.to_string());
+    }
     if !WorkflowsSettings::get_global(cx).enabled {
         return Err(OFF_MESSAGE.to_string());
     }
@@ -189,6 +207,17 @@ pub fn execute(
             engine
                 .revise(&run, &key, payload.comment.unwrap_or_default(), cx)
                 .map(|()| "Sent back for revision".to_string())
+                .map_err(refused)
+        }
+        WorkflowVerb::AllowUnsandboxedOnce => engine
+            .answer_unsandboxed(&run, true, BY_PERSON, cx)
+            .map(|()| "Allowed this run to go without a sandbox".to_string())
+            .map_err(refused),
+        WorkflowVerb::RefuseUnsandboxed => {
+            let by = if person { BY_PERSON } else { BY_PEER };
+            engine
+                .answer_unsandboxed(&run, false, by, cx)
+                .map(|()| "Stopped: nothing ran without a sandbox".to_string())
                 .map_err(refused)
         }
         WorkflowVerb::Start | WorkflowVerb::ClearFinished => unreachable!("handled above"),

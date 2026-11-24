@@ -20,6 +20,9 @@ pub enum GitError {
     Spawn { args: String, message: String },
     #[error("git {args} failed: {stderr}")]
     Failed { args: String, stderr: String },
+    /// The repository git would use in the directory was written by a sandboxed job.
+    #[error("{message}")]
+    Refused { message: String },
 }
 
 impl GitError {
@@ -110,6 +113,27 @@ const REDIRECTING_VARIABLES: [&str; 19] = [
 pub struct Git {
     binary: PathBuf,
     isolated: bool,
+    job_roots: JobRootsSource,
+}
+
+/// The job roots registry a [`Git`] consults: the process's, or one given by a test.
+#[derive(Clone, Default)]
+struct JobRootsSource(Option<std::sync::Arc<util::job_roots::JobRoots>>);
+
+impl std::fmt::Debug for JobRootsSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let source = if self.0.is_some() { "given" } else { "process" };
+        formatter.write_str(source)
+    }
+}
+
+impl JobRootsSource {
+    fn contains(&self, path: &Path) -> bool {
+        match &self.0 {
+            Some(roots) => roots.contains(path),
+            None => util::job_roots::contains(path),
+        }
+    }
 }
 
 impl Git {
@@ -133,12 +157,34 @@ impl Git {
         Self {
             binary,
             isolated: false,
+            job_roots: JobRootsSource::default(),
         }
+    }
+
+    /// The git binary this runs.
+    pub fn binary(&self) -> &Path {
+        &self.binary
+    }
+
+    /// Whether this ignores the user's and the system's git configuration.
+    pub fn is_isolated(&self) -> bool {
+        self.isolated
     }
 
     /// Ignores the user's and the system's git configuration, for tests.
     pub fn isolated(mut self) -> Self {
         self.isolated = true;
+        self
+    }
+
+    /// Decides what lies inside a job root with `roots` instead of the process's registry, for
+    /// tests.
+    #[cfg(test)]
+    pub(crate) fn with_job_roots(
+        mut self,
+        roots: std::sync::Arc<util::job_roots::JobRoots>,
+    ) -> Self {
+        self.job_roots = JobRootsSource(Some(roots));
         self
     }
 
@@ -190,6 +236,7 @@ impl Git {
             args: shown.clone(),
             message: error.to_string(),
         };
+        refuse_job_written_repository(directory, &self.job_roots)?;
         let mut command = self.command(directory, index, args);
         let output = match stdin {
             None => command.output().await.map_err(spawn_error)?,
@@ -284,6 +331,7 @@ impl Git {
             .map(|arg| arg.to_string_lossy())
             .collect::<Vec<_>>()
             .join(" ");
+        refuse_job_written_repository(directory, &self.job_roots)?;
         let mut command = self.command(directory, None, args);
         command
             .stdin(util::command::Stdio::null())
@@ -1057,6 +1105,57 @@ impl Git {
         self.run_bounded(parent, args, timeout).await?;
         Ok(())
     }
+}
+
+/// Refuses to run git in `directory` when the repository git would find there has its git
+/// directory, or the common directory its `commondir` names, inside a job root of `job_roots`:
+/// a sandboxed job may have written its configuration and hooks. Everything else runs as before.
+fn refuse_job_written_repository(
+    directory: &Path,
+    job_roots: &JobRootsSource,
+) -> Result<(), GitError> {
+    refuse_job_written_repository_with(directory, &|path: &Path| job_roots.contains(path))
+}
+
+/// [`refuse_job_written_repository`] with `in_job_root` deciding what lies inside a job root.
+pub(crate) fn refuse_job_written_repository_with(
+    directory: &Path,
+    in_job_root: &dyn Fn(&Path) -> bool,
+) -> Result<(), GitError> {
+    match discovered_git_dir(directory) {
+        Some(git_dir) => bongos_confine::safe_git::check_git_dir_with(&git_dir, in_job_root)
+            .map_err(|error| GitError::Refused {
+                message: error.to_string(),
+            }),
+        None => Ok(()),
+    }
+}
+
+/// The git directory git would discover from `directory` (none of the redirecting variables are
+/// set; see [`REDIRECTING_VARIABLES`]): the nearest ancestor holding a `.git` directory, the
+/// target of a `.git` file's `gitdir:` line, or an ancestor that is itself a git directory (a bare
+/// repository). A `.git` file that cannot be read stands for itself, so a job root around it still
+/// refuses it.
+fn discovered_git_dir(directory: &Path) -> Option<PathBuf> {
+    let start = std::fs::canonicalize(directory).unwrap_or_else(|_| directory.to_path_buf());
+    for ancestor in start.ancestors() {
+        let dot_git = ancestor.join(".git");
+        if let Ok(metadata) = std::fs::metadata(&dot_git) {
+            if metadata.is_dir() {
+                return Some(dot_git);
+            }
+            let pointer = std::fs::read_to_string(&dot_git).ok().and_then(|text| {
+                let target = text.lines().next()?.strip_prefix("gitdir:")?.trim();
+                (!target.is_empty()).then(|| ancestor.join(target))
+            });
+            return Some(pointer.unwrap_or(dot_git));
+        }
+        let has = |name: &str| std::fs::symlink_metadata(ancestor.join(name)).is_ok();
+        if has("HEAD") && ((has("objects") && has("refs")) || has("commondir")) {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
 }
 
 /// How a rebase ended.

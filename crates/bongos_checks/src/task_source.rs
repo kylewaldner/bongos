@@ -39,6 +39,9 @@ pub struct TaskChecks {
     pub output_dir: PathBuf,
     /// Where the private indexes of tree keys go.
     pub index_dir: PathBuf,
+    /// The primary checkouts of the configured code repositories: a task's trees are trusted
+    /// only as linked worktrees of one of them (see [`crate::task_git`]).
+    pub code_repositories: Vec<PathBuf>,
 }
 
 impl TaskChecks {
@@ -65,6 +68,12 @@ pub trait TaskSource: 'static {
     fn code_repository(&self, name: &str, cx: &App) -> Option<PathBuf> {
         let _ = (name, cx);
         None
+    }
+
+    /// The primary checkouts of every configured code repository. None by default.
+    fn code_repositories(&self, cx: &App) -> Vec<PathBuf> {
+        let _ = cx;
+        Vec::new()
     }
 
     /// The open project repository whose id is `project_id`, for a check a landing asks for.
@@ -105,6 +114,7 @@ impl TaskSource for WorkTaskSource {
             base_branch: file.base.clone(),
             output_dir: settings.output_folder(&project.location().files, task_id),
             index_dir: settings.scratch_folder().join(TREE_KEYS_FOLDER),
+            code_repositories: self.code_repositories(cx),
             project,
         })
     }
@@ -124,6 +134,18 @@ impl TaskSource for WorkTaskSource {
         let repositories = &WorkSettings::get_global(cx).repositories;
         let repository = bongos_work::find_repository(repositories, name)?;
         Some(bongos_work::expand_home(&repository.path))
+    }
+
+    fn code_repositories(&self, cx: &App) -> Vec<PathBuf> {
+        WorkSettings::try_get(cx)
+            .map(|settings| {
+                settings
+                    .repositories
+                    .iter()
+                    .map(|repository| bongos_work::expand_home(&repository.path))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn project(&self, project_id: &str, cx: &App) -> Option<ProjectRepo> {

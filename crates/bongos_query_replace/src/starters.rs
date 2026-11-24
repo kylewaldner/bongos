@@ -109,6 +109,70 @@ pub fn start(editor: &Entity<Editor>, mode: Mode, window: &mut Window, cx: &mut 
     });
 }
 
+/// A replace whose strings and range are already chosen, as another command hands it over.
+#[derive(Clone, Debug)]
+pub struct ScopedReplace {
+    /// The string (or pattern, with `regexp`) to replace.
+    pub from: String,
+    pub regexp: bool,
+    pub case: CaseMode,
+    /// Only matches that are whole words.
+    pub whole_word: bool,
+    /// The range the replace stays in; the search starts at its start.
+    pub scope: Range<Anchor>,
+    /// The replacement: literal, or a template naming the groups with `regexp`.
+    pub to: String,
+    /// Asks at every match (`query-replace`), else replaces every match.
+    pub interactive: bool,
+}
+
+/// Starts the replace `replace` in `editor` without asking for the strings. The matches are found
+/// on the editor's text as it is now. Whole words follow project search's rule, so the replace
+/// finds the matches a project search with the same flags lists: a literal string matches where
+/// neither neighbor is a word character, and a regexp gets a word bound on each edge that is a
+/// word character.
+pub fn start_in_scope(
+    editor: &Entity<Editor>,
+    replace: ScopedReplace,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if !can_start(editor, window, cx) {
+        return;
+    }
+    let ScopedReplace {
+        from,
+        regexp,
+        case,
+        whole_word,
+        scope,
+        to,
+        interactive,
+    } = replace;
+    let mut spec = SearchSpec::new(regexp);
+    spec.string = from;
+    spec.lax = false;
+    spec.case = case;
+    let origin = Origin {
+        point: None,
+        from: scope.start,
+        scope: Some(scope),
+    };
+    begin(
+        editor,
+        Mode {
+            regexp,
+            interactive,
+        },
+        origin,
+        spec,
+        whole_word,
+        to,
+        window,
+        cx,
+    );
+}
+
 /// Whether a replace may start in `editor` now: not in a read-only buffer, and one replace at a
 /// time (a batch still running in this editor finishes first).
 pub(crate) fn can_start(editor: &Entity<Editor>, window: &mut Window, cx: &mut App) -> bool {
@@ -164,23 +228,26 @@ fn answered(
     spec.string = answer.from;
     spec.lax = false;
     spec.case = answer.case;
-    begin(editor, mode, origin, spec, answer.to, window, cx);
+    begin(editor, mode, origin, spec, false, answer.to, window, cx);
 }
 
 /// The search and the replacement are known: finds the first match, then stops there or replaces
-/// every match.
+/// every match. `whole_word` keeps only whole-word matches, by project search's rule.
 pub(crate) fn begin(
     editor: &Entity<Editor>,
     mode: Mode,
     origin: Origin,
     spec: SearchSpec,
+    whole_word: bool,
     to: String,
     window: &mut Window,
     cx: &mut App,
 ) {
     let regexp = spec.regexp;
     let from_text = spec.string.clone();
-    let query = match build_query(&compile(&spec)) {
+    let mut compiled = compile(&spec);
+    compiled.whole_word |= whole_word;
+    let query = match build_query(&compiled) {
         Ok(query) => query,
         Err(error) => {
             bongos_minibuffer::error(window, cx, error.0);

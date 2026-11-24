@@ -49,6 +49,7 @@ use bongos_work_model::store::Project;
 use bongos_workflow_model::inputs::Input;
 use bongos_workflow_model::record::{RunningNode, StartedBy};
 use bongos_workflow_model::scheduler::Branch;
+use bongos_workflow_model::unsandboxed::{self, Mode, Permit};
 use bongos_workflow_model::{
     Command, Definition, EnvEdit, Event, Failure, FailureReason, LaneRef, Limits, NodeKey,
     RunState, record, replay, scheduler,
@@ -58,6 +59,7 @@ use serde_json::Value;
 
 use crate::WorkflowsSettings;
 use crate::builtin_nodes::{BuiltinNode, BuiltinNodes, BuiltinStart};
+use crate::consent::{self, ConsentScope, Grant, RunConsentStore, RunConsents};
 use crate::process::{OrphanOutcome, ProcessRecord, kill_orphans};
 use crate::worktrees::{self, Git, RunWorktree, TaskCheckout, WorktreeError};
 
@@ -109,6 +111,9 @@ pub struct Finish {
     pub turns: Option<u32>,
     pub elapsed_ms: u64,
     pub session_id: Option<String>,
+    /// The writes the confinement refused, each as the annotation naming the rule; empty for an
+    /// unconfined try.
+    pub confinement_refusals: Vec<String>,
 }
 
 impl Finish {
@@ -123,6 +128,7 @@ impl Finish {
             turns: None,
             elapsed_ms: 0,
             session_id: None,
+            confinement_refusals: Vec::new(),
         }
     }
 }
@@ -166,6 +172,19 @@ pub struct RunSetup {
     /// For a project subject: the project, its files folder and the definitions its agents are
     /// pointed at.
     pub project: Option<ProjectSource>,
+    /// Who started the run and whether it runs unattended, which decide whether a program may
+    /// ever run without the OS sandbox.
+    pub facts: RunFacts,
+}
+
+/// What `run.toml` says about who is there to answer for a run: whether it runs unattended and
+/// who started it. The default knows neither, so a program of it never runs unsandboxed (fail
+/// closed).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RunFacts {
+    pub unattended: bool,
+    /// `None` when the run's record was not read.
+    pub started_by: Option<StartedBy>,
 }
 
 /// Where the agents of a project-subject run take their context from.
@@ -249,6 +268,9 @@ pub struct NodeStart<'a> {
     pub budget_left_usd: Option<f64>,
     /// The run's binding, when the lifecycle bound it.
     pub binding: Option<&'a RunBinding>,
+    /// A person's grant to run this run's programs without the OS sandbox, from the runtime's
+    /// consent store; `None` when there is none.
+    pub grant: Option<Grant>,
 }
 
 /// What runs node tries: the agent runners, the program runner and the built-ins, or a fake in
@@ -268,6 +290,12 @@ pub trait Runner {
 
     /// Forgets the context of `run`, when the runtime drops it.
     fn unbind(&mut self, _run: &str) {}
+
+    /// The effective `workflows.programs.unsandboxed` mode of `run`, which its built-ins start
+    /// under; the default reads no setting.
+    fn unsandboxed_mode(&self, _run: &str) -> Mode {
+        Mode::default()
+    }
 
     /// [`Runner::start`] with the run's state and binding; the runtime calls this one.
     fn start_node(&mut self, node: NodeStart<'_>) -> Result<ProcessRecord, Failure> {
@@ -303,6 +331,10 @@ impl<R: Runner + ?Sized> Runner for Box<R> {
 
     fn unbind(&mut self, run: &str) {
         (**self).unbind(run)
+    }
+
+    fn unsandboxed_mode(&self, run: &str) -> Mode {
+        (**self).unsandboxed_mode(run)
     }
 
     fn start_node(&mut self, node: NodeStart<'_>) -> Result<ProcessRecord, Failure> {
@@ -371,6 +403,14 @@ impl LiveRun {
         self.events.push(event);
     }
 
+    /// Appends `event` only when the write succeeds: on a failed write the event is neither in
+    /// memory nor taken as done, so the caller can refuse what it records.
+    fn try_append(&mut self, event: Event) -> std::io::Result<()> {
+        record::append(&mut self.log, &event)?;
+        self.events.push(event);
+        Ok(())
+    }
+
     /// The number of the next try of `key`: one more than its `NodeStarted` events.
     fn next_try(&self, key: &NodeKey) -> u32 {
         self.events
@@ -408,6 +448,21 @@ impl LiveRun {
             || !state.interrupted.is_empty()
             || !state.held.is_empty()
     }
+
+    /// Whether the run is held only on its ask to run without the OS sandbox: every held key is
+    /// held on the ask, and nothing else holds the run. The other starts of the same step still
+    /// go ahead then, so keys that need the same answer join the one ask.
+    fn held_on_ask_only(state: &RunState) -> bool {
+        !state.cancelled
+            && state.ended.is_none()
+            && !state.halted
+            && state.interrupted.is_empty()
+            && state.consent_pending.is_some()
+            && state
+                .held
+                .values()
+                .all(|failure| failure.reason == FailureReason::SandboxRequired)
+    }
 }
 
 /// Why a runtime command was refused.
@@ -427,6 +482,8 @@ pub enum RuntimeError {
         "run {run} is over its cost cap: raise workflows.run_max_cost_usd above ${cost:.2} first"
     )]
     OverCap { run: String, cost: f64 },
+    #[error("run {0} is not waiting for an answer about running without a sandbox")]
+    NothingAsked(String),
 }
 
 impl RuntimeError {
@@ -469,6 +526,8 @@ pub struct Runtime<R: Runner> {
     draining: bool,
     /// The drains waiting for no node process to run.
     drain_waiters: Vec<oneshot::Sender<()>>,
+    /// The grants of the live runs, per run and scope, in memory only.
+    consents: Arc<dyn RunConsentStore>,
 }
 
 /// The most rounds one [`Runtime::tick`] runs; a round that changes nothing ends it sooner.
@@ -488,7 +547,78 @@ impl<R: Runner> Runtime<R> {
             held_back: BTreeSet::new(),
             draining: false,
             drain_waiters: Vec::new(),
+            consents: RunConsents::store(),
         }
+    }
+
+    /// The store of the grants to run without the OS sandbox.
+    pub fn consents(&self) -> &Arc<dyn RunConsentStore> {
+        &self.consents
+    }
+
+    /// Keeps the grants in `store` from now on; the grants of the old store are not carried over.
+    pub fn set_consents(&mut self, store: Arc<dyn RunConsentStore>) {
+        self.consents = store;
+    }
+
+    /// Run `id`'s grant to run without the OS sandbox. A heal run never has one, whatever the
+    /// store holds.
+    pub fn sandbox_grant(&self, id: &str) -> Option<Grant> {
+        if self.find(id).is_some_and(|index| self.is_heal(index)) {
+            return None;
+        }
+        self.consents.granted(id, &ConsentScope::Sandbox)
+    }
+
+    /// Whether the run at `index` was started by the healer, by the runtime's word or its facts.
+    fn is_heal(&self, index: usize) -> bool {
+        let run = &self.runs[index];
+        run.started_by == StartedBy::Healer
+            || run
+                .binding
+                .as_ref()
+                .is_some_and(|binding| binding.setup.facts.started_by == Some(StartedBy::Healer))
+    }
+
+    /// Answers the pending ask of run `id` to run without the OS sandbox: appends
+    /// `ConsentAnswered`, and only once it is written grants the run in the store when allowed.
+    /// Replay of the answer releases the held keys (allowed: ready to start, here with the grant;
+    /// stopped: failed `SandboxRefused`), so the run is queued again. Refused with nothing
+    /// pending; a failed write refuses the answer and leaves the ask pending, with no grant.
+    pub fn answer_consent(
+        &mut self,
+        id: &str,
+        allowed: bool,
+        by: &str,
+        at: String,
+    ) -> Result<(), RuntimeError> {
+        let index = self.live(id)?;
+        if self.runs[index].state().consent_pending.is_none() {
+            return Err(RuntimeError::NothingAsked(id.to_string()));
+        }
+        let event = Event::ConsentAnswered {
+            allowed,
+            by: by.to_string(),
+            at: at.clone(),
+        };
+        if let Err(error) = self.runs[index].try_append(event) {
+            return Err(RuntimeError::Io(format!(
+                "could not record the answer for run {id}: {error}"
+            )));
+        }
+        // A heal run's answer is recorded but never granted.
+        if allowed && !self.is_heal(index) {
+            self.consents.grant(
+                id,
+                ConsentScope::Sandbox,
+                Grant {
+                    at,
+                    by: by.to_string(),
+                },
+            );
+        }
+        self.requeue(index);
+        Ok(())
     }
 
     /// Records who started run `id`: a lane's or a landing check's run does not count toward
@@ -855,6 +985,9 @@ impl<R: Runner> Runtime<R> {
                 run.append(Event::Interrupted { keys });
             }
             let state = run.state();
+            // Replay never grants: a run loaded from disk starts with no grant, so a key its
+            // log released from an ask asks again.
+            self.consents.forget(&run.id);
             self.recover_builtins(&run, &state);
             if LiveRun::is_held(&state) {
                 run.status = Status::Held;
@@ -1063,6 +1196,8 @@ impl<R: Runner> Runtime<R> {
         self.settling.retain(|settling| *settling != run.id);
         self.held_back.remove(&run.id);
         self.runner.unbind(&run.id);
+        // A run dropped here (a restart, a handover) takes its grant with it.
+        self.consents.forget(&run.id);
     }
 
     /// The definition run `id` runs now.
@@ -1115,6 +1250,11 @@ impl<R: Runner> Runtime<R> {
         let run = &mut self.runs[index];
         run.status = Status::Held;
         let id = run.id.clone();
+        // An ended or cancelled run's grant ends with it: a retry step asks again.
+        let state = run.state();
+        if state.cancelled || state.ended.is_some() {
+            self.consents.forget(&id);
+        }
         self.queue.retain(|queued| *queued != id);
         self.held_back.remove(&id);
     }
@@ -1212,6 +1352,7 @@ impl<R: Runner> Runtime<R> {
                 turns: finish.turns,
                 elapsed_ms: finish.elapsed_ms,
                 session_id: finish.session_id,
+                confinement_refusals: finish.confinement_refusals,
             });
             changed = true;
         }
@@ -1376,16 +1517,24 @@ impl<R: Runner> Runtime<R> {
                 }
                 continue;
             }
+            let mut held = false;
             for command in commands {
+                if held {
+                    // Held only on the sandbox ask, the step's other starts still go ahead, so
+                    // keys that need the same answer join the one ask; anything else waits.
+                    let state = self.runs[index].state();
+                    if !(LiveRun::held_on_ask_only(&state) && matches!(command, Command::Start(_)))
+                    {
+                        break;
+                    }
+                }
                 changed = true;
                 if !self.apply(index, command) {
                     // A merge failed: the rest of this step (more merges, starts) was planned
                     // before it, so it is dropped; the next round asks the scheduler again.
                     break;
                 }
-                if LiveRun::is_held(&self.runs[index].state()) {
-                    break;
-                }
+                held = LiveRun::is_held(&self.runs[index].state());
             }
             if LiveRun::is_held(&self.runs[index].state()) {
                 self.hold(index);
@@ -1440,6 +1589,7 @@ impl<R: Runner> Runtime<R> {
                             turns: None,
                             elapsed_ms: 0,
                             session_id: None,
+                            confinement_refusals: Vec::new(),
                         });
                         return false;
                     }
@@ -1476,12 +1626,22 @@ impl<R: Runner> Runtime<R> {
     /// A key of a registered built-in is started through it, with no process of its own: it is
     /// recorded with pid 0.
     fn start(&mut self, index: usize, key: NodeKey) {
+        let grant = self.sandbox_grant(&self.runs[index].id);
         let run = &mut self.runs[index];
         let try_number = run.next_try(&key);
         let builtin = self.builtins.for_key(&run.definition, &key);
         let started = match &builtin {
             Some(builtin) => {
                 let state = run.state();
+                // The runner knows the setting and the run's project, which can only tighten it.
+                let mode = self.runner.unsandboxed_mode(&run.id);
+                let permit = run.binding.as_ref().map_or(Permit::Refuse, |binding| {
+                    crate::dispatch_program::program_permit(
+                        &binding.setup.facts,
+                        mode,
+                        grant.as_ref(),
+                    )
+                });
                 builtin
                     .start(BuiltinStart {
                         run: &run.id,
@@ -1490,6 +1650,8 @@ impl<R: Runner> Runtime<R> {
                         key: &key,
                         try_number,
                         binding: run.binding.as_ref(),
+                        permit,
+                        mode,
                     })
                     .map(|()| ProcessRecord {
                         pid: 0,
@@ -1510,10 +1672,40 @@ impl<R: Runner> Runtime<R> {
                     state: &state,
                     budget_left_usd,
                     binding: run.binding.as_ref(),
+                    grant,
                 })
             }
         };
+        // Fail closed: a run nobody can answer for (unattended, a heal run, or one never bound)
+        // never asks, whoever returned the ask.
+        let askable = run.binding.as_ref().is_some_and(|binding| {
+            crate::dispatch_program::program_permit(&binding.setup.facts, Mode::Ask, None)
+                == Permit::Ask
+        });
+        let started = started.map_err(|failure| {
+            if failure.reason == FailureReason::SandboxRequired && !askable {
+                let reason = consent::probe_reason(&failure.detail).to_string();
+                Failure::new(
+                    FailureReason::SandboxRefused,
+                    failure.node,
+                    format!("{} ({reason})", unsandboxed::REFUSED_TEXT),
+                )
+            } else {
+                failure
+            }
+        });
         match started {
+            Err(failure) if failure.reason == FailureReason::SandboxRequired => {
+                // Not a try: the key is held on the run's one ask (a later key joins the pending
+                // one) until a person answers. The question names the node with
+                // `unsandboxed::ask_text` over the probe's reason recorded here.
+                let reason = consent::probe_reason(&failure.detail).to_string();
+                log::info!(
+                    "workflows: run {} asks to run {key} without the OS sandbox: {reason}",
+                    run.id
+                );
+                run.append(Event::ConsentAsked { key, reason });
+            }
             Ok(process) => {
                 if let Some(builtin) = builtin {
                     run.builtins.insert(key.clone(), builtin);
@@ -1542,6 +1734,7 @@ impl<R: Runner> Runtime<R> {
                     turns: None,
                     elapsed_ms: 0,
                     session_id: None,
+                    confinement_refusals: Vec::new(),
                 });
             }
         }
@@ -1579,6 +1772,7 @@ impl<R: Runner> Runtime<R> {
                 turns: None,
                 elapsed_ms: 0,
                 session_id: None,
+                confinement_refusals: Vec::new(),
             });
         }
     }

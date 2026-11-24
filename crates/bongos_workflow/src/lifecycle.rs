@@ -18,6 +18,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use bongos_confine::safe_git::linked_git_dir_from_record;
 use bongos_project_repo::CommitId;
 use bongos_work::ActiveRun;
 use bongos_work_model::derive::{self, Shape};
@@ -39,6 +40,7 @@ use crate::WorkflowsSettings;
 use crate::builtin_merge::{
     ProjectMergeRefusal, ProjectMergeRequest, ProjectMerged, merge_project_run,
 };
+use crate::consent::{self, Grant, WallClock};
 use crate::definitions::{self, DefinitionError};
 use crate::mcp;
 use crate::runtime::{
@@ -55,6 +57,9 @@ pub const RUNS_DIR: &str = "runs";
 pub const RUN_FILE: &str = "run.toml";
 /// Who closes a gate from the app.
 pub const BY_PERSON: &str = "person";
+/// The refusal of an answer to a sandbox ask when the run has none pending.
+pub const NOTHING_TO_ANSWER: &str =
+    "This run is not waiting for an answer about running without a sandbox.";
 /// The heading a revision comment goes under in the node's prompt.
 pub const REVISION_HEADING: &str = "Revision requested:";
 
@@ -93,10 +98,13 @@ pub enum RunTree {
         base: Option<String>,
         merge_into: Option<String>,
     },
-    /// A lane's tree at `path`. `base` is the second tree's path, `start` the ref the run branch
-    /// is created from and `merge_into` the branch the success merge targets.
+    /// A lane's tree at `path`. `common_dir` is the repository's git common directory, read in
+    /// the person's own checkout (git never runs by discovery in the lane's tree, which jobs
+    /// wrote). `base` is the second tree's path, `start` the ref the run branch is created from
+    /// and `merge_into` the branch the success merge targets.
     Lane {
         path: PathBuf,
+        common_dir: Option<PathBuf>,
         base: Option<PathBuf>,
         start: Option<String>,
         merge_into: Option<String>,
@@ -418,13 +426,15 @@ pub trait RunWorktrees: Send {
     }
 
     /// The run worktree of a task run in a lane's tree at `path`, which the lane already put on
-    /// the run branch ([`worktrees::lane_run`]). By default no run is made in a lane's tree.
+    /// the run branch ([`worktrees::lane_run`]); `common_dir` is the repository's trusted git
+    /// common directory. By default no run is made in a lane's tree.
     fn lane(
         &mut self,
         _task: &TaskCheckout,
         _run_id: &str,
         _attempt: u32,
         path: &Path,
+        _common_dir: Option<&Path>,
         _settings: &WorkflowsSettings,
     ) -> Result<RunWorktree, WorktreeError> {
         Err(WorktreeError::Io {
@@ -483,6 +493,7 @@ impl RunWorktrees for GitWorktrees {
         run_id: &str,
         attempt: u32,
         path: &Path,
+        common_dir: Option<&Path>,
         settings: &WorkflowsSettings,
     ) -> Result<RunWorktree, WorktreeError> {
         let free_space = self.free_space.clone();
@@ -492,6 +503,7 @@ impl RunWorktrees for GitWorktrees {
             run_id,
             attempt,
             path,
+            common_dir,
             settings,
             &move |path: &Path| free_space(path),
         ))
@@ -688,7 +700,7 @@ fn read_cleared(dir: &Path, checkout: &TaskCheckout) -> Result<Option<ClearedRun
     Ok(Some(ClearedRun {
         id: record.id.clone(),
         dir: dir.to_path_buf(),
-        worktree: attempt_worktree(attempt),
+        worktree: attempt_worktree(attempt, checkout)?,
         attempt: attempt.n,
         checkout: checkout.clone(),
         status,
@@ -713,15 +725,42 @@ fn worktree_refusal(error: WorktreeError) -> Refusal {
     }
 }
 
-fn attempt_worktree(attempt: &Attempt) -> RunWorktree {
+/// The run worktree of `attempt`. A record that has no git directory (one written before the field)
+/// gets the one under the common directory of the task's repository that names the tree, trusted
+/// only where git puts it ([`linked_git_dir_from_record`]); a `.git` that names anything else
+/// refuses. The common directory comes from the task's own worktree.
+pub(crate) fn attempt_worktree(
+    attempt: &Attempt,
+    checkout: &TaskCheckout,
+) -> Result<RunWorktree, String> {
     let path = PathBuf::from(&attempt.worktree);
-    RunWorktree {
+    let git_dir = match &attempt.git_dir {
+        Some(git_dir) if !git_dir.is_empty() => PathBuf::from(git_dir),
+        // The tree is gone: no git call runs in it, and its branch goes alone (see `run_worktrees`).
+        _ if !path.exists() => PathBuf::new(),
+        _ => {
+            let task_worktree = checkout.worktree.as_deref().filter(|tree| tree.is_dir());
+            let task_worktree = task_worktree.ok_or_else(|| {
+                "the task worktree is gone, so the git directory of the run worktree is unknown"
+                    .to_string()
+            })?;
+            let common = futures::executor::block_on(Git::new("git").run(
+                task_worktree,
+                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            ))
+            .map_err(|error| error.to_string())?;
+            linked_git_dir_from_record(&path, Path::new(&common))
+                .map_err(|error| format!("{error:#}"))?
+        }
+    };
+    Ok(RunWorktree {
         run_dir: path
             .parent()
             .map_or_else(|| path.clone(), Path::to_path_buf),
         path,
         branch: attempt.branch.clone(),
-    }
+        git_dir,
+    })
 }
 
 /// One output field of a gate's held result, for `workflow: approve` with an edit.
@@ -838,6 +877,10 @@ fn setup_of(record: &RunToml, tree: &WorkTree, project_dir: &Path) -> RunSetup {
         snapshot: snapshot.is_some(),
         work_dir: matches!(record.tree, Some(RunTreeRecord::Work)),
         project,
+        facts: crate::runtime::RunFacts {
+            unattended: record.unattended.is_some_and(|choice| choice.value),
+            started_by: Some(record.started_by),
+        },
     }
 }
 
@@ -999,6 +1042,52 @@ pub fn definition_copy_dir(attempt_dir: &Path, rev: u32) -> PathBuf {
     attempt_dir.join("definition").join(rev.to_string())
 }
 
+/// `<attempt dir>/schemas/<rev>/<node>.json`: the node's one schema document of definition
+/// revision `rev`, beside `definition/<rev>` and never inside it, so it cannot clash with a
+/// definition's own `schemas/<name>.json` or change the definition hash. The file only feeds the
+/// agents; nothing reads it back to validate.
+pub fn schema_file(attempt_dir: &Path, rev: u32, node: &str) -> PathBuf {
+    attempt_dir
+        .join("schemas")
+        .join(rev.to_string())
+        .join(format!("{node}.json"))
+}
+
+/// Writes every node's document of `definition` to `schemas/<rev>/`.
+fn write_schemas(attempt_dir: &Path, rev: u32, definition: &Definition) -> std::io::Result<()> {
+    let dir = attempt_dir.join("schemas").join(rev.to_string());
+    if dir.exists() {
+        fs::remove_dir_all(&dir)?;
+    }
+    fs::create_dir_all(&dir)?;
+    for node in &definition.nodes {
+        fs::write(
+            schema_file(attempt_dir, rev, &node.name),
+            node.schema.document().to_string(),
+        )?;
+    }
+    Ok(())
+}
+
+/// The text of the node's schema file for revision `rev`. A run from before the files existed has
+/// none: it is written from the node's stored document then.
+pub fn schema_text(attempt_dir: &Path, rev: u32, node: &Node) -> Result<String, String> {
+    let path = schema_file(attempt_dir, rev, &node.name);
+    match fs::read_to_string(&path) {
+        Ok(text) => Ok(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let text = node.schema.document().to_string();
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
+            }
+            fs::write(&path, &text).map_err(|error| format!("{}: {error}", path.display()))?;
+            Ok(text)
+        }
+        Err(error) => Err(format!("{}: {error}", path.display())),
+    }
+}
+
 /// The live runs and their records, over a [`Runtime`].
 pub struct Lifecycle<R: Runner> {
     runtime: Runtime<R>,
@@ -1016,6 +1105,8 @@ pub struct Lifecycle<R: Runner> {
     /// ([`Self::observe_runs`]), in start order. Nothing drives them here and no command reaches
     /// them: every command looks among `runs` only.
     observed: Vec<ObservedRun>,
+    /// The wall clock an answer to a sandbox ask is timed by; tests set a fixed one.
+    clock: WallClock,
 }
 
 /// A run another process drives, as its records on disk say.
@@ -1057,7 +1148,49 @@ impl<R: Runner> Lifecycle<R> {
             events: Vec::new(),
             moving: Vec::new(),
             observed: Vec::new(),
+            clock: consent::system_clock(),
         }
+    }
+
+    /// Times the answers to sandbox asks by `clock` from now on.
+    pub fn set_wall_clock(&mut self, clock: WallClock) {
+        self.clock = clock;
+    }
+
+    /// Answers `run`'s pending ask to run its programs without the OS sandbox, as `by`, at the
+    /// lifecycle's clock. Allowed: `ConsentAnswered { allowed: true }` is appended, then (only once
+    /// it is written) the run is granted for the rest of its life in this process and its held
+    /// keys start again. Stopped: `ConsentAnswered { allowed: false }` is appended and replay
+    /// fails each held key `refused: no OS sandbox`. Refused when nothing is pending (a second
+    /// answer finds the first took it) and when the answer cannot be written (the ask stays).
+    pub fn answer_unsandboxed(
+        &mut self,
+        run: &str,
+        allowed: bool,
+        by: &str,
+    ) -> Result<(), Refusal> {
+        self.entry(run)?;
+        let at = consent::rfc3339((self.clock)());
+        self.runtime
+            .answer_consent(run, allowed, by, at)
+            .map_err(|error| match error {
+                RuntimeError::NothingAsked(_) => {
+                    Refusal::new(RefusalKind::WrongState, NOTHING_TO_ANSWER, "")
+                }
+                other => Refusal::runtime(other),
+            })?;
+        self.note(run);
+        Ok(())
+    }
+
+    /// The question `run`'s pending sandbox ask puts to a person; `None` when nothing is pending.
+    pub fn consent_question(&self, run: &str) -> Option<String> {
+        consent::question(&self.state(run)?)
+    }
+
+    /// The grant that lets `run`'s programs run without the OS sandbox in this process, if any.
+    pub fn consent_grant(&self, run: &str) -> Option<Grant> {
+        self.runtime.sandbox_grant(run)
     }
 
     /// While `on`, a start or restart of a run under `files` (a project's files) is refused: the
@@ -1433,6 +1566,7 @@ impl<R: Runner> Lifecycle<R> {
             documents,
             merge: merge_into.map(|merge_into| ProjectMergeRequest {
                 run_tree: entry.worktree.path.clone(),
+                run_git_dir: entry.worktree.git_dir.clone(),
                 run_branch: entry.worktree.branch.clone(),
                 merge_into,
                 run_id: entry.id.clone(),
@@ -1577,8 +1711,10 @@ impl<R: Runner> Lifecycle<R> {
         let checkout = TaskCheckout::from_task(task.slug.clone(), file);
         let id = request.run_id.clone().unwrap_or_else(new_id);
         let (worktree, tree_record) = match &request.tree {
-            RunTree::Lane { path, .. } => {
-                let worktree = self.lane_worktree(&checkout, &id, path)?;
+            RunTree::Lane {
+                path, common_dir, ..
+            } => {
+                let worktree = self.lane_worktree(&checkout, &id, path, common_dir.as_deref())?;
                 let record = RunTreeRecord::Lane {
                     path: worktree.path.clone(),
                     run_dir: worktree.run_dir.clone(),
@@ -1937,6 +2073,8 @@ impl<R: Runner> Lifecycle<R> {
                     run_dir: scratch,
                     path: path.clone(),
                     branch: String::new(),
+                    // No repository of the run's: nothing for host git to name.
+                    git_dir: PathBuf::new(),
                 };
                 let record = RunTreeRecord::Snapshot { path: path.clone() };
                 (checkout, worktree, record)
@@ -2016,6 +2154,7 @@ impl<R: Runner> Lifecycle<R> {
                     run_dir: work.clone(),
                     path: work,
                     branch: String::new(),
+                    git_dir: PathBuf::new(),
                 };
                 (checkout, worktree, RunTreeRecord::Work)
             }
@@ -2318,7 +2457,6 @@ impl<R: Runner> Lifecycle<R> {
         let state = bongos_workflow_model::record::replay(&parsed.events);
         let rev = state.definition_rev.unwrap_or(0);
         let definition = read_definition(&definition_copy_dir(&attempt_dir, rev))?;
-        let mut worktree = attempt_worktree(attempt);
         let checkout = match (&record.tree, &task.file) {
             (Some(RunTreeRecord::Repository { repo, base, .. }), _) => TaskCheckout {
                 slug: task.slug.clone(),
@@ -2335,26 +2473,36 @@ impl<R: Runner> Lifecycle<R> {
                 TaskCheckout::from_task(task.slug.clone(), file)
             }
         };
-        match &record.tree {
-            // The attempt that ran in the lane's tree keeps its own run directory beside it.
-            Some(RunTreeRecord::Lane { path, run_dir }) if *path == worktree.path => {
-                worktree.run_dir = run_dir.clone();
-            }
-            Some(RunTreeRecord::Snapshot { .. }) => {
+        let worktree = match &record.tree {
+            Some(RunTreeRecord::Snapshot { .. }) => RunWorktree {
                 // The snapshot is no run directory: the run's own directory is its work directory.
-                worktree.run_dir = project_work_dir(&task.dir, &record.id);
-            }
+                // It is no repository of the run's, so no git directory is recorded or looked up.
+                run_dir: project_work_dir(&task.dir, &record.id),
+                path: PathBuf::from(&attempt.worktree),
+                branch: attempt.branch.clone(),
+                git_dir: PathBuf::new(),
+            },
             Some(RunTreeRecord::Work) => {
                 // The work directory is where the project folder has it, whatever the record says.
                 let work = project_work_dir(&task.dir, &record.id);
-                worktree = RunWorktree {
+                RunWorktree {
                     run_dir: work.clone(),
                     path: work,
                     branch: String::new(),
-                };
+                    git_dir: PathBuf::new(),
+                }
             }
-            _ => {}
-        }
+            _ => {
+                let mut worktree = attempt_worktree(attempt, &checkout)?;
+                // The attempt that ran in the lane's tree keeps its own run directory beside it.
+                if let Some(RunTreeRecord::Lane { path, run_dir }) = &record.tree
+                    && *path == worktree.path
+                {
+                    worktree.run_dir = run_dir.clone();
+                }
+                worktree
+            }
+        };
         let setup = setup_of(&record, tree, &task.dir);
         let task_id = record.task_id.clone();
         let spec = RunSpec {
@@ -2985,9 +3133,10 @@ impl<R: Runner> Lifecycle<R> {
         checkout: &TaskCheckout,
         run: &str,
         path: &Path,
+        common_dir: Option<&Path>,
     ) -> Result<RunWorktree, Refusal> {
         self.worktrees
-            .lane(checkout, run, 1, path, &self.settings)
+            .lane(checkout, run, 1, path, common_dir, &self.settings)
             .map_err(worktree_refusal)
     }
 
@@ -3006,6 +3155,7 @@ impl<R: Runner> Lifecycle<R> {
         let loop_bound = self.settings.limits.loop_bound;
         let copy = definition_copy_dir(&attempt_dir, 0);
         copy_dir(source, &copy).map_err(Refusal::io)?;
+        write_schemas(&attempt_dir, 0, &definition).map_err(Refusal::io)?;
         entry.record.attempts.push(Attempt {
             n,
             created,
@@ -3013,6 +3163,8 @@ impl<R: Runner> Lifecycle<R> {
             definition_commit,
             worktree: entry.worktree.path.to_string_lossy().into_owned(),
             branch: entry.worktree.branch.clone(),
+            git_dir: Some(entry.worktree.git_dir.to_string_lossy().into_owned())
+                .filter(|git_dir| !git_dir.is_empty()),
             loop_bound: Some(loop_bound),
         });
         entry.rev = 0;
@@ -3065,10 +3217,18 @@ impl<R: Runner> Lifecycle<R> {
                     )
                 })
         });
+        let attempt_dir = self.runs[index].attempt_dir();
         let fresh = match checked {
+            Ok(fresh) => write_schemas(&attempt_dir, rev, &fresh)
+                .map(|()| fresh)
+                .map_err(Refusal::io),
+            Err(refusal) => Err(refusal),
+        };
+        let fresh = match fresh {
             Ok(fresh) => fresh,
             Err(refusal) => {
                 fs::remove_dir_all(&copy).ok();
+                fs::remove_dir_all(attempt_dir.join("schemas").join(rev.to_string())).ok();
                 return Err(refusal);
             }
         };
@@ -3107,13 +3267,19 @@ impl<R: Runner> Lifecycle<R> {
             .definition(run)
             .ok_or_else(|| unknown_run(run))?;
         let node = definition.node(&key.node).ok_or_else(|| unknown_run(run))?;
-        if !node.output.iter().any(|output| output.name == field) {
+        if !node
+            .schema
+            .fields()
+            .iter()
+            .any(|output| output.name == field)
+        {
             return Err(Refusal::new(
                 RefusalKind::InvalidEdit,
                 format!("Node '{}' has no output field '{field}'.", key.node),
                 format!(
                     "Edit one of: {}.",
-                    node.output
+                    node.schema
+                        .fields()
                         .iter()
                         .map(|output| output.name.as_str())
                         .collect::<Vec<_>>()
@@ -3132,7 +3298,7 @@ impl<R: Runner> Lifecycle<R> {
             ));
         };
         result.insert(field.clone(), value.clone());
-        schema::check(&node.output, &Value::Object(result)).map_err(|detail| {
+        schema::check(&node.schema, &Value::Object(result)).map_err(|detail| {
             Refusal::new(
                 RefusalKind::InvalidEdit,
                 format!(
@@ -3351,7 +3517,17 @@ fn load_definition(
 fn read_definition(dir: &Path) -> Result<Definition, String> {
     let file = dir.join(DEFINITION_FILE);
     let text = fs::read_to_string(&file).map_err(|error| format!("{}: {error}", file.display()))?;
-    parse(&text).map_err(|error| error.to_string())
+    let mut definition = parse(&text).map_err(|error| error.to_string())?;
+    // A node with `output_schema` takes its fields and its compiled schema from the file in `dir`.
+    for node in &mut definition.nodes {
+        if node.output_schema.is_some() && node.output.is_empty() {
+            let schema = bongos_workflow_model::document(node, dir)
+                .map_err(|diagnostic| diagnostic.message)?;
+            node.output = schema.fields().to_vec();
+            node.schema = std::sync::Arc::new(schema);
+        }
+    }
+    Ok(definition)
 }
 
 /// The agent CLIs, the interpreter and the MCP servers the definition needs, in that order.
@@ -3555,7 +3731,7 @@ fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
 
 /// A stable hash of the files under `dir` (FNV-1a over their relative paths and contents, in
 /// path order), as `fnv1a64:<hex>`.
-fn hash_dir(dir: &Path) -> String {
+pub(crate) fn hash_dir(dir: &Path) -> String {
     fn walk(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) {
         for item in fs::read_dir(dir).into_iter().flatten().flatten() {
             let path = item.path();

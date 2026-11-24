@@ -1,10 +1,15 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::process::{Command, Stdio};
 
+use bongos_workflow_model::unsandboxed::{Launch, Mode, Permit, decide};
 use bongos_workflow_model::{Definition, Failure, FailureReason, NodeKey};
 use serde_json::{Value, json};
 
 use super::{Finish, NodeStart, Runner};
+use crate::dispatch_program::program_permit;
+
+/// What the fake's probe says when a `no_sandbox` node starts.
+pub const NO_SANDBOX_REASON: &str = "bwrap not found";
 use crate::process::{NodeProcess, ProcessRecord, stop_all};
 use bongos_workflow_model::scheduler::Branch;
 
@@ -42,6 +47,13 @@ pub struct FakeRunner {
     pub merges: Vec<(String, String, Branch)>,
     /// The `budget_left_usd` of every start, in order.
     pub budgets: Vec<Option<f64>>,
+    /// Nodes whose start finds no OS sandbox ([`NO_SANDBOX_REASON`]): each start decides as the
+    /// program node kind does under `ask`, from the run's facts and the start's grant.
+    pub no_sandbox: BTreeSet<String>,
+    /// The permit of every start of a `no_sandbox` node, in order.
+    pub permits: Vec<(NodeKey, Permit)>,
+    /// The mode the run's built-ins start under ([`Runner::unsandboxed_mode`]).
+    pub unsandboxed_mode: Mode,
     results: BTreeMap<String, Value>,
     /// The cost each node's tries report.
     costs: BTreeMap<String, f64>,
@@ -155,8 +167,28 @@ impl Runner for FakeRunner {
         Ok(record)
     }
 
+    fn unsandboxed_mode(&self, _run: &str) -> Mode {
+        self.unsandboxed_mode
+    }
+
     fn start_node(&mut self, node: NodeStart<'_>) -> Result<ProcessRecord, Failure> {
         self.budgets.push(node.budget_left_usd);
+        if self.no_sandbox.contains(&node.key.node) {
+            // As the program node kind decides it under `ask`, with a probe that finds no sandbox.
+            let facts = node
+                .binding
+                .map(|binding| binding.setup.facts)
+                .unwrap_or_default();
+            let permit = program_permit(&facts, Mode::Ask, node.grant.as_ref());
+            self.permits.push((node.key.clone(), permit.clone()));
+            let availability = Err(NO_SANDBOX_REASON.to_string());
+            let fail = |reason, message| Err(Failure::new(reason, Some(node.key.clone()), message));
+            match decide(&availability, &permit, Mode::Ask) {
+                Launch::Unsandboxed { .. } | Launch::Sandboxed => {}
+                Launch::Ask { message } => return fail(FailureReason::SandboxRequired, message),
+                Launch::Refuse { message } => return fail(FailureReason::SandboxRefused, message),
+            }
+        }
         self.start(node.run, node.definition, node.key, node.try_number)
     }
 

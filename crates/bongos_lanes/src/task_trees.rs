@@ -17,7 +17,7 @@ use bongos_work::OpenProjectRepos;
 use gpui::{App, Global};
 
 use crate::create::lexical;
-use crate::env::{apply_env, second_tree_env, tip_env};
+use crate::env::{apply_env, base_dir_names, second_tree_env, tip_env};
 use crate::job_trees::CurrentJobTrees;
 use crate::lane_tree::{Forbidden, check_apart_from_tips, check_own_tree, lane_tree};
 use crate::locations::LaneLocations;
@@ -143,6 +143,25 @@ impl LaneTreeSetup {
         lane_tree(&self.locations, repo, true)
             .ok()
             .map(|location| location.path.as_path())
+    }
+
+    /// The directories the lane declares for its tip tree: every named directory.
+    pub fn tip_declared_dirs(&self) -> Vec<PathBuf> {
+        self.locations
+            .dir_values(&[])
+            .into_values()
+            .map(PathBuf::from)
+            .collect()
+    }
+
+    /// The directories the lane declares for the second tree of `repo`: as
+    /// [`Self::second_edits`], a listed name gives its `<name>-base` directory.
+    pub fn second_declared_dirs(&self, repo: &str) -> Vec<PathBuf> {
+        self.locations
+            .dir_values(&base_dir_names(&self.binding, repo))
+            .into_values()
+            .map(PathBuf::from)
+            .collect()
     }
 
     /// The edits of the second tree of `repo`: `{dir.<name>}` is the `<name>-base` directory for
@@ -431,7 +450,18 @@ impl LaneTaskTrees {
             return SecondTree::Unavailable;
         }
         let env = apply_env((self.inner.process_env)(), &edits);
-        SecondTree::Lease(Box::new(LaneLease { hold, env }))
+        let dirs = setup.second_declared_dirs(repo);
+        SecondTree::Lease(Box::new(LaneLease { hold, env, dirs }))
+    }
+
+    /// The directories the lane of the job on `task_id` declares for its tip tree of `repo`.
+    pub fn declared_dirs(&self, task_id: &str, repo: &str) -> Vec<PathBuf> {
+        let Some((lane, _)) = self.tip_of(task_id, repo) else {
+            return Vec::new();
+        };
+        self.setup(&lane)
+            .map(|setup| setup.tip_declared_dirs())
+            .unwrap_or_default()
     }
 }
 
@@ -439,6 +469,7 @@ impl LaneTaskTrees {
 pub struct LaneLease {
     hold: TreeHold,
     env: Vec<(String, String)>,
+    dirs: Vec<PathBuf>,
 }
 
 impl SecondTreeLease for LaneLease {
@@ -448,6 +479,10 @@ impl SecondTreeLease for LaneLease {
 
     fn env(&self) -> Vec<(String, String)> {
         self.env.clone()
+    }
+
+    fn declared_dirs(&self) -> Vec<PathBuf> {
+        self.dirs.clone()
     }
 }
 
@@ -462,5 +497,9 @@ impl TaskTrees for LaneTaskTrees {
 
     fn env(&self, task_id: &str, repo: &str) -> Vec<(String, String)> {
         LaneTaskTrees::env(self, task_id, repo)
+    }
+
+    fn declared_dirs(&self, task_id: &str, repo: &str) -> Vec<PathBuf> {
+        LaneTaskTrees::declared_dirs(self, task_id, repo)
     }
 }

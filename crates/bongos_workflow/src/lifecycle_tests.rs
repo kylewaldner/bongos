@@ -30,7 +30,7 @@ use crate::engine::{EngineRunner, WorkflowEngine};
 use crate::lifecycle::{
     GitWorktrees, Lifecycle, Offer, RefusalKind, RunStatus, RunTree, RunWorktrees, StartChecks,
     StartContext, StartRequest, WorkflowEvent, active_runs_on_disk, attempt_dir,
-    definition_copy_dir,
+    definition_copy_dir, hash_dir, schema_file, schema_text,
 };
 use crate::runtime::Runner;
 use crate::runtime::fake::FakeRunner;
@@ -285,6 +285,7 @@ impl RunWorktrees for DirWorktrees {
         let path = run_dir.join("run");
         fs::create_dir_all(&path).unwrap();
         Ok(RunWorktree {
+            git_dir: run_dir.join("git"),
             run_dir,
             path,
             branch: format!("{TASK_BRANCH}-run-{attempt}"),
@@ -297,6 +298,7 @@ impl RunWorktrees for DirWorktrees {
         run_id: &str,
         attempt: u32,
         path: &Path,
+        _common_dir: Option<&Path>,
         _settings: &WorkflowsSettings,
     ) -> Result<RunWorktree, WorktreeError> {
         if let Some(error) = self.error.lock().unwrap().clone() {
@@ -305,6 +307,7 @@ impl RunWorktrees for DirWorktrees {
         let run_dir = self.root.join(format!("{}-{run_id}-{attempt}", task.slug));
         fs::create_dir_all(&run_dir).unwrap();
         Ok(RunWorktree {
+            git_dir: run_dir.join("git"),
             run_dir,
             path: path.to_path_buf(),
             branch: format!("{TASK_BRANCH}-run-{attempt}"),
@@ -2144,6 +2147,224 @@ fn an_edited_gate_field_is_what_the_next_node_state_holds() {
     );
 }
 
+/// `two` whose `work` also takes an optional `note`.
+const TWO_WITH_NOTE: &str = r#"
+schema = 1
+name = "two"
+start = "plan"
+
+[nodes.plan]
+kind = "agent"
+prompt = "work.md"
+output = { summary = { type = "text" } }
+routes = [{ to = "work" }]
+
+[nodes.work]
+kind = "agent"
+prompt = "work.md"
+output = { summary = { type = "text" }, note = { type = "text", optional = true } }
+routes = [{ to = "done" }]
+
+[ends.done]
+kind = "success"
+"#;
+
+/// `plan` takes its schema from `schemas/report.json`, a user's file in the definition directory.
+const FILE_SCHEMA: &str = r#"
+schema = 1
+name = "report"
+start = "plan"
+
+[nodes.plan]
+kind = "agent"
+prompt = "work.md"
+output_schema = "schemas/report.json"
+routes = [{ to = "work" }]
+
+[nodes.work]
+kind = "agent"
+prompt = "work.md"
+output = { summary = { type = "text" } }
+routes = [{ to = "done" }]
+
+[ends.done]
+kind = "success"
+"#;
+
+fn report_schema(count_type: &str) -> String {
+    format!(
+        r#"{{"type":"object","required":["report"],"properties":{{"report":{{"type":"object","properties":{{"n":{{"type":"{count_type}"}}}}}}}}}}"#
+    )
+}
+
+fn write_report_schema(profile: &Path, text: &str) {
+    let dir = profile.join("report").join("schemas");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("report.json"), text).unwrap();
+}
+
+/// A world whose `report` workflow reads `schemas/report.json`, with `plan` finished and `work`
+/// failed once, so a fresh retry is possible.
+fn failed_after_a_file_schema_plan(world: &World, lifecycle: &mut Lifecycle<FakeRunner>) -> String {
+    write_definition(world.profile(), "report", FILE_SCHEMA);
+    write_report_schema(world.profile(), &report_schema("number"));
+    lifecycle
+        .runtime_mut()
+        .runner_mut()
+        .script("plan", json!({ "report": { "n": 1 } }))
+        .fail("work", 1);
+    let run = world.start(lifecycle, with_workflow("report")).unwrap();
+    settle(lifecycle);
+    finish_all(lifecycle);
+    assert_eq!(lifecycle.status(&run), Some(RunStatus::Failed));
+    run
+}
+
+#[test]
+fn each_revision_writes_every_nodes_document_beside_the_definition_copy() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    lifecycle.runtime_mut().runner_mut().fail("work", 1);
+    let run = world.start(&mut lifecycle, with_workflow("two")).unwrap();
+    settle(&mut lifecycle);
+    finish_all(&mut lifecycle);
+    let attempt = attempt_dir(lifecycle.run_dir(&run).unwrap(), 1);
+    let definition = lifecycle.runtime().definition(&run).unwrap().clone();
+    let first = schema_file(&attempt, 0, "work");
+    assert!(!first.starts_with(definition_copy_dir(&attempt, 0)));
+    assert_eq!(
+        fs::read_to_string(&first).unwrap(),
+        definition
+            .node("work")
+            .unwrap()
+            .schema
+            .document()
+            .to_string()
+    );
+
+    // A relaunch reads the revision's file instead of writing it again.
+    let node = definition.node("work").unwrap();
+    fs::write(&first, "{\"title\":\"kept\"}").unwrap();
+    assert_eq!(
+        schema_text(&attempt, 0, node).unwrap(),
+        "{\"title\":\"kept\"}"
+    );
+    fs::remove_file(&first).unwrap();
+    assert_eq!(
+        schema_text(&attempt, 0, node).unwrap(),
+        node.schema.document().to_string()
+    );
+    assert!(first.is_file());
+
+    // A fresh retry writes the next revision's file and leaves revision 0 alone.
+    write_definition(world.profile(), "two", TWO);
+    lifecycle
+        .retry(&run, None, true, &world.dirs, None)
+        .unwrap();
+    assert!(schema_file(&attempt, 1, "plan").is_file());
+    assert!(schema_file(&attempt, 1, "work").is_file());
+    assert!(first.is_file());
+}
+
+#[test]
+fn a_fresh_retry_with_a_changed_output_validates_against_the_new_document() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    lifecycle
+        .runtime_mut()
+        .runner_mut()
+        .script("work", json!({ "summary": "s", "note": "n" }))
+        .fail("work", 1);
+    let run = world.start(&mut lifecycle, with_workflow("two")).unwrap();
+    settle(&mut lifecycle);
+    finish_all(&mut lifecycle);
+    assert_eq!(lifecycle.status(&run), Some(RunStatus::Failed));
+
+    write_definition(world.profile(), "two", TWO_WITH_NOTE);
+    lifecycle
+        .retry(&run, None, true, &world.dirs, None)
+        .unwrap();
+    let attempt = attempt_dir(lifecycle.run_dir(&run).unwrap(), 1);
+    let old = fs::read_to_string(schema_file(&attempt, 0, "work")).unwrap();
+    let new = fs::read_to_string(schema_file(&attempt, 1, "work")).unwrap();
+    assert_ne!(old, new);
+    assert!(new.contains("\"note\""), "{new}");
+    settle(&mut lifecycle);
+    finish_all(&mut lifecycle);
+    // `note` is not in revision 0's document, so only the new one accepts the result.
+    assert_eq!(lifecycle.status(&run), Some(RunStatus::Succeeded));
+}
+
+#[test]
+fn a_users_schema_file_is_untouched_and_the_definition_hash_unchanged() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    // The user's own file is named like the node it belongs to.
+    write_definition(
+        world.profile(),
+        "named",
+        &FILE_SCHEMA
+            .replace("schemas/report.json", "schemas/plan.json")
+            .replace("name = \"report\"", "name = \"named\""),
+    );
+    let own = report_schema("number");
+    let named = world.profile().join("named").join("schemas");
+    fs::create_dir_all(&named).unwrap();
+    fs::write(named.join("plan.json"), &own).unwrap();
+    let run = world.start(&mut lifecycle, with_workflow("named")).unwrap();
+    let attempt = attempt_dir(lifecycle.run_dir(&run).unwrap(), 1);
+    let copy = definition_copy_dir(&attempt, 0);
+    assert_eq!(
+        fs::read_to_string(copy.join("schemas/plan.json")).unwrap(),
+        own
+    );
+    // The engine's file is the node's document, in its own directory.
+    let written = fs::read_to_string(schema_file(&attempt, 0, "plan")).unwrap();
+    assert!(written.contains("\"report\""), "{written}");
+    assert!(!copy.join("schemas").join("0").exists());
+    let record = lifecycle.record(&run).unwrap();
+    assert_eq!(record.attempts[0].definition_hash, hash_dir(&copy));
+}
+
+#[test]
+fn a_file_schemas_data_field_reaches_the_recorded_result() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    let run = failed_after_a_file_schema_plan(&world, &mut lifecycle);
+    let state = lifecycle.state(&run).unwrap();
+    let plan = state.last_finish(&NodeKey::new("plan", 1)).unwrap();
+    assert_eq!(plan.result, Some(json!({ "report": { "n": 1 } })));
+}
+
+#[test]
+fn a_fresh_retry_changing_a_nested_property_of_a_data_field_is_refused() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    let run = failed_after_a_file_schema_plan(&world, &mut lifecycle);
+
+    write_report_schema(world.profile(), &report_schema("string"));
+    let refusal = lifecycle
+        .retry(&run, None, true, &world.dirs, None)
+        .unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::FreshDefinition);
+    assert!(
+        refusal
+            .to_string()
+            .contains("changes output field 'report' of 'plan'"),
+        "{refusal}"
+    );
+    let attempt = attempt_dir(lifecycle.run_dir(&run).unwrap(), 1);
+    assert!(!schema_file(&attempt, 1, "plan").exists());
+
+    // The same subschema passes, whatever else the definition changes.
+    write_report_schema(world.profile(), &report_schema("number"));
+    fs::write(world.profile().join("report").join("work.md"), "Again\n").unwrap();
+    lifecycle
+        .retry(&run, None, true, &world.dirs, None)
+        .unwrap();
+    assert!(schema_file(&attempt, 1, "plan").is_file());
+}
+
 #[path = "landing_tests.rs"]
 mod landing_tests;
 
@@ -2332,6 +2553,7 @@ fn a_task_run_in_a_lane_tree_works_there_and_keeps_its_run_directory_across_a_re
         started_by: StartedBy::Lane,
         tree: RunTree::Lane {
             path: tree.clone(),
+            common_dir: None,
             base: None,
             start: None,
             merge_into: None,
@@ -2366,6 +2588,7 @@ fn a_lane_tree_with_no_lane_is_a_bad_request() {
     let request = StartRequest {
         tree: RunTree::Lane {
             path: world.root.join("lane"),
+            common_dir: None,
             base: None,
             start: None,
             merge_into: None,
@@ -2384,6 +2607,7 @@ fn a_lane_tree_with_a_start_or_a_task_run_on_a_snapshot_or_named_repository_is_r
     for tree in [
         RunTree::Lane {
             path: world.root.join("lane"),
+            common_dir: None,
             base: None,
             start: Some("main".to_string()),
             merge_into: None,

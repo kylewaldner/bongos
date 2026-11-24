@@ -7,9 +7,12 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
+use std::sync::Arc;
 
 use serde::Deserialize;
 use toml::Spanned;
+
+use crate::schema::OutputSchema;
 
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -30,6 +33,7 @@ const NODE_KEYS: &[&str] = &[
     "purpose",
     "prompt",
     "output",
+    "output_schema",
     "routes",
     "join",
     "script",
@@ -239,6 +243,11 @@ pub struct Node {
     pub with: toml::Table,
     pub permissions: Option<Permissions>,
     pub output: Vec<OutputField>,
+    /// `output_schema`: a schema file in the definition directory, instead of `output`.
+    pub output_schema: Option<Located<String>>,
+    /// The node's one result schema document, compiled at load. A node with `output_schema` holds
+    /// an empty placeholder until the loader reads the file ([`crate::schema::document`]).
+    pub schema: Arc<OutputSchema>,
     pub routes: Vec<Route>,
     pub join: Option<Join>,
     pub gate: Option<Gate>,
@@ -322,6 +331,9 @@ pub enum FieldType {
     Path,
     Number,
     List(ItemType),
+    /// Any other value of a file schema, kept as JSON in `result.json`: never routable, never an
+    /// outcome and not editable. It cannot be declared in `output`.
+    Data,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -498,6 +510,7 @@ struct RawNode {
     permissions: Option<Spanned<Permissions>>,
     #[serde(default)]
     output: HashMap<String, Spanned<RawField>>,
+    output_schema: Option<Spanned<String>>,
     #[serde(default)]
     routes: Vec<Spanned<RawRoute>>,
     join: Option<Spanned<Join>>,
@@ -741,6 +754,11 @@ fn convert_node(
         output = checks_output(line);
     }
 
+    let schema = OutputSchema::from_fields(&output).map_err(|message| ParseError {
+        line,
+        message: format!("node '{name}': {message}"),
+    })?;
+
     Ok(Node {
         name,
         line,
@@ -759,6 +777,8 @@ fn convert_node(
             }
         }),
         output,
+        output_schema: raw.output_schema.map(|file| located(file, lines)),
+        schema: Arc::new(schema),
         routes,
         join: raw.join.map(|join| {
             let line = lines.line_of(&join);

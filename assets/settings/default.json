@@ -2697,7 +2697,8 @@
     // The prompts that open in the minibuffer instead of a centered modal. Names:
     // "command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint",
     // "goto_line", "zap", "isearch", "kill_ring", "query_replace", "set_keybindings", "outline",
-    // "project_symbols", "xref_history", "string_rectangle", "language_extensions".
+    // "project_symbols", "xref_history", "string_rectangle", "language_extensions",
+    // "switch_buffer", "go_to_file", "find_in_files", "search_buffer_lines", "find_directory".
     // Remove a name to bring that prompt back as a centered modal. While the list is empty
     // there is no minibuffer, nothing is routed to it and its commands are hidden.
     "enabled_for": [
@@ -2717,7 +2718,12 @@
       "project_symbols",
       "xref_history",
       "string_rectangle",
-      "language_extensions"
+      "language_extensions",
+      "switch_buffer",
+      "go_to_file",
+      "find_in_files",
+      "search_buffer_lines",
+      "find_directory"
     ],
     // The most candidate rows the minibuffer shows at once.
     "max_rows": 15,
@@ -2729,6 +2735,20 @@
     // Delay in milliseconds before the minibuffer shows the keys typed so far of a pending
     // key sequence.
     "key_hint_delay": 500,
+  },
+  // Settings for the navigation pickers: the buffer switcher, go to file and find in files.
+  "navigation": {
+    // Whether the buffer switcher lists recently closed files after the open buffers.
+    "include_recent_closed": true,
+    // The largest file, in bytes, that a picker preview shows (default 2 MiB).
+    "preview_max_file_size": 2097152,
+  },
+  // Settings for the undo tree: a view of a buffer's undo history as a tree.
+  "undo_tree": {
+    // The most nodes the undo tree keeps. Values below 100 count as 100.
+    "node_limit": 10000,
+    // How edits are grouped into undo states: "emacs" or "zed".
+    "grouping": "emacs",
   },
   // Settings for the Work view: projects and tasks kept as files under ~/.bongos.
   "work": {
@@ -2947,6 +2967,10 @@
       // MB of output (stdout and stderr together) a program may print; past it the output
       // is dropped and the node fails "output cap hit".
       "max_output_mb": 10,
+      // What a program node does when no OS sandbox is available: "ask" asks a person to
+      // approve the run once, "refuse" never runs it, "allow" runs it unsandboxed without
+      // asking. The default is "ask". A project can only tighten this.
+      "unsandboxed": "ask",
     },
   },
   "lanes": {
@@ -3016,6 +3040,19 @@
     "tree_key_debounce_ms": 2000,
     // At most one live-state write per task per this many milliseconds.
     "live_write_ms": 1000,
+  },
+  "confinement": {
+    // Run agent steps inside the sandbox (writes only to the job tree, scratch, declared
+    // directories and the agent CLI's own state paths below). Off until the confined Claude Code
+    // CLI is verified with a logged-in session and user-scoped MCP servers.
+    "agent_steps": false,
+    // Run task checks inside the sandbox.
+    "task_checks": true,
+    // Paths each agent CLI must write to keep its session and login; ~ is the job's HOME.
+    "agent_state_paths": {
+      "claude": ["~/.claude"],
+      "codex": ["~/.codex"],
+    },
   },
   // The server to connect to. If the environment variable
   // ZED_SERVER_URL is set, it will override this setting.

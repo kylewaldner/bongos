@@ -415,6 +415,16 @@ impl<'a> Validator<'a> {
             NodeKind::Program => self.check_program(node),
         }
 
+        if let Some(file) = &node.output_schema
+            && !node.output.is_empty()
+        {
+            self.error(
+                Some(name),
+                file.line,
+                "set either `output` or `output_schema`, not both",
+            );
+        }
+
         for field in &node.output {
             if let FieldType::Choice(values) = &field.field_type {
                 let mut seen = HashSet::new();
@@ -1049,6 +1059,11 @@ impl<'a> Validator<'a> {
                         Some(name),
                         line,
                         format!("route on list field '{}'", condition.field),
+                    ),
+                    FieldType::Data => self.error(
+                        Some(name),
+                        line,
+                        format!("route on data field '{}'", condition.field),
                     ),
                     FieldType::Text | FieldType::Path | FieldType::Number => {}
                 },

@@ -266,7 +266,7 @@ async fn a_prepared_job_runs_in_its_lane_tree_reset_onto_its_run_branch_with_the
     let tip = fixture.tip();
     let target = fixture.locations.get("target").unwrap().path.clone();
     assert!(
-        matches!(&setup.tree, bongos_workflow::RunTree::Lane { path, base: None, start: None, merge_into: None } if *path == tip),
+        matches!(&setup.tree, bongos_workflow::RunTree::Lane { path, common_dir: Some(_), base: None, start: None, merge_into: None } if *path == tip),
         "{:?}",
         setup.tree
     );

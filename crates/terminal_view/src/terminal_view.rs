@@ -1638,7 +1638,12 @@ impl Item for TerminalView {
                         cx.update(|window, cx| {
                             let Ok(new_pane) = terminal_panel.update(cx, |terminal_panel, cx| {
                                 let new_pane = terminal_panel::new_terminal_pane(
-                                    workspace, project, is_zoomed, window, cx,
+                                    workspace,
+                                    project,
+                                    is_zoomed,
+                                    terminal_panel.pane_history_timestamp.clone(),
+                                    window,
+                                    cx,
                                 );
                                 terminal_panel.apply_tab_bar_buttons(&new_pane, cx);
                                 terminal_panel.center.split(

@@ -38,6 +38,8 @@ mod migrate;
 mod minibuffer_keymap_tests;
 #[cfg(target_os = "macos")]
 pub(crate) mod move_to_applications;
+#[cfg(test)]
+mod navigation_keymap_tests;
 mod open_listener;
 mod open_url_modal;
 #[cfg(test)]
@@ -50,6 +52,8 @@ mod rectangle_keymap_tests;
 pub mod remote_debug;
 #[cfg(test)]
 mod symbol_keymap_tests;
+#[cfg(test)]
+mod undo_tree_keymap_tests;
 #[cfg(test)]
 mod universal_argument_tests;
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
@@ -5697,6 +5701,7 @@ mod tests {
                 "menu",
                 "minibuffer",
                 "multi_workspace",
+                "navigation",
                 "new_process_modal",
                 "notebook",
                 "outline",
@@ -5735,6 +5740,7 @@ mod tests {
                 "toast",
                 "todo",
                 "toolchain",
+                "undo_tree",
                 "variable_list",
                 "vim",
                 "window",

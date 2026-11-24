@@ -44,6 +44,9 @@ uuid.workspace = true
 futures.workspace = true
 ztracing.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, features = ["user"] }
+
 [dev-dependencies]
 pretty_assertions.workspace = true
 serde_json.workspace = true

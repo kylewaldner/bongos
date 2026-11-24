@@ -887,6 +887,71 @@ async fn a_project_job_starts_from_its_start_and_merges_into_merge_into(cx: &mut
 }
 
 #[gpui::test]
+async fn the_merge_in_a_lane_tree_runs_no_hook_a_job_wrote_there(cx: &mut TestAppContext) {
+    use bongos_workflow::builtin_merge::{MergeRequest, merge};
+
+    cx.executor().allow_parking();
+    let fixture = Fixture::new();
+    let tip = fixture.tip();
+    let job = JobRepository::for_project(
+        "app",
+        fixture.app.clone(),
+        Some("release"),
+        "main",
+        RUN_1,
+        1,
+        None,
+    );
+    fixture.reset(&job).await.unwrap();
+    // The user's own configuration names a relative hooks directory, as husky does; the run
+    // branch (written by the job) holds a `post-merge` hook there.
+    git(&fixture.app, &["config", "core.hooksPath", ".hooks"]);
+    let marker = fixture.base.join("hook-ran");
+    std::fs::create_dir_all(tip.join(".hooks")).unwrap();
+    let hook = tip.join(".hooks").join("post-merge");
+    std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+    std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    git(&tip, &["add", ".hooks/post-merge"]);
+    git(&tip, &["commit", "-q", "-m", "hook"]);
+    let work = git(&tip, &["rev-parse", "HEAD"]);
+    git(&fixture.app, &["branch", "control", "integration"]);
+
+    let into = MergeTarget::MergeInto(Some("integration".to_string()));
+    merge_in_lane_tree(
+        &fixture.git,
+        &lane_merge(&fixture, into, &job.run_branch, RUN_1),
+    )
+    .await
+    .unwrap();
+    assert_eq!(git(&fixture.app, &["rev-parse", "integration"]), work);
+    assert!(!marker.exists(), "the job-written hook ran in the merge");
+
+    // Control: the same merge as a person's tree (no job protections) does run the hook.
+    git(&tip, &["checkout", "-q", "control"]);
+    let common = git(
+        &fixture.app,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    );
+    merge(
+        &fixture.git,
+        &MergeRequest {
+            task_worktree: tip.clone(),
+            run_git_dir: PathBuf::from(common),
+            task_branch: "control".to_string(),
+            run_branch: job.run_branch.clone(),
+            run_id: RUN_1.to_string(),
+            workflow: "build".to_string(),
+            todo: "ship it".to_string(),
+            style: MergeStyle::FfOrMerge,
+            job: false,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(marker.exists(), "the control merge should run the hook");
+}
+
+#[gpui::test]
 async fn a_branch_only_leaf_merges_into_its_task_branch_in_the_lane_tree(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let fixture = Fixture::new();

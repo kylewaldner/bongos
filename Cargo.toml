@@ -211,6 +211,7 @@ members = [
     "crates/bongos_chat_model",
     "crates/bongos_checks",
     "crates/bongos_checks_model",
+    "crates/bongos_confine",
     "crates/bongos_java",
     "crates/bongos_kotlin",
     "crates/bongos_language_status",
@@ -227,6 +228,8 @@ members = [
     "crates/bongos_query_replace_model",
     "crates/bongos_minibuffer",
     "crates/bongos_minibuffer_model",
+    "crates/bongos_navigation",
+    "crates/bongos_navigation_model",
     "crates/bongos_window",
     "crates/bongos_net",
     "crates/bongos_engine_host",
@@ -235,6 +238,8 @@ members = [
     "crates/bongos_prompts",
     "crates/bongos_prompts_model",
     "crates/bongos_terraform",
+    "crates/bongos_undo_tree",
+    "crates/bongos_undo_tree_model",
     "crates/bongos_version",
     "crates/bongos_work",
     "crates/bongos_work_model",
@@ -490,6 +495,7 @@ bongos_chat = { path = "crates/bongos_chat" }
 bongos_chat_model = { path = "crates/bongos_chat_model" }
 bongos_checks = { path = "crates/bongos_checks" }
 bongos_checks_model = { path = "crates/bongos_checks_model" }
+bongos_confine = { path = "crates/bongos_confine" }
 bongos_engine_host = { path = "crates/bongos_engine_host" }
 bongos_java = { path = "crates/bongos_java" }
 bongos_kotlin = { path = "crates/bongos_kotlin" }
@@ -507,6 +513,8 @@ bongos_query_replace = { path = "crates/bongos_query_replace" }
 bongos_query_replace_model = { path = "crates/bongos_query_replace_model" }
 bongos_minibuffer = { path = "crates/bongos_minibuffer" }
 bongos_minibuffer_model = { path = "crates/bongos_minibuffer_model" }
+bongos_navigation = { path = "crates/bongos_navigation" }
+bongos_navigation_model = { path = "crates/bongos_navigation_model" }
 bongos_window = { path = "crates/bongos_window" }
 bongos_net = { path = "crates/bongos_net" }
 bongos_project_repo = { path = "crates/bongos_project_repo" }
@@ -514,6 +522,8 @@ bongos_project_repo_model = { path = "crates/bongos_project_repo_model" }
 bongos_prompts = { path = "crates/bongos_prompts" }
 bongos_prompts_model = { path = "crates/bongos_prompts_model" }
 bongos_terraform = { path = "crates/bongos_terraform" }
+bongos_undo_tree = { path = "crates/bongos_undo_tree" }
+bongos_undo_tree_model = { path = "crates/bongos_undo_tree_model" }
 bongos_version = { path = "crates/bongos_version" }
 bongos_work = { path = "crates/bongos_work" }
 bongos_work_model = { path = "crates/bongos_work_model" }
@@ -655,7 +665,7 @@ indoc = "2"
 inventory = "0.3.19"
 itertools = "0.14.0"
 json_dotpath = "1.1"
-jsonschema = "0.37.0"
+jsonschema = { version = "0.37.0", default-features = false }
 jsonwebtoken = "10.0"
 jupyter-protocol = "1.4.0"
 jupyter-websocket-client = "1.1.0"
@@ -1003,6 +1013,7 @@ nucleo = { opt-level = 3 }
 nucleo-matcher = { opt-level = 3 }
 memchr = { opt-level = 3 }
 bongos_minibuffer_model = { opt-level = 3 }
+bongos_navigation_model = { opt-level = 3 }
 # The incremental search perf gate (bongos_isearch perf_tests) needs these optimized.
 bongos_isearch = { opt-level = 3 }
 aho-corasick = { opt-level = 3 }

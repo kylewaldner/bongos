@@ -5,13 +5,14 @@ use bongos_project_repo::Git;
 use futures::executor::block_on;
 use tempfile::TempDir;
 
+use crate::task_git::TaskGit;
 use crate::test_support::{
     HOSTILE_CHILD, commit_everything, git_in, init_git_repo, rerun_with_hostile_git_env, write_file,
 };
 use crate::tree_key::{TreeError, TreeKey, combine_trees, key_inputs_digest, tree_key};
 
-fn git() -> Git {
-    Git::locate().unwrap().isolated()
+fn git() -> TaskGit {
+    TaskGit::new(Git::locate().unwrap().isolated(), std::path::PathBuf::new())
 }
 
 struct Fixture {

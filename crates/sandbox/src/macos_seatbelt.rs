@@ -95,10 +95,14 @@ impl SeatbeltConfigFile {
     /// `allowed_unix_socket_paths` lists Unix domain sockets the command may
     /// connect to for local IPC even when IP network access is otherwise
     /// disabled. This does not permit sending packets to other machines.
+    ///
+    /// `read_only_masks` lists paths (usually inside a writable directory)
+    /// whose writes are denied in place; reads stay allowed.
     pub fn new(
         writable_directories: &[&Path],
         protected_paths: &[&Path],
         allowed_unix_socket_paths: &[&Path],
+        read_only_masks: &[&Path],
         permissions: SandboxPermissions,
     ) -> Result<Self> {
         let mut file =
@@ -108,6 +112,7 @@ impl SeatbeltConfigFile {
             writable_directories,
             protected_paths,
             allowed_unix_socket_paths,
+            read_only_masks,
             permissions,
         )?;
         file.write_all(config.as_bytes())
@@ -144,6 +149,8 @@ impl SeatbeltConfigFile {
 /// * `allowed_unix_socket_paths` - Unix domain sockets the command may
 ///   connect to for local IPC even when IP network access is otherwise
 ///   disabled. This does not permit sending packets to other machines.
+/// * `read_only_masks` - Paths whose writes are denied in place even when they
+///   fall under a writable directory. Reads stay allowed.
 /// * `permissions` - Sandbox relaxations requested for this command.
 ///
 /// # Returns
@@ -155,12 +162,14 @@ pub fn wrap_invocation(
     writable_directories: &[&Path],
     protected_paths: &[&Path],
     allowed_unix_socket_paths: &[&Path],
+    read_only_masks: &[&Path],
     permissions: SandboxPermissions,
 ) -> Result<(String, Vec<String>, SeatbeltConfigFile)> {
     let config_file = SeatbeltConfigFile::new(
         writable_directories,
         protected_paths,
         allowed_unix_socket_paths,
+        read_only_masks,
         permissions,
     )?;
 
@@ -180,11 +189,23 @@ pub fn wrap_invocation(
     ];
     wrapped_args.extend(args.iter().cloned());
 
-    Ok((
-        "/usr/bin/sandbox-exec".to_string(),
-        wrapped_args,
-        config_file,
-    ))
+    Ok((SANDBOX_EXEC.to_string(), wrapped_args, config_file))
+}
+
+/// Seatbelt's launcher, always run from this fixed path.
+pub(crate) const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+
+/// Whether [`SANDBOX_EXEC`] is an executable file, since it is run by its fixed path and
+/// never looked up.
+pub(crate) fn check_launcher() -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let metadata = std::fs::metadata(SANDBOX_EXEC)
+        .with_context(|| format!("Seatbelt's launcher {SANDBOX_EXEC} is unavailable"))?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        anyhow::bail!("Seatbelt's launcher {SANDBOX_EXEC} is not an executable file");
+    }
+    Ok(())
 }
 
 /// Generate a Seatbelt config string that reads everywhere by default.
@@ -207,6 +228,7 @@ fn generate_seatbelt_config(
     writable_directories: &[&Path],
     protected_paths: &[&Path],
     allowed_unix_socket_paths: &[&Path],
+    read_only_masks: &[&Path],
     permissions: SandboxPermissions,
 ) -> Result<String> {
     // Canonicalize each writable path to resolve symlinks (e.g.,
@@ -324,6 +346,23 @@ fn generate_seatbelt_config(
         ));
     }
 
+    // Read-only masks come after every write allow (and the Git denies): in
+    // Seatbelt a later matching rule wins, so these keep a path read-only even
+    // inside a writable directory. A mask that doesn't exist yet is denied
+    // too (so it can't be created) only while its parent exists; callers
+    // should pass existing paths, as the Linux path refuses a missing one.
+    for mask in read_only_masks {
+        let canonical = crate::canonicalize_allowing_missing_leaf(mask);
+        let escaped_path = escape_sandbox_path(&canonical)?;
+        config.push_str(&format!(
+            r#"
+; Keep a read-only mask read-only inside writable directories
+(deny file-write*
+    (subpath "{escaped_path}"))
+"#
+        ));
+    }
+
     match permissions.network {
         NetworkAccess::None => {}
         NetworkAccess::All => {
@@ -405,9 +444,14 @@ mod tests {
     #[test]
     fn test_generate_seatbelt_config_contains_read_and_project_write_permissions_by_default() {
         let dir = PathBuf::from("/Users/test/projects/myproject");
-        let config =
-            generate_seatbelt_config(&[dir.as_path()], &[], &[], SandboxPermissions::default())
-                .unwrap();
+        let config = generate_seatbelt_config(
+            &[dir.as_path()],
+            &[],
+            &[],
+            &[],
+            SandboxPermissions::default(),
+        )
+        .unwrap();
 
         assert!(config.contains("(allow file-read*)"));
         assert!(config.contains("/Users/test/projects/myproject"));
@@ -421,6 +465,7 @@ mod tests {
         let dir = PathBuf::from("/Users/test/projects/myproject");
         let config = generate_seatbelt_config(
             &[dir.as_path()],
+            &[],
             &[],
             &[],
             SandboxPermissions {
@@ -440,13 +485,59 @@ mod tests {
     #[test]
     fn test_generate_seatbelt_config_allows_terminal_ioctls_by_default() {
         let dir = PathBuf::from("/Users/test/projects/myproject");
-        let config =
-            generate_seatbelt_config(&[dir.as_path()], &[], &[], SandboxPermissions::default())
-                .unwrap();
+        let config = generate_seatbelt_config(
+            &[dir.as_path()],
+            &[],
+            &[],
+            &[],
+            SandboxPermissions::default(),
+        )
+        .unwrap();
 
         assert!(config.contains("(allow file-ioctl"));
         assert!(config.contains("/dev/ptmx"));
         assert!(config.contains("^/dev/ttys[0-9]+"));
+    }
+
+    #[test]
+    fn test_generate_seatbelt_config_denies_read_only_masks_after_write_allows() {
+        let dir = PathBuf::from("/Users/test/projects/myproject");
+        let protected = dir.join(".git");
+        let mask = dir.join("plans");
+        let config = generate_seatbelt_config(
+            &[dir.as_path()],
+            &[protected.as_path()],
+            &[],
+            &[mask.as_path()],
+            SandboxPermissions::default(),
+        )
+        .unwrap();
+
+        let deny = "(deny file-write*\n    (subpath \"/Users/test/projects/myproject/plans\"))";
+        let deny_at = config.find(deny).expect("mask deny rule is present");
+        let allow_at = config
+            .find("(subpath \"/Users/test/projects/myproject\"))")
+            .expect("write allow is present");
+        let git_deny_at = config
+            .find("(deny file-read-data file-write*")
+            .expect("git deny is present");
+        assert!(deny_at > allow_at, "mask deny must follow the write allow");
+        assert!(deny_at > git_deny_at, "mask deny must follow the git deny");
+    }
+
+    #[test]
+    fn test_generate_seatbelt_config_without_masks_is_unchanged() {
+        let dir = PathBuf::from("/Users/test/projects/myproject");
+        let config = generate_seatbelt_config(
+            &[dir.as_path()],
+            &[],
+            &[],
+            &[],
+            SandboxPermissions::default(),
+        )
+        .unwrap();
+        assert!(!config.contains("read-only mask"));
+        assert!(!config.contains("(deny file-write*"));
     }
 
     #[test]
@@ -457,6 +548,7 @@ mod tests {
             &[dir.as_path()],
             &[],
             &[socket_path.as_path()],
+            &[],
             SandboxPermissions::default(),
         )
         .unwrap();
@@ -523,6 +615,7 @@ mod tests {
             &[temp_dir.path()],
             &[],
             &[socket_path.as_path(), canonical_socket_path.as_path()],
+            &[],
             SandboxPermissions::default(),
         )
         .unwrap();
@@ -548,6 +641,7 @@ mod tests {
         let config = generate_seatbelt_config(
             &[dir.as_path()],
             &[protected.as_path()],
+            &[],
             &[],
             SandboxPermissions::default(),
         )
@@ -580,6 +674,7 @@ mod tests {
             ],
             &[temp_dir.path()],
             &[protected_file.as_path()],
+            &[],
             &[],
             SandboxPermissions::default(),
         )
@@ -623,6 +718,7 @@ mod tests {
             &[temp_dir.path()],
             &[protected_file.as_path()],
             &[],
+            &[],
             SandboxPermissions {
                 network: NetworkAccess::None,
                 allow_fs_write: true,
@@ -654,6 +750,7 @@ mod tests {
             &[dir.as_path()],
             &[],
             &[],
+            &[],
             SandboxPermissions {
                 network: NetworkAccess::All,
                 allow_fs_write: false,
@@ -672,6 +769,7 @@ mod tests {
         let dir = PathBuf::from("/Users/test/projects/myproject");
         let config = generate_seatbelt_config(
             &[dir.as_path()],
+            &[],
             &[],
             &[],
             SandboxPermissions {
@@ -693,6 +791,7 @@ mod tests {
         let scratch_dir = PathBuf::from("/private/tmp/zed-agent-command");
         let config = generate_seatbelt_config(
             &[project_dir.as_path(), scratch_dir.as_path()],
+            &[],
             &[],
             &[],
             SandboxPermissions::default(),
@@ -732,6 +831,7 @@ mod tests {
             &[temp_dir.path()],
             &[],
             &[],
+            &[],
             SandboxPermissions::default(),
         )
         .unwrap();
@@ -753,6 +853,7 @@ mod tests {
             "/bin/sh",
             &["-c".to_string(), "cat /etc/hosts".to_string()],
             &[temp_dir.path()],
+            &[],
             &[],
             &[],
             SandboxPermissions::default(),
@@ -782,6 +883,7 @@ mod tests {
             &[temp_dir.path()],
             &[],
             &[],
+            &[],
             SandboxPermissions::default(),
         )
         .unwrap();
@@ -807,6 +909,7 @@ mod tests {
             "/bin/sh",
             &["-c".to_string(), "echo test 2>/dev/null".to_string()],
             &[temp_dir.path()],
+            &[],
             &[],
             &[],
             SandboxPermissions {
@@ -842,6 +945,7 @@ mod tests {
                 format!("echo 'hello' > '{}'", test_file.display()),
             ],
             &[temp_dir.path()],
+            &[],
             &[],
             &[],
             SandboxPermissions {
@@ -881,6 +985,7 @@ mod tests {
             &[project_dir.path(), scratch_dir.path()],
             &[],
             &[],
+            &[],
             SandboxPermissions::default(),
         )
         .unwrap();
@@ -912,6 +1017,7 @@ mod tests {
                 format!("echo 'hello' > '{}'", test_file.display()),
             ],
             &[temp_dir.path()],
+            &[],
             &[],
             &[],
             SandboxPermissions::default(),
@@ -946,6 +1052,7 @@ mod tests {
                 format!("echo 'hello' > '{}'", test_file.display()),
             ],
             &[project_dir.path()],
+            &[],
             &[],
             &[],
             SandboxPermissions {
@@ -986,6 +1093,7 @@ mod tests {
                 format!("echo 'hello' > '{}'", forbidden_file.display()),
             ],
             &[project_dir.path()],
+            &[],
             &[],
             &[],
             SandboxPermissions::default(),

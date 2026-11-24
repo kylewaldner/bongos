@@ -262,8 +262,15 @@ fn a_project_merge_never_checks_out_its_target_so_a_retry_after_a_crash_finds_th
     git_out(&git, &clash_tree, &["commit", "-q", "-m", "clash"]);
     git_out(&git, &clash_tree, &["checkout", "-q", "--detach"]);
     let clash_head = git_out(&git, &repo, &["rev-parse", "clash"]);
+    // The run tree's git directory, as the run records it when it makes the tree.
+    let run_git_dir = PathBuf::from(git_out(
+        &git,
+        &tree,
+        &["rev-parse", "--path-format=absolute", "--git-dir"],
+    ));
     let request = |merge_into: &str| ProjectMergeRequest {
         run_tree: tree.clone(),
+        run_git_dir: run_git_dir.clone(),
         run_branch: "run-branch".to_string(),
         merge_into: merge_into.to_string(),
         run_id: "run-1".to_string(),
@@ -352,6 +359,7 @@ fn a_project_run_with_no_target_merges_nothing() {
     let end = ProjectEnd {
         merge: Some(ProjectMergeRequest {
             run_tree: PathBuf::from("/nowhere"),
+            run_git_dir: PathBuf::from("/nowhere/.git"),
             run_branch: "run".to_string(),
             merge_into: "main".to_string(),
             run_id: "run".to_string(),
@@ -574,6 +582,7 @@ fn a_lane_run_records_its_lane_directories_and_edits_and_a_plain_start_none() {
     assert_eq!(setup.lane, request.lane);
     assert_eq!(setup.lane_dirs, request.lane_dirs);
     assert_eq!(setup.env, request.env);
+    assert_eq!(setup.facts.started_by, Some(StartedBy::Lane));
     assert_eq!(setup.writable_dirs(), vec![target.clone()]);
     let record = lifecycle.record(&run).unwrap();
     assert_eq!(record.env, request.env);
@@ -590,7 +599,17 @@ fn a_lane_run_records_its_lane_directories_and_edits_and_a_plain_start_none() {
     let run = world
         .start(&mut lifecycle, with_workflow("single"))
         .unwrap();
-    assert_eq!(lifecycle.binding(&run).unwrap().setup, RunSetup::default());
+    // Only the facts of its record are known: a person started it, attended.
+    assert_eq!(
+        lifecycle.binding(&run).unwrap().setup,
+        RunSetup {
+            facts: crate::runtime::RunFacts {
+                unattended: false,
+                started_by: Some(StartedBy::Person),
+            },
+            ..RunSetup::default()
+        }
+    );
     assert!(RunSetup::default().env_edits().is_empty());
     let text = fs::read_to_string(lifecycle.run_dir(&run).unwrap().join("run.toml")).unwrap();
     for field in ["tree", "definitions", "env", "lane_dirs"] {
@@ -880,6 +899,7 @@ fn a_program_of_a_work_directory_run_may_write_only_its_own_work_directory() {
                 state: &state,
                 budget_left_usd: None,
                 binding: Some(&binding),
+                grant: None,
             },
             &binding,
             &snapshot,

@@ -361,6 +361,7 @@ fn probe_sandbox(cwd: std::path::PathBuf) -> SandboxState {
         },
         network: SandboxNetPolicy::Blocked,
         git: GitSandboxPolicy::default(),
+        read_only_masks: Vec::new(),
     };
     match crate::runner_program::os_sandbox_probe()(&policy, &cwd) {
         Ok(()) => SandboxState::Sandboxed,

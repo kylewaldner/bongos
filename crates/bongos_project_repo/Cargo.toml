@@ -14,6 +14,7 @@ doctest = false
 
 [dependencies]
 anyhow.workspace = true
+bongos_confine.workspace = true
 bongos_project_repo_model.workspace = true
 bongos_work_model = { workspace = true, features = ["gpui"] }
 chrono.workspace = true

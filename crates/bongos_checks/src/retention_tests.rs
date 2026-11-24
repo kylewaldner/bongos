@@ -38,6 +38,7 @@ fn settings(output_dir: Option<PathBuf>) -> TaskChecksSettings {
         scratch_dir: None,
         tree_key_debounce_ms: 2000,
         live_write_ms: 1000,
+        confine: false,
     }
 }
 

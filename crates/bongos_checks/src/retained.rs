@@ -12,8 +12,8 @@
 
 use std::path::Path;
 
+use crate::task_git::TaskGit;
 use anyhow::{Result, anyhow};
-use bongos_project_repo::Git;
 
 /// Where the refs live.
 pub(crate) const CHECKS_REFS: &str = "refs/bongos/checks/";
@@ -61,7 +61,7 @@ pub(crate) struct KeptTree<'a> {
 
 /// Points the refs of `task_id` at `trees`: one tree is `refs/bongos/checks/<task id>`, several
 /// are one ref per repository. The other form is deleted first, so the two never collide.
-pub(crate) async fn keep_trees(git: &Git, task_id: &str, trees: &[KeptTree<'_>]) -> Result<()> {
+pub(crate) async fn keep_trees(git: &TaskGit, task_id: &str, trees: &[KeptTree<'_>]) -> Result<()> {
     let single = ref_name(task_id, None).ok_or_else(|| anyhow!("{task_id:?} cannot name a ref"))?;
     match trees {
         [] => Ok(()),
@@ -94,7 +94,7 @@ pub(crate) async fn keep_trees(git: &Git, task_id: &str, trees: &[KeptTree<'_>])
 
 /// The tree a ref of `task_id` names in the repository at `directory`, if it names one.
 pub(crate) async fn kept_tree(
-    git: &Git,
+    git: &TaskGit,
     directory: &Path,
     task_id: &str,
     repo: Option<&str>,
@@ -116,7 +116,7 @@ pub(crate) async fn kept_tree(
 
 /// Every ref under `refs/bongos/checks/` of the repository at `directory`, with the task id it
 /// names.
-pub(crate) async fn list_refs(git: &Git, directory: &Path) -> Result<Vec<(String, String)>> {
+pub(crate) async fn list_refs(git: &TaskGit, directory: &Path) -> Result<Vec<(String, String)>> {
     let output = git
         .run(
             directory,
@@ -134,7 +134,7 @@ pub(crate) async fn list_refs(git: &Git, directory: &Path) -> Result<Vec<(String
 }
 
 /// Deletes the ref `name`, which must be under `refs/bongos/checks/`.
-pub(crate) async fn delete_ref(git: &Git, directory: &Path, name: &str) -> Result<()> {
+pub(crate) async fn delete_ref(git: &TaskGit, directory: &Path, name: &str) -> Result<()> {
     if !name.starts_with(CHECKS_REFS) {
         return Err(anyhow!("{name} is not a ref of task checks"));
     }
@@ -143,7 +143,7 @@ pub(crate) async fn delete_ref(git: &Git, directory: &Path, name: &str) -> Resul
 }
 
 /// Whether the repository at `directory` holds the tree object `tree`.
-pub(crate) async fn has_tree(git: &Git, directory: &Path, tree: &str) -> bool {
+pub(crate) async fn has_tree(git: &TaskGit, directory: &Path, tree: &str) -> bool {
     ensure_object_id(tree).is_ok()
         && git
             .run(directory, &["cat-file", "-t", tree])

@@ -1445,6 +1445,15 @@ impl Editor {
         });
     }
 
+    /// Pushes the newest selection's head as a goto origin, for a jump that starts somewhere else
+    /// (a picker) and leaves this editor.
+    pub fn push_goto_origin_at_cursor(&mut self, cx: &mut Context<Self>) {
+        let head = self.selections.newest_anchor().head();
+        if let Some(origin) = self.navigation_entry(head, cx) {
+            self.push_goto_origin(origin, cx);
+        }
+    }
+
     /// Like `push_goto_origin`, but does nothing when the cursor is still on the origin's row,
     /// since a jump within a row is not a navigation worth returning from.
     fn push_goto_origin_if_moved(&mut self, origin: NavigationEntry, cx: &mut Context<Self>) {
