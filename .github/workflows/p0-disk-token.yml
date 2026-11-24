@@ -25,7 +25,7 @@ jobs:
       - name: Sizes of removal candidates
         run: |
           for p in /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift /opt/microsoft /usr/lib/jvm /usr/local/share/powershell /opt/az /usr/lib/google-cloud-sdk /usr/lib/firefox /opt/google /usr/local/share/chromium /home/linuxbrew /usr/local/aws-cli /usr/local/julia* /var/lib/docker /usr/local/lib/node_modules /usr/share/miniconda /usr/local/n /opt/pipx /usr/local/.ghcup /usr/share/gradle* /usr/local/graalvm /swapfile /mnt/swapfile; do
-            [ -e "$p" ] && echo "SIZE $p $(sudo du -sm "$p" 2>/dev/null | cut -f1) MB"
+            if [ -e "$p" ]; then echo "SIZE $p $(sudo du -sm "$p" 2>/dev/null | cut -f1) MB"; fi
           done
       - name: Remove one at a time and measure
         run: |
