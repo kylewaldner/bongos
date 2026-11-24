@@ -16,28 +16,61 @@ fn destinations_parse_and_malformed_ones_are_refused() {
 
     assert_eq!(Destination::parse(""), Err(DestinationError::Empty));
     assert_eq!(Destination::parse("   "), Err(DestinationError::Empty));
-    for bad in ["#general", "c0123", "C", "X0123", "C01-23", ":1730000000.1"] {
+    for bad in [
+        "#general",
+        "c0123",
+        "C",
+        "X0123",
+        "C01-23",
+        ":1730000000.000100",
+    ] {
         assert!(
             matches!(
                 Destination::parse(bad),
-                Err(DestinationError::BadConversation(_) | DestinationError::Empty)
+                Err(DestinationError::BadConversation | DestinationError::Empty)
             ),
             "{bad}"
         );
     }
-    for bad in ["C0123:", "C0123:abc", "C0123:1.", "C0123:.5", "C0123:1.2.3"] {
+    for bad in [
+        "C0123:",
+        "C0123:abc",
+        "C0123:1.",
+        "C0123:.5",
+        "C0123:1.2.3",
+        "C0123:1.1",
+        "C0123:1730000000",
+        "C0123:1730000000.0001000",
+    ] {
         assert!(
-            matches!(Destination::parse(bad), Err(DestinationError::BadTs(_))),
+            matches!(Destination::parse(bad), Err(DestinationError::BadTs)),
             "{bad}"
         );
     }
 
-    // Timestamps order by seconds, then by the fraction, as integers.
+    // The errors never echo the input, which may be a pasted token.
+    let secret = "xoxp-1234-secret";
+    assert!(
+        !Destination::parse(secret)
+            .unwrap_err()
+            .to_string()
+            .contains(secret)
+    );
+    let with_ts = format!("C0123:{secret}");
+    assert!(
+        !Destination::parse(&with_ts)
+            .unwrap_err()
+            .to_string()
+            .contains(secret)
+    );
+
+    // Timestamps order by seconds, then by the fraction, as decimals.
     let mut stamps = [
         Ts::new("1730000000.000100"),
         Ts::new("999999999.900000"),
         Ts::new("1730000000.000099"),
         Ts::new("1730000001.000000"),
+        Ts::new("1730000000.1"),
     ];
     stamps.sort();
     let sorted: Vec<&str> = stamps.iter().map(Ts::as_str).collect();
@@ -47,6 +80,7 @@ fn destinations_parse_and_malformed_ones_are_refused() {
             "999999999.900000",
             "1730000000.000099",
             "1730000000.000100",
+            "1730000000.1",
             "1730000001.000000"
         ]
     );
