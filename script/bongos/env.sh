@@ -77,7 +77,15 @@ export CC=clang CXX=clang++
 
 # Tuning with no manifest diff. Never set RUSTFLAGS: it replaces .cargo/config.toml's flags (cargo uses
 # the first of CARGO_ENCODED_RUSTFLAGS, RUSTFLAGS, target.*.rustflags, build.rustflags, and never merges them).
-export CARGO_PROFILE_DEV_DEBUG=line-tables-only
+# Dev and test builds keep line tables (file and line in backtraces). BONGOS_NO_DEBUGINFO=1 (exactly 1, like the
+# switches below) builds them with no debug info at all: hosted CI runners set it, because the whole-suite test build
+# then needs about 55 GiB instead of about 106 GiB (the ~290 test binaries are 43 GiB instead of 92 GiB) and a runner
+# has about 125 GiB. Panic messages keep their file and line; backtrace frames show function names only.
+if [ "${BONGOS_NO_DEBUGINFO:-}" = 1 ]; then
+  export CARGO_PROFILE_DEV_DEBUG=0
+else
+  export CARGO_PROFILE_DEV_DEBUG=line-tables-only
+fi
 export CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG=0
 
 # Faster dev builds on Linux, two switches with no manifest diff. Both are for dev and test builds only:
