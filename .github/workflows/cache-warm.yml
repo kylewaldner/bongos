@@ -48,6 +48,8 @@ jobs:
       BONGOS_WORKSPACE: /mnt/bongos-workspace
       BONGOS_UNIFIED_FEATURES: ${{ matrix.unified }}
       BONGOS_RELEASE_BUILD: ${{ matrix.release }}
+      # The dev variants have no debug info on runners (env.sh); every job that restores them sets the same
+      BONGOS_NO_DEBUGINFO: ${{ matrix.release != '1' && '1' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

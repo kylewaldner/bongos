@@ -265,6 +265,9 @@ runs:
         BONGOS_WORKSPACE: /mnt/bongos-workspace
         BONGOS_UNIFIED_FEATURES: ${{ inputs.cache_variant == 'dev-unified' && '1' || '' }}
         BONGOS_RELEASE_BUILD: ${{ inputs.cache_variant == 'release' && '1' || '' }}
+        # Dev and test builds without debug info, as cache-warm builds the dev variants: the whole-suite test build is
+        # about 55 GiB instead of about 106 GiB, which a runner's 125 GiB cannot hold beside the 15 GiB floor
+        BONGOS_NO_DEBUGINFO: ${{ inputs.cache_variant != 'release' && '1' || '' }}
       run: |
         set -euo pipefail
         sudo mkdir -p "$BONGOS_WORKSPACE"

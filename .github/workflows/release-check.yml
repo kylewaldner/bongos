@@ -301,6 +301,8 @@ jobs:
           BONGOS_WORKSPACE: /mnt/bongos-workspace
           BONGOS_UNIFIED_FEATURES: ''
           BONGOS_RELEASE_BUILD: ''
+          # no debug info in the test build, as cache-warm's dev row: about half the disk of line tables
+          BONGOS_NO_DEBUGINFO: '1'
         run: |
           set -euo pipefail
           export RUSTUP_HOME="$BONGOS_WORKSPACE/rustup" CARGO_HOME="$BONGOS_WORKSPACE/cargo"
