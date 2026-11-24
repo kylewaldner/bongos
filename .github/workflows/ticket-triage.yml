@@ -4,17 +4,17 @@
 # secret to $RUNNER_TEMP/coord, outside the workspace. No Claude usage, no ANTHROPIC_API_KEY. With every switch of the
 # committed runner.toml off, a run only reports (the report is the step summary).
 #
-# Started by: workflow_dispatch; repository_dispatch of type `triage` (sent by the trigger workflow of the coordination
-# repository on a push that changes a claim or a queue file, and by the final step of every other workflow); a
-# 10-minute schedule. `schedule` and `repository_dispatch` run only from the default branch, so until this file reaches
-# main nothing starts it: that is intended (no workflow file reaches main before the owner switches the pipeline on).
+# Started by: workflow_dispatch (the final step of every other workflow runs `gh workflow run ticket-triage.yml --ref
+# main`, no inputs); repository_dispatch of type `triage`, sent only by the trigger workflow of the coordination
+# repository on a push that changes a claim or a queue file; a 10-minute schedule.
+# `schedule` and `repository_dispatch` run only from the default branch, so until this file reaches main nothing starts it: that is intended (no workflow file reaches main before the owner switches the pipeline on).
 #
 # Concurrency: one run at a time, a waiting run is replaced by the newest one, and a running one is never cancelled.
 # No `queue: max`: a polling ping needs only the latest request.
 #
 # Test runs: set the redirect inputs (coord_ref, coord_base, app_base, state_prefix) to their test values. The run is then
 # a test run (the frame's rule, frame.redirect): coord_base, app_base and state_prefix must ALL be redirected, or the
-# job refuses. A test run dispatches only with `--ref` its own test ref (a branch named gh-runners-test-*); a
+# job refuses. index_tag is read only (the dispatched jobs read that index) and does not make a test run. A test run dispatches only with `--ref` its own test ref (a branch named gh-runners-test-*); a
 # production run refuses to start from any ref but main and always dispatches on main.
 name: ticket-triage
 run-name: ticket-triage
@@ -37,6 +37,10 @@ on:
       state_prefix:
         description: "Prefix of state branches, lock, signal and wip refs (empty in production)"
         default: ''
+        type: string
+      index_tag:
+        description: "Release tag of the code search index that dispatched jobs read"
+        default: colgrep-index
         type: string
   repository_dispatch:
     types: [triage]
@@ -62,6 +66,7 @@ jobs:
       IN_COORD_BASE: ${{ inputs.coord_base || 'main' }}
       IN_APP_BASE: ${{ inputs.app_base || 'main' }}
       IN_STATE_PREFIX: ${{ inputs.state_prefix || '' }}
+      IN_INDEX_TAG: ${{ inputs.index_tag || 'colgrep-index' }}
     steps:
       - name: Refuse a re-run and an API key
         env:
@@ -141,6 +146,7 @@ jobs:
           AUTOPILOT_COORD_BASE: ${{ env.IN_COORD_BASE }}
           AUTOPILOT_APP_BASE: ${{ env.IN_APP_BASE }}
           AUTOPILOT_STATE_PREFIX: ${{ env.IN_STATE_PREFIX }}
+          AUTOPILOT_INDEX_TAG: ${{ env.IN_INDEX_TAG }}
           DISPATCH_REF: ${{ steps.mode.outputs.dispatch_ref }}
           # The lane table of the owner's machine is not valid here: run.py skips its host-layout check in runner mode
           # (the dependency graph imports run.py).
