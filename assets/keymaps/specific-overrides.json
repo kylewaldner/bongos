@@ -78,6 +78,13 @@
       "ctrl-l": ["zed::Unbind", "pane::SplitRight"],
     },
   },
+  // The find in files picker (the `FindInFiles` context of its session).
+  {
+    "context": "Minibuffer > FindInFiles > Editor",
+    "bindings": {
+      "ctrl-c ctrl-o": "navigation::ExportToMultibuffer",
+    },
+  },
   // An isearch session (the `Isearch` context of its prompt). Without `Minibuffer`, so the keys
   // also hold when the prompt is not routed to the strip and opens centered.
   {

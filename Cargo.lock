@@ -2817,6 +2817,7 @@ dependencies = [
  "language",
  "log",
  "project",
+ "search",
  "serde_json",
  "settings",
  "terminal_view",
