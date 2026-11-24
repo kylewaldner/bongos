@@ -1,5 +1,6 @@
 //! The agent node kind of the app runner: turns a node start into a [`ClaudeNode`] (caps, rendered
-//! prompt, system text, try directory, branch worktree) and hands it to one [`ClaudeRunner`].
+//! prompt, system text, try directory, branch worktree and, while `confinement.agent_steps` is
+//! on, what it may write) and hands it to one [`ClaudeRunner`].
 
 use std::fs;
 
@@ -9,7 +10,9 @@ use bongos_workflow_model::record::TodoRef;
 use bongos_workflow_model::template::{Scope, render};
 use bongos_workflow_model::{Failure, FailureReason, NodeKey, RunState};
 
+use crate::agent_confinement::AgentJob;
 use crate::dispatch::{NodeKind, RunnerSnapshot};
+use crate::dispatch_program::{host_git, scratch_dir, tree_access};
 use crate::lifecycle::{definition_copy_dir, prompt_with_revision, schema_text};
 use crate::process::ProcessRecord;
 use crate::run_view::try_dir;
@@ -88,6 +91,20 @@ impl NodeKind for AgentNodes {
         )
         .map_err(|detail| fail(FailureReason::WorktreeUnavailable, detail))?;
         let try_dir = try_dir(&binding.attempt_dir, key, node.try_number);
+        let confinement = if inputs.agent_confinement.agent_steps {
+            let (host_git, tree_git) = host_git(binding, &worktree)
+                .map_err(|detail| fail(FailureReason::WorktreeUnavailable, detail))?;
+            Some(AgentJob {
+                scratch: scratch_dir(binding, key, node.try_number),
+                declared_dirs: binding.setup.writable_dirs(),
+                tree_access: tree_access(binding),
+                tree_git,
+                host_git,
+                state_paths: inputs.agent_confinement.claude_state_paths.clone(),
+            })
+        } else {
+            None
+        };
         let claude_node = ClaudeNode {
             caps,
             output: definition_node.output.clone(),
@@ -107,6 +124,7 @@ impl NodeKind for AgentNodes {
             task_id: binding.task_id.clone(),
             task_dir: binding.task_dir.clone(),
             session_id: new_id(),
+            confinement,
             env: binding.setup.env_edits(),
         };
         self.runner_for(cli, inputs)

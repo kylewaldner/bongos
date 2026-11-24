@@ -676,16 +676,12 @@ async fn ctrl_c_y_leaves_the_chat_and_work_keys_alone(cx: &mut gpui::TestAppCont
 /// Keys other features own (D13), and the only actions the Emacs base may bind on them until
 /// each owner replaces its row.
 const RESERVED: &[(&str, &[&str])] = &[
-    ("ctrl-x b", &["tab_switcher::Toggle"]),
     // Incremental search, and the search bar's own next and previous match.
     ("ctrl-s", &["isearch::Forward", "search::SelectNextMatch"]),
     (
         "ctrl-r",
         &["isearch::Backward", "search::SelectPreviousMatch"],
     ),
-    ("ctrl-/", &["editor::Undo"]),
-    ("ctrl-_", &["editor::Undo"]),
-    ("ctrl-x u", &["editor::Undo"]),
 ];
 
 #[gpui::test]

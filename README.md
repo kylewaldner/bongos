@@ -474,6 +474,26 @@ definition. The keys are for the Emacs keymap; every command is also in the pale
   (3), `fan_out_width` (8), `retries` (2), `poll_interval_minutes` (5), `wait_give_up_days` (7) and
   `programs` with `python` (null, `python3` then `python` on `PATH`), `max_minutes` (10),
   `max_output_mb` (10) and `unsandboxed` (`ask`; `refuse` or `allow` by hand).
+- **Confinement.** Jobs (workflow programs, agent steps and task checks) can write only to their
+  job tree, their scratch directory and the directories they declare (agent steps may also write
+  the agent CLI's own state directories, `~/.claude` and `~/.codex` by default), and the
+  Confinement section of the Work page shows what that means on your machine. On Linux with Bubblewrap, jobs are
+  confined: they never get your repository's shared git data, bongos brings back their commits and
+  branches after each run and checks them, and git run by bongos and by the editor never uses
+  configuration or pointers a job wrote. On macOS jobs are confined by path through Seatbelt: reads
+  are not restricted, and a process a job leaves running may outlive it. With no sandbox available,
+  jobs are not confined; install Bubblewrap (Linux) to get it. Without a usable sandbox, agent
+  steps run unsandboxed (and the log says so) and program steps ask or refuse as `No working
+  sandbox` above says, except in a main worktree, where both are refused, and task checks refuse to start until Bubblewrap is installed or
+  `confinement.task_checks` is set to false. Two switches turn it on per kind of
+  job: `confinement.task_checks` (on by default) and `confinement.agent_steps` (off by
+  default until the confined Claude Code CLI is verified with a logged-in session and user-scoped
+  MCP servers; a confined Claude Code CLI runs with `CLAUDE_CONFIG_DIR` set to `~/.claude`). Each switch that is off adds a line to the section, for example `Agent steps are
+  not confined (confinement.agent_steps is off)`. `confinement.agent_state_paths` names the paths
+  each agent CLI must write to keep its session and login, `~` being the job's HOME; its defaults
+  are `claude` with `["~/.claude"]` and `codex` with `["~/.codex"]`. To add a
+  path, list it under the CLI's key with the whole list, for example `"agent_state_paths": {
+  "claude": ["~/.claude", "~/.config/claude"] }`.
 - **Privacy.** Workflows run only the local CLIs and scripts a definition names. bongos itself
   contacts no host for them; what leaves the machine is what those programs do themselves: the model
   provider of the `claude` or `codex` you run, and `gh` or the network hosts a program node declares
@@ -723,7 +743,9 @@ C-x C-s, C-x C-w and C-x s, and the command keys (M-x, C-x ...) work everywhere 
 | C-M-k | kill-whole-line |
 | C-M-w | append-next-kill: the next kill is added to the last entry |
 | C-o | open line: insert a newline after the cursor and stay before it |
-| C-/, C-_, C-x u | undo |
+| C-/, C-_ | undo |
+| C-?, M-_ | redo |
+| C-x u | undo tree: open the undo history of the buffer as a tree (see Undo tree) |
 | M-u, M-l, M-c | upcase, downcase, capitalize word |
 | C-t, M-t, C-x C-t | transpose characters, words, lines |
 | M-z, M-Z | zap to char, zap up to char (prompts for the character in the minibuffer) |
@@ -939,6 +961,25 @@ Type the label characters to jump; the cursor moves there, and into another pane
 in one. **C-g** or **Escape** cancels the labels and leaves the cursor where it was, and nothing
 you typed is inserted.
 
+### Undo tree
+
+Undo never loses an edit: undoing and then typing starts a branch, and the old text stays reachable.
+**C-x u** (vundo) opens the buffer's undo history as a tree in a pane beside the buffer. **C-/** and
+**C-_** undo, **C-?** and **M-_** redo. With the Emacs keys, typing is grouped as in Emacs: a run of
+up to 20 characters is one undo step, and any command or cursor move ends the run (`undo_tree.grouping`
+is `emacs`; `zed` keeps the time-based grouping). `undo_tree.node_limit` (default 10000) caps the
+nodes the tree keeps.
+
+Keys in the tree:
+
+- **f** and **b** move to the child and the parent state, **n** and **p** to the next and previous
+  branch below the same parent. The buffer shows the state under the cursor as you move.
+- **m** marks a state and **u** removes the mark. **d** shows a diff between the marked state (or the
+  state the tree was opened at) and the state under the cursor.
+- **RET** commits the state under the cursor as the buffer's text and closes the tree; one undo
+  returns to the text from before. **q** or **C-g** closes the tree and leaves the buffer, and the
+  caret, as they were before **C-x u**.
+
 ## Keybinding profiles
 
 bongos has three keybinding profiles, set with `base_keymap` in settings: `"Emacs"` (the default),
@@ -1076,6 +1117,38 @@ happened, such as `Replaced 12 occurrences` or `Replaced 12, skipped 3`.
 `minibuffer.enabled_for` names `query_replace` by default, so the prompts and the questions are in
 the strip. Remove it from that list to get them as a centered modal; the keys are the same.
 
+## Navigation pickers
+
+Four pickers move you around a project, in the minibuffer strip by default. Under the Emacs base
+keymap these keys open them:
+
+| Key | Action | What it does |
+|---|---|---|
+| C-x b | `navigation::SwitchBuffer` | open the buffer switcher; C-x b RET goes back to the previous buffer |
+| C-x C-f | `navigation::GoToFile` | go to a file by path; C-g closes it and opens nothing |
+| C-x 4 C-f | `navigation::GoToFileOtherPane` | the same, opening the file in another pane |
+| M-? | `navigation::FindInFiles` | find a query in the files of the project |
+| M-s / | `navigation::SearchBufferLines` | search the lines of the current buffer; RET jumps to the line |
+
+M-? replaced find-all-references; references stay on alt-shift-f12 and in M-x.
+
+Keys inside the pickers:
+
+| Key | Action | What it does |
+|---|---|---|
+| C-k | `navigation::KillBuffer` | in the switcher, kill the selected buffer |
+| C-c C-o | `navigation::ExportToMultibuffer` | in find in files, export the matches to a results multibuffer |
+| C-c C-r | `navigation::ReplaceAll` | in find in files, replace in all matches |
+| M-% | `navigation::ToggleReplace` | in find in files, show or hide the replace field |
+| M-r, M-c, M-w | `navigation::ToggleRegex`, `ToggleCaseSensitive`, `ToggleWholeWord` | in find in files, toggle regex, case sensitivity and whole words |
+| M-b, M-d | `navigation::ScopeOpenBuffers`, `ScopeDirectory` | in find in files, limit the search to open buffers or to a directory |
+
+`minibuffer.enabled_for` routes them with the names `switch_buffer`, `go_to_file`, `find_in_files`
+and `search_buffer_lines`, plus `find_directory` for the directory prompt of find in files (M-d); remove a name to get that picker as a centered modal. Two settings:
+
+- `navigation.include_recent_closed` (true): the switcher also lists recently closed files.
+- `navigation.preview_max_file_size` (2097152 bytes): the largest file the preview pane shows.
+
 ## Symbol jump and goto stack
 
 M-n and M-p jump between the occurrences of the symbol at the cursor, as `symbol-overlay` does in
@@ -1119,7 +1192,7 @@ prefix. It is on by default. The matches show in a list above the strip and focu
 it was when the prompt ends.
 
 `minibuffer.enabled_for` names the prompts that use the strip. Its default is
-`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch", "kill_ring", "query_replace", "set_keybindings", "outline", "project_symbols", "string_rectangle", "language_extensions"]`. Remove a name
+`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch", "kill_ring", "query_replace", "set_keybindings", "outline", "project_symbols", "xref_history", "string_rectangle", "language_extensions", "switch_buffer", "go_to_file", "find_in_files", "search_buffer_lines", "find_directory"]`. Remove a name
 to bring that prompt back as a centered modal, for example:
 
 ```json

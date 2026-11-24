@@ -30,7 +30,7 @@ pub use attach::effective_auto_submit;
 pub use bongos_prompts_model as model;
 pub use display::{PromptsCurrent, rule_label};
 pub use dump::{dump_path, dump_text};
-pub use guard::{JOIN_MESSAGE, finalize_own_edit};
+pub use guard::{BeforeFinalize, JOIN_MESSAGE, finalize_own_edit};
 pub use language::{FILE_NAME, NAME as LANGUAGE_NAME, register_language};
 pub use mode::{KEY_CONTEXT, ModeStats, PromptsAddon, PromptsMode, is_attached, mode_of};
 pub use mode_line::{PromptsModeLine, mode_line};

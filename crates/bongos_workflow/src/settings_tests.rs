@@ -36,6 +36,8 @@ fn defaults_are_the_documented_values(cx: &mut TestAppContext) {
     assert!(settings.programs.allow_network);
     assert_eq!(settings.programs.unsandboxed, Mode::Ask);
     assert_eq!(settings.ceilings, Ceilings::default());
+    assert!(!settings.agent_confinement.agent_steps);
+    assert_eq!(settings.agent_confinement.claude_state_paths, ["~/.claude"]);
     assert_eq!(settings, WorkflowsSettings::default());
 }
 

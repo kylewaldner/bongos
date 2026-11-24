@@ -41,7 +41,7 @@ use crate::dispatch_program::{
 };
 use crate::runner_program::{SandboxProbe, os_sandbox_probe};
 use crate::runtime::{Finish, RunBinding};
-use crate::worktrees::Git;
+use crate::worktrees::{At, Git, common_dir_of, task_git_dir};
 
 /// Every confined wait gets these of the writer's variables, when set.
 const BASE_VARS: &[&str] = &["PATH", "HOME", "LANG"];
@@ -245,8 +245,8 @@ fn node_with<'a>(start: &BuiltinStart<'a>) -> Result<&'a toml::Table, Failure> {
 pub struct MergeNode {
     git: Git,
     tries: Tries,
-    /// The task worktree each run's merge started in, for [`BuiltinNode::recover`].
-    worktrees: Mutex<HashMap<String, PathBuf>>,
+    /// The task worktree and the run's git directory each run's merge started in, for [`BuiltinNode::recover`].
+    worktrees: Mutex<HashMap<String, (PathBuf, PathBuf)>>,
     recoveries: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
@@ -300,12 +300,14 @@ impl MergeNode {
         };
         Ok(MergeRequest {
             task_worktree: task_worktree.clone(),
+            run_git_dir: binding.worktree.git_dir.clone(),
             task_branch: task_branch.clone(),
             run_branch: binding.worktree.branch.clone(),
             run_id: start.run.to_string(),
             workflow: binding.workflow.clone(),
             todo: binding.task_id.clone(),
             style,
+            job: false,
         })
     }
 }
@@ -331,12 +333,24 @@ async fn run_merge(git: &Git, request: &MergeRequest, key: &NodeKey) -> Result<V
 }
 
 /// Aborts a merge in progress in `worktree`; does nothing when there is none.
-async fn abort_half_done(git: &Git, worktree: &Path) {
+async fn abort_half_done(git: &Git, worktree: &Path, run_git_dir: &Path) {
+    let Ok(git_dir) = task_git_dir(worktree, run_git_dir) else {
+        log::error!(
+            "workflows: the task worktree's git directory is not trusted; no merge aborted"
+        );
+        return;
+    };
+    let git_dir = git_dir.as_path();
+    let at = At {
+        git_dir,
+        directory: worktree,
+        job: false,
+    };
     let in_progress = git
-        .run(worktree, &["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+        .run_at(at, &["rev-parse", "-q", "--verify", "MERGE_HEAD"])
         .await
         .is_ok();
-    if in_progress && let Err(error) = git.run(worktree, &["merge", "--abort"]).await {
+    if in_progress && let Err(error) = git.run_at(at, &["merge", "--abort"]).await {
         log::error!("workflows: could not abort a half-done merge: {error}");
     }
 }
@@ -347,7 +361,10 @@ impl BuiltinNode for MergeNode {
         self.worktrees
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(start.run.to_string(), request.task_worktree.clone());
+            .insert(
+                start.run.to_string(),
+                (request.task_worktree.clone(), request.run_git_dir.clone()),
+            );
         let git = self.git.clone();
         let key = start.key.clone();
         let id = (start.run.to_string(), key.clone(), start.try_number);
@@ -365,7 +382,7 @@ impl BuiltinNode for MergeNode {
     }
 
     fn recover(&self, run: &str, _keys: &[NodeKey]) {
-        let Some(worktree) = self
+        let Some((worktree, git_dir)) = self
             .worktrees
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -377,7 +394,7 @@ impl BuiltinNode for MergeNode {
         let git = self.git.clone();
         let handle = std::thread::Builder::new()
             .name("workflow-merge-recover".to_string())
-            .spawn(move || futures::executor::block_on(abort_half_done(&git, &worktree)));
+            .spawn(move || futures::executor::block_on(abort_half_done(&git, &worktree, &git_dir)));
         if let Ok(handle) = handle {
             self.recoveries
                 .lock()
@@ -683,17 +700,16 @@ impl WaitNode {
         }
         let mut seen = HashSet::new();
         hosts.retain(|host| seen.insert(host.clone()));
-        let mut git_dirs: Vec<PathBuf> = futures::executor::block_on(self.git.run(
-            &request.worktree,
-            &[
-                "rev-parse",
-                "--path-format=absolute",
-                "--git-dir",
-                "--git-common-dir",
-            ],
-        ))
-        .map(|output| output.lines().map(PathBuf::from).collect())
-        .unwrap_or_default();
+        // The task worktree's git directories come from the run's record, never from git
+        // discovering them in the tree ([`task_git_dir`]). Only the scratch directory is writable,
+        // so they are read-only either way; naming them also hides their contents on macOS.
+        let mut git_dirs: Vec<PathBuf> = Vec::new();
+        if let Ok(git_dir) = task_git_dir(&request.worktree, &binding.worktree.git_dir) {
+            if let Ok(common) = common_dir_of(&git_dir) {
+                git_dirs.push(common);
+            }
+            git_dirs.insert(0, git_dir);
+        }
         git_dirs.dedup();
         Ok(SandboxPolicy {
             fs: SandboxFsPolicy::Restricted {
@@ -707,6 +723,7 @@ impl WaitNode {
                 }
             },
             git: GitSandboxPolicy::Denied { git_dirs },
+            read_only_masks: Vec::new(),
         })
     }
 }

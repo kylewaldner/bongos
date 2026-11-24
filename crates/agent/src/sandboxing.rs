@@ -176,6 +176,7 @@ pub fn settings_sandbox_policy(persistent: &SandboxPermissions) -> SandboxPolicy
         fs,
         network,
         git: GitSandboxPolicy::default(),
+        read_only_masks: Vec::new(),
     }
 }
 
@@ -459,6 +460,7 @@ impl ThreadSandboxGrants {
             fs,
             network,
             git: GitSandboxPolicy::default(),
+            read_only_masks: Vec::new(),
         }
     }
 
@@ -656,6 +658,7 @@ mod tests {
                 }
             },
             git: GitSandboxPolicy::default(),
+            read_only_masks: Vec::new(),
         };
 
         // Unsandboxed on either side wins — the agent runs with ambient access.

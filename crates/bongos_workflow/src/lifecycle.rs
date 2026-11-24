@@ -18,6 +18,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use bongos_confine::safe_git::linked_git_dir_from_record;
 use bongos_project_repo::CommitId;
 use bongos_work::ActiveRun;
 use bongos_work_model::derive::{self, Shape};
@@ -97,10 +98,13 @@ pub enum RunTree {
         base: Option<String>,
         merge_into: Option<String>,
     },
-    /// A lane's tree at `path`. `base` is the second tree's path, `start` the ref the run branch
-    /// is created from and `merge_into` the branch the success merge targets.
+    /// A lane's tree at `path`. `common_dir` is the repository's git common directory, read in
+    /// the person's own checkout (git never runs by discovery in the lane's tree, which jobs
+    /// wrote). `base` is the second tree's path, `start` the ref the run branch is created from
+    /// and `merge_into` the branch the success merge targets.
     Lane {
         path: PathBuf,
+        common_dir: Option<PathBuf>,
         base: Option<PathBuf>,
         start: Option<String>,
         merge_into: Option<String>,
@@ -422,13 +426,15 @@ pub trait RunWorktrees: Send {
     }
 
     /// The run worktree of a task run in a lane's tree at `path`, which the lane already put on
-    /// the run branch ([`worktrees::lane_run`]). By default no run is made in a lane's tree.
+    /// the run branch ([`worktrees::lane_run`]); `common_dir` is the repository's trusted git
+    /// common directory. By default no run is made in a lane's tree.
     fn lane(
         &mut self,
         _task: &TaskCheckout,
         _run_id: &str,
         _attempt: u32,
         path: &Path,
+        _common_dir: Option<&Path>,
         _settings: &WorkflowsSettings,
     ) -> Result<RunWorktree, WorktreeError> {
         Err(WorktreeError::Io {
@@ -487,6 +493,7 @@ impl RunWorktrees for GitWorktrees {
         run_id: &str,
         attempt: u32,
         path: &Path,
+        common_dir: Option<&Path>,
         settings: &WorkflowsSettings,
     ) -> Result<RunWorktree, WorktreeError> {
         let free_space = self.free_space.clone();
@@ -496,6 +503,7 @@ impl RunWorktrees for GitWorktrees {
             run_id,
             attempt,
             path,
+            common_dir,
             settings,
             &move |path: &Path| free_space(path),
         ))
@@ -692,7 +700,7 @@ fn read_cleared(dir: &Path, checkout: &TaskCheckout) -> Result<Option<ClearedRun
     Ok(Some(ClearedRun {
         id: record.id.clone(),
         dir: dir.to_path_buf(),
-        worktree: attempt_worktree(attempt),
+        worktree: attempt_worktree(attempt, checkout)?,
         attempt: attempt.n,
         checkout: checkout.clone(),
         status,
@@ -717,15 +725,42 @@ fn worktree_refusal(error: WorktreeError) -> Refusal {
     }
 }
 
-fn attempt_worktree(attempt: &Attempt) -> RunWorktree {
+/// The run worktree of `attempt`. A record that has no git directory (one written before the field)
+/// gets the one under the common directory of the task's repository that names the tree, trusted
+/// only where git puts it ([`linked_git_dir_from_record`]); a `.git` that names anything else
+/// refuses. The common directory comes from the task's own worktree.
+pub(crate) fn attempt_worktree(
+    attempt: &Attempt,
+    checkout: &TaskCheckout,
+) -> Result<RunWorktree, String> {
     let path = PathBuf::from(&attempt.worktree);
-    RunWorktree {
+    let git_dir = match &attempt.git_dir {
+        Some(git_dir) if !git_dir.is_empty() => PathBuf::from(git_dir),
+        // The tree is gone: no git call runs in it, and its branch goes alone (see `run_worktrees`).
+        _ if !path.exists() => PathBuf::new(),
+        _ => {
+            let task_worktree = checkout.worktree.as_deref().filter(|tree| tree.is_dir());
+            let task_worktree = task_worktree.ok_or_else(|| {
+                "the task worktree is gone, so the git directory of the run worktree is unknown"
+                    .to_string()
+            })?;
+            let common = futures::executor::block_on(Git::new("git").run(
+                task_worktree,
+                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            ))
+            .map_err(|error| error.to_string())?;
+            linked_git_dir_from_record(&path, Path::new(&common))
+                .map_err(|error| format!("{error:#}"))?
+        }
+    };
+    Ok(RunWorktree {
         run_dir: path
             .parent()
             .map_or_else(|| path.clone(), Path::to_path_buf),
         path,
         branch: attempt.branch.clone(),
-    }
+        git_dir,
+    })
 }
 
 /// One output field of a gate's held result, for `workflow: approve` with an edit.
@@ -1531,6 +1566,7 @@ impl<R: Runner> Lifecycle<R> {
             documents,
             merge: merge_into.map(|merge_into| ProjectMergeRequest {
                 run_tree: entry.worktree.path.clone(),
+                run_git_dir: entry.worktree.git_dir.clone(),
                 run_branch: entry.worktree.branch.clone(),
                 merge_into,
                 run_id: entry.id.clone(),
@@ -1675,8 +1711,10 @@ impl<R: Runner> Lifecycle<R> {
         let checkout = TaskCheckout::from_task(task.slug.clone(), file);
         let id = request.run_id.clone().unwrap_or_else(new_id);
         let (worktree, tree_record) = match &request.tree {
-            RunTree::Lane { path, .. } => {
-                let worktree = self.lane_worktree(&checkout, &id, path)?;
+            RunTree::Lane {
+                path, common_dir, ..
+            } => {
+                let worktree = self.lane_worktree(&checkout, &id, path, common_dir.as_deref())?;
                 let record = RunTreeRecord::Lane {
                     path: worktree.path.clone(),
                     run_dir: worktree.run_dir.clone(),
@@ -2035,6 +2073,8 @@ impl<R: Runner> Lifecycle<R> {
                     run_dir: scratch,
                     path: path.clone(),
                     branch: String::new(),
+                    // No repository of the run's: nothing for host git to name.
+                    git_dir: PathBuf::new(),
                 };
                 let record = RunTreeRecord::Snapshot { path: path.clone() };
                 (checkout, worktree, record)
@@ -2114,6 +2154,7 @@ impl<R: Runner> Lifecycle<R> {
                     run_dir: work.clone(),
                     path: work,
                     branch: String::new(),
+                    git_dir: PathBuf::new(),
                 };
                 (checkout, worktree, RunTreeRecord::Work)
             }
@@ -2416,7 +2457,6 @@ impl<R: Runner> Lifecycle<R> {
         let state = bongos_workflow_model::record::replay(&parsed.events);
         let rev = state.definition_rev.unwrap_or(0);
         let definition = read_definition(&definition_copy_dir(&attempt_dir, rev))?;
-        let mut worktree = attempt_worktree(attempt);
         let checkout = match (&record.tree, &task.file) {
             (Some(RunTreeRecord::Repository { repo, base, .. }), _) => TaskCheckout {
                 slug: task.slug.clone(),
@@ -2433,26 +2473,36 @@ impl<R: Runner> Lifecycle<R> {
                 TaskCheckout::from_task(task.slug.clone(), file)
             }
         };
-        match &record.tree {
-            // The attempt that ran in the lane's tree keeps its own run directory beside it.
-            Some(RunTreeRecord::Lane { path, run_dir }) if *path == worktree.path => {
-                worktree.run_dir = run_dir.clone();
-            }
-            Some(RunTreeRecord::Snapshot { .. }) => {
+        let worktree = match &record.tree {
+            Some(RunTreeRecord::Snapshot { .. }) => RunWorktree {
                 // The snapshot is no run directory: the run's own directory is its work directory.
-                worktree.run_dir = project_work_dir(&task.dir, &record.id);
-            }
+                // It is no repository of the run's, so no git directory is recorded or looked up.
+                run_dir: project_work_dir(&task.dir, &record.id),
+                path: PathBuf::from(&attempt.worktree),
+                branch: attempt.branch.clone(),
+                git_dir: PathBuf::new(),
+            },
             Some(RunTreeRecord::Work) => {
                 // The work directory is where the project folder has it, whatever the record says.
                 let work = project_work_dir(&task.dir, &record.id);
-                worktree = RunWorktree {
+                RunWorktree {
                     run_dir: work.clone(),
                     path: work,
                     branch: String::new(),
-                };
+                    git_dir: PathBuf::new(),
+                }
             }
-            _ => {}
-        }
+            _ => {
+                let mut worktree = attempt_worktree(attempt, &checkout)?;
+                // The attempt that ran in the lane's tree keeps its own run directory beside it.
+                if let Some(RunTreeRecord::Lane { path, run_dir }) = &record.tree
+                    && *path == worktree.path
+                {
+                    worktree.run_dir = run_dir.clone();
+                }
+                worktree
+            }
+        };
         let setup = setup_of(&record, tree, &task.dir);
         let task_id = record.task_id.clone();
         let spec = RunSpec {
@@ -3083,9 +3133,10 @@ impl<R: Runner> Lifecycle<R> {
         checkout: &TaskCheckout,
         run: &str,
         path: &Path,
+        common_dir: Option<&Path>,
     ) -> Result<RunWorktree, Refusal> {
         self.worktrees
-            .lane(checkout, run, 1, path, &self.settings)
+            .lane(checkout, run, 1, path, common_dir, &self.settings)
             .map_err(worktree_refusal)
     }
 
@@ -3112,6 +3163,8 @@ impl<R: Runner> Lifecycle<R> {
             definition_commit,
             worktree: entry.worktree.path.to_string_lossy().into_owned(),
             branch: entry.worktree.branch.clone(),
+            git_dir: Some(entry.worktree.git_dir.to_string_lossy().into_owned())
+                .filter(|git_dir| !git_dir.is_empty()),
             loop_bound: Some(loop_bound),
         });
         entry.rev = 0;

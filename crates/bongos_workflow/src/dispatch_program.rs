@@ -1,10 +1,14 @@
 //! The program node kind of the app runner: turns a node start into a [`ProgramNode`] (script of
-//! the attempt's definition copy, caps, poll plan, state document, worktree, scratch, git
-//! directory and network list with `@remote` resolved) and hands it to one [`ProgramRunner`].
+//! the attempt's definition copy, caps, poll plan, state document, worktree, scratch, what it may
+//! write, the host's record of its git and network list with `@remote` resolved) and hands it to
+//! one [`ProgramRunner`].
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use bongos_confine::private_git::{self, RecoverOutcome};
+use bongos_confine::safe_git::linked_git_dir_from_record;
+use bongos_confine::{HostGit, TreeAccess, TreeGit};
 use bongos_workflow_model::record::{StartedBy, TodoRef};
 use bongos_workflow_model::state_doc::{self, Paths, RunIdentity};
 use bongos_workflow_model::unsandboxed::{AllowedBy, Mode, Permit};
@@ -20,7 +24,7 @@ use crate::runner_program::{
     Clock, Interpreter, PollPlan, ProgramCaps, ProgramNode, ProgramRunner, SandboxProbe,
 };
 use crate::runtime::{Finish, NodeStart, RunBinding, RunFacts};
-use crate::worktrees::{Git, repository_root};
+use crate::worktrees::{Git, common_dir_of, repository_of};
 
 /// The network entry that stands for the host of the task repository's push remote.
 pub(crate) const REMOTE_ENTRY: &str = "@remote";
@@ -149,14 +153,16 @@ impl NodeKind for ProgramNodes {
             },
         );
         let try_dir = try_dir(&binding.attempt_dir, key, node.try_number);
-        let snapshot = binding.setup.snapshot;
+        let (host_git, tree_git) = host_git(binding, &worktree)
+            .map_err(|detail| fail(FailureReason::WorktreeUnavailable, detail))?;
         let mode = inputs.unsandboxed_mode(node.run);
         let program_node = ProgramNode {
             permit: program_permit(&binding.setup.facts, mode, node.grant.as_ref()),
             mode,
-            // Only the OS sandbox keeps a project's files folder, which holds every run's
-            // records, read-only around a run's work directory.
-            needs_sandbox: binding.setup.work_dir,
+            // Only the OS sandbox keeps a snapshot read-only, and a project's files folder, which
+            // holds every run's records, read-only around a run's work directory. `branchless()`
+            // is `snapshot || work_dir`, so it covers every tree that needs the sandbox.
+            needs_sandbox: binding.setup.branchless(),
             script,
             output: definition_node.output.clone(),
             schema: definition_node.schema.clone(),
@@ -167,16 +173,13 @@ impl NodeKind for ProgramNodes {
                 .as_ref()
                 .map(|polls| PollPlan::resolve(polls, &inputs.programs)),
             state,
-            // A snapshot or a work directory is no repository of the run's: none of its git
-            // metadata is writable, even when it sits inside one.
-            git_common_dir: if binding.setup.branchless() {
-                None
-            } else {
-                common_git_dir(&worktree)
-            },
+            // The lane's named directories are the only ones a program writes besides its tree and
+            // scratch.
+            declared_dirs: binding.setup.writable_dirs(),
+            tree_access: tree_access(binding),
+            tree_git,
+            host_git,
             worktree,
-            read_only_worktree: snapshot,
-            extra_writable: binding.setup.writable_dirs(),
             env: binding.setup.env_edits(),
             scratch,
             node_result: try_dir.join("node-result.json"),
@@ -230,6 +233,129 @@ fn todo_of(binding: &RunBinding) -> TodoRef {
     }
 }
 
+/// What the host trusts about the node's repository, read from host-owned records and never from
+/// the tree, and the git the node gets in `worktree`. The common git directory comes from the
+/// run worktree's git directory in the run's record. The worktree's own linked git directory is,
+/// for the run worktree, that recorded git directory; for a branch worktree, the entry under
+/// `<common>/worktrees/` whose `gitdir` file names the worktree's `.git` (files git and the host
+/// write, never the tree). A pass that died with the app leaves the worktree on its private git:
+/// that is recovered first ([`private_git::recover`]; the dead pass's commits are dropped), and a
+/// live job holding the worktree refuses the start with [`private_git::BUSY`]. Then the tree's
+/// `.git` must name the recorded linked git directory ([`linked_git_dir_from_record`]). A run or
+/// branch worktree gets [`TreeGit::Private`]; a worktree with no `.git` gets [`TreeGit::None`]; a
+/// `.git` that is not that linked worktree of the run's repository (a directory, a pointer
+/// elsewhere) refuses the start. The run's record directory is the records directory no writable
+/// root may hold.
+pub(crate) fn host_git(
+    binding: &RunBinding,
+    worktree: &Path,
+) -> Result<(HostGit, TreeGit), String> {
+    let records_dir = binding.run_dir.exists().then(|| binding.run_dir.clone());
+    if binding.setup.branchless() {
+        // A snapshot or a work directory is no repository of the run's and has no recorded git
+        // directory: a `.git` in it (or one it sits inside) is masked read-only, never the job's.
+        let tree_git = if std::fs::symlink_metadata(worktree.join(".git")).is_ok() {
+            TreeGit::ReadOnly
+        } else {
+            TreeGit::None
+        };
+        let host = HostGit {
+            git_dirs: Vec::new(),
+            records_dir,
+        };
+        return Ok((host, tree_git));
+    }
+    let common = common_dir_of(&binding.worktree.git_dir);
+    if std::fs::symlink_metadata(worktree.join(".git")).is_err() {
+        let host = HostGit {
+            git_dirs: common.into_iter().collect(),
+            records_dir,
+        };
+        return Ok((host, TreeGit::None));
+    }
+    let common = common?;
+    let untrusted = |detail: String| {
+        format!("the git directory of the node's worktree is not trusted: {detail}")
+    };
+    let recorded = if worktree == binding.worktree.path {
+        Some(binding.worktree.git_dir.clone())
+    } else {
+        branch_git_dir(&common, worktree)
+    };
+    if let Some(recorded) = &recorded {
+        match private_git::recover(recorded) {
+            Ok(RecoverOutcome::InUse) => {
+                return Err(format!("{}: {}", private_git::BUSY, worktree.display()));
+            }
+            Ok(RecoverOutcome::Recovered) => log::info!(
+                "workflows: switched {} back to shared git after a pass that is gone",
+                worktree.display()
+            ),
+            Ok(RecoverOutcome::NoMarker) => {}
+            Err(error) => {
+                return Err(format!(
+                    "could not recover {} from a pass that is gone: {error:#}",
+                    worktree.display()
+                ));
+            }
+        }
+    }
+    let linked = linked_git_dir_from_record(worktree, &common)
+        .map_err(|error| untrusted(format!("{error:#}")))?;
+    let recorded = recorded
+        .and_then(|recorded| recorded.canonicalize().ok())
+        .ok_or_else(|| {
+            untrusted(format!(
+                "no git directory is recorded for {}",
+                worktree.display()
+            ))
+        })?;
+    if linked != recorded {
+        return Err(untrusted(format!(
+            "its .git names {}, not the recorded {}",
+            linked.display(),
+            recorded.display()
+        )));
+    }
+    let host = HostGit {
+        git_dirs: vec![common, linked],
+        records_dir,
+    };
+    Ok((host, TreeGit::Private))
+}
+
+/// How the node may use its tree: a snapshot is read and never written; every other tree (a run,
+/// branch or lane tree, a work directory) is writable.
+pub(crate) fn tree_access(binding: &RunBinding) -> TreeAccess {
+    if binding.setup.snapshot {
+        TreeAccess::ReadOnly
+    } else {
+        TreeAccess::Writable
+    }
+}
+
+/// The linked git directory of the branch worktree `worktree`: the directory directly under
+/// `<common>/worktrees/` whose `gitdir` file names `<worktree>/.git`. Only host-owned files are
+/// read; `None` when no entry names it.
+fn branch_git_dir(common: &Path, worktree: &Path) -> Option<PathBuf> {
+    let regular = std::fs::symlink_metadata(worktree.join(".git"))
+        .is_ok_and(|metadata| metadata.file_type().is_file());
+    if !regular {
+        return None;
+    }
+    let gitlink = worktree.canonicalize().ok()?.join(".git");
+    let entries = std::fs::read_dir(common.join("worktrees")).ok()?;
+    entries.flatten().map(|entry| entry.path()).find(|dir| {
+        let is_dir = std::fs::symlink_metadata(dir).is_ok_and(|metadata| metadata.is_dir());
+        is_dir
+            && std::fs::read_to_string(dir.join("gitdir")).is_ok_and(|text| {
+                dir.join(text.trim_end_matches(['\n', '\r']))
+                    .canonicalize()
+                    .is_ok_and(|named| named == gitlink)
+            })
+    })
+}
+
 /// The node's scratch directory, beside the run's worktrees and outside the record.
 pub(crate) fn scratch_dir(binding: &RunBinding, key: &NodeKey, try_number: u32) -> PathBuf {
     binding
@@ -241,31 +367,16 @@ pub(crate) fn scratch_dir(binding: &RunBinding, key: &NodeKey, try_number: u32) 
         .join(format!("{}-{try_number}", key.pass))
 }
 
-/// The common git directory of `worktree`, when it is in a git repository.
-fn common_git_dir(worktree: &Path) -> Option<PathBuf> {
-    let git = Git::new("git");
-    let output = futures::executor::block_on(git.run(
-        worktree,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    ))
-    .ok()?;
-    Some(PathBuf::from(output))
-}
-
 /// The hosts of the task repository's push remote, or [`NO_ORIGIN`].
 pub(crate) fn task_remote_hosts(git: &Git, binding: &RunBinding) -> Result<Vec<String>, String> {
     let url = task_remote_url(git, binding).ok_or_else(|| NO_ORIGIN.to_string())?;
     remote_hosts(&url).ok_or_else(|| NO_ORIGIN.to_string())
 }
 
-/// The push URL of the task repository's `origin` remote, if it has one.
+/// The push URL of the task repository's `origin` remote, if it has one. The repository comes
+/// from the run's recorded git directory; no tree is asked.
 pub(crate) fn task_remote_url(git: &Git, binding: &RunBinding) -> Option<String> {
-    let task_tree = binding
-        .checkout
-        .worktree
-        .clone()
-        .unwrap_or_else(|| binding.worktree.path.clone());
-    let root = futures::executor::block_on(repository_root(git, &task_tree)).unwrap_or(task_tree);
+    let root = repository_of(&binding.worktree.git_dir).ok()?;
     futures::executor::block_on(git.run(&root, &["remote", "get-url", "--push", "origin"])).ok()
 }
 

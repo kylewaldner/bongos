@@ -36,6 +36,11 @@ pub const WORKING_COPIES_DIR: &str = "working-copies";
 pub const STATE_DIR: &str = "state";
 /// Files of tasks, one folder per task id (and one for the project id).
 pub const FILES_DIR: &str = "files";
+/// The folder of a project folder that lanes' named directories default to:
+/// `lanes/<lane>/<name>`.
+pub const LANES_DIR: &str = "lanes";
+/// The folder of bongos's data folder that project folders default to: `projects/<slug>`.
+pub const PROJECTS_DIR: &str = "projects";
 
 /// The state store, in [`STATE_DIR`].
 pub const STATE_DB_FILE: &str = "state.db";

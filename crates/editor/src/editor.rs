@@ -8384,6 +8384,16 @@ impl Editor {
         }
     }
 
+    /// The selections this editor had when the given transaction began and
+    /// ended, if the transaction was started by this editor.
+    #[allow(clippy::type_complexity)]
+    pub fn transaction_selections(
+        &self,
+        id: TransactionId,
+    ) -> Option<(Arc<[Selection<Anchor>]>, Option<Arc<[Selection<Anchor>]>>)> {
+        self.selection_history.transaction(id).cloned()
+    }
+
     pub fn modify_transaction_selection_history(
         &mut self,
         transaction_id: TransactionId,

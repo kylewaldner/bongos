@@ -280,6 +280,21 @@ async fn base_tree_dirs_decide_the_second_trees_own_directories(cx: &mut TestApp
     // The tip's own environment has the tip's directories.
     let tip_env = trees.env("leaf", "app");
     assert_eq!(value(&tip_env, "OUT"), Some(out.display().to_string()));
+
+    // A confined check may write the lane's declared directories: the tip's, and the second
+    // tree's `-base` ones, the same paths the environment exports.
+    let sorted = |mut dirs: Vec<PathBuf>| {
+        dirs.sort();
+        dirs
+    };
+    let tip_dirs = sorted(trees.declared_dirs("leaf", "app"));
+    assert!(!tip_dirs.is_empty());
+    assert!(tip_dirs.contains(&out) && tip_dirs.contains(&cache));
+    assert!(!tip_dirs.contains(&out_base));
+    let second_dirs = sorted(app.declared_dirs());
+    assert!(second_dirs.contains(&out_base) && second_dirs.contains(&cache));
+    assert!(!second_dirs.contains(&out));
+    assert_eq!(sorted(lib.declared_dirs()), tip_dirs);
 }
 
 #[gpui::test]

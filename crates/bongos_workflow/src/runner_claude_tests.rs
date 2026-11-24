@@ -5,10 +5,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bongos_chat::model::{Agent, Capabilities};
 use bongos_chat::{AgentCommand, Health, HealthState};
+use bongos_confine::safe_git::linked_git_dir_from_record;
+use bongos_confine::{HostGit, RULE, TreeAccess, TreeGit};
 use bongos_workflow_model::record::EndState;
 use bongos_workflow_model::scheduler::Branch;
 use bongos_workflow_model::{
@@ -17,11 +20,15 @@ use bongos_workflow_model::{
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+use sandbox::{GitSandboxPolicy, SandboxFsPolicy, SandboxNetPolicy, SandboxPolicy};
+
+use crate::agent_confinement::{AgentJob, CONFINEMENT_LOG};
 use crate::process::ProcessRecord;
 use crate::runner_claude::{
     AgentDefaults, ClaudeCli, ClaudeNode, ClaudeRunner, ENV_NAMES, Exit, NodeCaps, PASSED_ENV,
-    RESULT_FILE, classify, launch_env,
+    RESULT_FILE, classify, confined_env, launch_env,
 };
+use crate::runner_program::{SandboxProbe, os_sandbox_probe};
 use crate::runtime::{Finish, RunSpec, Runner, Runtime};
 
 const FAKE: &str = concat!(
@@ -154,6 +161,7 @@ fn node(definition: &Definition, name: &str, root: &Path, try_number: u32) -> Cl
         task_dir: root.join("task"),
         node_result: try_dir.join("node-result.json"),
         session_id: SESSION.to_string(),
+        confinement: None,
         env: Vec::new(),
     }
 }
@@ -620,6 +628,29 @@ fn a_lane_run_adds_its_variables_and_edits_and_no_edit_changes_the_node_names() 
 }
 
 #[test]
+fn a_confined_try_points_the_cli_config_at_home_dot_claude() {
+    let home = "/job/home";
+    let base = BTreeMap::from([("HOME".to_string(), home.to_string())]);
+
+    // Unconfined: the launch environment has no CLAUDE_CONFIG_DIR.
+    let root = TempDir::new().unwrap();
+    let node = node(&definition(), "triage", root.path(), 1);
+    let plain = launch_env(&base, "run-1", &key("triage"), &node);
+    assert!(!plain.contains_key("CLAUDE_CONFIG_DIR"));
+    assert!(!PASSED_ENV.contains(&"CLAUDE_CONFIG_DIR"));
+
+    // Confined: the variable is `<HOME>/.claude`, the rest is unchanged.
+    let confined = confined_env(plain.clone());
+    assert_eq!(confined["CLAUDE_CONFIG_DIR"], "/job/home/.claude");
+    let mut without = confined;
+    without.remove("CLAUDE_CONFIG_DIR");
+    assert_eq!(without, plain);
+
+    // No HOME: nothing to point at, so it stays unset.
+    assert!(!confined_env(BTreeMap::new()).contains_key("CLAUDE_CONFIG_DIR"));
+}
+
+#[test]
 fn a_stopped_try_is_never_reported() {
     let root = TempDir::new().unwrap();
     let mut runner = ClaudeRunner::new(
@@ -801,4 +832,321 @@ fn a_data_field_of_a_file_schema_reaches_the_recorded_result() {
     )
     .unwrap();
     assert_eq!(recorded["why"], json!("trivial"));
+}
+
+// Confined agent steps (`confinement.agent_steps`).
+
+const NO_SANDBOX: &str = "bwrap not found (test)";
+
+fn no_sandbox() -> SandboxProbe {
+    Arc::new(|_, _| Err(NO_SANDBOX.to_string()))
+}
+
+/// The probe of the real OS sandbox, or `None` (the test skips) when it cannot be created for
+/// `root`.
+fn real_sandbox(root: &Path) -> Option<SandboxProbe> {
+    // Bubblewrap hides the host's /tmp behind its own, so a fixture there cannot be sandboxed.
+    if root.starts_with("/tmp") {
+        eprintln!("skipped: the fixture is under /tmp");
+        return None;
+    }
+    let policy = SandboxPolicy {
+        fs: SandboxFsPolicy::Restricted {
+            writable_paths: vec![root.to_path_buf()],
+        },
+        network: SandboxNetPolicy::Blocked,
+        git: GitSandboxPolicy::default(),
+        read_only_masks: Vec::new(),
+    };
+    let probe = os_sandbox_probe();
+    if let Err(reason) = probe(&policy, root) {
+        eprintln!("skipped: {reason}");
+        return None;
+    }
+    Some(probe)
+}
+
+/// What `triage` may write under `root` when confined: its worktree (no git) and
+/// `root/scratch`, plus `state_paths`.
+fn job(root: &Path, state_paths: &[&str]) -> AgentJob {
+    AgentJob {
+        scratch: root.join("scratch/triage/1-1"),
+        declared_dirs: Vec::new(),
+        tree_access: TreeAccess::Writable,
+        tree_git: TreeGit::None,
+        host_git: HostGit::default(),
+        state_paths: state_paths.iter().map(|path| path.to_string()).collect(),
+    }
+}
+
+/// Runs one try of `triage` in `root` with the fake's `confined` scenario and `extra` knobs, on
+/// `probe`.
+fn run_confined(
+    root: &Path,
+    probe: SandboxProbe,
+    extra: &[&str],
+    tweak: impl FnOnce(&mut ClaudeNode),
+) -> Finish {
+    let args: Vec<&str> = ["--fake-scenario", "confined"]
+        .into_iter()
+        .chain(extra.iter().copied())
+        .collect();
+    let mut runner = ClaudeRunner::new(cli(&args, root), base_env(root)).with_sandbox_probe(probe);
+    let mut claude_node = node(&definition(), "triage", root, 1);
+    tweak(&mut claude_node);
+    runner
+        .start("run-1", &key("triage"), 1, claude_node)
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(finish) = runner.poll().pop() {
+            return finish;
+        }
+        assert!(Instant::now() < deadline, "the fake did not finish");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn confinement_log(root: &Path) -> String {
+    std::fs::read_to_string(root.join("record/nodes/triage/1-1").join(CONFINEMENT_LOG)).unwrap()
+}
+
+#[test]
+fn an_unconfined_try_is_unchanged_by_confinement() {
+    let (finish, root) = run_one("success", |_| {});
+    assert!(finish.outcome.is_ok(), "{:?}", finish.outcome);
+    assert!(finish.confinement_refusals.is_empty());
+    let try_dir = root.path().join("record/nodes/triage/1-1");
+    assert!(std::fs::symlink_metadata(try_dir.join(CONFINEMENT_LOG)).is_err());
+    assert_eq!(
+        std::fs::read_to_string(try_dir.join("system.md")).unwrap(),
+        "Task context: the goal.\n"
+    );
+    // TMPDIR is the base environment's, and no scratch directory was made.
+    let env = std::fs::read_to_string(root.path().join("log/env")).unwrap();
+    assert!(
+        env.lines()
+            .any(|line| line == format!("TMPDIR={}", root.path().display())),
+        "{env}"
+    );
+    assert!(std::fs::symlink_metadata(root.path().join("scratch")).is_err());
+    // The event a finish records is written as before.
+    let event = Event::NodeFinished {
+        key: finish.key.clone(),
+        try_number: 1,
+        result: None,
+        failure: None,
+        cost_usd: 0.0,
+        turns: None,
+        elapsed_ms: 0,
+        session_id: None,
+        confinement_refusals: finish.confinement_refusals,
+    };
+    assert!(!event.to_line().contains("confinement_refusals"));
+}
+
+#[test]
+fn a_confined_try_writes_its_tree_and_state_but_not_home() {
+    let root = TempDir::new().unwrap();
+    let Some(probe) = real_sandbox(root.path()) else {
+        return;
+    };
+    let state = root.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let outside = root.path().join("outside");
+    let finish = run_confined(
+        root.path(),
+        probe,
+        &[
+            "--fake-state",
+            &state.to_string_lossy(),
+            "--fake-outside",
+            &outside.to_string_lossy(),
+        ],
+        |node| node.confinement = Some(job(root.path(), &["~/state"])),
+    );
+    assert!(finish.outcome.is_ok(), "{:?}", finish.outcome);
+    let worktree = root.path().join("worktree");
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("tree-write")).unwrap(),
+        "tree\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(state.join("state-write")).unwrap(),
+        "state\n"
+    );
+    assert!(std::fs::symlink_metadata(&outside).is_err());
+    let refusal = format!("bongos: {RULE}: {}", outside.display());
+    assert_eq!(finish.confinement_refusals, vec![refusal.clone()]);
+    let log = confinement_log(root.path());
+    assert!(log.lines().any(|line| line == "sandboxed"), "{log}");
+    assert!(log.lines().any(|line| line == refusal), "{log}");
+    let system =
+        std::fs::read_to_string(root.path().join("record/nodes/triage/1-1/system.md")).unwrap();
+    let line = system.lines().last().unwrap();
+    assert!(
+        line.contains(&*worktree.canonicalize().unwrap().to_string_lossy()),
+        "{line}"
+    );
+    assert!(
+        line.contains(&*state.canonicalize().unwrap().to_string_lossy()),
+        "{line}"
+    );
+    assert!(line.contains(RULE), "{line}");
+    assert!(system.starts_with("Task context: the goal.\n"), "{system}");
+}
+
+#[test]
+fn a_missing_state_path_is_dropped_with_a_warning_and_the_try_starts() {
+    let root = TempDir::new().unwrap();
+    let log_arg = root.path().join("log").to_string_lossy().into_owned();
+    let finish = run_confined(
+        root.path(),
+        no_sandbox(),
+        &["--fake-log", &log_arg],
+        |node| node.confinement = Some(job(root.path(), &["~/.missing", ""])),
+    );
+    assert!(finish.outcome.is_ok(), "{:?}", finish.outcome);
+    assert!(root.path().join("worktree/tree-write").exists());
+    let log = confinement_log(root.path());
+    let missing = root.path().join(".missing");
+    assert!(
+        log.lines().any(|line| line
+            == format!(
+                "warning: the agent state path ~/.missing ({}) is dropped: it does not exist",
+                missing.display()
+            )),
+        "{log}"
+    );
+    assert!(
+        log.lines()
+            .any(|line| line == format!("not sandboxed: {NO_SANDBOX}")),
+        "{log}"
+    );
+    // Only the tree and the scratch directory are writable; TMPDIR is in the scratch.
+    let scratch = root.path().join("scratch/triage/1-1");
+    let writable = format!(
+        "writable: {}, {}",
+        scratch.canonicalize().unwrap().display(),
+        root.path()
+            .join("worktree")
+            .canonicalize()
+            .unwrap()
+            .display()
+    );
+    assert!(log.lines().any(|line| line == writable), "{log}");
+    let env = std::fs::read_to_string(root.path().join("log/env")).unwrap();
+    assert!(
+        env.lines()
+            .any(|line| line == format!("TMPDIR={}", scratch.join("tmp").display())),
+        "{env}"
+    );
+}
+
+/// Runs host git in `dir` with a clean configuration; its output, or `None` when it failed.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test fixture runs git to make a real repository"
+)]
+fn git(home: &Path, dir: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .env("HOME", home)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
+        .args([
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.invalid",
+        ])
+        .args(args)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[test]
+fn a_confined_commit_reaches_the_shared_branch() {
+    commit_reaches_the_shared_branch(|_| Some(no_sandbox()));
+}
+
+#[test]
+fn a_confined_commit_in_the_sandbox_reaches_the_shared_branch() {
+    commit_reaches_the_shared_branch(real_sandbox);
+}
+
+/// A try with private git in a linked worktree commits there, on the probe `probe` gives for
+/// the fixture's root (none: the test skips); the commit is imported into the shared branch.
+fn commit_reaches_the_shared_branch(probe: impl FnOnce(&Path) -> Option<SandboxProbe>) {
+    let root = TempDir::new().unwrap();
+    let home = root.path();
+    let Some(probe) = probe(home) else {
+        return;
+    };
+    let repo = home.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    if git(home, &repo, &["init", "-q", "-b", "main"]).is_none() {
+        eprintln!("skipped: git is not installed");
+        return;
+    }
+    git(
+        home,
+        &repo,
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+    )
+    .unwrap();
+    let worktree = home.join("worktree");
+    git(
+        home,
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "run",
+            &worktree.to_string_lossy(),
+        ],
+    )
+    .unwrap();
+    let common = repo.join(".git");
+    let linked = linked_git_dir_from_record(&worktree, &common).unwrap();
+    let records = home.join("records");
+    std::fs::create_dir_all(&records).unwrap();
+    let dot_git = std::fs::read(worktree.join(".git")).unwrap();
+    let finish = run_confined(home, probe, &["--fake-commit"], |node| {
+        let mut confined = job(home, &[]);
+        confined.tree_git = TreeGit::Private;
+        confined.host_git = HostGit {
+            git_dirs: vec![common.clone(), linked],
+            records_dir: Some(records),
+        };
+        node.confinement = Some(confined);
+    });
+    assert!(finish.outcome.is_ok(), "{:?}", finish.outcome);
+    assert_eq!(
+        git(home, &repo, &["log", "-1", "--format=%s", "run", "--"]).as_deref(),
+        Some("inside")
+    );
+    assert_eq!(
+        git(home, &repo, &["log", "-1", "--format=%s", "main", "--"]).as_deref(),
+        Some("start")
+    );
+    // The worktree is back on shared git.
+    assert_eq!(std::fs::read(worktree.join(".git")).unwrap(), dot_git);
+    let log = confinement_log(home);
+    assert!(
+        log.lines()
+            .any(|line| line == "git imported: refs/heads/run"),
+        "{log}"
+    );
 }

@@ -34,6 +34,7 @@ mod hooks;
 mod host;
 mod job_trees;
 mod lane_control;
+mod lane_git;
 mod lane_tree;
 mod lane_waits;
 mod lanes_rows;
@@ -226,6 +227,8 @@ mod exporter_tests;
 mod host_tests;
 #[cfg(test)]
 mod job_trees_tests;
+#[cfg(test)]
+mod lane_tree_recovery_tests;
 #[cfg(test)]
 mod lane_tree_tests;
 #[cfg(test)]

@@ -2051,6 +2051,7 @@ dependencies = [
  "bongos_chat",
  "bongos_chat_model",
  "bongos_checks",
+ "bongos_confine",
  "bongos_emacs",
  "bongos_engine_host",
  "bongos_extensions",
@@ -2062,11 +2063,13 @@ dependencies = [
  "bongos_languages",
  "bongos_linear",
  "bongos_minibuffer",
+ "bongos_navigation",
  "bongos_net",
  "bongos_project_repo",
  "bongos_prompts",
  "bongos_query_replace",
  "bongos_terraform",
+ "bongos_undo_tree",
  "bongos_version",
  "bongos_window",
  "bongos_work",
@@ -2358,6 +2361,7 @@ dependencies = [
  "anyhow",
  "async-task",
  "bongos_checks_model",
+ "bongos_confine",
  "bongos_project_repo",
  "bongos_project_repo_model",
  "bongos_work",
@@ -2374,6 +2378,7 @@ dependencies = [
  "project",
  "regex",
  "release_channel",
+ "sandbox",
  "semver",
  "serde",
  "serde_json",
@@ -2402,6 +2407,25 @@ dependencies = [
  "sha2",
  "thiserror 2.0.17",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "bongos_confine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures 0.3.32",
+ "git",
+ "gpui",
+ "libc",
+ "log",
+ "paths",
+ "sandbox",
+ "smol",
+ "tempfile",
+ "text",
+ "thiserror 2.0.17",
+ "util",
 ]
 
 [[package]]
@@ -2624,6 +2648,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bongos_checks",
+ "bongos_confine",
  "bongos_emacs",
  "bongos_engine_host",
  "bongos_lanes_model",
@@ -2797,6 +2822,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "bongos_navigation"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-channel 2.5.0",
+ "bongos_emacs",
+ "bongos_isearch_model",
+ "bongos_minibuffer",
+ "bongos_minibuffer_model",
+ "bongos_navigation_model",
+ "bongos_query_replace",
+ "bongos_window",
+ "command_palette_hooks",
+ "db",
+ "editor",
+ "fs",
+ "futures 0.3.32",
+ "gpui",
+ "language",
+ "log",
+ "project",
+ "search",
+ "serde_json",
+ "settings",
+ "terminal_view",
+ "text",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+ "workspace",
+ "zed_actions",
+]
+
+[[package]]
+name = "bongos_navigation_model"
+version = "0.1.0"
+dependencies = [
+ "globset",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "bongos_net"
 version = "0.1.0"
 dependencies = [
@@ -2812,6 +2881,7 @@ name = "bongos_project_repo"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bongos_confine",
  "bongos_project_repo_model",
  "bongos_work_model",
  "chrono",
@@ -2949,6 +3019,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "bongos_undo_tree"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bongos_emacs",
+ "bongos_prompts",
+ "bongos_undo_tree_model",
+ "clock",
+ "collections",
+ "db",
+ "editor",
+ "fs",
+ "gpui",
+ "language",
+ "lsp",
+ "project",
+ "release_channel",
+ "remote",
+ "rpc",
+ "semver",
+ "serde_json",
+ "settings",
+ "text",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
+name = "bongos_undo_tree_model"
+version = "0.1.0"
+
+[[package]]
 name = "bongos_version"
 version = "0.1.0"
 
@@ -3031,6 +3134,7 @@ dependencies = [
  "anyhow",
  "bongos_builder_model",
  "bongos_chat",
+ "bongos_confine",
  "bongos_minibuffer",
  "bongos_project_repo",
  "bongos_project_repo_model",
@@ -3039,6 +3143,7 @@ dependencies = [
  "bongos_workflow_model",
  "chrono",
  "command_palette_hooks",
+ "ctor",
  "editor",
  "fs",
  "futures 0.3.32",
@@ -7018,6 +7123,7 @@ dependencies = [
  "http_client",
  "itertools 0.14.0",
  "log",
+ "nix 0.29.0",
  "parking_lot",
  "pretty_assertions",
  "rand 0.9.4",
@@ -15010,6 +15116,7 @@ dependencies = [
  "agent_skills",
  "anyhow",
  "audio",
+ "bongos_confine",
  "bongos_linear",
  "bongos_work",
  "cloud_api_types",

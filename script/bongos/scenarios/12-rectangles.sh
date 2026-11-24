@@ -5,15 +5,15 @@
 # Emacs is the default base keymap, so the scenario drops the base flow's VSCode pin from
 # global_settings.json, as 06 and 08 do. Main.kt is rewritten before each part and the app launches
 # again, and every check reads the saved file. A rectangle runs between the mark and the cursor.
-#   1. C-x r o opens a blank column in a block; C-x u puts the block back.
-#   2. C-x r k kills a column; C-x u brings it back; the kill is repeated, then Other.kt is opened
-#      with C-x C-f and C-x r y puts the column in at its start; C-x u removes it again.
-#   3. C-x r c clears a comment block to spaces; C-x u restores it.
-#   4. C-x r t asks `String rectangle: ` in the minibuffer and puts a prefix on every row; C-x u
+#   1. C-x r o opens a blank column in a block; C-/ puts the block back.
+#   2. C-x r k kills a column; C-/ brings it back; the kill is repeated, then Other.kt is opened
+#      with C-x C-f and C-x r y puts the column in at its start; C-/ removes it again.
+#   3. C-x r c clears a comment block to spaces; C-/ restores it.
+#   4. C-x r t asks `String rectangle: ` in the minibuffer and puts a prefix on every row; C-/
 #      removes it.
 #   5. A kill and a yank at the end of the last row, which is shorter: the yank pads the rows it
-#      adds. C-x u undoes the newline the save added, the yank, then the kill.
-#   6. A tab row and a CJK row are cut at the displayed column (C-x r d); C-x u restores them.
+#      adds. C-/ undoes the newline the save added, the yank, then the kill.
+#   6. A tab row and a CJK row are cut at the displayed column (C-x r d); C-/ restores them.
 #   7. C-x SPC starts rectangle-mark-mode and shows the rectangle (rectangle-mark.png); C-g ends it.
 # The scenario leaves the app quit and restores Main.kt and global_settings.json.
 
@@ -89,7 +89,7 @@ mark_and_move 1 2 2
 keys ctrl+x r o
 sleep 0.5
 save_and_expect "$MAIN" 'a  bcd\ne  fgh\ni  jkl\n'
-keys ctrl+x u
+keys ctrl+slash
 save_and_expect "$MAIN" 'abcd\nefgh\nijkl\n'
 
 # 2. A column killed, undone, killed again and yanked into another file.
@@ -99,7 +99,7 @@ mark_and_move 1 2 2
 keys ctrl+x r k
 sleep 0.5
 save_and_expect "$MAIN" 'ad\neh\nil\n'
-keys ctrl+x u
+keys ctrl+slash
 save_and_expect "$MAIN" 'abcd\nefgh\nijkl\n'
 keys ctrl+Home
 sleep 0.5
@@ -119,7 +119,7 @@ sleep 0.5
 keys ctrl+x r y
 sleep 0.5
 save_and_expect "$OTHER" 'bcxxxx\nfgyyyy\njkzzzz\n'
-keys ctrl+x u
+keys ctrl+slash
 save_and_expect "$OTHER" 'xxxx\nyyyy\nzzzz\n'
 # Close Other.kt so the window restores on Main.kt in the next part.
 act keys ctrl+x k
@@ -132,7 +132,7 @@ mark_and_move 0 2 3
 keys ctrl+x r c
 sleep 0.5
 save_and_expect "$MAIN" '   one\n   two\n   three\n'
-keys ctrl+x u
+keys ctrl+slash
 save_and_expect "$MAIN" '// one\n// two\n// three\n'
 quit_part
 
@@ -146,7 +146,7 @@ type_text '# '
 keys Return
 sleep 0.5
 save_and_expect "$MAIN" '# one\n# two\n# three\n'
-keys ctrl+x u
+keys ctrl+slash
 save_and_expect "$MAIN" 'one\ntwo\nthree\n'
 quit_part
 
@@ -162,13 +162,13 @@ sleep 0.5
 keys ctrl+x r y
 sleep 0.5
 save_and_expect "$MAIN" 'cd\ngh\nijab\n  ef\n'
-# The added row has no newline, so the save added one as its own undo step: the first C-x u takes
+# The added row has no newline, so the save added one as its own undo step: the first C-/ takes
 # that back and the second the yank.
-keys ctrl+x u
+keys ctrl+slash
 sleep 0.3
-keys ctrl+x u
+keys ctrl+slash
 save_and_expect "$MAIN" 'cd\ngh\nij\n'
-keys ctrl+x u
+keys ctrl+slash
 save_and_expect "$MAIN" 'abcd\nefgh\nij\n'
 quit_part
 
@@ -179,7 +179,7 @@ sleep 0.5
 keys ctrl+x r d
 sleep 0.5
 save_and_expect "$MAIN" 'abfgh\na cd\n日x\nabfgh\n'
-keys ctrl+x u
+keys ctrl+slash
 save_and_expect "$MAIN" 'abcdefgh\na\tbcd\n日本語x\nabcdefgh\n'
 quit_part
 

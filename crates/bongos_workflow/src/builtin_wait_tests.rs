@@ -345,6 +345,9 @@ fn binding(place: &Place) -> RunBinding {
         run_dir: place.run_dir.clone(),
         attempt_dir: place.run_dir.clone(),
         worktree: RunWorktree {
+            // The run's recorded git directory names the task repository, as a linked worktree
+            // of it would; its remote is read from there, never from a tree.
+            git_dir: place.worktree.join(".git"),
             run_dir: place.run_dir.clone(),
             path: place.run_dir.join("run"),
             branch: "run".to_string(),
@@ -481,6 +484,7 @@ fn sandbox_ready(place: &Place) -> bool {
         },
         network: SandboxNetPolicy::Blocked,
         git: Default::default(),
+        read_only_masks: Vec::new(),
     };
     if os_sandbox_probe()(&policy, &place.worktree).is_err() {
         println!("skipped: bwrap not found");
@@ -867,6 +871,7 @@ fn a_gh_condition_is_evaluated_inside_the_real_sandbox() {
         git: GitSandboxPolicy::Denied {
             git_dirs: vec![place.worktree.join(".git")],
         },
+        read_only_masks: Vec::new(),
     });
     assert_eq!(
         futures::executor::block_on(wait(&request)),
@@ -993,6 +998,7 @@ impl RunWorktrees for DirWorktrees {
         let path = run_dir.join("run");
         fs::create_dir_all(&path).unwrap();
         Ok(RunWorktree {
+            git_dir: run_dir.join("git"),
             run_dir,
             path,
             branch: format!("run-{run_id}-{attempt}"),

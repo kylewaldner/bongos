@@ -39798,3 +39798,42 @@ async fn test_profile_nav_explicit_true_under_emacs_restores_implicit_pushes(
     go_back_in_active_pane(&mut cx);
     assert_eq!(active_editor_and_row(&mut cx), (original, 32));
 }
+
+#[gpui::test]
+fn test_transaction_selections_by_transaction_id(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+
+    let now = Instant::now();
+    let buffer = cx.new(|cx| language::Buffer::local("123456", cx));
+    let buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx));
+    let editor = cx.add_window(|window, cx| build_editor(buffer.clone(), window, cx));
+
+    _ = editor.update(cx, |editor, window, cx| {
+        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
+            s.select_ranges([MultiBufferOffset(2)..MultiBufferOffset(4)])
+        });
+        let anchors_before = editor.selections.disjoint_anchors_arc();
+        let transaction_id = editor.start_transaction_at(now, window, cx).unwrap();
+        editor.insert("cd", window, cx);
+        editor.end_transaction_at(now, cx);
+        let anchors_after = editor.selections.disjoint_anchors_arc();
+
+        let (before, after) = editor.transaction_selections(transaction_id).unwrap();
+        assert_eq!(before, anchors_before);
+        assert_eq!(after, Some(anchors_after));
+    });
+
+    // A transaction this editor did not start has no entry.
+    let foreign_id = buffer.update(cx, |buffer, cx| {
+        buffer.start_transaction_at(now + Duration::from_secs(10), cx);
+        buffer.edit(
+            [(MultiBufferOffset(0)..MultiBufferOffset(0), "z")],
+            None,
+            cx,
+        );
+        buffer.end_transaction_at(now + Duration::from_secs(10), cx)
+    });
+    _ = editor.update(cx, |editor, _, _| {
+        assert!(editor.transaction_selections(foreign_id.unwrap()).is_none());
+    });
+}

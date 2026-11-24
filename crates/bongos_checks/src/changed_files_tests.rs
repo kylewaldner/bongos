@@ -3,12 +3,13 @@ use futures::executor::block_on;
 use tempfile::TempDir;
 
 use crate::changed_files::{ChangedFiles, ChangedFilesError, ChangedSet, changed_files};
+use crate::task_git::TaskGit;
 use crate::test_support::{
     HOSTILE_CHILD, commit_everything, git_in, init_git_repo, rerun_with_hostile_git_env, write_file,
 };
 
-fn git() -> Git {
-    Git::locate().unwrap().isolated()
+fn git() -> TaskGit {
+    TaskGit::new(Git::locate().unwrap().isolated(), std::path::PathBuf::new())
 }
 
 /// A repository with `base.txt`, `keep.txt` and an ignore rule committed on `main`, and the

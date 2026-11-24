@@ -41,6 +41,7 @@ mod retention;
 pub mod run;
 mod section_source;
 mod settings;
+pub mod task_git;
 mod task_source;
 mod task_tree;
 mod tree_key;
@@ -118,6 +119,7 @@ pub fn init(cx: &mut gpui::App) {
     // What a crash left in the scratch folder goes at load. The parts it left running go as the
     // decider (started above) follows each project's store: `ChecksEngine::follow_project`.
     if let Ok(git) = bongos_project_repo::Git::locate() {
+        let git = task_git::TaskGit::new(git, std::path::PathBuf::new());
         engine
             .update(cx, |engine, cx| engine.sweep_scratch(git, cx))
             .detach();
@@ -160,6 +162,8 @@ mod process_tests;
 mod retention_tests;
 #[cfg(test)]
 mod run_tests;
+#[cfg(test)]
+mod task_git_tests;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]

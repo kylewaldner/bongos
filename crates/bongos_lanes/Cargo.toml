@@ -15,6 +15,7 @@ doctest = false
 [dependencies]
 anyhow.workspace = true
 bongos_checks.workspace = true
+bongos_confine.workspace = true
 bongos_emacs.workspace = true
 bongos_engine_host.workspace = true
 bongos_lanes_model.workspace = true

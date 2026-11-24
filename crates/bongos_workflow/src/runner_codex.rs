@@ -26,6 +26,10 @@
 //! Failures are the same closed list as the Claude runner's; `permission denied` is never reported
 //! because the sandbox blocks quietly and Codex has no denial record. The environment is the same
 //! as the Claude runner's: only `PATH`, `HOME`, `LANG`, `TMPDIR` and the node's `BONGOS_*` names.
+//!
+//! While `confinement.agent_steps` is on the node carries an [`AgentJob`] and the CLI runs
+//! confined as the Claude runner's does (see [`crate::agent_confinement`]); the line naming what
+//! it may write goes after the task context on stdin.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -40,9 +44,13 @@ use bongos_workflow_model::definition::{AgentKind, Node, OutputField};
 use bongos_workflow_model::{Definition, Failure, FailureReason, NodeKey, schema};
 use serde_json::Value;
 
+use crate::agent_confinement::{self, AgentJob, Running};
 use crate::mcp;
 use crate::process::{NodeProcess, ProcessRecord, group_alive, stop_all};
-use crate::runner_claude::{NodeCaps, NodeEnv, STDERR_TAIL, minutes, node_env, read_tail};
+use crate::runner_claude::{
+    NodeCaps, NodeEnv, STDERR_TAIL, minutes, node_env, output_files, read_tail, with_line,
+};
+use crate::runner_program::{SandboxProbe, os_sandbox_probe};
 use crate::runtime::Finish;
 
 /// The files a try writes in its directory (the stream and the result are named as the Claude
@@ -87,6 +95,8 @@ pub struct CodexNode {
     pub task_id: String,
     pub task_dir: PathBuf,
     pub node_result: PathBuf,
+    /// What the step may write while `confinement.agent_steps` is on; `None` while it is off.
+    pub confinement: Option<AgentJob>,
     /// The run's edits to the environment.
     pub env: Vec<bongos_workflow_model::EnvEdit>,
 }
@@ -497,6 +507,8 @@ struct Try {
     offset: u64,
     partial: Vec<u8>,
     turns_started: u32,
+    /// The confinement of a confined try, settled once its process group is gone.
+    confined: Option<Running>,
 }
 
 impl Try {
@@ -529,6 +541,7 @@ impl Try {
 pub struct CodexRunner {
     cli: CodexCli,
     base_env: BTreeMap<String, String>,
+    probe: SandboxProbe,
     tries: Vec<(Try, NodeProcess)>,
 }
 
@@ -537,8 +550,14 @@ impl CodexRunner {
         Self {
             cli,
             base_env,
+            probe: os_sandbox_probe(),
             tries: Vec::new(),
         }
+    }
+
+    pub fn with_sandbox_probe(mut self, probe: SandboxProbe) -> Self {
+        self.probe = probe;
+        self
     }
 
     pub fn cli(&self) -> &CodexCli {
@@ -585,17 +604,51 @@ impl CodexRunner {
             .unwrap_or_default();
         fs::write(&schema_file, schema_text).map_err(io)?;
         let stdin_file = node.try_dir.join("stdin.txt");
-        fs::write(&stdin_file, stdin_text(&node)).map_err(io)?;
-        let stdin = File::open(&stdin_file).map_err(io)?;
         let stdout = File::create(node.try_dir.join(STREAM_FILE)).map_err(io)?;
         let stderr = File::create(node.try_dir.join(STDERR_FILE)).map_err(io)?;
 
-        let mut command = Command::new(&self.cli.program);
-        command
-            .args(args)
-            .current_dir(&node.worktree)
-            .env_clear()
-            .envs(launch_env(&self.base_env, run, key, &node));
+        let env = launch_env(&self.base_env, run, key, &node);
+        let (command, mut confined) = match &node.confinement {
+            None => {
+                fs::write(&stdin_file, stdin_text(&node)).map_err(io)?;
+                let mut command = Command::new(&self.cli.program);
+                command
+                    .args(args)
+                    .current_dir(&node.worktree)
+                    .env_clear()
+                    .envs(env);
+                (command, None)
+            }
+            Some(job) => {
+                let prepared = agent_confinement::prepare(
+                    job,
+                    key,
+                    &node.worktree,
+                    &node.try_dir,
+                    &self.probe,
+                    self.cli.program.to_string_lossy().into_owned(),
+                    args,
+                    env,
+                )?;
+                let mut confined_node = node.clone();
+                confined_node.system = with_line(&node.system, &prepared.prompt_line);
+                if let Err(error) = fs::write(&stdin_file, stdin_text(&confined_node)) {
+                    prepared.abandon();
+                    return Err(io(error));
+                }
+                let command = prepared.command();
+                (command, Some(prepared.start(key)?))
+            }
+        };
+        let stdin = match File::open(&stdin_file) {
+            Ok(stdin) => stdin,
+            Err(error) => {
+                if let Some(confined) = confined.take() {
+                    confined.abandon();
+                }
+                return Err(io(error));
+            }
+        };
         let process = NodeProcess::spawn(
             command,
             Stdio::from(stdin),
@@ -603,6 +656,9 @@ impl CodexRunner {
             Stdio::from(stderr),
         )
         .map_err(|error| {
+            if let Some(confined) = confined.take() {
+                confined.abandon();
+            }
             let not_found = error
                 .chain()
                 .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
@@ -632,6 +688,7 @@ impl CodexRunner {
                 offset: 0,
                 partial: Vec::new(),
                 turns_started: 0,
+                confined,
             },
             process,
         ));
@@ -696,9 +753,27 @@ impl CodexRunner {
                     .any(|(run, key)| *run == entry.run && *key == entry.key)
             });
         self.tries = kept;
-        let mut processes: Vec<NodeProcess> =
-            stopped.into_iter().map(|(_, process)| process).collect();
+        let mut processes: Vec<NodeProcess> = Vec::new();
+        let mut confined = Vec::new();
+        for (entry, process) in stopped {
+            processes.push(process);
+            confined.extend(
+                entry
+                    .confined
+                    .map(|running| (entry.key, entry.node.try_dir, running)),
+            );
+        }
         stop_all(&mut processes);
+        // The process groups are gone: the work of each stopped try is imported all the same.
+        for (key, try_dir, running) in confined {
+            let settled = running.settle(&key, &output_files(&try_dir));
+            if let Some(failure) = settled.failure {
+                log::error!(
+                    "workflows: the git of a stopped agent step: {}",
+                    failure.detail
+                );
+            }
+        }
     }
 
     /// The tries in flight, as `(run, key)`.
@@ -709,8 +784,13 @@ impl CodexRunner {
             .collect()
     }
 
-    fn finish(&self, entry: Try, exit: Exit) -> Finish {
-        let classified = classify(
+    fn finish(&self, mut entry: Try, exit: Exit) -> Finish {
+        let settled = entry
+            .confined
+            .take()
+            .map(|running| running.settle(&entry.key, &output_files(&entry.node.try_dir)))
+            .unwrap_or_default();
+        let mut classified = classify(
             &entry.key,
             &entry.node,
             &self.cli.command,
@@ -718,6 +798,9 @@ impl CodexRunner {
             &read_tail(&entry.node.try_dir.join(STDERR_FILE), STDERR_TAIL),
             exit,
         );
+        if let Some(failure) = settled.failure {
+            classified.outcome = Err(failure);
+        }
         if let Ok(result) = &classified.outcome {
             let path = entry.node.try_dir.join(RESULT_FILE);
             let text = serde_json::to_string_pretty(result).unwrap_or_default();
@@ -734,6 +817,7 @@ impl CodexRunner {
             turns: classified.turns,
             elapsed_ms: entry.started.elapsed().as_millis() as u64,
             session_id: classified.session_id,
+            confinement_refusals: settled.refusals,
         }
     }
 }

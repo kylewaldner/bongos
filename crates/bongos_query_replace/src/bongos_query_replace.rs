@@ -40,6 +40,8 @@ mod perf_tests;
 #[cfg(test)]
 mod prompts_tests;
 #[cfg(test)]
+mod starters_tests;
+#[cfg(test)]
 mod view_tests;
 
 use gpui::App;

@@ -29,6 +29,7 @@ fn finished(key: &NodeKey, try_number: u32, result: serde_json::Value, cost: f64
         turns: Some(3),
         elapsed_ms: 1500,
         session_id: Some("session-1".to_string()),
+        confinement_refusals: Vec::new(),
     }
 }
 
@@ -42,6 +43,7 @@ fn failed(key: &NodeKey, try_number: u32, reason: FailureReason) -> Event {
         turns: None,
         elapsed_ms: 10,
         session_id: None,
+        confinement_refusals: Vec::new(),
     }
 }
 
@@ -799,6 +801,7 @@ fn run_toml() -> RunToml {
                 definition_commit: Some(COMMIT.to_string()),
                 worktree: "/w/1".to_string(),
                 branch: "run/1".to_string(),
+                git_dir: Some("/repo/.git/worktrees/1".to_string()),
                 loop_bound: Some(7),
             },
             Attempt {
@@ -808,6 +811,7 @@ fn run_toml() -> RunToml {
                 definition_commit: None,
                 worktree: "/w/2".to_string(),
                 branch: "run/2".to_string(),
+                git_dir: None,
                 loop_bound: None,
             },
         ],
@@ -901,6 +905,17 @@ fn the_definition_commit_is_written_only_when_there_is_one() {
             .iter()
             .all(|a| a.definition_commit.is_none())
     );
+}
+
+#[test]
+fn the_git_directory_is_written_only_when_there_is_one() {
+    let text = run_toml().to_toml();
+    assert_eq!(text.matches("git_dir").count(), 1, "{text}");
+    // A record from before the field reads with none, and writes none back.
+    let old = text.replace("git_dir = \"/repo/.git/worktrees/1\"\n", "");
+    let parsed = RunToml::parse(&old).unwrap();
+    assert!(parsed.attempts.iter().all(|a| a.git_dir.is_none()));
+    assert!(!parsed.to_toml().contains("git_dir"));
 }
 
 #[test]

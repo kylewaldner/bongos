@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::{Poll, Waker};
 
 use nucleo::Utf32String;
 use nucleo::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
@@ -8,9 +9,16 @@ use nucleo::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use crate::candidate::{Candidate, Texts};
 use crate::pool::Scorer;
 
-/// A flag that stops a pass early. Clones share the flag.
+/// A flag that stops a pass early. Clones share the flag. A pass that waits can also await
+/// [`Cancel::cancelled`], which wakes it when the flag is set.
 #[derive(Clone, Debug, Default)]
-pub struct Cancel(Arc<AtomicBool>);
+pub struct Cancel(Arc<CancelState>);
+
+#[derive(Debug, Default)]
+struct CancelState {
+    cancelled: AtomicBool,
+    wakers: Mutex<Vec<Waker>>,
+}
 
 impl Cancel {
     pub fn new() -> Self {
@@ -18,11 +26,41 @@ impl Cancel {
     }
 
     pub fn cancel(&self) {
-        self.0.store(true, AtomicOrdering::Relaxed);
+        self.0.cancelled.store(true, AtomicOrdering::SeqCst);
+        let wakers = std::mem::take(&mut *self.wakers());
+        for waker in wakers {
+            waker.wake();
+        }
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(AtomicOrdering::Relaxed)
+        self.0.cancelled.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Resolves once the flag is set (at once when it already is).
+    pub fn cancelled(&self) -> impl Future<Output = ()> + Unpin + '_ {
+        std::future::poll_fn(move |cx| {
+            if self.0.cancelled.load(AtomicOrdering::SeqCst) {
+                return Poll::Ready(());
+            }
+            {
+                let mut wakers = self.wakers();
+                if !wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
+                    wakers.push(cx.waker().clone());
+                }
+            }
+            // Set between the first check and the registration: `cancel` may have taken the
+            // wakers before this one was added.
+            if self.0.cancelled.load(AtomicOrdering::SeqCst) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+    }
+
+    fn wakers(&self) -> MutexGuard<'_, Vec<Waker>> {
+        self.0.wakers.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 

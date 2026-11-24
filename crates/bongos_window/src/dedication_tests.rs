@@ -4,7 +4,7 @@ use gpui::{AppContext as _, Entity, EntityId, TestAppContext, VisualTestContext,
 use language::{Capability, Point};
 use project::{Fs as _, Project, ProjectPath, WorktreeId};
 use workspace::{
-    AppState, MultiWorkspace, Pane, Workspace, WorkspaceHandle as _, dock::DockPosition,
+    AppState, MultiWorkspace, OpenTarget, Pane, Workspace, WorkspaceHandle as _, dock::DockPosition,
 };
 
 use crate::actions::ToggleWindowDedication;
@@ -361,6 +361,32 @@ async fn with_every_window_dedicated_an_open_splits_a_new_one(cx: &mut TestAppCo
     assert_eq!(item_ids(&panes[1], cx), before[1]);
     assert!(is_dedicated(&panes[0], cx));
     assert!(is_dedicated(&panes[1], cx));
+}
+
+#[gpui::test]
+async fn open_target_names_the_split_that_pane_for_open_makes(cx: &mut TestAppContext) {
+    let (workspace, _, mut cx) = setup(cx).await;
+    let cx = &mut cx;
+    let (panes, _) = panes_with_editors(&workspace, 2, cx);
+    dedicate(&panes[0], cx);
+    dedicate(&panes[1], cx);
+
+    let target = cx.update(|_, cx| workspace.read(cx).open_target(&panes[1], cx));
+    assert_eq!(target, OpenTarget::SplitRightOf(panes[1].clone()));
+    assert_eq!(center_panes(&workspace, cx), panes);
+
+    let opened = workspace.update_in(cx, |workspace, window, cx| {
+        workspace.pane_for_open(panes[1].clone(), window, cx)
+    });
+    let after = center_panes(&workspace, cx);
+    assert_eq!(after.len(), 3);
+    assert_eq!(after[2], opened);
+    assert!(!panes.contains(&opened));
+
+    // With a pane that may take the open, the target is that pane and nothing splits.
+    let target = cx.update(|_, cx| workspace.read(cx).open_target(&panes[1], cx));
+    assert_eq!(target, OpenTarget::Pane(opened));
+    assert_eq!(center_panes(&workspace, cx).len(), 3);
 }
 
 #[gpui::test]
