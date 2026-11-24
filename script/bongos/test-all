@@ -8,6 +8,8 @@
 #   BONGOS_TEST_PARTITION=K/N  run only slice K of N of the tests (nextest --partition hash:K/N)
 #   BONGOS_NEXTEST_PROFILE=p   nextest profile (default gate: everything except the timing tests; perf runs only them)
 #   BONGOS_CARGO_PROFILE=p     cargo profile to build the tests with (nextest --cargo-profile; default unset: the dev profile); perf-test is optimized with debug assertions off
+#   BONGOS_TEST_EXCLUDE=f      a nextest filterset of tests not to run (-E 'not (f)'); set only by the CI release job, from its
+#                              list of tests that cannot pass on a hosted runner
 # The extension_host dev-extension test (test_extension_store_with_test_extension) expects a wasi-sdk
 # in the repository's own target/wasi-sdk and tries to download one when it is missing; in a fresh
 # worktree that failed on 2026-11-07 (the test's HTTP client is a fake), so a failure of that one
@@ -81,4 +83,8 @@ fi
 cargo_profile=()
 [ -n "${BONGOS_CARGO_PROFILE:-}" ] && cargo_profile=(--cargo-profile "$BONGOS_CARGO_PROFILE")
 
-cargo_limited nextest run "${scope[@]}" "${filter[@]}" ${partition[@]+"${partition[@]}"} ${cargo_profile[@]+"${cargo_profile[@]}"} --profile "${BONGOS_NEXTEST_PROFILE:-gate}" --lib --bins --tests --locked --no-fail-fast --color never
+# BONGOS_TEST_EXCLUDE=f leaves out the tests the filterset f matches. Unset, the command line is unchanged.
+exclude=()
+[ -n "${BONGOS_TEST_EXCLUDE:-}" ] && exclude=(-E "not ($BONGOS_TEST_EXCLUDE)")
+
+cargo_limited nextest run "${scope[@]}" "${filter[@]}" ${exclude[@]+"${exclude[@]}"} ${partition[@]+"${partition[@]}"} ${cargo_profile[@]+"${cargo_profile[@]}"} --profile "${BONGOS_NEXTEST_PROFILE:-gate}" --lib --bins --tests --locked --no-fail-fast --color never
