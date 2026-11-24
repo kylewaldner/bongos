@@ -448,6 +448,19 @@ pub fn connect(
             Ok(connection)
         }
         .await;
+        if matches!(
+            result,
+            Err(ConnectError::File(_) | ConnectError::ClearAllowed(_))
+        ) {
+            // The new token was stored but the connection is not: a disconnect would refuse to
+            // run, so the secret goes now.
+            if let Err(error) = provider.delete_credentials(CREDENTIAL_URL, cx).await {
+                log::warn!(
+                    "could not delete the Slack token of a failed connect: {}",
+                    token.redact(&format!("{error:#}"))
+                );
+            }
+        }
         cx.update(|cx| {
             let state = state_mut(cx);
             state.busy = false;
