@@ -61,13 +61,14 @@ jobs:
           printf '#!/bin/sh\nexec clang "$@" -fuse-ld=mold\n' | sudo tee /usr/local/bin/bongos-mold-linker >/dev/null; sudo chmod 755 /usr/local/bin/bongos-mold-linker
           echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/bongos-mold-linker" >> "$GITHUB_ENV"
           echo "MEASURE shard=${{ matrix.shard }} setup_done root_avail_mb=$(avail_root)"
-      - name: Cache dependencies (read only)
+      - name: Cache dependencies (shard 1 writes)
         id: cache
         uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
         with:
           workspaces: ". -> ../../../../../mnt/bongos-workspace/target"
-          shared-key: p0-dev
-          save-if: false
+          shared-key: p0-suite-dev
+          add-job-id-key: false
+          save-if: ${{ matrix.shard == 1 }}
       - name: Report cache
         run: echo "MEASURE shard=${{ matrix.shard }} cache_hit=${{ steps.cache.outputs.cache-hit }}"
       - name: Pick this shard's crates
