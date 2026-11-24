@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use bongos_workflow_model::definition::{AgentKind, NodeKind as DefinitionKind};
+use bongos_workflow_model::unsandboxed::{self, Mode};
 use bongos_workflow_model::{Failure, FailureReason, NodeKey};
 
 use crate::dispatch_agent::AgentNodes;
@@ -40,6 +41,16 @@ pub struct RunnerSnapshot {
     /// The hosts `@remote` stands for, by run id; a run with no entry takes them from the task
     /// repository's push remote when its node starts.
     pub remote_hosts: BTreeMap<String, Vec<String>>,
+    /// The runs whose project's `runs.unsandboxed` refuses unsandboxed starts, by run id.
+    pub refusing_runs: BTreeSet<String>,
+}
+
+impl RunnerSnapshot {
+    /// The effective `workflows.programs.unsandboxed` mode of `run`: the user setting, or
+    /// `Refuse` when the run's project refuses, whatever the setting.
+    pub fn unsandboxed_mode(&self, run: &str) -> Mode {
+        unsandboxed::effective_mode(self.programs.unsandboxed, self.refusing_runs.contains(run))
+    }
 }
 
 /// A shared, replaceable [`RunnerSnapshot`]: the app sets it, the runner reads a copy.
@@ -198,6 +209,10 @@ impl Runner for AppRunner {
 
     fn unbind(&mut self, run: &str) {
         self.bindings.remove(run);
+    }
+
+    fn unsandboxed_mode(&self, run: &str) -> Mode {
+        self.inputs.snapshot().unsandboxed_mode(run)
     }
 
     fn start_node(&mut self, node: NodeStart<'_>) -> Result<ProcessRecord, Failure> {
