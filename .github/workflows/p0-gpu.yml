@@ -1,0 +1,56 @@
+# Phase 0 measurement (scratch branch only, never merged): do the wgpu tests pass with a software Vulkan driver.
+name: p0-gpu
+on:
+  push:
+    branches: [gh-runners-phase0]
+    paths: ['.github/workflows/p0-gpu.yml']
+permissions:
+  contents: read
+jobs:
+  gpu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: '0'
+      CARGO_PROFILE_DEV_SPLIT_DEBUGINFO: 'off'
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_SPLIT_DEBUGINFO: 'off'
+      RUSTC_BOOTSTRAP: '1'
+      CARGO_UNSTABLE_FEATURE_UNIFICATION: 'true'
+      CARGO_RESOLVER_FEATURE_UNIFICATION: workspace
+      CC: clang
+      CXX: clang++
+      RUSTUP_HOME: /mnt/bongos-workspace/rustup
+      CARGO_HOME: /mnt/bongos-workspace/cargo
+      CARGO_TARGET_DIR: /mnt/bongos-workspace/target
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup with a software Vulkan driver
+        run: |
+          s=$(date +%s)
+          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends gcc g++ libasound2-dev libfontconfig-dev libgit2-dev libglib2.0-dev libssl-dev libva-dev libvulkan1 libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev make cmake clang lld llvm jq git curl gettext-base elfutils libsqlite3-dev musl-tools musl-dev build-essential pkg-config python3 mold mesa-vulkan-drivers vulkan-tools >/dev/null
+          echo "MEASURE gpu apt_seconds=$(( $(date +%s)-s ))"
+          vulkaninfo --summary 2>&1 | grep -iE "deviceName|deviceType|driverName" | sed 's/^/MEASURE gpu vulkan /' || echo "MEASURE gpu vulkaninfo=FAILED"
+          sudo mkdir -p /mnt/bongos-workspace; sudo chown "$USER" /mnt/bongos-workspace
+          mkdir -p "$CARGO_HOME/bin" "$CARGO_TARGET_DIR"
+          rustup toolchain install >/dev/null 2>&1
+          curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C "$CARGO_HOME/bin"
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+          printf '#!/bin/sh\nexec clang "$@" -fuse-ld=mold\n' | sudo tee /usr/local/bin/bongos-mold-linker >/dev/null; sudo chmod 755 /usr/local/bin/bongos-mold-linker
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/bongos-mold-linker" >> "$GITHUB_ENV"
+      - name: Cache dependencies (read only)
+        uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        with:
+          workspaces: ". -> ../../../../../mnt/bongos-workspace/target"
+          shared-key: p0-suite-dev
+          add-job-id-key: false
+          save-if: false
+      - name: Run the wgpu tests and the two engine host tests that failed once
+        run: |
+          s=$(date +%s)
+          cargo nextest run -p gpui_wgpu -p bongos_engine_host --lib --bins --tests --locked --no-fail-fast --profile gate 2>&1 | grep -E "Summary|FAIL|TIMEOUT|error" | sed 's/^/MEASURE gpu /'
+          echo "MEASURE gpu test_seconds=$(( $(date +%s)-s ))"
