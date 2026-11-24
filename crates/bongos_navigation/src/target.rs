@@ -112,11 +112,29 @@ pub fn add_pane_choices(
     workspace: WeakEntity<Workspace>,
     on_choice: impl Fn(Value, Entity<Pane>, &mut Window, &mut App) + 'static,
 ) -> Session {
+    add_pane_choices_where(session, workspace, |_| true, on_choice)
+}
+
+/// Like [`add_pane_choices`], but a row for which `uses_pane` is false is opened in the default
+/// pane and no pane is made for it, because its `on_choice` ignores the pane.
+pub fn add_pane_choices_where(
+    session: Session,
+    workspace: WeakEntity<Workspace>,
+    uses_pane: impl Fn(&Value) -> bool + 'static,
+    on_choice: impl Fn(Value, Entity<Pane>, &mut Window, &mut App) + 'static,
+) -> Session {
+    let uses_pane: Rc<dyn Fn(&Value) -> bool> = Rc::new(uses_pane);
     let on_choice: OnChoice = Rc::new(on_choice);
     let entry = |session: Session, label: &'static str, key: char, choice: PaneChoice| {
         let workspace = workspace.clone();
         let on_choice = on_choice.clone();
+        let uses_pane = uses_pane.clone();
         session.action(label, key, move |value, window, cx| {
+            let choice = if uses_pane(&value) {
+                choice.clone()
+            } else {
+                PaneChoice::Default
+            };
             let pane = workspace
                 .update(cx, |workspace, cx| {
                     let resolved = resolve(workspace, &choice, cx);

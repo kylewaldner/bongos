@@ -29,7 +29,7 @@ use workspace::Workspace;
 
 use crate::goto_file_open::{self, FileTarget};
 use crate::preview::{Preview, PreviewSession, PreviewTarget};
-use crate::target::{PaneChoice, add_pane_choices, resolve};
+use crate::target::{PaneChoice, add_pane_choices_where, resolve};
 
 /// The name the picker's session is routed by.
 pub const HOST: &str = "go_to_file";
@@ -266,8 +266,9 @@ pub(crate) fn start(
     let session = Session::completing_read(HOST, "Go to file: ")
         .key_context(KEY_CONTEXT)
         // C-j answers the input as typed and creates the file when it does not exist; an empty
-        // input is refused.
+        // input is refused. RET never creates: it opens the selected row or does nothing.
         .free_input(true)
+        .free_input_only_on_confirm_input()
         .accept(|input| !input.trim().is_empty(), "Give the name of a file")
         .source(Source::Dynamic(Box::new(move |query, cancel, cx| {
             let (mut sender, receiver) = mpsc::channel(1);
@@ -351,9 +352,11 @@ pub(crate) fn start(
                     .ok();
             }
         });
-    let session = add_pane_choices(
+    let session = add_pane_choices_where(
         session,
         choice_workspace.clone(),
+        // A file outside the project opens in the default pane, so no pane is made for it.
+        |value| !matches!(value.downcast_ref::<FileTarget>(), Some(FileTarget::Abs(_))),
         move |value, pane, window, cx| {
             let Some(target) = value.downcast_ref::<FileTarget>() else {
                 return;

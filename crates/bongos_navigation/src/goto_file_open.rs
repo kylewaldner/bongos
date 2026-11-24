@@ -98,6 +98,10 @@ pub(crate) fn create_and_open(
         .visible_worktrees(cx)
         .next()
         .map(|worktree| worktree.read(cx).abs_path().to_path_buf());
+    if input.starts_with('~') && !input.starts_with("~/") {
+        bongos_minibuffer::error(window, cx, "Use ~/ for the home directory");
+        return;
+    }
     let Some(abs_path) = typed_file_path(input, root.as_deref()) else {
         bongos_minibuffer::error(window, cx, "No project to create the file in");
         return;

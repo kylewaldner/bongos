@@ -315,15 +315,26 @@ async fn goto_file_c_j_with_a_missing_directory_asks_and_creates_both_on_yes(
 }
 
 #[gpui::test]
-async fn goto_file_c_j_creates_nothing_on_no_and_for_an_empty_input(cx: &mut TestAppContext) {
+async fn goto_file_c_j_creates_nothing_for_an_empty_input(cx: &mut TestAppContext) {
     let (workspace, mut cx, fake) = setup(cx, &[]).await;
     let cx = &mut cx;
     let before = fake.paths(true);
-
     let handle = open_picker(&workspace, PaneChoice::Default, cx);
     confirm_input(cx);
     assert_eq!(fake.paths(true), before, "an empty input creates nothing");
+    type_input(&handle, "   ", cx);
+    confirm_input(cx);
+    assert_eq!(fake.paths(true), before, "a blank input creates nothing");
+}
 
+#[gpui::test]
+async fn goto_file_c_j_creates_nothing_when_the_directory_question_is_answered_no(
+    cx: &mut TestAppContext,
+) {
+    let (workspace, mut cx, fake) = setup(cx, &[]).await;
+    let cx = &mut cx;
+    let before = fake.paths(true);
+    let handle = open_picker(&workspace, PaneChoice::Default, cx);
     type_input(&handle, "src/new/Deep.kt", cx);
     confirm_input(cx);
     answer("n", cx);
@@ -332,6 +343,94 @@ async fn goto_file_c_j_creates_nothing_on_no_and_for_an_empty_input(cx: &mut Tes
         opened_abs_path(&workspace, cx),
         Some(PathBuf::from("/root/src/new/Deep.kt"))
     );
+}
+
+#[gpui::test]
+async fn goto_file_ret_creates_nothing_before_results_arrive_or_for_a_typo(
+    cx: &mut TestAppContext,
+) {
+    let (workspace, mut cx, fake) = setup(cx, &[]).await;
+    let cx = &mut cx;
+    let before = fake.paths(true);
+    let handle = open_picker(&workspace, PaneChoice::Default, cx);
+
+    // RET right after typing, before the source has answered.
+    cx.update(|window, cx| handle.set_input("src/Typo.kt", window, cx));
+    confirm(cx);
+    assert_eq!(
+        fake.paths(true),
+        before,
+        "RET before results creates nothing"
+    );
+    assert!(handle.is_open(), "the picker stays open");
+
+    // RET on an input no row matches.
+    type_input(&handle, "zzzqqq", cx);
+    confirm(cx);
+    assert_eq!(fake.paths(true), before, "RET on a typo creates nothing");
+    assert!(handle.is_open());
+
+    // C-j on the same input still creates.
+    type_input(&handle, "src/Typo.kt", cx);
+    confirm_input(cx);
+    assert!(fake.is_file("/root/src/Typo.kt".as_ref()).await);
+}
+
+#[gpui::test]
+async fn goto_file_c_j_refuses_a_leading_tilde_that_is_not_the_home_directory(
+    cx: &mut TestAppContext,
+) {
+    let (workspace, mut cx, fake) = setup(cx, &[]).await;
+    let cx = &mut cx;
+    let before = fake.paths(true);
+    for input in ["~", "~user/x.kt"] {
+        let handle = open_picker(&workspace, PaneChoice::Default, cx);
+        type_input(&handle, input, cx);
+        confirm_input(cx);
+        assert_eq!(fake.paths(true), before, "{input} creates nothing");
+        cx.simulate_keystrokes("ctrl-g");
+        cx.run_until_parked();
+    }
+}
+
+#[gpui::test]
+async fn goto_file_c_j_failure_is_shown_and_opens_nothing(cx: &mut TestAppContext) {
+    let (workspace, mut cx, fake) = setup(cx, &[]).await;
+    let cx = &mut cx;
+    // The parent of the new file is a file, so the file cannot be made.
+    let handle = open_picker(&workspace, PaneChoice::Default, cx);
+    type_input(&handle, "src/Main.kt/Child.kt", cx);
+    confirm_input(cx);
+    assert!(!fake.is_file("/root/src/Main.kt/Child.kt".as_ref()).await);
+    assert_eq!(text_of(&fake, "/root/src/Main.kt").await, "fun main() {}\n");
+    assert_eq!(opened_abs_path(&workspace, cx), None, "nothing is opened");
+}
+
+#[gpui::test]
+async fn goto_file_m_o_entries_open_an_outside_project_row_without_splitting(
+    cx: &mut TestAppContext,
+) {
+    let (workspace, mut cx, _) = setup(cx, &[("/elsewhere/outside.txt", "outside\n")]).await;
+    let cx = &mut cx;
+    let panes = center_panes(&workspace, 2, cx);
+    activate(&workspace, &panes[0], cx);
+    for key in ["r", "d", "o"] {
+        let handle = open_picker(&workspace, PaneChoice::Default, cx);
+        type_input(&handle, "/elsewhere/outside.txt", cx);
+        cx.dispatch_action(minibuffer::Actions);
+        cx.run_until_parked();
+        answer(key, cx);
+        assert_eq!(
+            all_panes(&workspace, cx).len(),
+            2,
+            "entry {key} splits nothing"
+        );
+        assert_eq!(
+            opened_abs_path(&workspace, cx),
+            Some(PathBuf::from("/elsewhere/outside.txt")),
+            "entry {key} opens the file"
+        );
+    }
 }
 
 #[gpui::test]
