@@ -139,6 +139,7 @@ fn node(definition: &Definition, name: &str, root: &Path, try_number: u32) -> Cl
     ClaudeNode {
         caps: NodeCaps::resolve(definition, declared, &AgentDefaults::default()),
         output: declared.output.clone(),
+        schema: declared.schema.clone(),
         mcp_exclude: Vec::new(),
         mcp_installed: ["broken", "github", "linear"]
             .iter()

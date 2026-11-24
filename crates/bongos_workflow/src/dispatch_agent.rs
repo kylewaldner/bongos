@@ -85,6 +85,7 @@ impl NodeKind for AgentNodes {
         let claude_node = ClaudeNode {
             caps,
             output: definition_node.output.clone(),
+            schema: definition_node.schema.clone(),
             mcp_exclude: inputs.mcp_exclude.clone(),
             mcp_installed: inputs
                 .mcp_installed
