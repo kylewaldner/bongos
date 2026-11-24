@@ -1,0 +1,110 @@
+# Phase 0 measurement (scratch branch only, never merged): Linux test builds, incremental, debug info, cache.
+name: p0-linux-build
+on:
+  push:
+    branches: [gh-runners-phase0]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  step-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: inc-off-lto, incremental: '0', debug: line-tables-only, save: true}
+          - {name: inc-on-lto, incremental: '1', debug: line-tables-only, save: false}
+          - {name: inc-off-nodebug, incremental: '0', debug: '0', save: false}
+    name: step-${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 345
+    env:
+      CARGO_INCREMENTAL: ${{ matrix.incremental }}
+      CARGO_PROFILE_DEV_DEBUG: ${{ matrix.debug }}
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: '0'
+      CARGO_PROFILE_DEV_SPLIT_DEBUGINFO: 'off'
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_SPLIT_DEBUGINFO: 'off'
+      BONGOS_SKIP_GIT_HEAD_WATCH: '1'
+      CC: clang
+      CXX: clang++
+      RUSTUP_HOME: /mnt/bongos-workspace/rustup
+      CARGO_HOME: /mnt/bongos-workspace/cargo
+      CARGO_TARGET_DIR: /mnt/bongos-workspace/target
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Start sampling and free disk
+        run: |
+          . p0/lib.sh
+          df -h / /mnt
+          echo "MEASURE start root_avail_mb=$(avail_root) mnt_avail_mb=$(avail_mnt)"
+          start_watch
+          free_disk
+      - name: Install build dependencies
+        run: |
+          . p0/lib.sh
+          timed apt sh -c 'sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends gcc g++ libasound2-dev libfontconfig-dev libgit2-dev libglib2.0-dev libssl-dev libva-dev libvulkan1 libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev make cmake clang lld llvm jq git curl gettext-base elfutils libsqlite3-dev musl-tools musl-dev build-essential pkg-config python3 mold >/dev/null'
+      - name: Install the Rust toolchain and nextest
+        run: |
+          . p0/lib.sh
+          sudo mkdir -p /mnt/bongos-workspace; sudo chown "$USER" /mnt/bongos-workspace
+          mkdir -p "$CARGO_HOME/bin" "$CARGO_TARGET_DIR"
+          timed rustup-install rustup toolchain install
+          timed nextest-install sh -c 'curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C "$CARGO_HOME/bin"'
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+          echo "rel=$(realpath -m --relative-to="$GITHUB_WORKSPACE" "$CARGO_TARGET_DIR")" >> "$RUNNER_TEMP/rel"
+      - name: Cache dependencies
+        id: cache
+        uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        with:
+          workspaces: ". -> ../../../mnt/bongos-workspace/target"
+          shared-key: p0-dev
+          save-if: ${{ matrix.save }}
+          cache-on-failure: true
+      - name: Cache result
+        run: |
+          echo "MEASURE cache_hit=${{ steps.cache.outputs.cache-hit }}"
+          du -sm "$CARGO_TARGET_DIR" "$CARGO_HOME" 2>/dev/null | sed 's/^/MEASURE restored_size_mb /'
+          . p0/lib.sh; echo "MEASURE after_cache root_avail_mb=$(avail_root) mnt_avail_mb=$(avail_mnt)"
+      - name: Fetch
+        run: . p0/lib.sh; timed cargo-fetch cargo fetch --locked
+      - name: Mold wrapper
+        run: |
+          printf '#!/bin/sh\nexec clang "$@" -fuse-ld=mold\n' | sudo tee /usr/local/bin/bongos-mold-linker >/dev/null
+          sudo chmod 755 /usr/local/bin/bongos-mold-linker
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/bongos-mold-linker" >> "$GITHUB_ENV"
+      - name: Cold compile of one small crate's tests
+        run: . p0/lib.sh; timed cold-small-crate-tests cargo nextest run -p bongos_isearch --lib --bins --tests --locked --no-fail-fast --profile gate
+      - name: Touch and rebuild the same crate (incremental effect)
+        run: |
+          . p0/lib.sh
+          f=$(ls crates/bongos_isearch/src/*.rs | head -1); echo "// touch 1" >> "$f"
+          timed rebuild1-small cargo nextest run -p bongos_isearch --lib --bins --tests --locked --no-fail-fast --profile gate
+          echo "// touch 2" >> "$f"
+          timed rebuild2-small cargo nextest run -p bongos_isearch --lib --bins --tests --locked --no-fail-fast --profile gate
+          git checkout -- "$f"
+      - name: Cold compile of editor's tests (a heavy crate on gpui)
+        run: . p0/lib.sh; timed cold-editor-tests cargo nextest run -p editor --lib --tests --locked --no-fail-fast --profile gate
+      - name: Touch and rebuild editor
+        run: |
+          . p0/lib.sh
+          f=crates/editor/src/editor.rs; echo "// touch" >> "$f"
+          timed rebuild-editor cargo nextest run -p editor --lib --tests --locked --no-fail-fast --profile gate
+          git checkout -- "$f"
+      - name: Build the app (dev)
+        run: . p0/lib.sh; timed app-build-dev cargo build -p bongos -p cli --locked
+      - name: Touch and rebuild the app
+        run: |
+          . p0/lib.sh
+          f=crates/editor/src/editor.rs; echo "// touch" >> "$f"
+          timed app-rebuild-dev cargo build -p bongos -p cli --locked
+          git checkout -- "$f"
+      - name: Sizes and peaks
+        if: always()
+        run: |
+          . p0/lib.sh
+          du -sm "$CARGO_TARGET_DIR" "$CARGO_TARGET_DIR"/debug/* 2>/dev/null | sort -n | tail -8 | sed 's/^/MEASURE size_mb /'
+          report_watch
+          df -h / /mnt
