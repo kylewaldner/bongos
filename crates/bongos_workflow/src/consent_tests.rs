@@ -28,7 +28,7 @@ use gpui::TestAppContext;
 use tempfile::TempDir;
 
 use crate::WorkflowsSettings;
-use crate::consent::Grant;
+use crate::consent::{ConsentScope, Grant, InMemoryRunConsents, RunConsentStore};
 use crate::lifecycle::{
     BY_PERSON, Lifecycle, NOTHING_TO_ANSWER, Refusal, RefusalKind, RunStatus, RunWorktrees,
     StartChecks, StartContext, StartRequest,
@@ -474,6 +474,7 @@ fn unattended_and_heal_runs_refuse_with_no_ask() {
         // Even a grant put in the store by hand does not let it run.
         lifecycle.runtime().consents().grant(
             &run,
+            ConsentScope::Sandbox,
             Grant {
                 at: AT.to_string(),
                 by: BY_PERSON.to_string(),
@@ -681,4 +682,106 @@ fn an_answer_then_a_crash_before_resuming_releases_the_held_keys_which_ask_again
         }
         assert!(started(&fresh, &run).is_empty());
     }
+}
+
+fn grant_at(by: &str) -> Grant {
+    Grant {
+        at: AT.to_string(),
+        by: by.to_string(),
+    }
+}
+
+#[test]
+fn two_scopes_of_one_run_are_independent() {
+    let store = InMemoryRunConsents::default();
+    let rule = ConsentScope::Rule("x".to_string());
+
+    store.grant("run-1", ConsentScope::Sandbox, grant_at("sandbox"));
+    assert_eq!(
+        store.granted("run-1", &ConsentScope::Sandbox),
+        Some(grant_at("sandbox"))
+    );
+    assert_eq!(store.granted("run-1", &rule), None);
+
+    let store = InMemoryRunConsents::default();
+    store.grant("run-1", rule.clone(), grant_at("rule"));
+    assert_eq!(store.granted("run-1", &rule), Some(grant_at("rule")));
+    assert_eq!(store.granted("run-1", &ConsentScope::Sandbox), None);
+    assert_eq!(
+        store.granted("run-1", &ConsentScope::Rule("y".to_string())),
+        None
+    );
+}
+
+#[test]
+fn forgetting_a_run_forgets_all_its_scopes_and_keeps_other_runs() {
+    let store = InMemoryRunConsents::default();
+    let rule = ConsentScope::Rule("x".to_string());
+    for run in ["run-1", "run-2"] {
+        store.grant(run, ConsentScope::Sandbox, grant_at(run));
+        store.grant(run, rule.clone(), grant_at(run));
+    }
+
+    store.forget("run-1");
+    assert_eq!(store.granted("run-1", &ConsentScope::Sandbox), None);
+    assert_eq!(store.granted("run-1", &rule), None);
+    assert_eq!(
+        store.granted("run-2", &ConsentScope::Sandbox),
+        Some(grant_at("run-2"))
+    );
+    assert_eq!(store.granted("run-2", &rule), Some(grant_at("run-2")));
+}
+
+#[test]
+fn a_heal_run_gets_no_grant() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle(&["lint"]);
+    let heal = world.start(
+        &mut lifecycle,
+        StartRequest {
+            started_by: StartedBy::Healer,
+            ..request(1, "one")
+        },
+    );
+    let person = world.start(&mut lifecycle, request(2, "one"));
+    settle(&mut lifecycle);
+
+    // A grant put in the store by hand is never read for the heal run, only for the other.
+    for run in [&heal, &person] {
+        lifecycle
+            .runtime()
+            .consents()
+            .grant(run, ConsentScope::Sandbox, grant_at(BY_PERSON));
+    }
+    assert_eq!(lifecycle.consent_grant(&heal), None);
+    assert_eq!(lifecycle.runtime().sandbox_grant(&heal), None);
+    assert_eq!(lifecycle.consent_grant(&person), Some(grant_at(BY_PERSON)));
+    assert!(
+        lifecycle
+            .answer_unsandboxed(&heal, true, BY_PERSON)
+            .is_err()
+    );
+    assert_eq!(answers(&lifecycle, &heal), 0);
+
+    // A run that asked and then turns out to be a heal run: its allow is recorded, never granted.
+    let world = World::new();
+    let mut lifecycle = world.lifecycle(&["lint"]);
+    let run = world.start(&mut lifecycle, request(1, "one"));
+    settle(&mut lifecycle);
+    assert_eq!(asks(&lifecycle, &run), 1);
+    lifecycle
+        .runtime_mut()
+        .set_started_by(&run, StartedBy::Healer);
+    lifecycle.answer_unsandboxed(&run, true, BY_PERSON).unwrap();
+    assert_eq!(answers(&lifecycle, &run), 1);
+    assert_eq!(
+        lifecycle
+            .runtime()
+            .consents()
+            .granted(&run, &ConsentScope::Sandbox),
+        None,
+        "nothing stored"
+    );
+    settle(&mut lifecycle);
+    assert!(started(&lifecycle, &run).is_empty(), "nothing ran");
 }

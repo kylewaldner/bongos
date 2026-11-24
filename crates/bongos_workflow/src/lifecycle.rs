@@ -1155,7 +1155,7 @@ impl<R: Runner> Lifecycle<R> {
 
     /// The grant that lets `run`'s programs run without the OS sandbox in this process, if any.
     pub fn consent_grant(&self, run: &str) -> Option<Grant> {
-        self.runtime.consents().granted(run)
+        self.runtime.sandbox_grant(run)
     }
 
     /// While `on`, a start or restart of a run under `files` (a project's files) is refused: the
