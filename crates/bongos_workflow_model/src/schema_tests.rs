@@ -1,9 +1,10 @@
 use serde_json::json;
+use tempfile::TempDir;
 
-use crate::definition::{Outcome, OutputField, parse};
+use crate::definition::{FieldType, ItemType, Node, Outcome, OutputField, parse};
 use crate::schema::{
-    CheckError, OutputSchema, TypedValue, check, format_errors, json_schema, json_schema_strict,
-    validate,
+    CheckError, OutputSchema, TypedValue, check, document, format_errors, json_schema,
+    json_schema_strict, validate,
 };
 
 /// The output fields of one node declared with `spec`.
@@ -57,7 +58,7 @@ fn json_schema_covers_every_field_type() {
 
 #[test]
 fn strict_schema_requires_every_property_and_nulls_the_optional_ones() {
-    let schema = json_schema_strict(&every_type());
+    let schema = json_schema_strict(&json_schema(&every_type()));
     assert_eq!(
         schema["required"],
         json!([
@@ -423,7 +424,8 @@ fn validate_sorts_errors_by_path() {
 #[test]
 fn validate_accepts_null_for_an_optional_field() {
     let fields = output(r#"{ a = { type = "text" }, b = { type = "number", optional = true } }"#);
-    let strict = OutputSchema::compile(json_schema_strict(&fields), fields.clone()).unwrap();
+    let strict =
+        OutputSchema::compile(json_schema_strict(&json_schema(&fields)), fields.clone()).unwrap();
     assert_eq!(validate(&strict, &json!({ "a": "x", "b": null })), Ok(()));
     assert_eq!(validate(&strict, &json!({ "a": "x", "b": 2 })), Ok(()));
     // A required field set to null is still an error.
@@ -431,4 +433,164 @@ fn validate_accepts_null_for_an_optional_field() {
     // Non-strict schema: a property outside `required` may be null too.
     let loose = OutputSchema::compile(json_schema(&fields), Vec::new()).unwrap();
     assert_eq!(validate(&loose, &json!({ "a": "x", "b": null })), Ok(()));
+}
+
+/// A node naming `schemas/result.json` with `schema` written to it in a fresh directory.
+fn file_node(schema: &str) -> (TempDir, Node) {
+    let dir = TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join("schemas")).unwrap();
+    std::fs::write(dir.path().join("schemas/result.json"), schema).unwrap();
+    let text = "schema = 1\nname = \"s\"\nstart = \"a\"\n[nodes.a]\nkind = \"agent\"\noutput_schema = \"schemas/result.json\"\n";
+    (dir, parse(text).unwrap().nodes[0].clone())
+}
+
+fn loaded(schema: &str) -> OutputSchema {
+    let (dir, node) = file_node(schema);
+    document(&node, dir.path()).unwrap()
+}
+
+#[test]
+fn a_disallowed_schema_keyword_is_a_load_error_naming_the_keyword_and_its_path() {
+    for (keyword, schema, path) in [
+        (
+            "$ref",
+            r##"{"type":"object","properties":{"a":{"$ref":"#/$defs/x"}}}"##,
+            "/properties/a/$ref",
+        ),
+        (
+            "pattern",
+            r#"{"type":"object","properties":{"a":{"type":"string","pattern":"^x"}}}"#,
+            "/properties/a/pattern",
+        ),
+        (
+            "oneOf",
+            r#"{"type":"object","oneOf":[{"type":"object"}]}"#,
+            "/oneOf",
+        ),
+    ] {
+        let (dir, node) = file_node(schema);
+        let message = document(&node, dir.path()).unwrap_err().message;
+        assert!(
+            message.contains(&format!("keyword '{keyword}' is not allowed at {path}")),
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn a_file_schema_maps_to_the_five_field_types() {
+    let schema = loaded(
+        r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","additionalProperties":false,
+        "required":["verdict","summary","score","count","tags","sizes"],
+        "properties":{
+          "verdict":{"type":"string","enum":["ship","hold"]},
+          "summary":{"type":"string","title":"s","description":"d"},
+          "score":{"type":"number"},
+          "count":{"type":"integer"},
+          "tags":{"type":"array","items":{"type":"string"}},
+          "sizes":{"type":"array","items":{"type":"number"}},
+          "note":{"type":"string"}}}"#,
+    );
+    let types = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            (
+                field.name.as_str(),
+                field.field_type.clone(),
+                field.optional,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        types,
+        [
+            (
+                "verdict",
+                FieldType::Choice(vec!["ship".into(), "hold".into()]),
+                false
+            ),
+            ("summary", FieldType::Text, false),
+            ("score", FieldType::Number, false),
+            ("count", FieldType::Number, false),
+            ("tags", FieldType::List(ItemType::Text), false),
+            ("sizes", FieldType::List(ItemType::Number), false),
+            ("note", FieldType::Text, true),
+        ]
+    );
+}
+
+#[test]
+fn a_nested_object_in_a_schema_becomes_a_data_field() {
+    let schema = loaded(
+        r#"{"type":"object","required":["report"],"properties":{"report":{"type":"object","properties":{"n":{"type":"number"}}}}}"#,
+    );
+    assert_eq!(schema.fields()[0].field_type, FieldType::Data);
+    let typed = check(schema.fields(), &json!({"report": {"n": 1}})).unwrap();
+    assert_eq!(
+        typed.get("report"),
+        Some(&TypedValue::Data(json!({"n": 1})))
+    );
+    assert_eq!(typed.to_json(), json!({"report": {"n": 1}}));
+    assert_eq!(typed.outcomes().count(), 0);
+}
+
+#[test]
+fn a_missing_schema_file_is_a_load_error() {
+    let (_dir, node) = file_node("{}");
+    let empty = TempDir::new().unwrap();
+    let diagnostic = document(&node, empty.path()).unwrap_err();
+    assert!(diagnostic.is_error());
+    assert!(
+        diagnostic
+            .message
+            .contains("cannot read output_schema 'schemas/result.json'"),
+        "{}",
+        diagnostic.message
+    );
+    assert_eq!(diagnostic.node.as_deref(), Some("a"));
+}
+
+#[test]
+fn naming_both_output_and_output_schema_is_a_load_error() {
+    let text = "schema = 1\nname = \"s\"\nstart = \"a\"\n[nodes.a]\nkind = \"agent\"\noutput = { x = { type = \"text\" } }\noutput_schema = \"schemas/result.json\"\n";
+    let node = parse(text).unwrap().nodes[0].clone();
+    let diagnostic = document(&node, TempDir::new().unwrap().path()).unwrap_err();
+    assert!(
+        diagnostic.message.contains("not both"),
+        "{}",
+        diagnostic.message
+    );
+}
+
+#[test]
+fn the_generated_document_and_the_strict_schema_derived_from_it_are_unchanged() {
+    let fields = every_type();
+    let generated = json_schema(&fields);
+    let pinned = r#"{"additionalProperties":false,"properties":{"design":{"type":"string"},"files":{"items":{"type":"string"},"type":"array"},"items":{"items":{"type":"string"},"type":"array"},"score":{"type":"number"},"sizes":{"items":{"type":"number"},"type":"array"},"summary":{"type":"string"},"verdict":{"enum":["approve","changes"],"type":"string"}},"required":["verdict","summary","design","items"],"type":"object"}"#;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(pinned).unwrap(),
+        generated
+    );
+    // The node's own document is that generated one.
+    let node = parse(
+        "schema = 1\nname = \"s\"\nstart = \"a\"\n[nodes.a]\nkind = \"agent\"\noutput = { v = { type = \"choice\", values = [\"x\"], optional = true }, t = { type = \"text\" } }\n",
+    )
+    .unwrap()
+    .nodes[0]
+        .clone();
+    assert_eq!(node.schema.document(), &json_schema(&node.output));
+    let strict = json_schema_strict(&node.schema.document().clone());
+    assert_eq!(
+        strict,
+        json!({
+            "type": "object",
+            "properties": {
+                "v": { "type": ["string", "null"], "enum": ["x", null] },
+                "t": { "type": "string" },
+            },
+            "required": ["v", "t"],
+            "additionalProperties": false,
+        })
+    );
 }

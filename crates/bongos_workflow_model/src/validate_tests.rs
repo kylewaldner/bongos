@@ -1291,3 +1291,24 @@ fn project_subject_problems_name_every_task_or_todo_input() {
     assert_eq!(problems[0].line, 5);
     assert!(problems.iter().all(Diagnostic::is_error));
 }
+
+#[test]
+fn a_route_on_a_schema_data_field_is_refused() {
+    let mut definition = parse(&mutate(
+        FIX_ROUTES,
+        "output = { notes = { type = \"text\" } }\nroutes = [{ when = { notes = \"x\" }, to = \"test\" }, { default = true, to = \"test\" }]",
+    ))
+    .unwrap();
+    let fix = definition
+        .nodes
+        .iter_mut()
+        .find(|node| node.name == "fix")
+        .unwrap();
+    fix.output[0].field_type = crate::definition::FieldType::Data;
+    let diagnostics = validate(&definition, &context());
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.is_error()
+            && diagnostic.message == "route on data field 'notes'"),
+        "{diagnostics:?}"
+    );
+}
