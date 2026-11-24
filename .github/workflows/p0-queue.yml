@@ -3,7 +3,7 @@ name: p0-queue
 on:
   push:
     branches: [gh-runners-phase0]
-    paths: ['p0/queue-trigger.txt', '.github/workflows/p0-queue.yml']
+    paths: ['p0q-trigger.txt', '.github/workflows/p0-queue.yml']
 permissions:
   contents: read
 concurrency:
