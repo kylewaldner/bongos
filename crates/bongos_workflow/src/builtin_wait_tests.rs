@@ -239,7 +239,8 @@ async fn edge_cases(cx: &mut TestAppContext) {
 const RUN: &str = "01890a5d-ac96-774b-bcce-b30200000057";
 
 /// Dumps the shell's own environment, as it was started, into the scratch directory.
-pub(crate) const DUMP_ENV: &str = r#"command = ["sh", "-c", "cat /proc/$$/environ > \"$TMPDIR/env\""]"#;
+pub(crate) const DUMP_ENV: &str =
+    r#"command = ["sh", "-c", "cat /proc/$$/environ > \"$TMPDIR/env\""]"#;
 
 fn temp() -> TempDir {
     let base = std::env::var_os("TMPDIR")

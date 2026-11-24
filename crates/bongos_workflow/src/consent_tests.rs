@@ -239,7 +239,11 @@ impl World {
         lifecycle
     }
 
-    pub(crate) fn start(&self, lifecycle: &mut Lifecycle<FakeRunner>, request: StartRequest) -> String {
+    pub(crate) fn start(
+        &self,
+        lifecycle: &mut Lifecycle<FakeRunner>,
+        request: StartRequest,
+    ) -> String {
         let context = StartContext {
             tree: &self.tree,
             active_run: None,
@@ -329,7 +333,10 @@ pub(crate) fn person_grant() -> Permit {
 }
 
 /// The run's finished failures, as `(node, reason, detail)`.
-pub(crate) fn failures(lifecycle: &Lifecycle<FakeRunner>, run: &str) -> Vec<(String, FailureReason, String)> {
+pub(crate) fn failures(
+    lifecycle: &Lifecycle<FakeRunner>,
+    run: &str,
+) -> Vec<(String, FailureReason, String)> {
     state(lifecycle, run)
         .finished
         .iter()

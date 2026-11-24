@@ -19,7 +19,7 @@ use crate::builtin_wait_tests::{
     read_env, scratch, start_wait, vars, wait_node,
 };
 use crate::consent::tests::{
-    World, asks, failures, person_grant, pending_keys, request, settle, started, state,
+    World, asks, failures, pending_keys, person_grant, request, settle, started, state,
 };
 use crate::lifecycle::{BY_PERSON, RunStatus, StartRequest};
 use crate::program_tests::{self, Fixture};
@@ -52,7 +52,10 @@ fn no_sandbox_asks_once_per_run_and_the_grant_is_only_in_memory() {
     settle(&mut lifecycle);
     assert_eq!(started(&lifecycle, &first), vec!["lint"]);
     let permits = &lifecycle.runtime().runner().permits;
-    assert_eq!(permits.last().map(|(_, permit)| permit), Some(&person_grant()));
+    assert_eq!(
+        permits.last().map(|(_, permit)| permit),
+        Some(&person_grant())
+    );
 
     // A second run does not borrow the first's answer: it asks for itself.
     let second = world.start(&mut lifecycle, request(2, "one"));
@@ -156,7 +159,11 @@ fn the_same_bad_result_from_claude_and_from_a_script_reads_the_same() {
     assert_eq!(from_script.reason, FailureReason::ProgramResultInvalid);
 
     // One message: the node kind only changes the reason that heads it.
-    assert!(from_claude.detail.contains("/mode"), "{}", from_claude.detail);
+    assert!(
+        from_claude.detail.contains("/mode"),
+        "{}",
+        from_claude.detail
+    );
     assert_eq!(from_claude.detail, from_script.detail);
 }
 
@@ -165,7 +172,11 @@ fn a_change_to_the_project_runs_unsandboxed_key_is_held_for_a_person() {
     let held = needs("changes the workflow sandbox switch runs.unsandboxed");
     // Adding, removing or altering the key: all held, whoever wrote the change.
     let allowing = "title = \"Shop\"\n\n[runs]\nunsandboxed = \"allow\"\n";
-    for (before, after) in [(PROJECT, REFUSING), (REFUSING, PROJECT), (REFUSING, allowing)] {
+    for (before, after) in [
+        (PROJECT, REFUSING),
+        (REFUSING, PROJECT),
+        (REFUSING, allowing),
+    ] {
         assert_eq!(
             judge(&[("project.toml", before)], &[("project.toml", after)]),
             held,
