@@ -27,8 +27,9 @@
 //! directory (emptied before each pass) that is also `TMPDIR`, the network reaches only the
 //! wait's hosts, and the environment is cleared down to [`WaitRequest::env`], `TMPDIR` and the
 //! sandbox's own proxy variables. `gh` is told the repository with `--repo`, since it cannot ask
-//! git. `gh`'s GitHub Enterprise tokens reach it only for the task remote's host or `GH_HOST`
-//! ([`gh_env`]). The sandbox leaves the D-Bus session bus reachable, so a pass can read the user's
+//! git. `gh`'s GitHub Enterprise tokens reach it only for the task remote's host or `GH_HOST`,
+//! and `GH_TOKEN` and `GITHUB_TOKEN` only for those or github.com ([`gh_env`]). The unconfined
+//! `fallback` mode passes the whole environment, tokens included. The sandbox leaves the D-Bus session bus reachable, so a pass can read the user's
 //! keyring (that is how `gh` finds its login), and a program that uses the bus can get around
 //! the filesystem and network limits above. With no sandbox and a person's (or the setting's)
 //! word, the same cleared environment and scratch directory are used without the sandbox. A pass whose
@@ -303,9 +304,14 @@ fn gh_args(request: &WaitRequest, args: &[&str]) -> Vec<String> {
 /// about that is not github.com, so [`gh_env`] passes them only to a host the task already trusts.
 pub const ENTERPRISE_TOKENS: &[&str] = &["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"];
 
+/// `gh`'s tokens for github.com: `gh` sends them to whatever host it is asked about, so
+/// [`gh_env`] passes them only to github.com itself or to a host the task already trusts.
+pub const GITHUB_TOKENS: &[&str] = &["GH_TOKEN", "GITHUB_TOKEN"];
+
 /// The environment a confined `gh` pass gets: `env` (the writer's variables picked for the wait)
-/// without [`ENTERPRISE_TOKENS`] unless the host `gh` will talk to is the task remote's host or
-/// `GH_HOST`. That host is a URL `pr`'s host; for a number or branch it is `GH_HOST`, else
+/// without [`ENTERPRISE_TOKENS`] and [`GITHUB_TOKENS`] unless the host `gh` will talk to is the
+/// task remote's host or `GH_HOST`; [`GITHUB_TOKENS`] are also kept when that host is exactly
+/// github.com. That host is a URL `pr`'s host; for a number or branch it is `GH_HOST`, else
 /// github.com. A URL `pr` whose host cannot be read never gets the tokens.
 pub fn gh_env(
     mut env: BTreeMap<String, String>,
@@ -329,12 +335,17 @@ pub fn gh_env(
     let remote_host = remote
         .and_then(crate::dispatch_program::remote_hosts)
         .and_then(|hosts| hosts.into_iter().next());
-    let trusted = target.is_some_and(|target| {
-        Some(&target) == remote_host.as_ref() || Some(&target) == gh_host_var.as_ref()
+    let trusted = target.as_ref().is_some_and(|target| {
+        Some(target) == remote_host.as_ref() || Some(target) == gh_host_var.as_ref()
     });
     if !trusted {
         for name in ENTERPRISE_TOKENS {
             env.remove(*name);
+        }
+        if target.as_deref() != Some("github.com") {
+            for name in GITHUB_TOKENS {
+                env.remove(*name);
+            }
         }
     }
     env

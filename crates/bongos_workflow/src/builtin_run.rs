@@ -48,8 +48,9 @@ const BASE_VARS: &[&str] = &["PATH", "HOME", "LANG"];
 /// A `gh` condition also gets `gh`'s own variables for its account, host and configuration
 /// directory. The installed `gh` was checked under the sandbox: it reads its keyring token with
 /// none of the D-Bus variables, through the session bus the sandbox leaves reachable (see the
-/// `sandbox` crate's docs). The enterprise tokens are dropped again in [`WaitNode::policy`] unless
-/// `gh`'s host is the remote's or `GH_HOST` ([`builtin_wait::gh_env`]).
+/// `sandbox` crate's docs). The tokens are dropped again in [`WaitNode::policy`] unless `gh`'s host
+/// is the remote's or `GH_HOST` (or github.com, for `GH_TOKEN` and `GITHUB_TOKEN`)
+/// ([`builtin_wait::gh_env`]).
 const GH_VARS: &[&str] = &[
     "GH_CONFIG_DIR",
     "GH_TOKEN",

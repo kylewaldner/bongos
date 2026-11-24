@@ -30,8 +30,8 @@ use crate::WorkflowsSettings;
 use crate::builtin_nodes::{BuiltinNode, BuiltinNodes, BuiltinStart};
 use crate::builtin_run::{EnvLookup, NO_GH_HOST, NO_GH_REPO, WaitClock, WaitNode};
 use crate::builtin_wait::{
-    ENTERPRISE_TOKENS, WaitCondition, WaitLaunch, WaitOutcome, WaitRequest, gh_env, wait,
-    wrap_in_sandbox,
+    ENTERPRISE_TOKENS, GITHUB_TOKENS, WaitCondition, WaitLaunch, WaitOutcome, WaitRequest, gh_env,
+    wait, wrap_in_sandbox,
 };
 use crate::dispatch_program::scratch_dir;
 use crate::lifecycle::{
@@ -749,7 +749,6 @@ fn enterprise_tokens_reach_gh_only_for_the_remote_or_gh_host() {
     let elsewhere = "https://evil.example/acme/widgets/pull/7";
     let out = gh_env(with_gh_host.clone(), elsewhere, Some(enterprise_remote));
     assert!(no_tokens(&out), "{out:?}");
-    assert_eq!(out["GH_TOKEN"], "github");
     assert_eq!(out["PATH"], "/usr/bin");
     assert_eq!(out["GH_HOST"], "ghe.other.com");
     // Shapes `gh` reads as that other host too, though the wait's own URL parser does not.
@@ -770,6 +769,78 @@ fn enterprise_tokens_reach_gh_only_for_the_remote_or_gh_host() {
         base,
         "https:///acme/widgets/pull/7",
         Some(enterprise_remote)
+    )));
+}
+
+#[test]
+fn github_tokens_reach_gh_only_for_github_com_the_remote_or_gh_host() {
+    let base: BTreeMap<String, String> = [
+        ("PATH", "/usr/bin"),
+        ("GH_TOKEN", "github"),
+        ("GITHUB_TOKEN", "github too"),
+    ]
+    .iter()
+    .map(|(name, value)| (name.to_string(), value.to_string()))
+    .collect();
+    let mut with_gh_host = base.clone();
+    with_gh_host.insert("GH_HOST".to_string(), "ghe.other.com".to_string());
+    let has_tokens =
+        |env: &BTreeMap<String, String>| GITHUB_TOKENS.iter().all(|name| env.contains_key(*name));
+    let no_tokens =
+        |env: &BTreeMap<String, String>| GITHUB_TOKENS.iter().all(|name| !env.contains_key(*name));
+    let ghe_remote = "git@ghe.acme.com:acme/widgets.git";
+    let github_remote = "git@github.com:acme/widgets.git";
+
+    // A *.ghe.com URL gets neither token unless it is the remote's host or `GH_HOST`.
+    let ghe_pr = "https://acme.ghe.com/acme/widgets/pull/7";
+    let out = gh_env(base.clone(), ghe_pr, Some(github_remote));
+    assert!(no_tokens(&out), "{out:?}");
+    assert_eq!(out["PATH"], "/usr/bin");
+    assert!(no_tokens(&gh_env(base.clone(), ghe_pr, None)));
+    assert!(no_tokens(&gh_env(
+        with_gh_host.clone(),
+        ghe_pr,
+        Some(ghe_remote)
+    )));
+
+    // The remote's own host, and `GH_HOST`, still get them.
+    assert!(has_tokens(&gh_env(
+        base.clone(),
+        ghe_pr,
+        Some("git@acme.ghe.com:acme/widgets.git")
+    )));
+    assert!(has_tokens(&gh_env(
+        base.clone(),
+        "https://ghe.acme.com/acme/widgets/pull/7",
+        Some(ghe_remote)
+    )));
+    assert!(has_tokens(&gh_env(
+        with_gh_host.clone(),
+        "https://ghe.other.com/o/r/pull/1",
+        Some(github_remote)
+    )));
+    assert!(has_tokens(&gh_env(with_gh_host.clone(), "42", None)));
+
+    // github.com keeps them even when the remote is elsewhere: a URL, and a number with no
+    // `GH_HOST`.
+    let github_pr = "https://github.com/acme/widgets/pull/7";
+    assert!(has_tokens(&gh_env(
+        base.clone(),
+        github_pr,
+        Some(ghe_remote)
+    )));
+    assert!(has_tokens(&gh_env(
+        with_gh_host.clone(),
+        github_pr,
+        Some(ghe_remote)
+    )));
+    assert!(has_tokens(&gh_env(base.clone(), "42", Some(ghe_remote))));
+
+    // An unreadable URL host never gets them.
+    assert!(no_tokens(&gh_env(
+        base,
+        "https:///acme/widgets/pull/7",
+        Some(github_remote)
     )));
 }
 
