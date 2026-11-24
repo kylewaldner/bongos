@@ -149,6 +149,7 @@ pub struct Session {
     source: Source,
     initial_input: String,
     select_initial: bool,
+    initial_selection: Option<usize>,
     default: Option<String>,
     free_input: bool,
     accept: Option<InputCheck>,
@@ -175,6 +176,7 @@ impl Session {
             source: Source::Fixed(Vec::new()),
             initial_input: String::new(),
             select_initial: false,
+            initial_selection: None,
             default: None,
             free_input: false,
             accept: None,
@@ -204,6 +206,14 @@ impl Session {
     /// Selects the initial input, so that typing replaces it and RET accepts it.
     pub fn select_initial_input(mut self) -> Self {
         self.select_initial = true;
+        self
+    }
+
+    /// Selects the row at `index` (the last one when the list is shorter) once the initial input
+    /// has narrowed the list, instead of the first. For a host that reopens a session where the
+    /// user left it.
+    pub fn initial_selection(mut self, index: usize) -> Self {
+        self.initial_selection = Some(index);
         self
     }
 
@@ -503,6 +513,29 @@ impl SessionHandle {
             .ok();
     }
 
+    /// Whether the session is still open.
+    pub fn is_open(&self) -> bool {
+        !self.core.done.get()
+    }
+
+    /// The text of the input, while the session is open.
+    pub fn input(&self, cx: &App) -> Option<String> {
+        if self.core.done.get() {
+            return None;
+        }
+        let view = self.view.upgrade()?;
+        Some(view.read(cx).picker.read(cx).query(cx))
+    }
+
+    /// The index of the selected row among the rows shown, while the session is open.
+    pub fn selected_index(&self, cx: &App) -> Option<usize> {
+        if self.core.done.get() {
+            return None;
+        }
+        let view = self.view.upgrade()?;
+        Some(view.read(cx).picker.read(cx).delegate.selected_row())
+    }
+
     /// The value of the selected candidate, if one is shown.
     pub fn selected(&self, cx: &App) -> Option<Value> {
         if self.core.done.get() {
@@ -545,6 +578,7 @@ pub fn open(
         source,
         initial_input,
         select_initial,
+        initial_selection,
         default,
         free_input,
         accept,
@@ -584,15 +618,22 @@ pub fn open(
 
     // `toggle_modal` alone would close a modal of the same type instead of replacing it.
     workspace.hide_modal(window, cx);
-    let mut parts = Some((source, initial_input, select_initial, key_context));
+    let mut parts = Some((
+        source,
+        initial_input,
+        select_initial,
+        initial_selection,
+        key_context,
+    ));
     workspace.toggle_modal(window, cx, |window, cx| {
-        let (source, initial_input, select_initial, key_context) =
+        let (source, initial_input, select_initial, initial_selection, key_context) =
             parts.take().expect("built once");
         SessionView::new(
             core.clone(),
             source,
             initial_input,
             select_initial,
+            initial_selection,
             key_context,
             window,
             cx,
