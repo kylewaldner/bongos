@@ -49,6 +49,8 @@ const FIND: [&str; 5] = [
     "Editor mode=full",
 ];
 
+const CENTERED_FIND: [&str; 4] = ["Workspace", "FindInFiles", "Picker", "Editor mode=full"];
+
 /// The keys that start a navigation picker, with the context they are pressed in.
 const STARTERS: &[(&str, &[&str], &str)] = &[
     ("ctrl-x b", &WORKSPACE, "navigation::SwitchBuffer"),
@@ -177,14 +179,18 @@ async fn session_keys_beat_the_minibuffer_row_and_the_emacs_kill_line(cx: &mut T
             );
             assert!(names.len() > 1, "a lower row is shadowed: {names:?}");
         }
-        for (input, action) in FIND_KEYS {
-            let names = resolve(&keymap, input, &FIND).0;
-            assert_eq!(
-                names.first(),
-                Some(action),
-                "{}: {input}",
-                platform.overrides
-            );
+        // In the strip and in the centered picker alike, the session's keys come first, ahead of
+        // the `Minibuffer > Editor` row and the Emacs editor keys (`alt-c` is capitalize there).
+        for contexts in [&FIND[..], &CENTERED_FIND[..]] {
+            for (input, action) in FIND_KEYS {
+                let names = resolve(&keymap, input, contexts).0;
+                assert_eq!(
+                    names.first(),
+                    Some(action),
+                    "{}: {input} in {contexts:?}",
+                    platform.overrides
+                );
+            }
         }
         // Outside the session the same keys keep their Emacs meaning.
         for (input, action) in FIND_KEYS {
@@ -224,7 +230,28 @@ async fn navigation_commands_are_in_the_command_palette(cx: &mut TestAppContext)
             .copied()
             .filter(|name| name.starts_with("navigation::"))
             .collect();
-        assert_eq!(names.len(), 17);
+        for expected in [
+            "SwitchBuffer",
+            "KillBuffer",
+            "OpenInPane",
+            "GoToFile",
+            "GoToFileOtherPane",
+            "GoToFileSplitRight",
+            "GoToFileSplitDown",
+            "FindInFiles",
+            "ToggleRegex",
+            "ToggleCaseSensitive",
+            "ToggleWholeWord",
+            "ScopeOpenBuffers",
+            "ScopeDirectory",
+            "ToggleReplace",
+            "ReplaceAll",
+            "ExportToMultibuffer",
+            "SearchBufferLines",
+        ] {
+            let name = format!("navigation::{expected}");
+            assert!(names.contains(&name.as_str()), "{name} is not registered");
+        }
         for name in names {
             let action = cx.build_action(name, None).unwrap();
             assert!(!filter.is_hidden(action.as_ref()), "{name} is hidden");

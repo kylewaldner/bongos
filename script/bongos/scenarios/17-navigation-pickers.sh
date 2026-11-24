@@ -7,16 +7,17 @@
 # changes of the bottom rows of the window; what they do shows in the window title and in the saved
 # Main.kt.
 #   1. C-x C-f README.md RET opens README.md (title). C-x b opens the switcher (bottom rows change,
-#      switcher.png); typing Main and RET goes back to Main.kt (title) and closes the strip. C-x b
-#      then C-g leaves the strip as it was and the title unchanged. (A second C-x b does not toggle
-#      back: the product does not do that.)
+#      switcher.png); RET toggles to the previous buffer Main.kt (title), and C-x b RET again back
+#      to README.md, and once more to Main.kt. C-x b then C-g leaves the strip as it was and the
+#      title unchanged.
 #   2. C-x C-f opens go to file (go-to-file.png, bottom rows change); C-g closes it, the bottom rows
 #      are as they were and the title is unchanged: no file was opened.
 #   3. M-? opens find in files; the query `hello from` matches Main.kt only (find-in-files.png);
 #      C-c C-o closes the strip and opens the results multibuffer (find-export.png); the window
 #      title stays on Main.kt, so the multibuffer is read from the screenshot only.
 #   4. C-x C-f Main.kt RET returns to Main.kt; M-s / opens search buffer lines (search-lines.png),
-#      `println` RET jumps to its line, which a typed `#` shows in the saved file: on line 2 only.
+#      typed over the seed `fun` at the cursor, `println` RET jumps to its line, which a typed `#`
+#      shows in the saved file: on line 2 only.
 # The scenario leaves the app quit and restores Main.kt and global_settings.json.
 
 if [ -n "${stock:-}" ]; then
@@ -79,11 +80,17 @@ act keys ctrl+x b
 [ "$(bottom_hash)" != "$closed" ] || fail "C-x b changed nothing at the bottom of the window"
 shot switcher
 say "smoke: screenshot $RUN/switcher.png"
-# The product has no second-C-x-b toggle (the switcher is open and the key does nothing); the
-# switcher's own way back is to type the buffer and confirm it.
-act type_text Main
-keys Return
-poll 30 "the switcher to bring back Main.kt" title_matches 'Main\.kt'
+# C-x b RET toggles to the previous buffer, which is the first row of the switcher.
+act keys Return
+poll 30 "C-x b RET to bring back Main.kt" title_matches 'Main\.kt'
+wait_for_settled
+act keys ctrl+x b
+act keys Return
+poll 30 "the second C-x b RET to bring back README.md" title_matches 'README\.md'
+wait_for_settled
+act keys ctrl+x b
+act keys Return
+poll 30 "the third C-x b RET to bring back Main.kt" title_matches 'Main\.kt'
 wait_for_settled
 closed=$(bottom_hash)
 
@@ -124,10 +131,9 @@ act type_text Main.kt
 keys Return
 wait_for_title 'Main\.kt'
 wait_for_settled
-# The picker prefills its query with the word at the cursor and typing appends to it, so start
-# from the empty last line.
-keys ctrl+End
-sleep 0.5
+# The picker prefills its query with the word at the cursor and typing replaces it, so start on
+# `fun` at the top of the file.
+keys ctrl+Home
 wait_for_settled
 closed=$(bottom_hash)
 act keys alt+s slash

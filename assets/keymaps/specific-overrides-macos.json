@@ -74,7 +74,7 @@
   },
   // The find in files picker (the `FindInFiles` context of its session).
   {
-    "context": "Minibuffer > FindInFiles > Editor",
+    "context": "FindInFiles > Editor",
     "bindings": {
       "ctrl-c ctrl-o": "navigation::ExportToMultibuffer",
       "ctrl-c ctrl-r": "navigation::ReplaceAll",

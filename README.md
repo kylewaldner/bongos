@@ -1056,7 +1056,7 @@ keymap these keys open them:
 
 | Key | Action | What it does |
 |---|---|---|
-| C-x b | `navigation::SwitchBuffer` | open the buffer switcher; C-x b again goes back to the previous buffer |
+| C-x b | `navigation::SwitchBuffer` | open the buffer switcher; C-x b RET goes back to the previous buffer |
 | C-x C-f | `navigation::GoToFile` | go to a file by path; C-g closes it and opens nothing |
 | C-x 4 C-f | `navigation::GoToFileOtherPane` | the same, opening the file in another pane |
 | M-? | `navigation::FindInFiles` | find a query in the files of the project |
@@ -1124,7 +1124,7 @@ prefix. It is on by default. The matches show in a list above the strip and focu
 it was when the prompt ends.
 
 `minibuffer.enabled_for` names the prompts that use the strip. Its default is
-`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch", "kill_ring", "query_replace", "set_keybindings", "outline", "project_symbols", "string_rectangle", "language_extensions"]`. Remove a name
+`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch", "kill_ring", "query_replace", "set_keybindings", "outline", "project_symbols", "xref_history", "string_rectangle", "language_extensions", "switch_buffer", "go_to_file", "find_in_files", "search_buffer_lines"]`. Remove a name
 to bring that prompt back as a centered modal, for example:
 
 ```json
