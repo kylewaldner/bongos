@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use bongos_slack_model::render::{self, UserNames};
 use bongos_slack_model::types::{Conversation, ConversationId, Cursor, Message, Page, Ts, UserId};
+use bongos_slack_model::wire;
 use bongos_slack_model::{
     ApiError, Destination, Origin, PostRequest, PostedMessage, SlackApi, User,
 };
@@ -42,9 +43,6 @@ use settings::Settings as _;
 use crate::SlackSettings;
 use crate::client;
 use crate::connection::{self, Connection, SlackConnection};
-
-/// The code of an answer that was not Slack's JSON envelope.
-const INVALID_RESPONSE_CODE: &str = "invalid_response";
 
 /// The longest a request waits on a rate limit, from when it began.
 pub const MAX_WAIT: Duration = Duration::from_secs(5 * 60);
@@ -273,7 +271,7 @@ impl Operation {
                     cause,
                 },
                 ApiError::Other { ref code }
-                    if code == INVALID_RESPONSE_CODE || code == client::TOO_LARGE_CODE =>
+                    if code == wire::INVALID_RESPONSE || code == client::TOO_LARGE_CODE =>
                 {
                     SlackError::PostMaybeNotSent {
                         channel: request.channel.clone(),
@@ -560,15 +558,19 @@ impl SlackService {
         {
             return Task::ready(Ok(answer.clone()));
         }
+        let retry = read.clone();
+        let mut joined = true;
         let running = match self.in_flight.get(&read) {
             Some(running) => running.clone(),
             None => {
+                joined = false;
                 let generation = self.cache_generation;
                 let operation = Operation::Read(read.clone());
                 let key = read.clone();
                 let running = cx
                     .spawn(async move |this, cx| {
-                        // A joined read shares the first caller's start.
+                        // The running read is measured from its first caller's start; a caller
+                        // that joined later checks the five-minute rule from its own start below.
                         let result = run(this.clone(), now, &operation, cx).await;
                         let result = result.map(|done| match done {
                             Done::Answer(answer) => answer,
@@ -592,7 +594,18 @@ impl SlackService {
                 running
             }
         };
-        cx.spawn(async move |_, _| running.await)
+        cx.spawn(async move |this, cx| {
+            let result = running.await;
+            if joined
+                && matches!(result, Err(SlackError::RateLimit { .. }))
+                && let Ok(again) = this.update(cx, |this, cx| this.call(retry, cx))
+            {
+                // The shared read gave up by its first caller's start; this caller began later,
+                // so its own five-minute budget decides.
+                return again.await;
+            }
+            result
+        })
     }
 
     fn remember(&mut self, answer: &Answer) {

@@ -560,3 +560,22 @@ async fn disconnect_while_not_connected_skips_the_credential_store(cx: &mut Test
         "Slack: a connect or a disconnect is already running"
     );
 }
+
+#[gpui::test]
+async fn failed_replace_deletes_the_new_token_so_nothing_is_left_stored(cx: &mut TestAppContext) {
+    let fixture = setup(cx);
+    fixture.fake.push_auth_test(Ok(auth_info("T1", SCOPES)));
+    connect(TOKEN, cx).await.unwrap();
+    fs::create_dir_all(fixture.dir.join(ALLOWED_FILE).join("blocker")).unwrap();
+
+    fixture.fake.push_auth_test(Ok(auth_info("T2", SCOPES)));
+    let error = connect("xoxp-5555-OTHERTEAM", cx).await.unwrap_err();
+
+    assert!(matches!(error, ConnectError::ClearAllowed(_)));
+    assert!(
+        fixture.credentials.secret().is_none(),
+        "the new token stayed in the credential store"
+    );
+    assert_eq!(fixture.credentials.deletes.load(Ordering::SeqCst), 1);
+    assert!(cx.update(|cx| connection::current(cx)).is_none());
+}
