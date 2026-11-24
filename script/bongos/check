@@ -59,11 +59,29 @@ run_check notice "$here/check-notice"
 run_check icons "$here/check-icons"
 
 no_github() {
-  # Zed's own workflows stay out; the release workflow is the one tracked path allowed under .github/.
-  local bad
-  bad=$(git ls-files .github | grep -vx '.github/workflows/release.yml' || true)
+  # Zed's own workflows stay out. Allowed under .github/: the release workflow and the pipeline's own files (the job
+  # frame, the code search index script and the pipeline workflows), each named here so an upstream file never slips in.
+  local bad allowed
+  allowed=(
+    .github/workflows/release.yml
+    .github/actions/pipeline-job/action.yml
+    .github/scripts/colgrep-index.sh
+    .github/workflows/bug-fix.yml
+    .github/workflows/cache-warm.yml
+    .github/workflows/feature-design.yml
+    .github/workflows/feature-finish.yml
+    .github/workflows/feature-implement.yml
+    .github/workflows/fix-pipeline.yml
+    .github/workflows/flaky-fix.yml
+    .github/workflows/index-rebuild.yml
+    .github/workflows/index-update.yml
+    .github/workflows/release-check.yml
+    .github/workflows/ticket-triage.yml
+    .github/workflows/track-pipeline-issue.yml
+  )
+  bad=$(git ls-files .github | grep -vxF -f <(printf '%s\n' "${allowed[@]}") || true)
   if [ -n "$bad" ]; then
-    echo "bongos: .github may hold only workflows/release.yml; upstream workflows must not run here"
+    echo "bongos: .github may hold only the files listed in script/bongos/check (no_github); upstream workflows must not run here"
     echo "$bad"
     return 1
   fi
