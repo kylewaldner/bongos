@@ -283,6 +283,12 @@ pub trait Runner {
     /// Forgets the context of `run`, when the runtime drops it.
     fn unbind(&mut self, _run: &str) {}
 
+    /// The effective `workflows.programs.unsandboxed` mode of `run`, which its built-ins start
+    /// under; the default reads no setting.
+    fn unsandboxed_mode(&self, _run: &str) -> Mode {
+        Mode::default()
+    }
+
     /// [`Runner::start`] with the run's state and binding; the runtime calls this one.
     fn start_node(&mut self, node: NodeStart<'_>) -> Result<ProcessRecord, Failure> {
         self.start(node.run, node.definition, node.key, node.try_number)
@@ -317,6 +323,10 @@ impl<R: Runner + ?Sized> Runner for Box<R> {
 
     fn unbind(&mut self, run: &str) {
         (**self).unbind(run)
+    }
+
+    fn unsandboxed_mode(&self, run: &str) -> Mode {
+        (**self).unsandboxed_mode(run)
     }
 
     fn start_node(&mut self, node: NodeStart<'_>) -> Result<ProcessRecord, Failure> {
@@ -1496,9 +1506,8 @@ impl<R: Runner> Runtime<R> {
         let started = match &builtin {
             Some(builtin) => {
                 let state = run.state();
-                // The runtime does not read the settings: the mode stays the default until a
-                // built-in needs the user's.
-                let mode = Mode::default();
+                // The runner knows the setting and the run's project, which can only tighten it.
+                let mode = self.runner.unsandboxed_mode(&run.id);
                 let permit = run.binding.as_ref().map_or(Permit::Refuse, |binding| {
                     crate::dispatch_program::program_permit(&binding.setup.facts, mode)
                 });

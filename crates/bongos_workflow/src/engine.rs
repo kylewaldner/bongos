@@ -63,6 +63,7 @@ use crate::project_sources::{self, RunProjects, WorkHolds, WorkflowActivity, Wor
 use crate::runner_claude::ClaudeCli;
 use crate::runner_program::Interpreter;
 use crate::runtime::{Runner, Settlement};
+use crate::sandbox_switch;
 use crate::shipped::Template;
 use crate::task_link::{self, Completed, Finale, Next, StoreWrites, TaskWrites, WriteCommand};
 use crate::worktrees::{Git, RunWorktree, TaskCheckout};
@@ -367,14 +368,34 @@ impl WorkflowEngine {
     fn refresh_runner_inputs(&self, cx: &App) {
         let reading = AppReading::read(&self.mcp.cache, cx);
         let previous = self.inputs.snapshot();
-        let next = self
+        let mut next = self
             .snapshots
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .refresh(&previous, reading);
+        next.refusing_runs = self.refusing_runs(&previous.refusing_runs);
         if next != previous {
             self.inputs.set(next);
         }
+    }
+
+    /// The runs whose project's `runs.unsandboxed` refuses unsandboxed starts, read at every
+    /// refresh ([`sandbox_switch::refusing_runs`]).
+    fn refusing_runs(&self, before: &BTreeSet<RunId>) -> BTreeSet<RunId> {
+        let projects = self
+            .projects
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let values = projects.into_iter().map(|(run, repo)| {
+            let value = repo.project_value(sandbox_switch::RUNS_UNSANDBOXED).value;
+            (run, value)
+        });
+        let (refusing, warnings) = sandbox_switch::refusing_runs(values, before);
+        for warning in warnings {
+            log::warn!("workflows: {warning}");
+        }
+        refusing
     }
 
     /// One tick of the runs: the runner's snapshot is refreshed, then the lifecycle ticks under

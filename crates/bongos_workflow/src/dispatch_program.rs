@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use bongos_workflow_model::record::{StartedBy, TodoRef};
 use bongos_workflow_model::state_doc::{self, Paths, RunIdentity};
-use bongos_workflow_model::unsandboxed::{self, AllowedBy, Mode, Permit};
+use bongos_workflow_model::unsandboxed::{AllowedBy, Mode, Permit};
 use bongos_workflow_model::{Failure, FailureReason, NodeKey};
 
 use crate::dispatch::{NodeKind, RunnerSnapshot};
@@ -149,7 +149,7 @@ impl NodeKind for ProgramNodes {
         );
         let try_dir = try_dir(&binding.attempt_dir, key, node.try_number);
         let snapshot = binding.setup.snapshot;
-        let mode = unsandboxed::effective_mode(inputs.programs.unsandboxed, false);
+        let mode = inputs.unsandboxed_mode(node.run);
         let program_node = ProgramNode {
             permit: program_permit(&binding.setup.facts, mode),
             mode,
