@@ -18,9 +18,13 @@
 # that has a live run; the concurrency group below is only a guard against a dispatch by hand overlapping a run of
 # the same ticket (it waits for that run to end; a newer pending one replaces an older pending one).
 name: feature-implement
-run-name: feature-implement ${{ inputs.ticket }}
+run-name: feature-implement 98-zz-test-relay
 
 on:
+  # TEST ONLY (stage 16 relay runner test): never on a build branch
+  push:
+    branches: [gh-runners-test-relay]
+    paths: ['.github/workflows/feature-implement.yml']
   workflow_dispatch:
     inputs:
       ticket:
@@ -60,7 +64,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: feature-${{ inputs.state_prefix }}${{ inputs.ticket }}
+  group: feature-zz-test-s16/98-zz-test-relay
   cancel-in-progress: false
 
 jobs:
@@ -79,8 +83,8 @@ jobs:
       - name: Check the dispatch inputs
         shell: bash
         env:
-          IN_LANES: ${{ inputs.lanes }}
-          IN_DEPTH: ${{ inputs.pipeline_depth }}
+          IN_LANES: 2
+          IN_DEPTH: 1
         run: |
           set -euo pipefail
           case "$IN_LANES" in 1|2) ;; *) echo "::error::lanes must be 1 or 2"; exit 1 ;; esac
@@ -93,12 +97,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.COORD_TOKEN }}
           COORD_REPO: ${{ secrets.COORD_REPO }}
-          IN_TICKET: ${{ inputs.ticket }}
-          IN_LANES: ${{ inputs.lanes }}
-          IN_DEPTH: ${{ inputs.pipeline_depth }}
-          IN_COORD_REF: ${{ inputs.coord_ref }}
-          IN_COORD_BASE: ${{ inputs.coord_base }}
-          AUTOPILOT_STATE_PREFIX: ${{ inputs.state_prefix }}
+          IN_TICKET: 98-zz-test-relay
+          IN_LANES: 2
+          IN_DEPTH: 1
+          IN_COORD_REF: gh-runners-test-base-16
+          IN_COORD_BASE: gh-runners-test-base-16
+          AUTOPILOT_STATE_PREFIX: zz-test-s16/
         run: |
           set -euo pipefail
           if [ "$IN_LANES" = 1 ]; then
@@ -130,8 +134,8 @@ jobs:
       - name: Check the dispatch inputs
         shell: bash
         env:
-          IN_LANES: ${{ inputs.lanes }}
-          IN_DEPTH: ${{ inputs.pipeline_depth }}
+          IN_LANES: 2
+          IN_DEPTH: 1
         run: |
           set -euo pipefail
           case "$IN_LANES" in 1|2) ;; *) echo "::error::lanes must be 1 or 2; nothing is claimed"; exit 1 ;; esac
@@ -144,7 +148,7 @@ jobs:
       - uses: ./.github/actions/pipeline-job
         with:
           kind: step
-          ticket: ${{ inputs.ticket }}
+          ticket: 98-zz-test-relay
           lane: a
           # the plan's lanes go into the claim: triage counts a live two-lane run as 2 jobs
           lanes: ${{ needs.plan.outputs.lanes || '1' }}
@@ -157,11 +161,11 @@ jobs:
           claude_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           coord_token: ${{ secrets.COORD_TOKEN }}
           coord_repo: ${{ secrets.COORD_REPO }}
-          coord_ref: ${{ inputs.coord_ref }}
-          coord_base: ${{ inputs.coord_base }}
-          app_base: ${{ inputs.app_base }}
-          state_prefix: ${{ inputs.state_prefix }}
-          index_tag: ${{ inputs.index_tag }}
+          coord_ref: gh-runners-test-base-16
+          coord_base: gh-runners-test-base-16
+          app_base: gh-runners-test-base-16
+          state_prefix: zz-test-s16/
+          index_tag: colgrep-index-test
           colgrep_version: ${{ vars.COLGREP_VERSION }}  # the index workflows' pin
 
   lane-b:
@@ -182,7 +186,7 @@ jobs:
       - uses: ./.github/actions/pipeline-job
         with:
           kind: step
-          ticket: ${{ inputs.ticket }}
+          ticket: 98-zz-test-relay
           lane: b
           lanes: ${{ needs.plan.outputs.lanes }}
           pipeline_depth: ${{ needs.plan.outputs.pipeline_depth }}
@@ -192,9 +196,9 @@ jobs:
           claude_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           coord_token: ${{ secrets.COORD_TOKEN }}
           coord_repo: ${{ secrets.COORD_REPO }}
-          coord_ref: ${{ inputs.coord_ref }}
-          coord_base: ${{ inputs.coord_base }}
-          app_base: ${{ inputs.app_base }}
-          state_prefix: ${{ inputs.state_prefix }}
-          index_tag: ${{ inputs.index_tag }}
+          coord_ref: gh-runners-test-base-16
+          coord_base: gh-runners-test-base-16
+          app_base: gh-runners-test-base-16
+          state_prefix: zz-test-s16/
+          index_tag: colgrep-index-test
           colgrep_version: ${{ vars.COLGREP_VERSION }}  # the index workflows' pin
