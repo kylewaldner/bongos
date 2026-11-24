@@ -9,7 +9,6 @@
 
 use bongos_isearch_model::CaseMode as SearchCase;
 use bongos_minibuffer::{Outcome, Session};
-use bongos_navigation_model::flags::CaseMode;
 use bongos_query_replace::prompts::to_history;
 use bongos_query_replace::starters::{ScopedReplace, start_in_scope};
 use editor::{Editor, MultiBufferOffset, SelectionEffects};
@@ -59,8 +58,9 @@ pub fn replace_all(workspace: &mut Workspace, window: &mut Window, cx: &mut Cont
 }
 
 /// Closes the picker and asks for the replacement of its query; `all` replaces every match after
-/// a confirmation, else the decision view asks at each one. A picker without a row replaces
-/// nothing and asks nothing.
+/// a confirmation, else the decision view asks at each one. A picker whose search has ended
+/// without a row replaces nothing and asks nothing; while its search runs, the replacement is
+/// asked and the export's own search decides.
 pub(crate) fn ask(
     picker: &FindPicker,
     all: bool,
@@ -70,7 +70,7 @@ pub(crate) fn ask(
 ) {
     let request = picker.request();
     if let Some(handle) = picker.handle() {
-        if all && handle.selected(cx).is_none() {
+        if all && picker.settled() && handle.selected(cx).is_none() {
             bongos_minibuffer::message(window, cx, NOTHING_TO_REPLACE);
             return;
         }
@@ -204,10 +204,12 @@ fn start(
             selections.select_anchor_ranges([scope.clone()])
         })
     });
-    let case = match request.flags.case {
-        CaseMode::Smart => SearchCase::Smart,
-        CaseMode::Sensitive => SearchCase::Sensitive,
-        CaseMode::Insensitive => SearchCase::Insensitive,
+    // Smart case decided by the find rule, as the export's search decides it, so the replace
+    // finds the matches the export listed.
+    let case = if request.flags.case_sensitive(&request.text) {
+        SearchCase::Sensitive
+    } else {
+        SearchCase::Insensitive
     };
     start_in_scope(
         editor,

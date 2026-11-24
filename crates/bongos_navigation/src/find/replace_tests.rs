@@ -292,6 +292,77 @@ async fn replace_all_leaves_buffers_unsaved_and_one_undo_restores_each(cx: &mut 
 }
 
 #[gpui::test]
+async fn no_match_replaces_nothing_and_asks_nothing(cx: &mut TestAppContext) {
+    let (workspace, mut cx, messages) = scene(cx).await;
+    let cx = &mut cx;
+    find(&workspace, false, cx);
+    type_text("zzz", cx);
+    dispatch("navigation::ToggleReplace", cx);
+
+    // RET without a row does not ask the replacement.
+    dispatch("menu::Confirm", cx);
+    assert_eq!(session_prompt(&workspace, cx), "Find [Aa][replace]: ");
+
+    cx.simulate_keystrokes("ctrl-c ctrl-r");
+    cx.run_until_parked();
+    assert_eq!(
+        messages.borrow().last().map(String::as_str),
+        Some("Nothing to replace")
+    );
+    assert_eq!(session_prompt(&workspace, cx), "Find [Aa][replace]: ");
+    assert!(
+        search_views(&workspace, cx).is_empty(),
+        "nothing is exported"
+    );
+    dispatch("menu::Cancel", cx);
+}
+
+#[gpui::test]
+async fn ctrl_g_stops_the_batch_and_clears_its_marker(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _) = scene(cx).await;
+    let cx = &mut cx;
+    asking_all(&workspace, cx);
+    let editor = results_editor(&workspace, cx);
+
+    // Answer `y` without letting the batch run, then stop it.
+    let window = cx.update(|window, _| window.window_handle());
+    cx.cx
+        .dispatch_keystroke(window, gpui::Keystroke::parse("y").unwrap());
+    assert!(
+        cx.read(|cx| batch_running(editor.read(cx))),
+        "the batch runs"
+    );
+    cx.update(|window, cx| {
+        window.dispatch_action(Box::new(bongos_query_replace::actions::Abort), cx)
+    });
+    cx.run_until_parked();
+
+    assert!(
+        !cx.read(|cx| batch_running(editor.read(cx))),
+        "C-g clears the batch marker"
+    );
+}
+
+#[gpui::test]
+async fn the_replace_finds_the_matches_again_on_text_edited_after_the_export(
+    cx: &mut TestAppContext,
+) {
+    let (workspace, mut cx, _) = scene(cx).await;
+    let cx = &mut cx;
+    asking_all(&workspace, cx);
+
+    // A match is edited away while the count question is open.
+    let a = buffer(&workspace, "a.txt", cx);
+    cx.update(|_, cx| a.update(cx, |buffer, cx| buffer.edit([(4..7, "baz")], None, cx)));
+    cx.run_until_parked();
+    cx.simulate_keystrokes("y");
+    cx.run_until_parked();
+
+    assert_eq!(text(&workspace, "a.txt", cx), "bar baz\n");
+    assert_eq!(text(&workspace, "b.txt", cx), "bar\nbar\n");
+}
+
+#[gpui::test]
 async fn an_export_closed_before_its_search_ends_replaces_nothing(cx: &mut TestAppContext) {
     let (workspace, mut cx, messages) = scene(cx).await;
     let cx = &mut cx;

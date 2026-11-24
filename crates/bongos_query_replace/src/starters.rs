@@ -127,8 +127,10 @@ pub struct ScopedReplace {
 }
 
 /// Starts the replace `replace` in `editor` without asking for the strings. The matches are found
-/// on the editor's text as it is now. A whole-word replace runs as a regexp wrapped in `\b(?:..)\b`
-/// (a literal string is escaped first, and so is its replacement).
+/// on the editor's text as it is now. Whole words follow project search's rule, so the replace
+/// finds the matches a project search with the same flags lists: a literal string matches where
+/// neither neighbor is a word character, and a regexp gets a word bound on each edge that is a
+/// word character.
 pub fn start_in_scope(
     editor: &Entity<Editor>,
     replace: ScopedReplace,
@@ -147,21 +149,8 @@ pub fn start_in_scope(
         to,
         interactive,
     } = replace;
-    let (string, regexp, to) = if whole_word {
-        let (pattern, to) = if regexp {
-            (from, to)
-        } else {
-            (
-                fancy_regex::escape(&from).into_owned(),
-                to.replace('\\', "\\\\"),
-            )
-        };
-        (whole_word_pattern(&pattern), true, to)
-    } else {
-        (from, regexp, to)
-    };
     let mut spec = SearchSpec::new(regexp);
-    spec.string = string;
+    spec.string = from;
     spec.lax = false;
     spec.case = case;
     let origin = Origin {
@@ -177,15 +166,11 @@ pub fn start_in_scope(
         },
         origin,
         spec,
+        whole_word,
         to,
         window,
         cx,
     );
-}
-
-/// `pattern` matched only as whole words.
-pub fn whole_word_pattern(pattern: &str) -> String {
-    format!(r"\b(?:{pattern})\b")
 }
 
 /// Whether a replace may start in `editor` now: not in a read-only buffer, and one replace at a
@@ -243,23 +228,26 @@ fn answered(
     spec.string = answer.from;
     spec.lax = false;
     spec.case = answer.case;
-    begin(editor, mode, origin, spec, answer.to, window, cx);
+    begin(editor, mode, origin, spec, false, answer.to, window, cx);
 }
 
 /// The search and the replacement are known: finds the first match, then stops there or replaces
-/// every match.
+/// every match. `whole_word` keeps only whole-word matches, by project search's rule.
 pub(crate) fn begin(
     editor: &Entity<Editor>,
     mode: Mode,
     origin: Origin,
     spec: SearchSpec,
+    whole_word: bool,
     to: String,
     window: &mut Window,
     cx: &mut App,
 ) {
     let regexp = spec.regexp;
     let from_text = spec.string.clone();
-    let query = match build_query(&compile(&spec)) {
+    let mut compiled = compile(&spec);
+    compiled.whole_word |= whole_word;
+    let query = match build_query(&compiled) {
         Ok(query) => query,
         Err(error) => {
             bongos_minibuffer::error(window, cx, error.0);

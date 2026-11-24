@@ -73,6 +73,8 @@ pub struct FindPicker {
     flags: RefCell<Flags>,
     /// Replace mode: RET replaces every match instead of opening one.
     replace: Cell<bool>,
+    /// Whether the search of the current input has ended, so its rows are all there.
+    settled: Cell<bool>,
     /// What the input holds.
     input: RefCell<String>,
     /// The buffers a search of the open buffers covers, collected when the flag is set.
@@ -190,7 +192,15 @@ impl FindPicker {
         self.set_flags(flags, buffers, window, cx);
     }
 
+    /// Whether the search of the current input has ended (or never started), so a picker without
+    /// a row has no match.
+    pub fn settled(&self) -> bool {
+        self.settled.get()
+    }
+
     fn set_status(&self, status: engine::FindStatus, cx: &mut App) {
+        self.settled
+            .set(!matches!(status, engine::FindStatus::Searching));
         if let Some(handle) = self.handle() {
             handle.set_status(status.label(), cx);
         }
@@ -428,6 +438,7 @@ pub fn open_with(
         base_dir: base_dir.clone(),
         flags: RefCell::new(flags),
         replace: Cell::new(replace),
+        settled: Cell::new(false),
         input: RefCell::new(seed.clone()),
         buffers: RefCell::new(buffers),
         preview: RefCell::new(None),
@@ -439,6 +450,8 @@ pub fn open_with(
         let picker = Rc::downgrade(&picker);
         move |query: String, cancel, cx: &mut App| {
             let (flags, buffers) = picker.upgrade().map_or_else(Default::default, |picker| {
+                // A new search starts: its rows are not all there until it reports its end.
+                picker.settled.set(false);
                 (picker.flags(), picker.buffers.borrow().clone())
             });
             let mut request = FindRequest::new(&query, flags).buffers(buffers);
