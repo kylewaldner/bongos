@@ -73,6 +73,7 @@ pub enum SandboxNetPolicy {
     Blocked,
     /// Allow outbound HTTP(S) only to these hostnames (exact hosts or
     /// leading-`*.` subdomain wildcards), enforced by an in-process proxy.
+    /// A program that uses the D-Bus session bus can get around this (see the module docs).
     Restricted { allowed_domains: Vec<String> },
 }
 

@@ -31,8 +31,8 @@
 //! ([`gh_env`]). The sandbox leaves the D-Bus session bus reachable, so a pass can read the user's
 //! keyring (that is how `gh` finds its login), and a program that uses the bus can get around
 //! the filesystem and network limits above. With no sandbox and a person's (or the setting's)
-//! word, the same cleared environment and scratch directory are used without the sandbox. A pass whose sandbox cannot be set up fails;
-//! it never runs outside the sandbox.
+//! word, the same cleared environment and scratch directory are used without the sandbox. A pass whose
+//! sandbox cannot be set up fails; it never runs outside the sandbox.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
