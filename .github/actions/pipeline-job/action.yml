@@ -219,6 +219,12 @@ runs:
         # only, as cache-warm: env.sh puts the mold linker into the environment, which is part of the cache key.
         extra='mesa-vulkan-drivers zstd'
         if [ "$CACHE_VARIANT" != release ]; then extra="$extra mold"; fi
+        # The smoke harness (gate.py's smoke, the finish job's UI verification): Xvfb, xdotool, import, bwrap, strace
+        # (script/bongos/setup-machine's list). bwrap needs unprivileged user namespaces, which 24.04 restricts.
+        extra="$extra xvfb xdotool imagemagick bubblewrap strace"
+        if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+          sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
+        fi
         sudo apt-get update -qq
         sudo apt-get install -y --no-install-recommends \
           gcc g++ libasound2-dev libfontconfig-dev libgit2-dev libglib2.0-dev libssl-dev libva-dev \
