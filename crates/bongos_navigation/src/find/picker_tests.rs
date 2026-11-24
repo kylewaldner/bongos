@@ -21,7 +21,7 @@ use crate::registry;
 use crate::test_support::{WorldSnapshot, world_snapshot};
 
 /// A workspace on `/root` holding `files`, with the find picker routed to the minibuffer.
-async fn setup(
+pub(crate) async fn setup(
     cx: &mut TestAppContext,
     files: &[(&str, &str)],
 ) -> (Entity<Workspace>, VisualTestContext) {
@@ -81,7 +81,7 @@ fn project_path(
 }
 
 /// Opens `name` in the active pane and returns its editor.
-async fn open_file(
+pub(crate) async fn open_file(
     workspace: &Entity<Workspace>,
     name: &str,
     cx: &mut VisualTestContext,
@@ -104,7 +104,11 @@ fn select(editor: &Entity<Editor>, range: std::ops::Range<Point>, cx: &mut Visua
     cx.run_until_parked();
 }
 
-fn find(workspace: &Entity<Workspace>, scoped: bool, cx: &mut VisualTestContext) -> Rc<FindPicker> {
+pub(crate) fn find(
+    workspace: &Entity<Workspace>,
+    scoped: bool,
+    cx: &mut VisualTestContext,
+) -> Rc<FindPicker> {
     let picker = workspace.update_in(cx, |workspace, window, cx| {
         open(workspace, scoped, window, cx)
     });
@@ -112,7 +116,7 @@ fn find(workspace: &Entity<Workspace>, scoped: bool, cx: &mut VisualTestContext)
     picker
 }
 
-fn dispatch(name: &str, cx: &mut VisualTestContext) {
+pub(crate) fn dispatch(name: &str, cx: &mut VisualTestContext) {
     cx.update(|window, cx| {
         let action = cx.build_action(name, None).expect("the action exists");
         window.dispatch_action(action, cx);
@@ -120,7 +124,7 @@ fn dispatch(name: &str, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
-fn type_text(text: &str, cx: &mut VisualTestContext) {
+pub(crate) fn type_text(text: &str, cx: &mut VisualTestContext) {
     cx.simulate_input(text);
     cx.run_until_parked();
 }
@@ -155,7 +159,7 @@ fn file_name(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> String {
 }
 
 /// The rows the picker shows, as `path:line`, walked with the selection.
-fn rows(picker: &FindPicker, cx: &mut VisualTestContext) -> Vec<String> {
+pub(crate) fn rows(picker: &FindPicker, cx: &mut VisualTestContext) -> Vec<String> {
     let handle = picker.handle().expect("the session is open");
     let mut seen: Vec<bongos_minibuffer::Value> = Vec::new();
     let mut rows = Vec::new();
