@@ -59,7 +59,7 @@ use serde_json::Value;
 
 use crate::WorkflowsSettings;
 use crate::builtin_nodes::{BuiltinNode, BuiltinNodes, BuiltinStart};
-use crate::consent::{self, Grant, RunConsentStore, RunConsents};
+use crate::consent::{self, ConsentScope, Grant, RunConsentStore, RunConsents};
 use crate::process::{OrphanOutcome, ProcessRecord, kill_orphans};
 use crate::worktrees::{self, Git, RunWorktree, TaskCheckout, WorktreeError};
 
@@ -522,7 +522,7 @@ pub struct Runtime<R: Runner> {
     draining: bool,
     /// The drains waiting for no node process to run.
     drain_waiters: Vec<oneshot::Sender<()>>,
-    /// The grants to run without the OS sandbox, per run, in memory only.
+    /// The grants of the live runs, per run and scope, in memory only.
     consents: Arc<dyn RunConsentStore>,
 }
 
@@ -557,6 +557,25 @@ impl<R: Runner> Runtime<R> {
         self.consents = store;
     }
 
+    /// Run `id`'s grant to run without the OS sandbox. A heal run never has one, whatever the
+    /// store holds.
+    pub fn sandbox_grant(&self, id: &str) -> Option<Grant> {
+        if self.find(id).is_some_and(|index| self.is_heal(index)) {
+            return None;
+        }
+        self.consents.granted(id, &ConsentScope::Sandbox)
+    }
+
+    /// Whether the run at `index` was started by the healer, by the runtime's word or its facts.
+    fn is_heal(&self, index: usize) -> bool {
+        let run = &self.runs[index];
+        run.started_by == StartedBy::Healer
+            || run
+                .binding
+                .as_ref()
+                .is_some_and(|binding| binding.setup.facts.started_by == Some(StartedBy::Healer))
+    }
+
     /// Answers the pending ask of run `id` to run without the OS sandbox: appends
     /// `ConsentAnswered`, and only once it is written grants the run in the store when allowed.
     /// Replay of the answer releases the held keys (allowed: ready to start, here with the grant;
@@ -583,9 +602,11 @@ impl<R: Runner> Runtime<R> {
                 "could not record the answer for run {id}: {error}"
             )));
         }
-        if allowed {
+        // A heal run's answer is recorded but never granted.
+        if allowed && !self.is_heal(index) {
             self.consents.grant(
                 id,
+                ConsentScope::Sandbox,
                 Grant {
                     at,
                     by: by.to_string(),
@@ -1599,10 +1620,10 @@ impl<R: Runner> Runtime<R> {
     /// A key of a registered built-in is started through it, with no process of its own: it is
     /// recorded with pid 0.
     fn start(&mut self, index: usize, key: NodeKey) {
+        let grant = self.sandbox_grant(&self.runs[index].id);
         let run = &mut self.runs[index];
         let try_number = run.next_try(&key);
         let builtin = self.builtins.for_key(&run.definition, &key);
-        let grant = self.consents.granted(&run.id);
         let started = match &builtin {
             Some(builtin) => {
                 let state = run.state();

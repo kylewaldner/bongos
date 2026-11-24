@@ -27,47 +27,57 @@ impl Grant {
     }
 }
 
-/// Where the grants of the live runs are kept. The runtime forgets a run's grant when the run
-/// ends or is dropped.
+/// What a grant is for: going without the OS sandbox, or a rule of a policy that asks a person
+/// once per run, by the rule's id.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ConsentScope {
+    Sandbox,
+    Rule(String),
+}
+
+/// Where the grants of the live runs are kept, per run and scope. The runtime forgets every
+/// scope of a run when the run ends or is dropped.
 pub trait RunConsentStore: Send + Sync {
-    fn granted(&self, run: &str) -> Option<Grant>;
-    fn grant(&self, run: &str, grant: Grant);
+    fn granted(&self, run: &str, scope: &ConsentScope) -> Option<Grant>;
+    fn grant(&self, run: &str, scope: ConsentScope, grant: Grant);
+    /// Forgets every scope of `run`.
     fn forget(&self, run: &str);
 }
 
 /// The default store: a map in memory, gone with the process.
 #[derive(Default)]
-pub struct InMemoryRunConsents(Mutex<BTreeMap<String, Grant>>);
+pub struct InMemoryRunConsents(Mutex<BTreeMap<(String, ConsentScope), Grant>>);
 
 impl RunConsentStore for InMemoryRunConsents {
-    fn granted(&self, run: &str) -> Option<Grant> {
+    fn granted(&self, run: &str, scope: &ConsentScope) -> Option<Grant> {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(run)
+            .get(&(run.to_string(), scope.clone()))
             .cloned()
     }
 
-    fn grant(&self, run: &str, grant: Grant) {
+    fn grant(&self, run: &str, scope: ConsentScope, grant: Grant) {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(run.to_string(), grant);
+            .insert((run.to_string(), scope), grant);
     }
 
     fn forget(&self, run: &str) {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .remove(run);
+            .retain(|(granted_run, _), _| granted_run != run);
     }
 }
 
 static INSTALLED: RwLock<Option<Arc<dyn RunConsentStore>>> = RwLock::new(None);
 
-/// The store a new runtime takes in place of its own [`InMemoryRunConsents`], for tests and for
-/// a later store that answers other per-run consents too. A runtime made before the call keeps
-/// the store it has.
+/// The store a new runtime takes in place of its own [`InMemoryRunConsents`]. Nothing in this
+/// crate installs one: it is the seam for a later store that also answers a policy's per-run
+/// rules, and a test sets a runtime's store with `Runtime::set_consents` instead, since this one
+/// is process-wide. A runtime made before the call keeps the store it has.
 pub struct RunConsents;
 
 impl RunConsents {
