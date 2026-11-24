@@ -122,7 +122,9 @@ jobs:
           put AUTOPILOT_PRIVATE "$RUNNER_TEMP/coord"
           put AUTOPILOT_BONGOS "$GITHUB_WORKSPACE"
           put AUTOPILOT_WORKTREES "$RUNNER_TEMP/worktrees"
-          put AUTOPILOT_LOGS "$RUNNER_TEMP/logs"
+          # not under $HOME: smoke runs the app in a sandbox that hides $HOME (RUNNER_TEMP is under it), and the release
+          # directory with the unpacked binary and the smoke logs lives in the logs directory
+          put AUTOPILOT_LOGS /mnt/bongos-workspace/ci-logs
           put RELEASE_STATE "$RUNNER_TEMP/release-state"
           put RELEASE_SHA "$IN_SHA"
           put RELEASE_STARTED "$(date +%s)"
@@ -297,6 +299,10 @@ jobs:
           export RUSTUP_HOME="$BONGOS_WORKSPACE/rustup" CARGO_HOME="$BONGOS_WORKSPACE/cargo"
           unset CARGO_BUILD_JOBS
           echo "CARGO_BUILD_JOBS=" >> "$GITHUB_ENV"
+          # the swap file protected the release build (one process needs 9 to 10 GB); the test build peaks near 6 GB and
+          # needs the 16 GB of disk more
+          sudo swapoff /swap-extra
+          sudo rm -f /swap-extra
           # the tarball is built and uploaded (smoke unpacks it): its 11 GB release profile is not used again, and the
           # whole-suite build needs about 52 GiB more
           df -h /
@@ -356,6 +362,13 @@ jobs:
         if: steps.notes.outputs.run == 'true'
         timeout-minutes: 75
         run: python3 "$AUTOPILOT_PRIVATE/autopilot/runner/release_job.py" step perf
+
+      - name: Disk use
+        if: always() && steps.notes.outputs.run == 'true'
+        run: |
+          df -h /
+          sudo du -xsh /mnt/bongos-workspace/* 2>/dev/null || true
+          du -xsh /mnt/bongos-workspace/target/* /mnt/bongos-workspace/target/debug/* 2>/dev/null | sort -h | tail -12 || true
 
       - name: Collect the step logs
         if: always() && steps.notes.outputs.run == 'true'
