@@ -1215,6 +1215,66 @@ impl ProjectSearchView {
         });
     }
 
+    /// Opens a new project search item, in the pane an open of the workspace goes to, that runs
+    /// `query` over every match: its query editor, options and file filters show `query`.
+    ///
+    /// The task resolves with the item's search once the search has ended, and with `None` when
+    /// the item is dropped before that.
+    pub fn open_with_query(
+        workspace: &mut Workspace,
+        query: SearchQuery,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Task<Option<Entity<ProjectSearch>>> {
+        let included = query.as_inner().files_to_include().sources().join(",");
+        let excluded = query.as_inner().files_to_exclude().sources().join(",");
+        let opened_only = query.buffers().is_some();
+        let weak_workspace = cx.entity().downgrade();
+
+        let entity = cx.new(|cx| {
+            let mut entity = ProjectSearch::new(workspace.project().clone(), cx);
+            entity.search(query, cx);
+            entity
+        });
+        let ended = Self::search_ended(&entity, cx);
+
+        let search = cx.new(|cx| ProjectSearchView::new(weak_workspace, entity, window, cx, None));
+        let preferred = workspace.active_pane().clone();
+        let pane = workspace.pane_for_open(preferred, window, cx);
+        workspace.add_item(pane, Box::new(search.clone()), None, true, true, window, cx);
+        search.update(cx, |search, cx| {
+            search.included_files_editor.update(cx, |editor, cx| {
+                editor.set_text(included.as_str(), window, cx)
+            });
+            search.excluded_files_editor.update(cx, |editor, cx| {
+                editor.set_text(excluded.as_str(), window, cx)
+            });
+            search.filters_enabled = !included.is_empty() || !excluded.is_empty();
+            search.included_opened_only = opened_only;
+        });
+        ended
+    }
+
+    /// Resolves with `entity` once its search has ended, and with `None` when `entity` is
+    /// dropped before that.
+    fn search_ended(
+        entity: &Entity<ProjectSearch>,
+        cx: &mut App,
+    ) -> Task<Option<Entity<ProjectSearch>>> {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        let mut tx = Some(tx);
+        // The observer owns the sender and lives as long as `entity`, so the receiver is
+        // cancelled when `entity` is dropped.
+        cx.observe(entity, move |entity, cx| {
+            let ended = matches!(entity.read(cx).search_state, SearchState::Completed(_));
+            if ended && let Some(tx) = tx.take() {
+                tx.send(entity).ok();
+            }
+        })
+        .detach();
+        cx.spawn(async move |_| rx.await.ok())
+    }
+
     /// Re-activate the most recently activated search in this pane or the most recent if it has been closed.
     /// If no search exists in the workspace, create a new one.
     pub fn deploy_search(
@@ -1891,6 +1951,27 @@ impl ProjectSearchView {
     #[cfg(any(test, feature = "test-support"))]
     pub fn results_editor(&self) -> &Entity<Editor> {
         &self.results_editor
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn search_options(&self) -> SearchOptions {
+        self.search_options
+    }
+
+    /// The text of the include and exclude file filters, and whether the filters are shown.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn file_filters(&self, cx: &App) -> (String, String, bool) {
+        (
+            self.included_files_editor.read(cx).text(cx),
+            self.excluded_files_editor.read(cx).text(cx),
+            self.filters_enabled,
+        )
+    }
+
+    /// Whether the search is limited to the open buffers.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn opened_only(&self) -> bool {
+        self.included_opened_only
     }
 
     fn adjust_query_regex_language(&self, cx: &mut App) {
@@ -4014,6 +4095,86 @@ pub mod tests {
                 })
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    async fn test_open_with_query_resolves_with_results_and_none_when_dropped(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            path!("/dir"),
+            json!({
+                "one.rs": "const ONE: usize = 1;",
+                "two.rs": "const TWO: usize = 2;",
+                "three.rs": "const THREE: usize = 3;",
+            }),
+        )
+        .await;
+        let project = Project::test(fs.clone(), ["/dir".as_ref()], cx).await;
+        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = window
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        let query = SearchQuery::text(
+            "const",
+            false,
+            true,
+            false,
+            PathMatcher::default(),
+            PathMatcher::new(["three.rs"], PathStyle::local()).unwrap(),
+            false,
+            None,
+        )
+        .unwrap();
+        let active_view = |cx: &mut VisualTestContext| {
+            cx.read(|cx| {
+                workspace
+                    .read(cx)
+                    .active_pane()
+                    .read(cx)
+                    .active_item()
+                    .and_then(|item| item.downcast::<ProjectSearchView>())
+            })
+        };
+
+        let task = workspace.update_in(cx, |workspace, window, cx| {
+            ProjectSearchView::open_with_query(workspace, query.clone(), window, cx)
+        });
+        let view = active_view(cx).expect("the search item is open");
+        let search = task.await.expect("the search ended with its results");
+        cx.read(|cx| {
+            assert_eq!(search.read(cx).match_ranges.len(), 2);
+            assert_eq!(view.read(cx).entity, search);
+            assert_eq!(view.read(cx).search_query_text(cx), "const");
+            let options = view.read(cx).search_options();
+            assert!(options.contains(SearchOptions::CASE_SENSITIVE));
+            assert!(!options.contains(SearchOptions::REGEX));
+            assert_eq!(
+                view.read(cx).file_filters(cx),
+                (String::new(), "three.rs".to_string(), true)
+            );
+            assert!(!view.read(cx).opened_only());
+        });
+
+        // A search that is dropped before it ends resolves with nothing.
+        let (task, dropped) = cx.update(|_, cx| {
+            let project = workspace.read(cx).project().clone();
+            let search = cx.new(|cx| {
+                let mut search = ProjectSearch::new(project, cx);
+                search.search(query, cx);
+                search
+            });
+            (
+                ProjectSearchView::search_ended(&search, cx),
+                search.downgrade(),
+            )
+        });
+        assert!(dropped.upgrade().is_none(), "nothing holds the search");
+        assert!(task.await.is_none(), "the dropped search ends the task");
     }
 
     #[perf]

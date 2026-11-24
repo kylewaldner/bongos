@@ -27,6 +27,7 @@ gpui.workspace = true
 language.workspace = true
 log.workspace = true
 project.workspace = true
+search.workspace = true
 serde_json.workspace = true
 settings.workspace = true
 text.workspace = true
@@ -42,6 +43,7 @@ editor = { workspace = true, features = ["test-support"] }
 fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 project = { workspace = true, features = ["test-support"] }
+search = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }
 terminal_view = { workspace = true, features = ["test-support"] }
 theme.workspace = true

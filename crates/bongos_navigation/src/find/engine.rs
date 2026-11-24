@@ -132,7 +132,11 @@ impl FindRequest {
     }
 
     /// The project search for this request, or the reason there is none.
-    fn query(&self, full_paths: bool, path_style: PathStyle) -> Result<SearchQuery, SharedString> {
+    pub(crate) fn query(
+        &self,
+        full_paths: bool,
+        path_style: PathStyle,
+    ) -> Result<SearchQuery, SharedString> {
         let include = PathMatcher::new(self.include_globs(), path_style)
             .map_err(|error| SharedString::from(format!("Invalid glob: {error}")))?;
         let exclude = PathMatcher::new(self.exclude_globs(), path_style)
