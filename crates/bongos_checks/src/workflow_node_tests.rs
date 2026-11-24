@@ -396,6 +396,7 @@ async fn the_run_view_line_shows_the_pool_wait_and_the_part_progress(cx: &mut Te
                 worktree: None,
                 attempt_dir: None,
                 session_limit: 4,
+                unsandboxed: false,
             };
             Snapshot::build(&data, None).text(Mode::List)
         })
