@@ -44,6 +44,7 @@ impl RenderOnce for CountBadge {
             .border_color(cx.theme().colors().border)
             .bg(bg)
             .shadow_sm()
+            .font_family(mono_label_font(cx))
             .child(
                 Label::new(label)
                     .size(LabelSize::Custom(rems_from_px(9.)))
