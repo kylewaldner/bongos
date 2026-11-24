@@ -109,6 +109,85 @@ pub fn start(editor: &Entity<Editor>, mode: Mode, window: &mut Window, cx: &mut 
     });
 }
 
+/// A replace whose strings and range are already chosen, as another command hands it over.
+#[derive(Clone, Debug)]
+pub struct ScopedReplace {
+    /// The string (or pattern, with `regexp`) to replace.
+    pub from: String,
+    pub regexp: bool,
+    pub case: CaseMode,
+    /// Only matches that are whole words.
+    pub whole_word: bool,
+    /// The range the replace stays in; the search starts at its start.
+    pub scope: Range<Anchor>,
+    /// The replacement: literal, or a template naming the groups with `regexp`.
+    pub to: String,
+    /// Asks at every match (`query-replace`), else replaces every match.
+    pub interactive: bool,
+}
+
+/// Starts the replace `replace` in `editor` without asking for the strings. The matches are found
+/// on the editor's text as it is now. A whole-word replace runs as a regexp wrapped in `\b(?:..)\b`
+/// (a literal string is escaped first, and so is its replacement).
+pub fn start_in_scope(
+    editor: &Entity<Editor>,
+    replace: ScopedReplace,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if !can_start(editor, window, cx) {
+        return;
+    }
+    let ScopedReplace {
+        from,
+        regexp,
+        case,
+        whole_word,
+        scope,
+        to,
+        interactive,
+    } = replace;
+    let (string, regexp, to) = if whole_word {
+        let (pattern, to) = if regexp {
+            (from, to)
+        } else {
+            (
+                fancy_regex::escape(&from).into_owned(),
+                to.replace('\\', "\\\\"),
+            )
+        };
+        (whole_word_pattern(&pattern), true, to)
+    } else {
+        (from, regexp, to)
+    };
+    let mut spec = SearchSpec::new(regexp);
+    spec.string = string;
+    spec.lax = false;
+    spec.case = case;
+    let origin = Origin {
+        point: None,
+        from: scope.start,
+        scope: Some(scope),
+    };
+    begin(
+        editor,
+        Mode {
+            regexp,
+            interactive,
+        },
+        origin,
+        spec,
+        to,
+        window,
+        cx,
+    );
+}
+
+/// `pattern` matched only as whole words.
+pub fn whole_word_pattern(pattern: &str) -> String {
+    format!(r"\b(?:{pattern})\b")
+}
+
 /// Whether a replace may start in `editor` now: not in a read-only buffer, and one replace at a
 /// time (a batch still running in this editor finishes first).
 pub(crate) fn can_start(editor: &Entity<Editor>, window: &mut Window, cx: &mut App) -> bool {

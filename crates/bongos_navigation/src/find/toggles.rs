@@ -56,6 +56,7 @@ pub fn scope_directory(
         let input = picker.input();
         let flags = picker.flags();
         let base_dir = picker.base_dir().map(str::to_string);
+        let replace = picker.replace_mode();
         if let Some(handle) = picker.handle() {
             handle.close(window, cx);
         }
@@ -75,6 +76,7 @@ pub fn scope_directory(
                     select_input: false,
                     flags,
                     base_dir,
+                    replace,
                 };
                 this.update(cx, |workspace, cx| {
                     picker::open_with(workspace, start, window, cx);
