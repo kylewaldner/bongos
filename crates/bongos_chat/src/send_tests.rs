@@ -29,6 +29,9 @@ use crate::channel_runtime_tests::{Channels, channels, event_report, needs_input
 use crate::runtime_tests::{Harness, STARTUP, WITHIN, harness, wait_for};
 use crate::{ChatRuntime, ChatState, ChatToast, SendError, SendOptions, Sent, Source, send};
 
+/// Hang guard for a fake that reads one byte at a time under load.
+const SLOW_READER_HANG_GUARD: Duration = Duration::from_secs(120);
+
 /// A multi-line prompt with a blank line, a tab, quotes and a fence.
 const PROMPT: &str = "Fix the backfill for invoices\n\n\tkeep the \"dry run\" flag\n```rust\nfn main() {}\n```\nthen stop";
 
@@ -205,7 +208,7 @@ async fn test_a_large_paste_into_a_slow_reader_is_one_paste_and_one_enter(cx: &m
     wait_for(
         cx,
         "the whole paste and its Enter to reach the fake",
-        STARTUP,
+        SLOW_READER_HANG_GUARD,
         |_| std::fs::read_to_string(&input).unwrap_or_default() == expected,
     )
     .await;
