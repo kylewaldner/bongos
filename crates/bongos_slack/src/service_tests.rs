@@ -33,14 +33,14 @@ use crate::service::{
 use crate::status_item::{Shown, SlackStatusItem, StatusFacts, status_text};
 
 /// One hour east of UTC, so the local time differs from UTC.
-const ZONE: FixedOffset = FixedOffset(3600);
+pub(crate) const ZONE: FixedOffset = FixedOffset(3600);
 
-struct Fixture {
+pub(crate) struct Fixture {
     _root: tempfile::TempDir,
     dir: PathBuf,
     credentials: Arc<FakeCredentials>,
-    fake: FakeSlack,
-    service: Entity<SlackService>,
+    pub(crate) fake: FakeSlack,
+    pub(crate) service: Entity<SlackService>,
 }
 
 fn set_enabled(enabled: bool, cx: &mut TestAppContext) {
@@ -55,7 +55,7 @@ fn set_enabled(enabled: bool, cx: &mut TestAppContext) {
 
 /// A connected service (unless `connected` is false) with `slack.enabled` on, the token in the
 /// in-memory store and the fake as the client.
-fn setup(connected: bool, cx: &mut TestAppContext) -> Fixture {
+pub(crate) fn setup(connected: bool, cx: &mut TestAppContext) -> Fixture {
     let root = tempfile::tempdir().unwrap();
     let dir = root.path().join("slack");
     if connected {

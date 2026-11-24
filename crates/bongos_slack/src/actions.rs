@@ -1,6 +1,7 @@
 //! The `slack` actions, hidden from the command palette while `slack.enabled` is false and shown
 //! while it is true. They are unbound in every keymap. `slack: connect` and `slack: disconnect`
-//! have handlers (see `token_prompt`), as does `slack: status` (see `status_item`); while
+//! have handlers (see `token_prompt`), as does `slack: status` (see `status_item`), and the three
+//! read commands (see `read_commands`); while
 //! `slack.enabled` is false they only say Slack is off.
 
 use std::any::TypeId;
@@ -11,6 +12,7 @@ use settings::{Settings as _, SettingsStore};
 use workspace::Workspace;
 
 use crate::SlackSettings;
+use crate::read_commands;
 use crate::status_item;
 use crate::token_prompt::{self, show_toast};
 
@@ -106,4 +108,7 @@ pub fn register(workspace: &mut Workspace) {
     register_direct::<slack::Connect>(workspace, token_prompt::connect);
     register_direct::<slack::Disconnect>(workspace, token_prompt::disconnect);
     register_direct::<slack::Status>(workspace, status_item::show_status);
+    register_direct::<slack::ReadChannel>(workspace, read_commands::read_channel);
+    register_direct::<slack::LoadOlderMessages>(workspace, read_commands::load_older);
+    register_direct::<slack::ReadThread>(workspace, read_commands::read_thread_command);
 }
