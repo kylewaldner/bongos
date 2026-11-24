@@ -94,7 +94,27 @@ fn true_dark_keeps_one_dark_key_set() {
         keys.sort();
         keys
     };
-    assert_eq!(keys(&style), keys(&one_dark));
+    let style_keys = keys(&style);
+    let one_keys = keys(&one_dark);
+    for key in &one_keys {
+        assert!(style_keys.contains(key), "True Dark is missing {key}");
+    }
+    let extra = style_keys
+        .iter()
+        .filter(|key| !one_keys.contains(key))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        extra,
+        [
+            "editor.indent_guide",
+            "editor.indent_guide_active",
+            "pane_group.border"
+        ]
+    );
+    assert_eq!(color(&style, "pane_group.border"), "#2a2a2aff");
+    assert_eq!(color(&style, "editor.indent_guide"), "#1a1a1aff");
+    assert_eq!(color(&style, "editor.indent_guide_active"), "#2a2a2aff");
     assert_eq!(keys(&style["syntax"]), keys(&one_dark["syntax"]));
     assert_eq!(
         style["players"].as_array().map(Vec::len),
@@ -110,7 +130,7 @@ fn true_dark_keeps_one_dark_key_set() {
 }
 
 #[test]
-fn true_dark_tokens_match_the_table() {
+fn true_dark_tokens_are_exact() {
     let style = true_dark_style();
     let table: &[(&[&str], &str)] = &[
         (
