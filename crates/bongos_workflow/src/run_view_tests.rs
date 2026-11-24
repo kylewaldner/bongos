@@ -2,11 +2,17 @@
 //! toggle, and the approve of a gate card. A child of the lifecycle tests, so it shares their
 //! world, definitions and scripted runner.
 
+use std::sync::Arc;
+
 use bongos_workflow_model::Limits;
+use chrono::{DateTime, Duration, Utc};
 use gpui::{AppContext as _, Entity};
 
 use super::*;
-use crate::run_view::{Mode, RunView, Snapshot, dump, try_dir};
+use crate::lifecycle::NOTHING_TO_ANSWER;
+use crate::run_view::{
+    ALLOW_UNSANDBOXED_LABEL, Mode, RunView, STOP_LABEL, Snapshot, UNSANDBOXED_NOTE, dump, try_dir,
+};
 
 const MARKER: &str = "WORKTREE-MARKER-9f3a1";
 
@@ -302,6 +308,7 @@ kind = "success"
         attempt_dir: None,
         session_limit: 6,
         node_status: Default::default(),
+        unsandboxed: false,
     };
     let snapshot = Snapshot::build(&data, None);
     assert_eq!(
@@ -313,4 +320,132 @@ kind = "success"
             .text(Mode::List)
             .contains("halted: cost cap of $5.00 reached at node implement")
     );
+}
+
+/// One program node.
+const SANDBOXED: &str = r#"
+schema = 1
+name = "sandboxed"
+start = "lint"
+
+[nodes.lint]
+kind = "program"
+script = "lint.py"
+output = { summary = { type = "text" } }
+routes = [{ to = "done" }]
+
+[ends.done]
+kind = "success"
+"#;
+
+/// The instant the fake clock reads, as an offset from the epoch.
+fn fake_now() -> DateTime<Utc> {
+    DateTime::<Utc>::UNIX_EPOCH + Duration::seconds(3_723)
+}
+
+/// A run of `sandboxed` whose node finds no OS sandbox, so it asks, on an engine whose answers
+/// are timed by the fake clock, with a view of it.
+fn asked_run(cx: &mut TestAppContext) -> (WorkflowEngine, String, Entity<RunView>, World) {
+    let world = world();
+    write_definition(world.profile(), "sandboxed", SANDBOXED);
+    fs::write(
+        world.profile().join("sandboxed").join("lint.py"),
+        "print('ok')\n",
+    )
+    .unwrap();
+    cx.update(|cx| {
+        let store = SettingsStore::test(cx);
+        cx.set_global(store);
+        WorkflowsSettings::register(cx);
+    });
+    let mut runner = FakeRunner::new();
+    runner.no_sandbox.insert("lint".to_string());
+    let worktrees = DirWorktrees {
+        root: world.root.join("runs"),
+        error: world.worktree_error.clone(),
+    };
+    let mut lifecycle = Lifecycle::new(
+        Box::new(runner) as EngineRunner,
+        Box::new(worktrees),
+        world.settings(),
+    );
+    lifecycle.set_wall_clock(Arc::new(fake_now));
+    let engine = WorkflowEngine::with_lifecycle(world.dirs.clone(), lifecycle);
+    let run = start(&engine, &world, "sandboxed", cx);
+    let view = view(&engine, &run, cx);
+    (engine, run, view, world)
+}
+
+#[gpui::test]
+fn the_buttons_answer_the_ask_through_the_lifecycle(cx: &mut TestAppContext) {
+    // Allow: the ask is answered, the run is granted and its held node starts.
+    let (engine, run, view, _world) = asked_run(cx);
+    let text = cx.update(|cx| view.read(cx).text());
+    assert!(
+        text.contains("sandbox ask: Program node 'lint' was not run"),
+        "{text}"
+    );
+    assert!(
+        text.contains(ALLOW_UNSANDBOXED_LABEL) && text.contains(STOP_LABEL),
+        "{text}"
+    );
+    assert_eq!(
+        engine.lifecycle().status(&run),
+        Some(RunStatus::WaitingOnYou)
+    );
+    cx.update(|cx| view.update(cx, |view, cx| view.allow_unsandboxed(cx)))
+        .unwrap();
+    assert_eq!(engine.lifecycle().consent_question(&run), None);
+    assert!(engine.lifecycle().consent_grant(&run).is_some());
+    // A second window answering finds nothing to answer.
+    let other_window = self::view(&engine, &run, cx);
+    let second = cx.update(|cx| other_window.update(cx, |view, cx| view.allow_unsandboxed(cx)));
+    assert_eq!(second, Err(NOTHING_TO_ANSWER.to_string()));
+    let text = cx.update(|cx| view.read(cx).text());
+    assert!(!text.contains("sandbox ask:"), "{text}");
+
+    // Stop: the ask is answered and nothing is granted.
+    let (engine, run, view, _world) = asked_run(cx);
+    cx.update(|cx| view.update(cx, |view, cx| view.refuse_unsandboxed(cx)))
+        .unwrap();
+    assert_eq!(engine.lifecycle().consent_question(&run), None);
+    assert_eq!(engine.lifecycle().consent_grant(&run), None);
+    for _ in 0..4 {
+        engine.lifecycle().tick();
+    }
+    assert_eq!(engine.lifecycle().status(&run), Some(RunStatus::Failed));
+}
+
+#[gpui::test]
+fn the_unsandboxed_note_shows_only_while_a_grant_is_live(cx: &mut TestAppContext) {
+    let (engine, run, view, _world) = asked_run(cx);
+    let shows = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.refresh(cx);
+                view.text().contains(UNSANDBOXED_NOTE)
+            })
+        })
+    };
+    assert!(!shows(cx), "no note while the ask is open");
+    cx.update(|cx| view.update(cx, |view, cx| view.allow_unsandboxed(cx)))
+        .unwrap();
+    assert!(shows(cx), "the note shows while the grant is live");
+    cx.update(|cx| engine.cancel(&run, cx)).unwrap();
+    assert_eq!(engine.lifecycle().consent_grant(&run), None);
+    assert!(!shows(cx), "the grant ended with the run");
+}
+
+#[gpui::test]
+fn history_rows_show_the_time_of_the_fake_clock(cx: &mut TestAppContext) {
+    let (_engine, _run, view, _world) = asked_run(cx);
+    cx.update(|cx| view.update(cx, |view, cx| view.allow_unsandboxed(cx)))
+        .unwrap();
+    let expected = format!(
+        "sandbox answer: allowed to run without a sandbox by {} at {}",
+        crate::lifecycle::BY_PERSON,
+        crate::consent::rfc3339(fake_now())
+    );
+    let text = cx.update(|cx| view.read(cx).text());
+    assert!(text.contains(&expected), "{text}");
 }

@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use bongos_work::{NeedsYou, NeedsYouRegistry, NeedsYouSource};
-use bongos_workflow_model::record::{CapReached, EndState};
+use bongos_workflow_model::record::{CapReached, ConsentPending, EndState};
 use bongos_workflow_model::{NodeKey, RunState};
 use gpui::{App, Global};
 use workspace::notifications::NotificationId;
@@ -59,7 +59,18 @@ pub fn reasons(state: &RunState) -> Vec<String> {
             .values()
             .map(|failure| format!("check had no verdict: {}", failure.detail.trim())),
     );
+    if let Some(pending) = &state.consent_pending {
+        found.push(format!(
+            "sandbox: {} needs your answer",
+            pending_node(pending)
+        ));
+    }
     found
+}
+
+/// The node a pending sandbox ask names: the first key it holds.
+fn pending_node(pending: &ConsentPending) -> &str {
+    pending.keys.first().map_or("", |key| key.node.as_str())
 }
 
 /// The tasks of the active runs that need Kyle, with why: the runs this process drives and those
@@ -106,11 +117,12 @@ pub struct Notice {
 pub struct Announced {
     gates: BTreeMap<RunId, BTreeSet<NodeKey>>,
     failed: BTreeSet<RunId>,
+    asked: BTreeSet<RunId>,
 }
 
 impl Announced {
     /// The toasts `state` of `run` earns that were not shown yet: one per gate newly open, one for
-    /// a failure. A gate that closed and opens again (a revision) earns a new one.
+    /// a failure, one for a sandbox ask while it is pending. A gate that closed and opens again (a revision) earns a new one.
     pub fn notices(&mut self, run: &str, state: &RunState) -> Vec<Notice> {
         let mut found = Vec::new();
         let open: BTreeSet<NodeKey> = state.open_gates.keys().cloned().collect();
@@ -123,6 +135,22 @@ impl Announced {
             });
         }
         *before = open;
+        match &state.consent_pending {
+            Some(pending) => {
+                if self.asked.insert(run.to_string()) {
+                    found.push(Notice {
+                        run: run.to_string(),
+                        message: format!(
+                            "Workflow sandbox: {} needs your answer",
+                            pending_node(pending)
+                        ),
+                    });
+                }
+            }
+            None => {
+                self.asked.remove(run);
+            }
+        }
         let failed = matches!(state.ended, Some((EndState::Failed, _)));
         if failed {
             if self.failed.insert(run.to_string()) {

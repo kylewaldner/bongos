@@ -21,6 +21,8 @@ const NAMES: &[&str] = &[
     "workflow::Restart",
     "workflow::Cancel",
     "workflow::Approve",
+    "workflow::AllowUnsandboxedOnce",
+    "workflow::RefuseUnsandboxed",
     "workflow::Revise",
     "workflow::OpenLogs",
     "workflow::ShowRuns",
@@ -80,6 +82,24 @@ fn default_settings_are_on(cx: &mut TestAppContext) {
             "the struct default mirrors default.json"
         );
     });
+}
+
+#[gpui::test]
+async fn the_sandbox_commands_are_hidden_while_workflows_are_off(cx: &mut TestAppContext) {
+    cx.update(|cx| command_palette_hooks::init(cx));
+    use_default_settings(cx);
+    cx.update(crate::init_palette);
+    let names = [
+        "workflow::AllowUnsandboxedOnce",
+        "workflow::RefuseUnsandboxed",
+    ];
+    for name in names {
+        assert!(!palette_hidden(name, cx), "{name} shows while on");
+    }
+    set_enabled(cx, false);
+    for name in names {
+        assert!(palette_hidden(name, cx), "{name} is hidden while off");
+    }
 }
 
 #[gpui::test]
