@@ -118,7 +118,7 @@ fn open_channel(
 }
 
 /// The active editor, the read session it shows and the row of its cursor.
-fn active_read_session(
+pub(crate) fn active_read_session(
     workspace: &Workspace,
     cx: &mut Context<Workspace>,
 ) -> Option<(Entity<Editor>, Entity<ReadSession>, usize)> {

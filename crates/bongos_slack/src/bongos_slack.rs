@@ -2,13 +2,15 @@
 //! hidden from the command palette while `slack.enabled` is false (the default), the HTTP
 //! client of the Slack Web API (`client`), the connection (`connection`, `token_prompt`):
 //! `slack: connect` and `slack: disconnect`, the token in the secret store and the files beside
-//! it (`allowed`), the service every request goes through (`service`), and the status bar item
-//! with `slack: status` (`status_item`).
+//! it (`allowed`, with `slack: allow channel` and `slack: disallow channel`), the service every
+//! request goes through (`service`), the status bar item with `slack: status` (`status_item`),
+//! the read commands (`read_commands`) and `slack: post` and `slack: reply` (`post`).
 
 mod actions;
 pub mod allowed;
 pub mod client;
 pub mod connection;
+pub mod post;
 pub mod read_buffer;
 mod read_commands;
 pub mod read_view;
@@ -42,9 +44,13 @@ pub fn init(cx: &mut App) {
 #[cfg(test)]
 mod actions_tests;
 #[cfg(test)]
+mod allowed_tests;
+#[cfg(test)]
 mod client_tests;
 #[cfg(test)]
 mod connection_tests;
+#[cfg(test)]
+mod post_tests;
 #[cfg(test)]
 mod read_buffer_tests;
 #[cfg(test)]

@@ -104,6 +104,10 @@ pub enum SlackError {
         channel: ConversationId,
         cause: ApiError,
     },
+    /// The post's text is `over` characters past Slack's limit; nothing was sent.
+    TooLong {
+        over: usize,
+    },
     /// The credential store failed when the token was read; the cause is redacted.
     SecretStore(String),
     /// No Slack client is installed.
@@ -146,6 +150,7 @@ impl fmt::Display for SlackError {
             Self::PostRefused { channel, cause } => {
                 write!(f, "Slack did not post to {channel}: {cause}")
             }
+            Self::TooLong { over } => f.write_str(&render::too_long_message(*over)),
             Self::SecretStore(cause) => write!(
                 f,
                 "Could not read the Slack token from the secret store ({cause})"
@@ -324,10 +329,13 @@ struct GlobalSlackService(Entity<SlackService>);
 
 impl Global for GlobalSlackService {}
 
-/// The check that a post's text fits Slack's limit belongs here; it comes with the post commands.
-/// Until then every text passes.
-fn check_post_text(_text: &str) -> Result<(), SlackError> {
-    Ok(())
+/// Checks that a post's text (as sent, after escaping) fits Slack's limit; a longer text is never
+/// sent.
+fn check_post_text(text: &str) -> Result<(), SlackError> {
+    match render::check_length(text) {
+        Err(ApiError::TooLong { over }) => Err(SlackError::TooLong { over }),
+        _ => Ok(()),
+    }
 }
 
 impl SlackService {
@@ -719,7 +727,8 @@ impl SlackService {
     }
 
     /// Posts `text` to `destination`, after every post asked for before it. `origin` is who asks;
-    /// whether it may post without asking is decided before this call. The text is sent as given.
+    /// whether it may post without asking is decided before this call. The text is sent as given;
+    /// one past Slack's limit fails with [`SlackError::TooLong`] and nothing is sent.
     pub fn post(
         &mut self,
         destination: Destination,
