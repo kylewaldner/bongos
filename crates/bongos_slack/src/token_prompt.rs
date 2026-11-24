@@ -134,19 +134,30 @@ pub(crate) fn open_text_buffer(
         });
         workspace
             .update_in(cx, |workspace, window, cx| {
-                let multi_buffer =
-                    cx.new(|cx| MultiBuffer::singleton(buffer, cx).with_title(title));
-                let editor = cx.new(|cx| {
-                    let mut editor =
-                        Editor::for_multibuffer(multi_buffer, Some(project), window, cx);
-                    editor.set_read_only(true);
-                    editor
-                });
-                workspace.add_item_to_active_pane(Box::new(editor), None, true, window, cx);
+                add_read_only_editor(workspace, buffer, title, window, cx);
             })
             .ok();
     })
     .detach();
+}
+
+/// Shows `buffer` in a read-only editor titled `title` in the active pane.
+pub(crate) fn add_read_only_editor(
+    workspace: &mut Workspace,
+    buffer: Entity<language::Buffer>,
+    title: String,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> Entity<Editor> {
+    let project = workspace.project().clone();
+    let multi_buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx).with_title(title));
+    let editor = cx.new(|cx| {
+        let mut editor = Editor::for_multibuffer(multi_buffer, Some(project), window, cx);
+        editor.set_read_only(true);
+        editor
+    });
+    workspace.add_item_to_active_pane(Box::new(editor.clone()), None, true, window, cx);
+    editor
 }
 
 /// Checks and stores the token typed in the prompt, then says how it went. When the workspace

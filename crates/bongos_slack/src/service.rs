@@ -414,6 +414,11 @@ impl SlackService {
         UserNames::from_users(self.users.values())
     }
 
+    /// The time zone the service shows times in.
+    pub fn zone(&self) -> Arc<dyn render::Clock> {
+        self.zone.clone()
+    }
+
     /// The conversation list as last read, if any.
     pub fn cached_conversations(&self) -> Option<&[Conversation]> {
         self.conversations

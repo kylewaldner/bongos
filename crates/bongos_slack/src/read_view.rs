@@ -200,16 +200,21 @@ impl ReadView {
 
     /// Reads one page older than the oldest message shown and merges it by `ts`.
     pub async fn load_older(&mut self, api: &dyn SlackApi) -> Result<(), LoadError> {
+        let latest = self.older_request()?;
+        self.load(api, latest).await
+    }
+
+    /// The `latest` of the request for the next older page (`None` asks for the newest page when
+    /// nothing is shown yet), or why nothing may be loaded.
+    pub fn older_request(&self) -> Result<Option<Ts>, LoadError> {
         if self.disconnected {
             return Err(LoadError::Disconnected);
         }
-        let Some(oldest) = self.oldest().cloned() else {
-            return self.load_first(api).await;
-        };
-        if self.older.is_none() {
-            return Err(LoadError::NothingOlder);
+        match self.oldest() {
+            None => Ok(None),
+            Some(_) if self.older.is_none() => Err(LoadError::NothingOlder),
+            Some(oldest) => Ok(Some(oldest.clone())),
         }
-        self.load(api, Some(oldest)).await
     }
 
     async fn load(&mut self, api: &dyn SlackApi, latest: Option<Ts>) -> Result<(), LoadError> {
@@ -220,19 +225,10 @@ impl ReadView {
             .history(self.channel.clone(), latest, PAGE_SIZE)
             .await
             .map_err(LoadError::Api)?;
-        // Replies for the first threads of the page, newest first; the rest keep their hint.
-        let parents: Vec<Ts> = page
-            .items
-            .iter()
-            .filter(|message| message.reply_count > 0 && is_parent(message))
-            .take(MAX_THREADS_PER_PAGE)
-            .map(|message| message.ts.clone())
-            .collect();
-        for parent in parents {
+        let mut replies = Vec::new();
+        for parent in thread_parents(&page) {
             match read_thread(api, &self.channel, &parent).await {
-                Ok(replies) => {
-                    self.threads.insert(parent, replies);
-                }
+                Ok(messages) => replies.push((parent, messages)),
                 // A thread that cannot be read keeps its hint; a refused token stops the load.
                 Err(error @ (ApiError::Unauthorized { .. } | ApiError::NotConnected)) => {
                     return Err(LoadError::Api(error));
@@ -240,12 +236,20 @@ impl ReadView {
                 Err(_) => {}
             }
         }
+        self.apply_page(page, replies);
+        Ok(())
+    }
+
+    /// Merges a history page and the replies read for its threads, and ends any wait line.
+    pub fn apply_page(&mut self, page: Page<Message>, replies: Vec<(Ts, Vec<Message>)>) {
+        for (parent, messages) in replies {
+            self.threads.insert(parent, messages);
+        }
         self.older = page.next;
         for message in page.items {
             self.messages.insert(message.ts.clone(), message);
         }
         self.waiting = None;
-        Ok(())
     }
 
     /// The buffer text and its row index: the transcript with the wait and disconnected lines
@@ -275,6 +279,17 @@ impl ReadView {
         }
         transcript
     }
+}
+
+/// The threads of `page` whose replies are read: the first [`MAX_THREADS_PER_PAGE`] parents that
+/// have replies, newest first; the rest keep their hint.
+pub fn thread_parents(page: &Page<Message>) -> Vec<Ts> {
+    page.items
+        .iter()
+        .filter(|message| message.reply_count > 0 && is_parent(message))
+        .take(MAX_THREADS_PER_PAGE)
+        .map(|message| message.ts.clone())
+        .collect()
 }
 
 /// A message that starts a thread (not a reply in one).
@@ -316,6 +331,16 @@ pub async fn thread_transcript(
     clock: &dyn Clock,
 ) -> Result<Transcript, ApiError> {
     let messages = read_thread(api, channel, thread_ts).await?;
+    Ok(thread_transcript_of(messages, thread_ts, users, clock))
+}
+
+/// The thread transcript of already read `messages` (see [`thread_transcript`]).
+pub fn thread_transcript_of(
+    messages: Vec<Message>,
+    thread_ts: &Ts,
+    users: &UserNames,
+    clock: &dyn Clock,
+) -> Transcript {
     let parent: Vec<Message> = messages
         .iter()
         .filter(|message| message.ts == *thread_ts)
@@ -327,7 +352,7 @@ pub async fn thread_transcript(
         items: parent,
         next: None,
     };
-    Ok(render::transcript(&[page], users, &threads, clock))
+    render::transcript(&[page], users, &threads, clock)
 }
 
 /// The thread at buffer row `row`, from the row index: the row's thread, else the message
