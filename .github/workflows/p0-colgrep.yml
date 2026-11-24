@@ -1,0 +1,67 @@
+# Phase 0 measurement (scratch branch only, never merged): colgrep index on a CPU runner.
+name: p0-colgrep
+on:
+  push:
+    branches: [gh-runners-phase0]
+    paths: ['.github/workflows/p0-colgrep.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  colgrep:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install colgrep
+        run: |
+          s=$(date +%s)
+          curl -fsSL https://github.com/lightonai/next-plaid/releases/latest/download/colgrep-x86_64-unknown-linux-gnu.tar.xz | tar xJ -C "$RUNNER_TEMP"
+          d=$(ls -d "$RUNNER_TEMP"/colgrep-*/ | head -1); echo "$d" >> "$GITHUB_PATH"
+          "$d/colgrep" --version
+          echo "MEASURE colgrep_install_seconds=$(( $(date +%s)-s ))"
+          nproc; free -m | head -2
+      - name: Restore index cache
+        id: restore
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.local/share/colgrep
+            ~/.cache/huggingface
+          key: p0-colgrep-${{ github.sha }}
+          restore-keys: p0-colgrep-
+      - name: Report restore
+        run: |
+          echo "MEASURE colgrep cache_hit=${{ steps.restore.outputs.cache-hit }} attempt=${{ github.run_attempt }}"
+          du -sm ~/.local/share/colgrep ~/.cache/huggingface 2>/dev/null | sed 's/^/MEASURE colgrep restored_mb /'
+      - name: Build or update the index
+        run: |
+          s=$(date +%s)
+          /usr/bin/time -v -o "$RUNNER_TEMP/t.txt" colgrep init -y . || echo "MEASURE colgrep_init_failed=$?"
+          echo "MEASURE colgrep step=init seconds=$(( $(date +%s)-s )) attempt=${{ github.run_attempt }}"
+          grep -E "Maximum resident" "$RUNNER_TEMP/t.txt" | sed 's/^/MEASURE colgrep /'
+          du -sm ~/.local/share/colgrep ~/.cache/huggingface 2>/dev/null | sed 's/^/MEASURE colgrep size_mb /'
+      - name: Query
+        run: |
+          s=$(date +%s.%N)
+          colgrep -k 5 "where is the minibuffer completion list decided" | head -20
+          echo "MEASURE colgrep step=query1 seconds=$(echo "$(date +%s.%N) - $s" | bc)"
+          s=$(date +%s.%N)
+          colgrep -k 5 "how are keymaps merged" > /dev/null
+          echo "MEASURE colgrep step=query2 seconds=$(echo "$(date +%s.%N) - $s" | bc)"
+      - name: Change a few files and update
+        run: |
+          for f in $(ls crates/editor/src/*.rs | head -5); do echo "// touched" >> "$f"; done
+          s=$(date +%s)
+          colgrep init -y .
+          echo "MEASURE colgrep step=incremental_5_files seconds=$(( $(date +%s)-s ))"
+          git checkout -- crates
+      - name: Save index cache
+        if: steps.restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.local/share/colgrep
+            ~/.cache/huggingface
+          key: p0-colgrep-${{ github.sha }}
