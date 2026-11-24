@@ -67,7 +67,12 @@ wait_for_settled
 
 closed=$(bottom_hash)
 
-# 1. Switch buffer. A second buffer first: go to README.md.
+# 1. Switch buffer. The app restores with the terminal focused, so it would be the previous item
+# of the switcher: visit Main.kt first, then go to README.md, so that Main.kt is the previous one.
+act keys ctrl+x ctrl+f
+act type_text Main.kt
+keys Return
+wait_for_settled
 act keys ctrl+x ctrl+f
 act type_text README.md
 keys Return
