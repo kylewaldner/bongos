@@ -759,7 +759,10 @@ async fn the_open_in_pane_action_asks_for_a_pane_letter_like_m_o_p(cx: &mut Test
     set_input(&handle, "moved", cx);
     cx.dispatch_action(crate::actions::OpenInPane);
     cx.run_until_parked();
-    assert!(!handle.is_open(), "the switcher ends as the menu entry does");
+    assert!(
+        !handle.is_open(),
+        "the switcher ends as the menu entry does"
+    );
     assert!(
         items(&panes[2], cx).len() == 1,
         "nothing moves before a letter"

@@ -106,7 +106,7 @@ pub fn realize(
 /// The label of the M-o entry that asks for the pane by letter.
 const PANE_BY_LETTER: &str = "Pane by letter";
 
-type OnChoice =Rc<dyn Fn(Value, Entity<Pane>, &mut Window, &mut App)>;
+type OnChoice = Rc<dyn Fn(Value, Entity<Pane>, &mut Window, &mut App)>;
 
 /// Adds the pane entries of the M-o menu to `session`: Other pane (o), Split right (r), Split
 /// down (d) and Pane by letter (p). Each realizes its choice at the active pane and calls
