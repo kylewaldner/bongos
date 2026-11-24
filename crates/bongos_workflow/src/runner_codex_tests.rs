@@ -130,6 +130,7 @@ fn node(definition: &Definition, root: &Path) -> CodexNode {
         model: own_model(definition, declared),
         output: declared.output.clone(),
         schema: declared.schema.clone(),
+        schema_text: declared.schema.document().to_string(),
         mcp_exclude: Vec::new(),
         mcp_installed: ["broken", "github", "linear"]
             .iter()
@@ -303,6 +304,7 @@ fn the_schema_file_requires_every_property_for_strict_mode() {
         let edited = edited.node("triage").unwrap();
         node.output = edited.output.clone();
         node.schema = edited.schema.clone();
+        node.schema_text = edited.schema.document().to_string();
     });
     assert!(finish.outcome.is_ok());
     let written: Value = serde_json::from_str(

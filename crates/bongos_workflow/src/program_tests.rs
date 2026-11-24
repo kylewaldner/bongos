@@ -182,6 +182,7 @@ impl Fixture {
         ProgramNode {
             script: script_path,
             output: declared.output.clone(),
+            schema: declared.schema.clone(),
             permissions: declared.permissions.clone().unwrap_or_default(),
             caps: ProgramCaps::resolve(declared, &settings),
             polls: declared
@@ -1892,4 +1893,26 @@ fn each_start_probes_for_itself() {
             "no answer is remembered between starts"
         );
     }
+}
+
+#[test]
+fn a_bad_script_result_gets_the_one_validation_message() {
+    let Some(fixture) = Fixture::new() else {
+        return;
+    };
+    let node = fixture.node("pass");
+    let outcome = crate::runner_program::classify(
+        &key(),
+        &node,
+        crate::runner_program::Exit::Code(0),
+        false,
+        &crate::runner_program::DenialLog::ended(Vec::new()),
+        crate::runner_program::ResultFile::Text("{\"status\": \"maybe\"}".to_string()),
+        "",
+    );
+    // The same text a Claude result gets: both go through `schema::check`.
+    assert_eq!(
+        outcome.unwrap_err().detail,
+        "Result failed validation at `/status`: expected one of \"one-shot\", \"planned\", \"waiting\", \"done\", got \"maybe\""
+    );
 }
