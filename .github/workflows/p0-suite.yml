@@ -1,4 +1,4 @@
-# Phase 0 measurement (scratch branch only, never merged): the whole workspace test suite, in one job and split by crate set.
+# Phase 0 measurement (run 2: workspace-unified features) (scratch branch only, never merged): the whole workspace test suite, in one job and split by crate set.
 name: p0-suite
 on:
   push:
@@ -35,6 +35,9 @@ jobs:
       CARGO_PROFILE_DEV_SPLIT_DEBUGINFO: 'off'
       CARGO_PROFILE_DEV_BUILD_OVERRIDE_SPLIT_DEBUGINFO: 'off'
       BONGOS_SKIP_GIT_HEAD_WATCH: '1'
+      RUSTC_BOOTSTRAP: '1'
+      CARGO_UNSTABLE_FEATURE_UNIFICATION: 'true'
+      CARGO_RESOLVER_FEATURE_UNIFICATION: workspace
       CC: clang
       CXX: clang++
       RUSTUP_HOME: /mnt/bongos-workspace/rustup
