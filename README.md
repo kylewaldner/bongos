@@ -432,7 +432,7 @@ definition. The keys are for the Emacs keymap; every command is also in the pale
   and no grant is written to the run record. A run nobody is there to answer (an unattended run, or
   one started by a healer) is refused and fails with "refused: no OS sandbox"; it is not retried. A
   program that runs after your answer runs with the cleared environment and scratch directory it
-  would have in the sandbox, and the try's summary says `unsandboxed` and who allowed it. Two
+  would have in the sandbox, and the try's summary says `unsandboxed (approved <time>)`, or that the setting allowed it, not who. Two
   settings decide: the user setting `workflows.programs.unsandboxed` is `ask` (the default),
   `refuse` (never run without the sandbox) or `allow` (run without asking; set it by hand, since an
   unattended run is refused even then), and the project key `[runs] unsandboxed = "refuse"` in the
@@ -446,7 +446,9 @@ definition. The keys are for the Emacs keymap; every command is also in the pale
   `output_schema` file in the definition directory: a JSON Schema (draft 2020-12) of an object with
   the keywords `type` (`string`, `number`, `integer`, `boolean`, `array`, `object`, `null`),
   `properties`, `required`, `items`, `enum`, `additionalProperties`, `title`, `description` and
-  `$schema`. A schema that uses any other keyword is refused when the definition loads.
+  `$schema`. `additionalProperties` may only be `false`, and `$schema` must be the JSON Schema
+  2020-12 URL (`https://json-schema.org/draft/2020-12/schema`). A schema that uses any other keyword
+  is refused when the definition loads.
 - **Worktrees and merge.** A run works in its own worktree on its own branch, made from the head of
   the task's branch, and each fan-out branch gets one from the run's branch. They live under
   `<repository>/.bongos-worktrees/.runs/` unless `workflows.worktrees_dir` says otherwise. Nothing

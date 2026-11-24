@@ -2,7 +2,7 @@
 //! no OS sandbox under the default mode asks once per run and the grant lives in memory; an
 //! unattended run is refused and never retried; a `wait` sees only the variables it names; the same
 //! bad result from an agent and from a script reads the same; and a change to the project's
-//! `runs.unsandboxed` is held for a person. The helpers are those of the neighbouring test modules:
+//! `runs.unsandboxed` is held for a person. The helpers are those of the neighboring test modules:
 //! the scripted runner whose nodes find no sandbox, the fake Claude, the sandbox probe that finds
 //! none, and the approval hook's own fixtures. Every wait uses a fake clock.
 

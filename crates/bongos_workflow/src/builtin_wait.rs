@@ -21,8 +21,8 @@
 //!   command as for `command`; with no command, a gate "Confirm deploy of <pr>?" opens.
 //!
 //! How a pass starts its process is [`WaitRequest::launch`], decided once when the wait starts
-//! (crate::builtin_run). It runs inside the OS sandbox: the task worktree is the working directory and
-//! read-only, git's directories are protected, the only writable place is a per-try scratch
+//! (crate::builtin_run). It runs inside the OS sandbox: the task worktree is the working directory
+//! and read-only, git's directories are protected, the only writable place is a per-try scratch
 //! directory (emptied before each pass) that is also `TMPDIR`, the network reaches only the
 //! wait's hosts, and the environment is cleared down to [`WaitRequest::env`], `TMPDIR` and the
 //! sandbox's own proxy variables. `gh` is told the repository with `--repo`, since it cannot ask
@@ -31,8 +31,8 @@
 //! leaves the D-Bus session bus reachable, so a pass can read the user's
 //! keyring (that is how `gh` finds its login), and a program that uses the bus can get around
 //! the filesystem and network limits above. With no sandbox and a person's (or the setting's)
-//! word, the same cleared environment and scratch directory are used without the sandbox. A pass whose
-//! sandbox cannot be set up fails; it never runs outside the sandbox.
+//! word, the same cleared environment and scratch directory are used without the sandbox. A pass
+//! whose sandbox cannot be set up fails; it never runs outside the sandbox.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

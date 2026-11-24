@@ -16,7 +16,8 @@
 //! the wait's process gets besides its own (a name that is not set is skipped).
 //!
 //! How the passes start is decided once, in `start` before the poll thread (a wait that runs no
-//! process needs no decision): the wait's sandbox policy (see [`builtin_wait`]) and the sandbox probe for it, then
+//! process needs no decision): the wait's sandbox policy (see [`builtin_wait`]) and the sandbox
+//! probe for it, then
 //! [`unsandboxed::decide`] over the run's permit, as a program node decides. A start that needs
 //! a person's answer returns `SandboxRequired` and one that is refused `SandboxRefused`, so the
 //! runtime asks or refuses before anything runs, and one answer covers the run's program nodes
