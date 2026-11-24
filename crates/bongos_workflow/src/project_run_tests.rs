@@ -891,6 +891,7 @@ fn a_program_of_a_work_directory_run_may_write_only_its_own_work_directory() {
                 state: &state,
                 budget_left_usd: None,
                 binding: Some(&binding),
+                grant: None,
             },
             &binding,
             &snapshot,

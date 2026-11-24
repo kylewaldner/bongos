@@ -145,6 +145,7 @@ fn run(
             state,
             budget_left_usd,
             binding: Some(&world.binding),
+            grant: None,
         },
         &world.binding,
         &world.snapshot,
