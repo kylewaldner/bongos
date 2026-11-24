@@ -239,7 +239,7 @@ async fn edge_cases(cx: &mut TestAppContext) {
 const RUN: &str = "01890a5d-ac96-774b-bcce-b30200000057";
 
 /// Dumps the shell's own environment, as it was started, into the scratch directory.
-const DUMP_ENV: &str = r#"command = ["sh", "-c", "cat /proc/$$/environ > \"$TMPDIR/env\""]"#;
+pub(crate) const DUMP_ENV: &str = r#"command = ["sh", "-c", "cat /proc/$$/environ > \"$TMPDIR/env\""]"#;
 
 fn temp() -> TempDir {
     let base = std::env::var_os("TMPDIR")
@@ -272,7 +272,7 @@ impl WaitClock for FakeClock {
     }
 }
 
-fn no_sandbox() -> SandboxProbe {
+pub(crate) fn no_sandbox() -> SandboxProbe {
     Arc::new(|_, _| Err("bwrap not found (test)".to_string()))
 }
 
@@ -285,7 +285,7 @@ fn counting_probe(calls: Arc<AtomicUsize>) -> SandboxProbe {
 }
 
 /// The writer's environment, as these pairs only.
-fn vars(pairs: &[(&str, &str)]) -> EnvLookup {
+pub(crate) fn vars(pairs: &[(&str, &str)]) -> EnvLookup {
     let map: BTreeMap<String, String> = pairs
         .iter()
         .map(|(name, value)| (name.to_string(), value.to_string()))
@@ -293,11 +293,11 @@ fn vars(pairs: &[(&str, &str)]) -> EnvLookup {
     Arc::new(move |name| map.get(name).cloned())
 }
 
-fn path_var() -> String {
+pub(crate) fn path_var() -> String {
     std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string())
 }
 
-fn person_grant() -> Permit {
+pub(crate) fn person_grant() -> Permit {
     Permit::Allowed(AllowedBy::RunConsent {
         at: "2026-01-02T03:04:05Z".to_string(),
         by: BY_PERSON.to_string(),
@@ -306,7 +306,7 @@ fn person_grant() -> Permit {
 
 /// A task worktree (a git repository, with `origin` when given), a home, the run's directory and
 /// a directory outside all of them.
-struct Place {
+pub(crate) struct Place {
     _temp: TempDir,
     home: PathBuf,
     worktree: PathBuf,
@@ -314,7 +314,7 @@ struct Place {
     outside: PathBuf,
 }
 
-fn place(origin: Option<&str>) -> Place {
+pub(crate) fn place(origin: Option<&str>) -> Place {
     let temp = temp();
     let root = temp.path().canonicalize().unwrap();
     let [home, worktree, run_dir, outside] =
@@ -362,11 +362,11 @@ fn wait_key() -> NodeKey {
     NodeKey::new("wait", 1)
 }
 
-fn scratch(place: &Place) -> PathBuf {
+pub(crate) fn scratch(place: &Place) -> PathBuf {
     scratch_dir(&binding(place), &wait_key(), 1)
 }
 
-fn wait_node(
+pub(crate) fn wait_node(
     place: &Place,
     gh: impl Into<PathBuf>,
     probe: SandboxProbe,
@@ -379,7 +379,7 @@ fn wait_node(
 }
 
 /// Starts the one `wait` node, its `with` and any other keys (`extra`) as given.
-fn start_wait(
+pub(crate) fn start_wait(
     node: &WaitNode,
     place: &Place,
     with: &str,
@@ -419,7 +419,7 @@ kind = "success"
     })
 }
 
-fn assert_satisfied(node: &WaitNode) {
+pub(crate) fn assert_satisfied(node: &WaitNode) {
     let finished = node.wait_finished(1);
     let outcome = &finished[0].outcome;
     assert_eq!(
@@ -430,7 +430,7 @@ fn assert_satisfied(node: &WaitNode) {
 }
 
 /// The variables in a `/proc/<pid>/environ` copy.
-fn read_env(path: &Path) -> BTreeMap<String, String> {
+pub(crate) fn read_env(path: &Path) -> BTreeMap<String, String> {
     fs::read(path)
         .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
         .split(|byte| *byte == 0)
@@ -443,7 +443,7 @@ fn read_env(path: &Path) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn names(env: &BTreeMap<String, String>) -> BTreeSet<&str> {
+pub(crate) fn names(env: &BTreeMap<String, String>) -> BTreeSet<&str> {
     env.keys().map(String::as_str).collect()
 }
 

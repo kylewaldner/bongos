@@ -103,6 +103,8 @@ mod runner_codex_tests;
 #[cfg(test)]
 mod runtime_tests;
 #[cfg(test)]
+mod sandbox_scenario_tests;
+#[cfg(test)]
 mod settings_tests;
 #[cfg(test)]
 mod shipped_tests;

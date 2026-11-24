@@ -95,13 +95,13 @@ impl Clock for FakeClock {
     }
 }
 
-const NO_SANDBOX: &str = "bwrap not found (test)";
+pub(crate) const NO_SANDBOX: &str = "bwrap not found (test)";
 
-fn no_sandbox() -> SandboxProbe {
+pub(crate) fn no_sandbox() -> SandboxProbe {
     Arc::new(|_, _| Err(NO_SANDBOX.to_string()))
 }
 
-struct Fixture {
+pub(crate) struct Fixture {
     root: TempDir,
     runner: ProgramRunner,
     clock: Arc<FakeClock>,
@@ -133,7 +133,7 @@ impl Fixture {
     }
 
     /// The `check` node running `script`.
-    fn node(&self, script: &str) -> ProgramNode {
+    pub(crate) fn node(&self, script: &str) -> ProgramNode {
         let definition = definition();
         let declared = definition.node("check").unwrap();
         let worktree = self.path("run-worktree");
@@ -241,7 +241,7 @@ impl Fixture {
     }
 }
 
-fn key() -> NodeKey {
+pub(crate) fn key() -> NodeKey {
     NodeKey::new("check", 1)
 }
 
@@ -1721,7 +1721,7 @@ fn git_metadata_is_checked_unless_bubblewrap_sandboxes_the_run() {
 /// A fixture whose interpreter does not exist, so nothing it starts can run: a start that gets
 /// past the sandbox decision fails at the spawn with `program interpreter missing`, and one that
 /// does not never reaches it. Needs no Python.
-fn without_python(probe: SandboxProbe) -> Fixture {
+pub(crate) fn without_python(probe: SandboxProbe) -> Fixture {
     let root = TempDir::new().unwrap();
     let clock = FakeClock::new();
     let interpreter = Interpreter {

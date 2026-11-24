@@ -192,4 +192,4 @@ fn workflow_names(definitions: &Path) -> Vec<OsString> {
 
 #[cfg(test)]
 #[path = "sandbox_switch_tests.rs"]
-mod tests;
+pub(crate) mod tests;
