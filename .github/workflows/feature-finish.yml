@@ -2,10 +2,14 @@
 # run feature-finish.yml -f ticket=<feature dir>` (plus the redirect inputs only when they are not their production
 # default). The run name ends with the ticket as its last word: triage ties a run to its ticket by it.
 #
-# The job is the local finish job (run.py --runner --kind finish, on the finisher row): three opus reviewers, UI
+# The job is the local finish job (run.py --runner --kind finish, on the runner-finisher row while the finisher
+# setting is on, else on runner-main): three opus reviewers, UI
 # verification when the feature has a design directory, gate.py light --fmt-all, then gate.py full --baseline, then
 # merge_main.py under refs/locks/main-merge. When the baseline rules call for the whole suite it runs here, in one
-# build on this runner (the frame installs mesa-vulkan-drivers, which the GPU tests need). Incremental builds are off.
+# build on this runner (the frame installs mesa-vulkan-drivers, which the GPU tests need; the runner test exclusion
+# list reaches nextest through the entry script). Incremental builds are off. A finish that returns (findings left
+# after its fix rounds) records a fix step and cedes with that step as next: triage then starts feature-implement,
+# and feature-finish again once the fix step merged.
 # The frame (claim, setup, snapshots, final step) is the pipeline-job action.
 #
 # Caps are triage's (cap.feature-finish). The concurrency group is the one feature-implement uses, so a finish and an

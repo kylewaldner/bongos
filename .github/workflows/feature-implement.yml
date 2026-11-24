@@ -9,9 +9,9 @@
 # the job then ends and triage starts the next run. The frame (claim, setup, snapshots, final step) is the
 # pipeline-job action.
 #
-# Caps are triage's (cap.feature-implement, counted in jobs; a two-lane run counts 2). The concurrency group below only
-# keeps two runs of one ticket from overlapping: a second dispatch waits for the first run to end, and a newer pending
-# one replaces an older pending one.
+# Caps are triage's (cap.feature-implement, counted in jobs; a two-lane run counts 2). Triage never dispatches a ticket
+# that has a live run; the concurrency group below is only a guard against a dispatch by hand overlapping a run of
+# the same ticket (it waits for that run to end; a newer pending one replaces an older pending one).
 name: feature-implement
 run-name: feature-implement ${{ inputs.ticket }}
 

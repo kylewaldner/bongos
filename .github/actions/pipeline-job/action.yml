@@ -220,8 +220,9 @@ runs:
         extra='mesa-vulkan-drivers zstd'
         if [ "$CACHE_VARIANT" != release ]; then extra="$extra mold"; fi
         # The smoke harness (gate.py's smoke, the finish job's UI verification): Xvfb, xdotool, import, bwrap, strace
-        # (script/bongos/setup-machine's list). bwrap needs unprivileged user namespaces, which 24.04 restricts.
-        extra="$extra xvfb xdotool imagemagick bubblewrap strace"
+        # (script/bongos/setup-machine's harness list, pipewire and the desktop portal included, as release-check.yml
+        # installs it). bwrap needs unprivileged user namespaces, which 24.04 restricts.
+        extra="$extra xvfb xdotool imagemagick bubblewrap strace pipewire xdg-desktop-portal"
         if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
           sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
         fi
