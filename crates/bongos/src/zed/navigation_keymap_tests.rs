@@ -4,8 +4,8 @@
 //! minibuffer strip, and the navigation settings are defined by default.
 
 use gpui::{
-    AppContext as _, Focusable as _, KeyBinding, KeyContext, Keymap, Keystroke,
-    TestAppContext, VisualTestContext, WindowHandle,
+    AppContext as _, Focusable as _, KeyBinding, KeyContext, Keymap, Keystroke, TestAppContext,
+    VisualTestContext, WindowHandle,
 };
 use project::Project;
 use settings::{KeybindSource, KeymapFile, Settings as _, SettingsStore};
@@ -179,7 +179,12 @@ async fn session_keys_beat_the_minibuffer_row_and_the_emacs_kill_line(cx: &mut T
         }
         for (input, action) in FIND_KEYS {
             let names = resolve(&keymap, input, &FIND).0;
-            assert_eq!(names.first(), Some(action), "{}: {input}", platform.overrides);
+            assert_eq!(
+                names.first(),
+                Some(action),
+                "{}: {input}",
+                platform.overrides
+            );
         }
         // Outside the session the same keys keep their Emacs meaning.
         for (input, action) in FIND_KEYS {
