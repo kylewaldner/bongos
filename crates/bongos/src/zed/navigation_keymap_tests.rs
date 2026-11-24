@@ -4,8 +4,8 @@
 //! minibuffer strip, and the navigation settings are defined by default.
 
 use gpui::{
-    AppContext as _, Focusable as _, KeyBinding, KeyContext, Keymap, Keystroke, TestAppContext,
-    VisualTestContext, WindowHandle,
+    Focusable as _, KeyBinding, KeyContext, Keymap, Keystroke, TestAppContext, VisualTestContext,
+    WindowHandle,
 };
 use project::Project;
 use settings::{KeybindSource, KeymapFile, Settings as _, SettingsStore};
