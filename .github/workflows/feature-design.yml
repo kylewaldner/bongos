@@ -14,6 +14,10 @@ on:
         description: The feature directory to design (for example 17-navigation-pickers)
         required: true
         type: string
+      coord_ref:
+        description: "Branch of the coordination repository with the pipeline code (main in production)"
+        default: main
+        type: string
       coord_base:
         description: Branch of the coordination repository that claim and design pull requests target
         type: string
@@ -26,6 +30,10 @@ on:
         description: Prefix of the state branches, lock refs and snapshot branches (empty in production)
         type: string
         default: ''
+      index_tag:
+        description: "Release tag of the code search index"
+        default: colgrep-index
+        type: string
 
 permissions:
   contents: read
@@ -51,6 +59,8 @@ jobs:
           claude_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           coord_token: ${{ secrets.COORD_TOKEN }}
           coord_repo: ${{ secrets.COORD_REPO }}
+          coord_ref: ${{ inputs.coord_ref }}
           coord_base: ${{ inputs.coord_base }}
           app_base: ${{ inputs.app_base }}
           state_prefix: ${{ inputs.state_prefix }}
+          index_tag: ${{ inputs.index_tag }}
