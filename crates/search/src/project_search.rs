@@ -1948,7 +1948,7 @@ impl ProjectSearchView {
         }
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    /// The editor that shows the results multibuffer.
     pub fn results_editor(&self) -> &Entity<Editor> {
         &self.results_editor
     }

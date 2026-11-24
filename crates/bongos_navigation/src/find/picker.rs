@@ -2,7 +2,12 @@
 //! what is typed, previewed in the pane a confirm would open in, and opened with the match
 //! selected.
 
-use std::{any::Any, cell::RefCell, ops::Range, rc::Rc};
+use std::{
+    any::Any,
+    cell::{Cell, RefCell},
+    ops::Range,
+    rc::Rc,
+};
 
 use bongos_emacs::mark;
 use bongos_minibuffer::{
@@ -20,6 +25,7 @@ use workspace::{Pane, Workspace, searchable::SearchableItem as _};
 use crate::find::engine::{self, FindRequest, FindRow};
 use crate::find::export;
 use crate::find::flag_history;
+use crate::find::replace;
 use crate::preview::{Preview, PreviewSession, PreviewTarget};
 use crate::registry;
 use crate::target::{self, PaneChoice};
@@ -33,7 +39,13 @@ pub const HISTORY: &str = "find-in-files";
 
 /// The prompt in front of the input: `Find ` and the lit flags, as `Find [.*][Aa][w][buf]: `.
 pub fn prompt(flags: &Flags) -> String {
-    format!("Find {}: ", flags.prompt_marks())
+    prompt_for(flags, false)
+}
+
+/// The prompt, with `[replace]` after the flags in replace mode.
+pub fn prompt_for(flags: &Flags, replace: bool) -> String {
+    let mode = if replace { replace::PROMPT_MARK } else { "" };
+    format!("Find {}{mode}: ", flags.prompt_marks())
 }
 
 /// How a picker starts.
@@ -46,6 +58,8 @@ pub struct Start {
     pub flags: Flags,
     /// The directory every search stays in, as a project path.
     pub base_dir: Option<String>,
+    /// Whether RET replaces the matches instead of opening one.
+    pub replace: bool,
 }
 
 /// One open find in files picker.
@@ -57,6 +71,10 @@ pub struct FindPicker {
     seed: String,
     base_dir: Option<String>,
     flags: RefCell<Flags>,
+    /// Replace mode: RET replaces every match instead of opening one.
+    replace: Cell<bool>,
+    /// Whether the search of the current input has ended, so its rows are all there.
+    settled: Cell<bool>,
     /// What the input holds.
     input: RefCell<String>,
     /// The buffers a search of the open buffers covers, collected when the flag is set.
@@ -74,6 +92,19 @@ impl registry::SessionHandle for FindPicker {
 }
 
 impl FindPicker {
+    /// Whether the picker is in replace mode: RET asks for a replacement of every match.
+    pub fn replace_mode(&self) -> bool {
+        self.replace.get()
+    }
+
+    /// Switches replace mode and shows it in the prompt.
+    pub fn set_replace_mode(&self, replace: bool, window: &mut Window, cx: &mut App) {
+        self.replace.set(replace);
+        if let Some(handle) = self.handle() {
+            handle.set_prompt(prompt_for(&self.flags.borrow(), replace), window, cx);
+        }
+    }
+
     /// The input the picker opened with.
     pub fn seed(&self) -> &str {
         &self.seed
@@ -113,7 +144,7 @@ impl FindPicker {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let prompt = prompt(&flags);
+        let prompt = prompt_for(&flags, self.replace.get());
         self.flags.replace(flags);
         self.buffers.replace(buffers);
         if let Some(handle) = self.handle() {
@@ -161,7 +192,15 @@ impl FindPicker {
         self.set_flags(flags, buffers, window, cx);
     }
 
+    /// Whether the search of the current input has ended (or never started), so a picker without
+    /// a row has no match.
+    pub fn settled(&self) -> bool {
+        self.settled.get()
+    }
+
     fn set_status(&self, status: engine::FindStatus, cx: &mut App) {
+        self.settled
+            .set(!matches!(status, engine::FindStatus::Searching));
         if let Some(handle) = self.handle() {
             handle.set_status(status.label(), cx);
         }
@@ -227,6 +266,16 @@ impl FindPicker {
         };
         workspace.update(cx, |workspace, cx| {
             export::open(self, workspace, window, cx)
+        });
+    }
+
+    /// Asks for the replacement of every match and opens the decision view on the first one.
+    fn replace(&self, window: &mut Window, cx: &mut App) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            replace::ask(self, false, workspace, window, cx)
         });
     }
 
@@ -373,13 +422,14 @@ pub fn open_with(
         select_input,
         flags,
         base_dir,
+        replace,
     } = start;
     let buffers = if flags.open_buffers {
         open_buffers(workspace, cx)
     } else {
         Vec::new()
     };
-    let prompt = prompt(&flags);
+    let prompt = prompt_for(&flags, replace);
     let this = cx.entity();
     let picker = Rc::new(FindPicker {
         workspace: this.downgrade(),
@@ -387,6 +437,8 @@ pub fn open_with(
         seed: seed.clone(),
         base_dir: base_dir.clone(),
         flags: RefCell::new(flags),
+        replace: Cell::new(replace),
+        settled: Cell::new(false),
         input: RefCell::new(seed.clone()),
         buffers: RefCell::new(buffers),
         preview: RefCell::new(None),
@@ -398,6 +450,8 @@ pub fn open_with(
         let picker = Rc::downgrade(&picker);
         move |query: String, cancel, cx: &mut App| {
             let (flags, buffers) = picker.upgrade().map_or_else(Default::default, |picker| {
+                // A new search starts: its rows are not all there until it reports its end.
+                picker.settled.set(false);
                 (picker.flags(), picker.buffers.borrow().clone())
             });
             let mut request = FindRequest::new(&query, flags).buffers(buffers);
@@ -451,7 +505,9 @@ pub fn open_with(
             let picker = picker.clone();
             move |outcome, window, cx| {
                 picker.remember_flags(cx);
-                if let Outcome::Candidate(value) = outcome {
+                if picker.replace_mode() {
+                    picker.replace(window, cx);
+                } else if let Outcome::Candidate(value) = outcome {
                     if matches!(value.downcast_ref::<FindRow>(), Some(FindRow::More { .. })) {
                         picker.export(window, cx);
                     } else {

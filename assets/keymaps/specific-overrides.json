@@ -83,6 +83,8 @@
     "context": "Minibuffer > FindInFiles > Editor",
     "bindings": {
       "ctrl-c ctrl-o": "navigation::ExportToMultibuffer",
+      "ctrl-c ctrl-r": "navigation::ReplaceAll",
+      "alt-%": "navigation::ToggleReplace",
     },
   },
   // An isearch session (the `Isearch` context of its prompt). Without `Minibuffer`, so the keys

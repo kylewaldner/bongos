@@ -31,6 +31,7 @@ pub(crate) async fn setup(
         command_palette_hooks::init(cx);
         editor::init(cx);
         bongos_minibuffer::init(cx);
+        bongos_query_replace::init(cx);
         crate::init(cx);
         params
     });

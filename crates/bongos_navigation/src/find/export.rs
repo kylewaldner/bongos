@@ -1,10 +1,12 @@
 //! Exporting find in files results to a multibuffer.
 
-use gpui::{Context, Window};
+use gpui::{Context, Entity, Task, Window};
 use project::search::SearchQuery;
 use search::ProjectSearchView;
+use search::project_search::ProjectSearch;
 use workspace::Workspace;
 
+use crate::find::engine::FindRequest;
 use crate::find::picker::FindPicker;
 use crate::registry;
 
@@ -25,22 +27,39 @@ pub(crate) fn open(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    let Some(query) = query(picker, workspace, cx) else {
+    let request = picker.request();
+    if query(&request, workspace, cx).is_none() {
         return;
-    };
+    }
     if let Some(handle) = picker.handle() {
         handle.close(window, cx);
     }
-    ProjectSearchView::open_with_query(workspace, query, window, cx).detach();
+    if let Some(search) = search(&request, workspace, window, cx) {
+        search.detach();
+    }
 }
 
-/// The project search for what the picker holds, or `None` for empty text or an invalid query.
+/// Opens a project search item that runs `request` over every match. The task resolves with the
+/// search once it has ended, and with `None` when the item is closed before that. `None` when
+/// there is no valid query.
+pub(crate) fn search(
+    request: &FindRequest,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> Option<Task<Option<Entity<ProjectSearch>>>> {
+    let query = query(request, workspace, cx)?;
+    Some(ProjectSearchView::open_with_query(
+        workspace, query, window, cx,
+    ))
+}
+
+/// The project search for `request`, or `None` for empty text or an invalid query.
 fn query(
-    picker: &FindPicker,
+    request: &FindRequest,
     workspace: &Workspace,
     cx: &Context<Workspace>,
 ) -> Option<SearchQuery> {
-    let request = picker.request();
     if request.text.is_empty() {
         return None;
     }
