@@ -1,0 +1,17 @@
+# Phase 0 measurement (scratch branch only, never merged): does concurrency `queue: max` work on a Free account.
+name: p0-queue
+on:
+  push:
+    branches: [gh-runners-phase0]
+    paths: ['p0/queue-trigger.txt', '.github/workflows/p0-queue.yml']
+permissions:
+  contents: read
+concurrency:
+  group: p0-queue
+  cancel-in-progress: false
+  queue: max
+jobs:
+  wait:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "queue run for ${{ github.sha }}"; sleep 75

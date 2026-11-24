@@ -1,0 +1,55 @@
+# Phase 0 measurement (scratch branch only, never merged): macOS release bundle.
+name: p0-macos
+on:
+  push:
+    branches: [gh-runners-phase0]
+    paths: ['.github/workflows/p0-macos.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [macos-26]
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 345
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Machine
+        run: |
+          sysctl -n hw.ncpu hw.memsize machdep.cpu.brand_string; sw_vers; df -h /; uname -m
+          echo "MEASURE macos root_avail_gb=$(df -g / | awk 'NR==2{print $4}')"
+      - name: Install tools
+        run: |
+          set -euo pipefail
+          s=$(date +%s)
+          tools="$RUNNER_TEMP/dmg-tools"
+          npm install --prefix "$tools" --no-audit --no-fund dmg-license@1.0.11 minimist@1.2.8
+          echo "$tools/node_modules/.bin" >> "$GITHUB_PATH"
+          rustup toolchain install
+          rustup target add aarch64-apple-darwin
+          echo "MEASURE macos_tools_seconds=$(( $(date +%s)-s ))"
+      - name: Cache Rust dependencies
+        id: cache
+        uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        with:
+          shared-key: p0-release-aarch64-apple-darwin
+          cache-on-failure: true
+      - name: Cache result
+        run: echo "MEASURE macos cache_hit=${{ steps.cache.outputs.cache-hit }} attempt=${{ github.run_attempt }}"; du -sm target ~/.cargo/registry 2>/dev/null | sed 's/^/MEASURE macos restored_size_mb /'
+      - name: Build the disk image
+        run: |
+          set -uo pipefail
+          s=$(date +%s)
+          # sample memory in the background (vm_stat pages used)
+          ( while true; do echo "$(date +%s) $(vm_stat | awk '/Pages active|Pages wired|Pages occupied by compressor/{gsub("\\.","",$NF); t+=$NF} END{print t*16384/1048576}')" >> "$RUNNER_TEMP/mem.log"; sleep 20; done ) &
+          script/bongos/bundle-mac --target aarch64-apple-darwin --out "$RUNNER_TEMP/dist"
+          rc=$?
+          echo "MEASURE macos step=bundle-mac seconds=$(( $(date +%s)-s )) exit=$rc attempt=${{ github.run_attempt }}"
+          awk '{if($2>m)m=$2} END{print "MEASURE macos peak_mem_mb=" m}' "$RUNNER_TEMP/mem.log"
+          ls -la "$RUNNER_TEMP/dist" | sed 's/^/MEASURE macos dist /'
+          du -sm target | sed 's/^/MEASURE macos target_mb /'; df -g / | tail -1

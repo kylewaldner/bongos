@@ -1,0 +1,62 @@
+# Phase 0 measurement (scratch branch only, never merged): Linux release build and bundle.
+name: p0-release-linux
+on:
+  push:
+    branches: [gh-runners-phase0]
+    paths: ['.github/workflows/p0-release-linux.yml', 'p0/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 345
+    env:
+      BONGOS_WORKSPACE: /mnt/bongos-workspace
+      RUSTUP_HOME: /mnt/bongos-workspace/rustup
+      CARGO_HOME: /mnt/bongos-workspace/cargo
+      CARGO_TARGET_DIR: /mnt/bongos-workspace/target
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Start sampling
+        run: . p0/lib.sh; echo "MEASURE start root_avail_mb=$(avail_root)"; start_watch
+      - name: Install build dependencies
+        run: |
+          . p0/lib.sh
+          timed apt sh -c 'sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends gcc g++ libasound2-dev libfontconfig-dev libgit2-dev libglib2.0-dev libssl-dev libva-dev libvulkan1 libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev make cmake clang lld llvm jq git curl gettext-base elfutils libsqlite3-dev musl-tools musl-dev build-essential pkg-config python3 >/dev/null'
+          if ! command -v llvm-objcopy >/dev/null; then sudo ln -s "$(ls /usr/bin/llvm-objcopy-* | sort -V | tail -n1)" /usr/local/bin/llvm-objcopy; fi
+      - name: Install the Rust toolchain
+        run: |
+          . p0/lib.sh
+          sudo mkdir -p /mnt/bongos-workspace; sudo chown "$USER" /mnt/bongos-workspace
+          mkdir -p "$CARGO_HOME" "$CARGO_TARGET_DIR"
+          timed rustup-install rustup toolchain install
+      - name: Cache Rust dependencies
+        id: cache
+        uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        with:
+          workspaces: ". -> ../../../../../mnt/bongos-workspace/target"
+          shared-key: p0-release
+          cache-on-failure: true
+      - name: Cache result
+        run: |
+          echo "MEASURE cache_hit=${{ steps.cache.outputs.cache-hit }} attempt=${{ github.run_attempt }}"
+          du -sm "$CARGO_TARGET_DIR" "$CARGO_HOME" 2>/dev/null | sed 's/^/MEASURE restored_size_mb /'
+      - name: Build the tarball
+        run: |
+          set -euo pipefail
+          . p0/lib.sh
+          . script/bongos/env.sh
+          s=$(date +%s)
+          /usr/bin/time -v script/bongos/bundle-linux --out "$RUNNER_TEMP/dist" 2> "$RUNNER_TEMP/time.txt" || echo "MEASURE bundle_failed=$?"
+          echo "MEASURE step=bundle-linux seconds=$(( $(date +%s)-s )) attempt=${{ github.run_attempt }}"
+          grep -E "Maximum resident|Elapsed" "$RUNNER_TEMP/time.txt" | sed 's/^/MEASURE time /'
+          ls -la "$RUNNER_TEMP/dist" | sed 's/^/MEASURE dist /'
+      - name: Sizes and peaks
+        if: always()
+        run: |
+          . p0/lib.sh
+          du -sm "$CARGO_TARGET_DIR" "$CARGO_TARGET_DIR"/release 2>/dev/null | sed 's/^/MEASURE size_mb /'
+          report_watch; df -h /
