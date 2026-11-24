@@ -9,7 +9,7 @@
 #     job:
 #       name: step lane-a                  # a lane job's name says lane-a or lane-b (the liveness check reads it)
 #       runs-on: ubuntu-24.04              # the same image as the runner_image input
-#       timeout-minutes: 345               # the agent step stops near 315 minutes, so the final step still runs
+#       timeout-minutes: 345               # run.py stops at 300 minutes; job.sh shows the final step ends by about 329
 #       permissions:
 #         contents: read                   # the index download uses the job's own token
 #       steps:
@@ -95,7 +95,7 @@ inputs:
     default: '3.5'
   run_timeout_minutes:
     description: "The agent step is stopped this many minutes after the job's start"
-    default: '315'
+    default: '300'
   claude_version:
     description: "Pinned Claude CLI version"
     default: 2.1.331
@@ -400,7 +400,8 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.coord_token }}
         COORD_REPO: ${{ inputs.coord_repo }}
-      run: bash "$AUTOPILOT_PRIVATE/autopilot/runner/job.sh" claim
+      # exec: a cancel or timeout signal reaches job.sh itself (its trap), not only this wrapper shell
+      run: exec bash "$AUTOPILOT_PRIVATE/autopilot/runner/job.sh" claim
 
     - name: Run the job
       if: steps.claim.outputs.claimed == 'true'
@@ -409,7 +410,8 @@ runs:
         GH_TOKEN: ${{ inputs.coord_token }}
         COORD_REPO: ${{ inputs.coord_repo }}
         CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_token }}
-      run: bash "$AUTOPILOT_PRIVATE/autopilot/runner/job.sh" run
+      # exec: a cancel or timeout signal reaches job.sh (its trap passes it on to run.py), not only this wrapper shell
+      run: exec bash "$AUTOPILOT_PRIVATE/autopilot/runner/job.sh" run
 
     - name: Final step
       id: final
