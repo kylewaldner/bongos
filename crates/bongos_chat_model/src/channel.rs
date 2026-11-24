@@ -2,10 +2,12 @@
 //! [`report`] is the wire format (one request line and one reply line per connection),
 //! [`translate`] turns an agent's hook input into a report without keeping any conversation content,
 //! [`state`] folds reports and terminal signals into a chat's live state, exact or estimated, and
-//! [`client`] is the reporter process that sends one report.
+//! [`client`] is the reporter process that sends one report. [`request`] is the request line a chat
+//! sends to ask bongos something and wait for the answer.
 
 pub mod client;
 pub mod report;
+pub mod request;
 pub mod state;
 pub mod translate;
 

@@ -99,17 +99,39 @@ fn wall_clock_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// The socket, chat and token a launch exports to its process.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelTarget {
+    pub socket: String,
+    pub chat: ChatId,
+    pub token: Token,
+}
+
+impl ChannelTarget {
+    /// Reads the socket path, chat id and token through `env`; `None` when any is missing or
+    /// invalid.
+    pub fn from_env(env: &dyn Fn(&str) -> Option<String>) -> Option<Self> {
+        let socket = env(CHANNEL_SOCKET_ENV).filter(|socket| !socket.is_empty())?;
+        let chat = env(CHAT_ID_ENV).as_deref().and_then(ChatId::new)?;
+        let token = env(CHANNEL_TOKEN_ENV).as_deref().and_then(Token::new)?;
+        Some(Self {
+            socket,
+            chat,
+            token,
+        })
+    }
+}
+
 /// The reporter, given its process. Sends at most one report; every failure ends it quietly.
 pub fn run(mode: &str, args: &[String], process: Process<'_>) {
     let at = (process.now_ms)();
     let env = process.env;
-    let Some(socket) = env(CHANNEL_SOCKET_ENV).filter(|socket| !socket.is_empty()) else {
-        return;
-    };
-    let Some(chat) = env(CHAT_ID_ENV).as_deref().and_then(ChatId::new) else {
-        return;
-    };
-    let Some(token) = env(CHANNEL_TOKEN_ENV).as_deref().and_then(Token::new) else {
+    let Some(ChannelTarget {
+        socket,
+        chat,
+        token,
+    }) = ChannelTarget::from_env(env)
+    else {
         return;
     };
     let identity = ReportIdentity { chat, token, at };
@@ -155,32 +177,39 @@ fn build_report(
     }
 }
 
-/// Connects, writes `line` and waits for the reply line, each step bounded by `timeouts`.
+/// Connects to `socket`, waiting at most `timeout`; `None` when the connect failed or was late.
 #[cfg(unix)]
-fn send(socket: &str, line: &[u8], timeouts: Timeouts) {
+pub(crate) fn connect(socket: &str, timeout: Duration) -> Option<std::os::unix::net::UnixStream> {
     use std::os::unix::net::UnixStream;
     use std::sync::mpsc;
-    use std::time::Instant;
-
-    use super::report::MAX_LINE_BYTES;
 
     // `std` has no connect timeout for a Unix socket, and a connect to a listener whose backlog is
-    // full blocks. The connect runs on its own thread; when it is late the reporter gives up and the
-    // thread ends with the process.
+    // full blocks. The connect runs on its own thread; when it is late the caller gives up and the
+    // thread ends on its own (or with the process).
     let (sender, receiver) = mpsc::channel();
     let path = socket.to_string();
     let spawned = std::thread::Builder::new()
         .name("chat-report-connect".to_string())
         .spawn(move || {
             if let Err(mpsc::SendError(late)) = sender.send(UnixStream::connect(path)) {
-                // The reporter stopped waiting; a late connection is closed unused.
+                // The caller stopped waiting; a late connection is closed unused.
                 drop(late);
             }
         });
     if spawned.is_err() {
-        return;
+        return None;
     }
-    let Ok(Ok(mut stream)) = receiver.recv_timeout(timeouts.connect) else {
+    receiver.recv_timeout(timeout).ok()?.ok()
+}
+
+/// Connects, writes `line` and waits for the reply line, each step bounded by `timeouts`.
+#[cfg(unix)]
+fn send(socket: &str, line: &[u8], timeouts: Timeouts) {
+    use std::time::Instant;
+
+    use super::report::MAX_LINE_BYTES;
+
+    let Some(mut stream) = connect(socket, timeouts.connect) else {
         return;
     };
     if stream.set_write_timeout(Some(timeouts.reply)).is_err() {
