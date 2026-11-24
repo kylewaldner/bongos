@@ -26,27 +26,8 @@ name: release-check
 
 on:
   push:
-    branches: [main]
-  workflow_dispatch:
-    inputs:
-      sha:
-        description: "Commit to check (default: the tip of the chosen branch)"
-        default: ''
-      coord_ref:
-        description: "Branch of the coordination repository the job checks out for pipeline code"
-        default: main
-      coord_base:
-        description: "Branch of the coordination repository that queue pull requests target"
-        default: main
-      app_base:
-        description: "Branch of this repository that merges target"
-        default: main
-      state_prefix:
-        description: "Prefix of the state branches (empty in production)"
-        default: ''
-      index_tag:
-        description: "Release tag of the code search index (not used by this job; checked with the others)"
-        default: colgrep-index
+    branches: [gh-runners-test-release]
+    paths: ['.github/workflows/release-check.yml']
 
 run-name: release check ${{ inputs.sha || github.sha }}
 
@@ -60,12 +41,12 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IN_SHA: ${{ inputs.sha || github.sha }}
-  IN_COORD_REF: ${{ inputs.coord_ref || 'main' }}
-  IN_COORD_BASE: ${{ inputs.coord_base || 'main' }}
-  IN_APP_BASE: ${{ inputs.app_base || 'main' }}
-  IN_STATE_PREFIX: ${{ inputs.state_prefix || '' }}
-  IN_INDEX_TAG: ${{ inputs.index_tag || 'colgrep-index' }}
+  IN_SHA: ${{ github.sha }}
+  IN_COORD_REF: github-runners-build
+  IN_COORD_BASE: gh-runners-test-base
+  IN_APP_BASE: gh-runners-test-base
+  IN_STATE_PREFIX: zz-test/
+  IN_INDEX_TAG: colgrep-index-test
 
 jobs:
   release:
