@@ -275,6 +275,9 @@ runs:
         if [ -n "$BONGOS_RELEASE_BUILD" ]; then echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"; fi
         # shellcheck disable=SC1091
         . script/bongos/env.sh
+        # env.sh names these under BONGOS_WORKSPACE but creates none of them; gate.py check refuses a missing smoke
+        # scratch, and the scripts write their temp files and logs there
+        mkdir -p "$BONGOS_SMOKE_SCRATCH" "$BONGOS_TMPDIR" "${BONGOS_LOG_DIR:-$BONGOS_WORKSPACE/scratch/logs}"
         env | grep -E '^(CARGO_|RUSTUP_HOME=|RUSTC_BOOTSTRAP=|BONGOS_|CC=|CXX=)' | grep -v '^CARGO_BUILD_JOBS=' >> "$GITHUB_ENV"
         echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
         echo "rel=$(realpath -m --relative-to="$GITHUB_WORKSPACE" "$CARGO_TARGET_DIR")" >> "$GITHUB_OUTPUT"
