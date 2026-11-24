@@ -1,0 +1,83 @@
+# TEMPORARY test copy of bug-fix.yml (c2 disk test): push trigger on the test branch only, every redirect at a test value.
+# Fixes one entry of a bug queue. One workflow, two queues chosen by the `queue` input:
+#   fixes    plans/FIXES.md          job kind `fix`          prompt fix.md
+#   release  plans/RELEASE-FIXES.md  job kind `release_fix`  prompt release_fix.md
+# Each job: a reproducing test, the fix, the gates with the whole suite in this job (mesa-vulkan-drivers is installed by
+# the frame, which makes the GPU tests pass), an opus review, and the merge into the base branch through merge_main.py.
+#
+# Started by ticket-triage (`workflow_dispatch` with the queue entry); never by a push. Release entries are dispatched
+# only while runner.toml's release_is_authority is on. Everything the job does is the pipeline-job frame: claim
+# (`<queue>-<entry id>`), run, final step. The coordination repository is cloned by the frame from the COORD_REPO
+# secret, so nothing here names it.
+#
+# Concurrency: one run at a time for both queues (runner.toml cap.bug-fix = 1, enforced by triage), never cancelled in
+# progress.
+name: bug-fix
+
+# A run's display title ends with its ticket as the last word (triage matches runs to tickets by it); a queue ticket
+# is `<queue>-<entry id lowercased>`.
+run-name: zz test bug-fix fixes-zz-test-fix31
+
+on:
+  push:
+    branches: [gh-runners-test-c2-disk-2]
+    paths: ['.github/workflows/zz-bug-fix-c2.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zz-bug-fix-c2-disk
+  cancel-in-progress: false
+
+jobs:
+  job:
+    name: bug-fix fixes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 345
+    permissions:
+      contents: read
+    steps:
+      # Only loads the action; the action checks the workspace out again at app_base with full history.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the inputs
+        env:
+          IN_TICKET: fixes-zz-test-fix31
+          IN_QUEUE: fixes
+          IN_ENTRY: zz-test-fix31
+        run: |
+          set -euo pipefail
+          case "$IN_QUEUE" in
+            fixes|release) ;;
+            *) echo "::error::queue must be fixes or release; got '$IN_QUEUE'"; exit 1 ;;
+          esac
+          case "$IN_ENTRY" in
+            ''|*[!A-Za-z0-9-]*) echo "::error::entry is not a queue entry id"; exit 1 ;;
+          esac
+          want=$(printf '%s-%s' "$IN_QUEUE" "$IN_ENTRY" | tr '[:upper:]' '[:lower:]')
+          if [ "$IN_TICKET" != "$want" ]; then
+            echo "::error::ticket '$IN_TICKET' is not the lowercase form of $IN_QUEUE-$IN_ENTRY"
+            exit 1
+          fi
+
+      - uses: ./.github/actions/pipeline-job
+        with:
+          kind: fix
+          # the entry id keeps its own case: the claim and the state branch match it exactly
+          ticket: fixes-zz-test-fix31
+          claude_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          coord_token: ${{ secrets.COORD_TOKEN }}
+          coord_repo: ${{ secrets.COORD_REPO }}
+          coord_ref: s22-disk
+          coord_base: gh-runners-test-base-c2
+          app_base: gh-runners-test-base-c2
+          state_prefix: zz-testc2/
+          index_tag: colgrep-index-test
+          colgrep_version: ${{ vars.COLGREP_VERSION }}  # the index workflows' pin
+          # Builds on the dependency cache of the unified-features dev build (cache-warm's dev-unified-ubuntu-24.04),
+          # read only; no incremental builds (the action's default for every kind but step).
+          cache_variant: dev-unified
+          runner_image: ubuntu-24.04
