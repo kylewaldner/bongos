@@ -1,0 +1,79 @@
+# Phase 0 measurement (scratch branch only, never merged): disk removal experiment and the headless token check.
+name: p0-disk-token
+on:
+  push:
+    branches: [gh-runners-phase0]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  disk:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [ubuntu-24.04, ubuntu-22.04]
+    runs-on: ${{ matrix.image }}
+    steps:
+      - name: Machine
+        run: |
+          set -x
+          cat /etc/os-release | head -3; nproc; free -m; df -h; df -m --output=target,avail,size,fstype
+          lsblk; mount | grep -E ' / | /mnt ' || true; ls -la /mnt || true
+          swapon --show || true; docker --version; docker images --format '{{.Size}} {{.Repository}}' | wc -l
+          echo "MEASURE image=${{ matrix.image }} root_avail_mb=$(df -m --output=avail / | tail -1 | tr -d ' ') mnt_avail_mb=$(df -m --output=avail /mnt 2>/dev/null | tail -1 | tr -d ' ') mnt_dev=$(df --output=source /mnt 2>/dev/null | tail -1)"
+      - name: Sizes of removal candidates
+        run: |
+          for p in /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift /opt/microsoft /usr/lib/jvm /usr/local/share/powershell /opt/az /usr/lib/google-cloud-sdk /usr/lib/firefox /opt/google /usr/local/share/chromium /home/linuxbrew /usr/local/aws-cli /usr/local/julia* /var/lib/docker /usr/local/lib/node_modules /usr/share/miniconda /usr/local/n /opt/pipx /usr/local/.ghcup /usr/share/gradle* /usr/local/graalvm /swapfile /mnt/swapfile; do
+            [ -e "$p" ] && echo "SIZE $p $(sudo du -sm "$p" 2>/dev/null | cut -f1) MB"
+          done
+      - name: Remove one at a time and measure
+        run: |
+          avail() { df -m --output=avail / | tail -1 | tr -d ' '; }
+          for p in /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift /opt/microsoft /usr/lib/jvm /usr/local/share/powershell /opt/az /usr/lib/google-cloud-sdk /usr/lib/firefox /opt/google /usr/local/share/chromium /home/linuxbrew /usr/local/aws-cli /usr/share/miniconda; do
+            [ -e "$p" ] || { echo "REMOVE $p absent"; continue; }
+            b=$(avail); s=$(date +%s.%N)
+            sudo rm -rf "$p"
+            e=$(date +%s.%N); a=$(avail)
+            echo "REMOVE ${{ matrix.image }} $p freed_mb=$((a-b)) seconds=$(echo "$e - $s" | bc)"
+          done
+          echo "MEASURE after_removals root_avail_mb=$(avail)"
+      - name: Docker images
+        run: |
+          avail() { df -m --output=avail / | tail -1 | tr -d ' '; }
+          b=$(avail); s=$(date +%s.%N)
+          sudo docker system prune -af >/dev/null 2>&1 || true
+          e=$(date +%s.%N)
+          echo "REMOVE ${{ matrix.image }} docker-prune freed_mb=$(( $(avail)-b )) seconds=$(echo "$e - $s" | bc)"
+      - name: Swap file
+        run: |
+          swapon --show
+          avail() { df -m --output=avail /mnt 2>/dev/null | tail -1 | tr -d ' '; }
+          b=$(avail); s=$(date +%s.%N)
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile
+          e=$(date +%s.%N)
+          echo "REMOVE ${{ matrix.image }} swapfile mnt_freed_mb=$(( $(avail)-b )) seconds=$(echo "$e - $s" | bc)"
+          df -h / /mnt
+      - name: Final
+        run: |
+          echo "MEASURE final ${{ matrix.image }} root_avail_mb=$(df -m --output=avail / | tail -1 | tr -d ' ') mnt_avail_mb=$(df -m --output=avail /mnt 2>/dev/null | tail -1 | tr -d ' ')"
+          df -h
+  token:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Headless claude with only the token, clean HOME
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          set -x
+          [ -z "${ANTHROPIC_API_KEY:-}" ] && echo "MEASURE api_key_unset=yes"
+          s=$(date +%s); npm install -g @anthropic-ai/claude-code >/dev/null 2>&1; echo "MEASURE claude_install_seconds=$(( $(date +%s)-s ))"
+          claude --version
+          h=$(mktemp -d)
+          s=$(date +%s)
+          env -i HOME="$h" PATH="$PATH" CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" \
+            claude -p "Reply with the single word ok" --model haiku --effort low --permission-mode auto --output-format json > "$h/out.json" 2> "$h/err.txt" || echo "MEASURE claude_exit_nonzero=$?"
+          echo "MEASURE claude_seconds=$(( $(date +%s)-s ))"
+          python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("MEASURE result=",d.get("result"),"is_error=",d.get("is_error"),"cost=",d.get("total_cost_usd"),"keys=",sorted(d))' "$h/out.json" || cat "$h/out.json"
+          head -c 600 "$h/err.txt" || true
+          ls -la "$h" "$h/.claude" 2>/dev/null || true
