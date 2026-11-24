@@ -5,7 +5,7 @@
 use bongos_minibuffer::{Candidate, Outcome, Session, Source, open};
 use editor::scroll::Autoscroll;
 use editor::{Editor, SelectionEffects};
-use gpui::{AppContext as _, Context, Entity, Window};
+use gpui::{Context, Entity, Window};
 use language::{Buffer, Point};
 use workspace::Workspace;
 
@@ -195,7 +195,7 @@ pub(crate) fn read_thread_command(
             return;
         };
         let label = title.strip_prefix("Slack: ").unwrap_or(&title).to_string();
-        open_thread(workspace, service, channel, thread, label, window, cx);
+        open_thread(service, channel, thread, label, window, cx);
         return;
     }
     let weak = cx.entity().downgrade();
@@ -223,7 +223,6 @@ pub(crate) fn read_thread_command(
                     link_label(&link, &entries)
                 };
                 open_thread(
-                    workspace,
                     service,
                     link.conversation.clone(),
                     link.thread(),
@@ -238,7 +237,6 @@ pub(crate) fn read_thread_command(
 }
 
 fn open_thread(
-    workspace: &mut Workspace,
     service: Entity<SlackService>,
     channel: bongos_slack_model::types::ConversationId,
     thread: bongos_slack_model::types::Ts,
