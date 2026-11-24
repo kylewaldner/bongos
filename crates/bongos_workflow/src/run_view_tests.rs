@@ -314,3 +314,217 @@ kind = "success"
             .contains("halted: cost cap of $5.00 reached at node implement")
     );
 }
+
+// Cancelling a built-in's start gate from the run view, `workflow: cancel gate` and the verb a
+// writer runs for another process.
+
+use crate::builtin_nodes::{BuiltinNode, BuiltinNodes, BuiltinStart};
+use crate::commands::{GATE_CANCELLED, NO_START_GATE};
+use crate::lifecycle::PERSON_ONLY_REFUSAL;
+use crate::remote::{WorkflowPayload, WorkflowVerb, execute};
+use crate::runtime::Finish;
+use bongos_workflow_model::FailureReason;
+use bongos_workflow_model::record::EndState;
+use gpui::BorrowAppContext as _;
+
+/// A program node whose built-in asks a question before every try.
+const ASKING: &str = r#"
+schema = 1
+name = "asking"
+start = "post"
+
+[nodes.post]
+kind = "program"
+use = "wait"
+routes = [{ to = "done" }]
+
+[ends.done]
+kind = "success"
+"#;
+
+/// A built-in that asks before each try and counts its starts; no try ever finishes.
+#[derive(Default)]
+struct AskingNode(std::sync::Mutex<usize>);
+
+impl AskingNode {
+    fn starts(&self) -> usize {
+        *self.0.lock().unwrap()
+    }
+}
+
+impl BuiltinNode for AskingNode {
+    fn start_gate(&self, _: &BuiltinStart<'_>) -> Option<String> {
+        Some("Post this to #team?".to_string())
+    }
+
+    fn start(&self, _: BuiltinStart<'_>) -> Result<(), bongos_workflow_model::Failure> {
+        *self.0.lock().unwrap() += 1;
+        Ok(())
+    }
+
+    fn poll(&self) -> Vec<Finish> {
+        Vec::new()
+    }
+
+    fn stop(&self, _: &[(String, NodeKey)]) {}
+}
+
+/// The engine of `world` over the settings already installed, with `node` as the `wait` built-in.
+fn asking_engine(world: &World, node: &Arc<AskingNode>) -> WorkflowEngine {
+    let worktrees = DirWorktrees {
+        root: world.root.join("runs"),
+        error: world.worktree_error.clone(),
+    };
+    let lifecycle = Lifecycle::new(
+        Box::new(FakeRunner::new()) as EngineRunner,
+        Box::new(worktrees),
+        world.settings(),
+    );
+    let engine = WorkflowEngine::with_lifecycle(world.dirs.clone(), lifecycle);
+    let builtins = BuiltinNodes::default();
+    builtins.insert("wait", node.clone());
+    engine.lifecycle().runtime_mut().set_builtins(builtins);
+    engine
+}
+
+fn asking_world() -> World {
+    let world = world();
+    write_definition(world.profile(), "asking", ASKING);
+    world
+}
+
+/// Ticks `run` a few times: a cancelled start gate must not come back as a new try.
+fn tick(engine: &WorkflowEngine, cx: &mut TestAppContext) {
+    for _ in 0..4 {
+        engine.lifecycle().tick();
+        cx.update(|cx| engine.publish(cx));
+    }
+}
+
+/// The run failed on `post` with `GateCancelled`, never started it and asks nothing more.
+fn assert_cancelled(engine: &WorkflowEngine, run: &str, node: &AskingNode) {
+    let state = engine.lifecycle().state(run).unwrap();
+    let (end, failure) = state.ended.clone().expect("the run ended");
+    assert_eq!(end, EndState::Failed);
+    assert_eq!(failure.unwrap().reason, FailureReason::GateCancelled);
+    assert!(state.open_gates.is_empty(), "not retried: no new gate");
+    assert_eq!(node.starts(), 0, "the step never started");
+}
+
+#[gpui::test]
+fn cancelling_a_start_gate_card_fails_the_step_without_a_retry(cx: &mut TestAppContext) {
+    let world = asking_world();
+    let node = Arc::new(AskingNode::default());
+    engine_of(&world, cx);
+    let engine = asking_engine(&world, &node);
+    let run = start(&engine, &world, "asking", cx);
+    let view = view(&engine, &run, cx);
+    let key = cx.update(|cx| {
+        let snapshot = view.read(cx).snapshot().unwrap().clone();
+        assert_eq!(snapshot.gates.len(), 1);
+        assert!(snapshot.gates[0].start_gate, "a start gate card");
+        snapshot.gates[0].key.clone()
+    });
+    assert_eq!(engine.start_gates(&run), vec![key.clone()]);
+
+    cx.update(|cx| view.update(cx, |view, cx| view.cancel_gate(&key, cx)))
+        .unwrap();
+    tick(&engine, cx);
+    assert_cancelled(&engine, &run, &node);
+    cx.update(|cx| {
+        view.update(cx, |view, cx| {
+            view.refresh(cx);
+            assert!(view.snapshot().unwrap().gates.is_empty());
+        })
+    });
+    // A second cancel finds no gate.
+    let again = cx.update(|cx| view.update(cx, |view, cx| view.cancel_gate(&key, cx)));
+    assert!(again.is_err(), "{again:?}");
+}
+
+#[gpui::test]
+fn a_static_gate_card_is_not_a_start_gate_and_cannot_be_cancelled(cx: &mut TestAppContext) {
+    let world = world();
+    let engine = engine_of(&world, cx);
+    let run = start(&engine, &world, "gated", cx);
+    let view = view(&engine, &run, cx);
+    let key = cx.update(|cx| {
+        let snapshot = view.read(cx).snapshot().unwrap().clone();
+        assert!(!snapshot.gates[0].start_gate);
+        snapshot.gates[0].key.clone()
+    });
+    assert!(engine.start_gates(&run).is_empty());
+    let cancelled = cx.update(|cx| view.update(cx, |view, cx| view.cancel_gate(&key, cx)));
+    assert!(cancelled.is_err(), "{cancelled:?}");
+    assert_eq!(engine.open_gates(&run), vec![key]);
+}
+
+#[gpui::test]
+fn the_cancel_gate_verb_is_refused_for_a_peer_without_a_person_and_runs_for_a_window(
+    cx: &mut TestAppContext,
+) {
+    let world = asking_world();
+    let node = Arc::new(AskingNode::default());
+    engine_of(&world, cx);
+    let engine = asking_engine(&world, &node);
+    cx.update(|cx| cx.set_global(engine.clone()));
+    let payload = |run: &str| WorkflowPayload {
+        run: Some(run.to_string()),
+        ..WorkflowPayload::default()
+    };
+
+    let run = start(&engine, &world, "asking", cx);
+    // The command line cannot attest a person: refused, and the gate stays open.
+    let refused = cx.update(|cx| execute(WorkflowVerb::CancelGate, payload(&run), false, cx));
+    assert_eq!(refused, Err(PERSON_ONLY_REFUSAL.to_string()));
+    tick(&engine, cx);
+    assert_eq!(engine.start_gates(&run).len(), 1, "the gate is still open");
+    assert_eq!(engine.lifecycle().state(&run).unwrap().ended, None);
+
+    // A window speaks for a person.
+    let done = cx.update(|cx| execute(WorkflowVerb::CancelGate, payload(&run), true, cx));
+    assert_eq!(done, Ok(GATE_CANCELLED.to_string()));
+    tick(&engine, cx);
+    assert_cancelled(&engine, &run, &node);
+    // Nothing is left to cancel.
+    let none = cx.update(|cx| execute(WorkflowVerb::CancelGate, payload(&run), true, cx));
+    assert_eq!(none, Err(NO_START_GATE.to_string()));
+    assert_eq!(
+        serde_json::to_value(WorkflowVerb::CancelGate).unwrap(),
+        serde_json::json!("cancel-gate")
+    );
+}
+
+#[gpui::test]
+async fn workflow_cancel_gate_in_a_run_view_cancels_its_start_gate(cx: &mut TestAppContext) {
+    let (workspace, _, cx) = crate::actions_tests::workspace_with_actions(cx).await;
+    cx.update(|_, cx| {
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |content| {
+                content.workflows.get_or_insert_default().enabled = Some(true);
+            });
+        })
+    });
+    let world = asking_world();
+    let node = Arc::new(AskingNode::default());
+    let engine = asking_engine(&world, &node);
+    cx.update(|_, cx| cx.set_global(engine.clone()));
+    let run = start(&engine, &world, "asking", cx);
+    workspace.update_in(cx, |workspace, window, cx| {
+        crate::run_view::show(engine.clone(), run.clone(), workspace, window, cx)
+    });
+    cx.run_until_parked();
+
+    let action = cx.update(|_, cx| cx.build_action("workflow::CancelGate", None).unwrap());
+    cx.update(|window, cx| window.dispatch_action(action, cx));
+    cx.run_until_parked();
+    cx.update(|_, cx| assert_eq!(cx.global::<crate::actions::LastToast>().0, GATE_CANCELLED));
+    tick(&engine, cx);
+    assert_cancelled(&engine, &run, &node);
+
+    // Nothing is left to cancel.
+    let action = cx.update(|_, cx| cx.build_action("workflow::CancelGate", None).unwrap());
+    cx.update(|window, cx| window.dispatch_action(action, cx));
+    cx.run_until_parked();
+    cx.update(|_, cx| assert_eq!(cx.global::<crate::actions::LastToast>().0, NO_START_GATE));
+}

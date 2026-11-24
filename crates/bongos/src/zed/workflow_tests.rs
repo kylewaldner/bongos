@@ -142,6 +142,7 @@ const ANSWERS: &[(&str, Answer)] = &[
     ("workflow::Cancel", Answer::Toast),
     ("workflow::Approve", Answer::Toast),
     ("workflow::Revise", Answer::Toast),
+    ("workflow::CancelGate", Answer::Toast),
     ("workflow::OpenLogs", Answer::Toast),
     ("workflow::ShowRun", Answer::Toast),
     ("workflow::OpenRunWorktree", Answer::Toast),
