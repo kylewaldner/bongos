@@ -1117,7 +1117,7 @@ Keys inside the pickers:
 | M-b, M-d | `navigation::ScopeOpenBuffers`, `ScopeDirectory` | in find in files, limit the search to open buffers or to a directory |
 
 `minibuffer.enabled_for` routes them with the names `switch_buffer`, `go_to_file`, `find_in_files`
-and `search_buffer_lines`; remove a name to get that picker as a centered modal. Two settings:
+and `search_buffer_lines`, plus `find_directory` for the directory prompt of find in files (M-d); remove a name to get that picker as a centered modal. Two settings:
 
 - `navigation.include_recent_closed` (true): the switcher also lists recently closed files.
 - `navigation.preview_max_file_size` (2097152 bytes): the largest file the preview pane shows.
@@ -1165,7 +1165,7 @@ prefix. It is on by default. The matches show in a list above the strip and focu
 it was when the prompt ends.
 
 `minibuffer.enabled_for` names the prompts that use the strip. Its default is
-`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch", "kill_ring", "query_replace", "set_keybindings", "outline", "project_symbols", "xref_history", "string_rectangle", "language_extensions", "switch_buffer", "go_to_file", "find_in_files", "search_buffer_lines"]`. Remove a name
+`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch", "kill_ring", "query_replace", "set_keybindings", "outline", "project_symbols", "xref_history", "string_rectangle", "language_extensions", "switch_buffer", "go_to_file", "find_in_files", "search_buffer_lines", "find_directory"]`. Remove a name
 to bring that prompt back as a centered modal, for example:
 
 ```json

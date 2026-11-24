@@ -277,6 +277,7 @@ async fn sessions_open_in_the_minibuffer_strip(cx: &mut TestAppContext) {
             "go_to_file",
             "find_in_files",
             "search_buffer_lines",
+            "find_directory",
         ] {
             assert!(workspace::routes_to_minibuffer(host, cx), "{host}");
         }

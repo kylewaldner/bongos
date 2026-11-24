@@ -742,6 +742,34 @@ async fn m_o_pane_by_letter_moves_the_item_into_the_picked_pane(cx: &mut TestApp
 }
 
 #[gpui::test]
+async fn the_open_in_pane_action_asks_for_a_pane_letter_like_m_o_p(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _) = setup(cx).await;
+    let cx = &mut cx;
+    let panes = cx.update(|window, cx| split_center(&workspace, 3, window, cx));
+    open(&workspace, &panes[2], "c.txt", cx).await;
+    open(&workspace, &panes[0], "keep1.txt", cx).await;
+    let moved = open(&workspace, &panes[0], "moved.txt", cx)
+        .await
+        .entity_id();
+    focus(&panes[0], cx);
+    let kept = items(&panes[0], cx)[..1].to_vec();
+
+    let handle = open_switcher(&workspace, cx);
+    set_input(&handle, "moved", cx);
+    cx.dispatch_action(crate::actions::OpenInPane);
+    cx.run_until_parked();
+    assert!(
+        items(&panes[2], cx).len() == 1,
+        "nothing moves before a letter"
+    );
+    answer("d", cx);
+
+    assert_eq!(items(&panes[0], cx), kept);
+    assert!(items(&panes[2], cx).contains(&moved));
+    assert_eq!(pane_count(&workspace, cx), 3);
+}
+
+#[gpui::test]
 async fn m_o_on_a_recently_closed_row_opens_the_file_in_the_chosen_pane(cx: &mut TestAppContext) {
     let (workspace, mut cx, _) = setup(cx).await;
     let cx = &mut cx;

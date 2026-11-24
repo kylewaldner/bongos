@@ -2698,7 +2698,7 @@
     // "command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint",
     // "goto_line", "zap", "isearch", "kill_ring", "query_replace", "set_keybindings", "outline",
     // "project_symbols", "xref_history", "string_rectangle", "language_extensions",
-    // "switch_buffer", "go_to_file", "find_in_files", "search_buffer_lines".
+    // "switch_buffer", "go_to_file", "find_in_files", "search_buffer_lines", "find_directory".
     // Remove a name to bring that prompt back as a centered modal. While the list is empty
     // there is no minibuffer, nothing is routed to it and its commands are hidden.
     "enabled_for": [
@@ -2722,7 +2722,8 @@
       "switch_buffer",
       "go_to_file",
       "find_in_files",
-      "search_buffer_lines"
+      "search_buffer_lines",
+      "find_directory"
     ],
     // The most candidate rows the minibuffer shows at once.
     "max_rows": 15,

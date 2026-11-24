@@ -7,8 +7,10 @@
 use std::rc::Rc;
 
 use bongos_minibuffer::{Session, Value};
-use gpui::{App, Context, Entity, WeakEntity, Window};
-use workspace::{OpenTarget, Pane, SplitDirection, Workspace};
+use gpui::{Action as _, App, Context, Entity, Keystroke, WeakEntity, Window};
+use workspace::{
+    MinibufferMessageKind, MinibufferRouting, OpenTarget, Pane, SplitDirection, Workspace,
+};
 
 /// Which pane a row opens in, as the picker's M-o menu or its default asks.
 #[derive(Clone)]
@@ -162,9 +164,23 @@ pub fn add_pane_choices_where(
     })
 }
 
-/// Opens the highlighted row in a chosen pane.
+/// Opens the highlighted row in a chosen pane: opens the M-o menu of the open picker and picks its
+/// Pane by letter entry (p). Every picker that has the M-o menu answers it.
 pub fn open_in_pane(_: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
-    crate::registry::in_session(window, cx, |_, _, _| {})
+    let menu = zed_actions::minibuffer::Actions;
+    if !window.is_action_available(&menu, cx) {
+        MinibufferRouting::message(
+            window,
+            cx,
+            crate::registry::NO_PICKER,
+            MinibufferMessageKind::Message,
+        );
+        return;
+    }
+    window.dispatch_action(menu.boxed_clone(), cx);
+    if let Ok(key) = Keystroke::parse("p") {
+        window.dispatch_keystroke(key, cx);
+    }
 }
 
 #[cfg(test)]
