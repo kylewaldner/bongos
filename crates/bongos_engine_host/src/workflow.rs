@@ -17,10 +17,13 @@ use crate::protocol::HostCommand;
 /// Serves the workflow commands in the writer with the process's engine.
 pub fn register_workflow(cx: &mut App) {
     HostCommands::serve_workflow(
-        Rc::new(|verb, payload, _peer, cx| {
+        Rc::new(|verb, payload, peer, cx| {
+            // Only a window can speak for a person: a gate-closing verb from any other peer is
+            // refused on a built-in's start gate.
+            let person = peer.may_attest_person();
             let result = serde_json::from_value::<WorkflowPayload>(payload)
                 .map_err(|error| format!("reading the workflow command: {error}"))
-                .and_then(|payload| execute(verb, payload, cx));
+                .and_then(|payload| execute(verb, payload, person, cx));
             Task::ready(match result {
                 Ok(message) => Ok(serde_json::Value::String(message)),
                 Err(message) => Err(anyhow!(message)),

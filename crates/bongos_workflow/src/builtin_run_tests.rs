@@ -134,6 +134,7 @@ fn start(
         key: &key,
         try_number: 1,
         binding,
+        facts: crate::builtin_nodes::RunFacts::default(),
     })
 }
 

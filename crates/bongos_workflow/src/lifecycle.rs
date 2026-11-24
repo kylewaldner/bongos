@@ -229,6 +229,9 @@ pub enum RefusalKind {
     /// A retry step with the definition read again would lose a completed result.
     FreshDefinition,
     NoGate,
+    /// A built-in's start gate was asked to change (an edit, a revision) or to be approved by
+    /// a peer that cannot speak for a person.
+    StartGate,
     InvalidEdit,
     NoSession,
     /// A restore holds new work in the project back.
@@ -277,6 +280,12 @@ impl Refusal {
                 "The run is over.",
                 "Restart it (workflow: restart), or start a new one.",
             ),
+            RuntimeError::NoGate(key) => Self::new(
+                RefusalKind::NoGate,
+                format!("No gate is open at {key}."),
+                "Act on the gate the run is waiting at.",
+            ),
+            RuntimeError::StartGate(message) => Self::new(RefusalKind::StartGate, message, ""),
             other => Self::io(other),
         }
     }
@@ -293,6 +302,26 @@ impl fmt::Display for Refusal {
 }
 
 impl std::error::Error for Refusal {}
+
+/// Why a peer that cannot attest a person may not approve a built-in's start gate.
+pub const PERSON_ONLY_REFUSAL: &str = "approving a Slack post needs a person at a bongos window";
+
+/// Refuses closing the gate of `key` in `state` for a peer that cannot attest a person
+/// (`attested` false) when it is a built-in's start gate. Any other gate is left to the verb.
+pub fn refuse_unattested(state: &RunState, key: &NodeKey, attested: bool) -> Result<(), Refusal> {
+    if !attested && state.person_only_gates.contains(key) {
+        return Err(Refusal::new(
+            RefusalKind::StartGate,
+            PERSON_ONLY_REFUSAL,
+            "",
+        ));
+    }
+    Ok(())
+}
+
+fn start_gate_as_is() -> Refusal {
+    Refusal::new(RefusalKind::StartGate, crate::runtime::START_GATE_AS_IS, "")
+}
 
 fn unknown_run(id: &str) -> Refusal {
     Refusal::new(
@@ -2279,6 +2308,10 @@ impl<R: Runner> Lifecycle<R> {
             };
             self.runtime
                 .set_started_by(&entry.id, entry.record.started_by);
+            self.runtime.set_unattended(
+                &entry.id,
+                entry.record.unattended.is_some_and(|choice| choice.value),
+            );
             self.runtime.bind(&entry.id, entry.binding());
             report.loaded.push(entry.id.clone());
             report.orphans.push((entry.id.clone(), orphans));
@@ -2894,6 +2927,10 @@ impl<R: Runner> Lifecycle<R> {
                     })
                     .ok();
                 self.runtime.set_started_by(run, entry.record.started_by);
+                self.runtime.set_unattended(
+                    run,
+                    entry.record.unattended.is_some_and(|choice| choice.value),
+                );
                 self.runtime.bind(run, entry.binding());
             }
         }
@@ -2912,6 +2949,9 @@ impl<R: Runner> Lifecycle<R> {
         edit: Option<(String, Value)>,
     ) -> Result<(), Refusal> {
         let state = self.open_gate(run, key)?;
+        if edit.is_some() && state.person_only_gates.contains(key) {
+            return Err(start_gate_as_is());
+        }
         let edit = match edit {
             Some((field, value)) => Some(self.checked_edit(run, key, &state, field, value)?),
             None => None,
@@ -2926,7 +2966,9 @@ impl<R: Runner> Lifecycle<R> {
     /// Sends the open gate of `key` back: the node reruns with `comment` appended to its prompt
     /// under "Revision requested:" with its previous result ([`Lifecycle::prompt_for`]).
     pub fn revise(&mut self, run: &str, key: &NodeKey, comment: String) -> Result<(), Refusal> {
-        self.open_gate(run, key)?;
+        if self.open_gate(run, key)?.person_only_gates.contains(key) {
+            return Err(start_gate_as_is());
+        }
         let comment = comment.trim().to_string();
         if comment.is_empty() {
             return Err(Refusal::new(
@@ -2940,6 +2982,28 @@ impl<R: Runner> Lifecycle<R> {
             .map_err(Refusal::runtime)?;
         self.note(run);
         Ok(())
+    }
+
+    /// Cancels the start gate of a built-in's `key`: the key fails with `GateCancelled`, never
+    /// retried ([`Runtime::cancel_gate`]).
+    pub fn cancel_gate(&mut self, run: &str, key: &NodeKey) -> Result<(), Refusal> {
+        self.open_gate(run, key)?;
+        self.runtime
+            .cancel_gate(run, key.clone())
+            .map_err(Refusal::runtime)?;
+        self.note(run);
+        Ok(())
+    }
+
+    /// Refuses closing the gate of `key` for a peer that cannot attest a person (`attested`
+    /// false) when the gate is a built-in's start gate: only a person at a window approves it.
+    pub fn refuse_unattested(
+        &self,
+        run: &str,
+        key: &NodeKey,
+        attested: bool,
+    ) -> Result<(), Refusal> {
+        refuse_unattested(&self.state_of(run)?, key, attested)
     }
 
     /// The prompt the next try of `key` gets from `base`: when the last decision on its gate was
@@ -3080,6 +3144,10 @@ impl<R: Runner> Lifecycle<R> {
             .map_err(Refusal::runtime)?;
         self.runtime
             .set_started_by(&entry.id, entry.record.started_by);
+        self.runtime.set_unattended(
+            &entry.id,
+            entry.record.unattended.is_some_and(|choice| choice.value),
+        );
         self.runtime.bind(&entry.id, entry.binding());
         Ok(())
     }

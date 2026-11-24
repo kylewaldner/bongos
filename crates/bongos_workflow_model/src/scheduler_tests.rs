@@ -637,6 +637,7 @@ fn a_revised_gate_reruns_the_node() {
         Event::GateOpened {
             key: review.clone(),
             question: "Ship this?".to_string(),
+            person_only: false,
         },
         Event::GateClosed {
             key: review.clone(),

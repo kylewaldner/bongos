@@ -1156,6 +1156,21 @@ impl WorkflowEngine {
         self.act(cx, |lifecycle, _| lifecycle.revise(run, key, comment))
     }
 
+    /// Cancels the start gate of a built-in's `key`: the key fails with `GateCancelled`.
+    pub fn cancel_gate(&self, run: &RunId, key: &NodeKey, cx: &mut App) -> Result<(), Refusal> {
+        self.act(cx, |lifecycle, _| lifecycle.cancel_gate(run, key))
+    }
+
+    /// Refuses closing a built-in's start gate at `key` for a peer that cannot attest a person.
+    pub fn refuse_unattested(
+        &self,
+        run: &RunId,
+        key: &NodeKey,
+        attested: bool,
+    ) -> Result<(), Refusal> {
+        self.lifecycle().refuse_unattested(run, key, attested)
+    }
+
     /// The worktrees a halted run is edited in.
     pub fn halt_worktrees(&self, run: &RunId) -> Option<HaltWorktrees> {
         self.lifecycle().halt_worktrees(run)
