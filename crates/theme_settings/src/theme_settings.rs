@@ -7,6 +7,8 @@
 
 mod schema;
 mod settings;
+#[cfg(test)]
+mod true_dark_tests;
 
 use std::sync::Arc;
 
