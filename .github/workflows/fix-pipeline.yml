@@ -164,9 +164,10 @@ jobs:
             --attempts "$FIX_ATTEMPTS" --claimed "$FIX_CLAIMED" --outcome "$FIX_OUTCOME"
 
       - name: Start this workflow again for the next entry
-        # only when the claim was decided (held or lost): a job that failed before its claim leaves the restart to
-        # ticket-triage, so a broken setup never loops; a test run starts no workflow
-        if: always() && needs.select.outputs.test != '1' && (needs.fix.outputs.claimed == 'true' || needs.fix.outputs.claimed == 'false')
+        # only after a held claim and not after a usage limit: a job that failed before its claim, a lost or refused
+        # claim and a usage limit leave the restart to ticket-triage (which pauses for the limit), so nothing loops;
+        # a test run starts no workflow
+        if: always() && needs.select.outputs.test != '1' && needs.fix.outputs.claimed == 'true' && needs.fix.outputs.outcome != 'usage_limit'
         env:
           GH_TOKEN: ${{ secrets.COORD_TOKEN }}
           REPO: ${{ github.repository }}
