@@ -1,7 +1,7 @@
 # The frame of every pipeline job: everything a job needs before its agent runs, the agent run itself and the final
 # step. The pipeline code (claims, the runner mode, prompts, gates) lives in the coordination repository, which is
-# cloned to $RUNNER_TEMP/coord (outside the workspace, so nothing in it can reach this repository, its snapshots or
-# its search index). Its entry script autopilot/runner/job.sh does the claim, the run and the final step.
+# cloned to /mnt/bongos-job/coord (outside the workspace, so nothing in it can reach this repository, its snapshots or
+# its search index; outside $HOME, which the smoke sandbox hides). Its entry script autopilot/runner/job.sh does the claim, the run and the final step.
 #
 # A workflow that uses it:
 #
@@ -180,20 +180,25 @@ runs:
         put JOB_BUDGET_HOURS "$IN_BUDGET_HOURS"
         put JOB_RUN_TIMEOUT_MINUTES "$IN_RUN_TIMEOUT_MINUTES"
         put JOB_INCREMENTAL "$inc"
-        put JOB_STATE "$RUNNER_TEMP/job-state"
+        # The job's own directories live under /mnt, not $RUNNER_TEMP (/home/runner/work/_temp): the smoke harness runs
+        # in bwrap with a tmpfs over $HOME, which would hide the logs and worktrees from the gates it reports to.
+        jobdir=/mnt/bongos-job
+        sudo mkdir -p "$jobdir"
+        sudo chown "$USER" "$jobdir"
+        put JOB_STATE "$jobdir/job-state"
         put AUTOPILOT_COORD_REF "$IN_COORD_REF"
         put AUTOPILOT_COORD_BASE "$IN_COORD_BASE"
         put AUTOPILOT_APP_BASE "$IN_APP_BASE"
         put AUTOPILOT_STATE_PREFIX "$IN_STATE_PREFIX"
         put AUTOPILOT_INDEX_TAG "$IN_INDEX_TAG"
-        put AUTOPILOT_PRIVATE "$RUNNER_TEMP/coord"
+        put AUTOPILOT_PRIVATE "$jobdir/coord"
         put AUTOPILOT_BONGOS "$GITHUB_WORKSPACE"
-        put AUTOPILOT_WORKTREES "$RUNNER_TEMP/worktrees"
-        put AUTOPILOT_LOGS "$RUNNER_TEMP/logs"
+        put AUTOPILOT_WORKTREES "$jobdir/worktrees"
+        put AUTOPILOT_LOGS "$jobdir/logs"
         put AUTOPILOT_RUNNER_STARTED "$(date +%s)"
         put AUTOPILOT_RUNNER_ACTOR "run $GITHUB_RUN_ID"
         put DISABLE_AUTOUPDATER 1
-        mkdir -p "$RUNNER_TEMP/job-state"
+        mkdir -p "$jobdir/job-state"
         echo "build=$build" >> "$GITHUB_OUTPUT"
         echo "$IN_KIND $IN_TICKET lane $IN_LANE; build $build, incremental $inc, cache $IN_CACHE_VARIANT-$IN_RUNNER_IMAGE"
 
