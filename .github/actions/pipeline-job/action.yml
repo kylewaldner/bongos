@@ -1,0 +1,417 @@
+# The frame of every pipeline job: everything a job needs before its agent runs, the agent run itself and the final
+# step. The pipeline code (claims, the runner mode, prompts, gates) lives in the coordination repository, which is
+# cloned to $RUNNER_TEMP/coord (outside the workspace, so nothing in it can reach this repository, its snapshots or
+# its search index). Its entry script autopilot/runner/job.sh does the claim, the run and the final step.
+#
+# A workflow that uses it:
+#
+#   jobs:
+#     job:
+#       runs-on: ubuntu-24.04              # the same image as the runner_image input
+#       timeout-minutes: 345               # the agent step stops near 315 minutes, so the final step still runs
+#       permissions:
+#         contents: read                   # the index download uses the job's own token
+#       steps:
+#         - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+#           with:
+#             persist-credentials: false   # the action checks out app_base again with full history
+#         - uses: ./.github/actions/pipeline-job
+#           with:
+#             kind: step
+#             ticket: ${{ inputs.ticket }}
+#             claude_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+#             coord_token: ${{ secrets.COORD_TOKEN }}
+#             coord_repo: ${{ secrets.COORD_REPO }}
+#             # the five redirect settings come from workflow inputs whose defaults are the production values
+#             coord_ref: ${{ inputs.coord_ref }}
+#             coord_base: ${{ inputs.coord_base }}
+#             app_base: ${{ inputs.app_base }}
+#             state_prefix: ${{ inputs.state_prefix }}
+#             index_tag: ${{ inputs.index_tag }}
+#
+# Never map ANTHROPIC_API_KEY into a job: the first step fails the job when it is set. Inputs reach the scripts only
+# through environment variables, never by expression substitution inside a script.
+name: pipeline-job
+description: Set up a pipeline job, claim its ticket, run the agent and record the outcome.
+
+inputs:
+  kind:
+    description: "Job kind: design, step, finish, fix, release_fix, flaky_fix or pipeline_fix"
+    required: true
+  ticket:
+    description: "A feature directory, or <queue>-<entry id> for a queue kind (fixes-, release-, flaky-, pipeline-)"
+    required: true
+  lane:
+    description: "Relay lane letter, a or b (b only confirms the claim lane a took)"
+    default: a
+  lanes:
+    description: "Jobs this run holds for the ticket (1 or 2), written into the claim"
+    default: '1'
+  coord_ref:
+    description: "Branch of the coordination repository the job checks out for pipeline code"
+    default: main
+  coord_base:
+    description: "Branch of the coordination repository that claim, queue, docs and fix pull requests target"
+    default: main
+  app_base:
+    description: "Branch of this repository that finish, fix and flaky-fix merges target, and that is checked out"
+    default: main
+  state_prefix:
+    description: "Prefix of the state branches, lock and signal refs and wip snapshot branches (empty in production)"
+    default: ''
+  index_tag:
+    description: "Release tag that holds the code search index"
+    default: colgrep-index
+  claude_token:
+    description: "CLAUDE_CODE_OAUTH_TOKEN, the only way the agent authenticates"
+    required: true
+  coord_token:
+    description: "COORD_TOKEN: clones the coordination repository and pushes and opens pull requests in both"
+    required: true
+  coord_repo:
+    description: "COORD_REPO: owner/name of the coordination repository (a secret, so logs mask it)"
+    required: true
+  runner_image:
+    description: "The runs-on image; part of the dependency cache key and checked against the machine"
+    default: ubuntu-24.04
+  build:
+    description: "auto (every kind but design), true or false: remove preinstalled software, install packages, the toolchain and the dependency cache"
+    default: auto
+  cache_variant:
+    description: "Dependency cache written by cache-warm: dev, dev-unified or release"
+    default: dev-unified
+  incremental:
+    description: "auto (on for step jobs only), 1 or 0: CARGO_INCREMENTAL after the cache step"
+    default: auto
+  index:
+    description: "Download the code search index (true or false)"
+    default: 'true'
+  model:
+    description: "Model of the job agent (sonnet, opus or haiku)"
+    default: sonnet
+  budget_hours:
+    description: "No new step starts after this many hours from the job's start"
+    default: '3.5'
+  run_timeout_minutes:
+    description: "The agent step is stopped this many minutes after the job's start"
+    default: '315'
+  claude_version:
+    description: "Pinned Claude CLI version"
+    default: 2.1.331
+
+outputs:
+  claimed:
+    description: "true when this job holds (or, lane b, shares) the ticket's claim"
+    value: ${{ steps.claim.outputs.claimed }}
+  outcome:
+    description: "The outcome recorded in runner-runs.md"
+    value: ${{ steps.final.outputs.outcome }}
+
+runs:
+  using: composite
+  steps:
+    - name: Refuse a re-run and an API key, and export the settings
+      id: settings
+      shell: bash
+      env:
+        RUN_ATTEMPT: ${{ github.run_attempt }}
+        IN_KIND: ${{ inputs.kind }}
+        IN_TICKET: ${{ inputs.ticket }}
+        IN_LANE: ${{ inputs.lane }}
+        IN_LANES: ${{ inputs.lanes }}
+        IN_COORD_REF: ${{ inputs.coord_ref }}
+        IN_COORD_BASE: ${{ inputs.coord_base }}
+        IN_APP_BASE: ${{ inputs.app_base }}
+        IN_STATE_PREFIX: ${{ inputs.state_prefix }}
+        IN_INDEX_TAG: ${{ inputs.index_tag }}
+        IN_RUNNER_IMAGE: ${{ inputs.runner_image }}
+        IN_BUILD: ${{ inputs.build }}
+        IN_CACHE_VARIANT: ${{ inputs.cache_variant }}
+        IN_INCREMENTAL: ${{ inputs.incremental }}
+        IN_MODEL: ${{ inputs.model }}
+        IN_BUDGET_HOURS: ${{ inputs.budget_hours }}
+        IN_RUN_TIMEOUT_MINUTES: ${{ inputs.run_timeout_minutes }}
+      run: |
+        set -euo pipefail
+        # A re-run reuses the run ID, which names this run's claim and signal refs.
+        if [ "$RUN_ATTEMPT" != 1 ]; then
+          echo "::error::run attempt $RUN_ATTEMPT: re-runs are refused; start a new run instead"
+          exit 1
+        fi
+        if [ -n "${ANTHROPIC_API_KEY+set}" ]; then
+          echo "::error::ANTHROPIC_API_KEY is set; jobs authenticate only with CLAUDE_CODE_OAUTH_TOKEN"
+          exit 1
+        fi
+        . /etc/os-release
+        if [ "ubuntu-$VERSION_ID" != "$IN_RUNNER_IMAGE" ]; then
+          echo "::error::runner_image is $IN_RUNNER_IMAGE but this machine is ubuntu-$VERSION_ID"
+          exit 1
+        fi
+        put() {
+          case "$2" in
+            *[!A-Za-z0-9._/@\ -]*) echo "::error::$1 has a character that is not allowed"; exit 1 ;;
+          esac
+          printf '%s=%s\n' "$1" "$2" >> "$GITHUB_ENV"
+        }
+        case "$IN_CACHE_VARIANT" in dev|dev-unified|release) ;; *) echo "::error::cache_variant must be dev, dev-unified or release"; exit 1 ;; esac
+        build=$IN_BUILD
+        if [ "$build" = auto ]; then
+          if [ "$IN_KIND" = design ]; then build=false; else build=true; fi
+        fi
+        inc=$IN_INCREMENTAL
+        if [ "$inc" = auto ]; then
+          if [ "$IN_KIND" = step ]; then inc=1; else inc=0; fi
+        fi
+        case "$build:$inc" in true:[01]|false:[01]) ;; *) echo "::error::build must be auto, true or false and incremental auto, 1 or 0"; exit 1 ;; esac
+        put JOB_KIND "$IN_KIND"
+        put JOB_TICKET "$IN_TICKET"
+        put JOB_LANE "$IN_LANE"
+        put JOB_LANES "$IN_LANES"
+        put JOB_MODEL "$IN_MODEL"
+        put JOB_BUDGET_HOURS "$IN_BUDGET_HOURS"
+        put JOB_RUN_TIMEOUT_MINUTES "$IN_RUN_TIMEOUT_MINUTES"
+        put JOB_INCREMENTAL "$inc"
+        put JOB_STATE "$RUNNER_TEMP/job-state"
+        put AUTOPILOT_COORD_REF "$IN_COORD_REF"
+        put AUTOPILOT_COORD_BASE "$IN_COORD_BASE"
+        put AUTOPILOT_APP_BASE "$IN_APP_BASE"
+        put AUTOPILOT_STATE_PREFIX "$IN_STATE_PREFIX"
+        put AUTOPILOT_INDEX_TAG "$IN_INDEX_TAG"
+        put AUTOPILOT_PRIVATE "$RUNNER_TEMP/coord"
+        put AUTOPILOT_BONGOS "$GITHUB_WORKSPACE"
+        put AUTOPILOT_WORKTREES "$RUNNER_TEMP/worktrees"
+        put AUTOPILOT_LOGS "$RUNNER_TEMP/logs"
+        put AUTOPILOT_RUNNER_STARTED "$(date +%s)"
+        put AUTOPILOT_RUNNER_ACTOR "run $GITHUB_RUN_ID"
+        put DISABLE_AUTOUPDATER 1
+        mkdir -p "$RUNNER_TEMP/job-state"
+        echo "build=$build" >> "$GITHUB_OUTPUT"
+        echo "$IN_KIND $IN_TICKET lane $IN_LANE; build $build, incremental $inc, cache $IN_CACHE_VARIANT-$IN_RUNNER_IMAGE"
+
+    - name: Start removing preinstalled software
+      if: steps.settings.outputs.build == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        df -h /
+        cat > "$RUNNER_TEMP/remove-software.sh" <<'EOF'
+        set -u
+        start=$(date +%s)
+        sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /usr/share/swift /usr/lib/jvm \
+          /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/share/miniconda /usr/lib/google-cloud-sdk \
+          /opt/az /opt/microsoft /usr/lib/firefox /opt/google /usr/local/share/chromium /home/linuxbrew \
+          /usr/local/aws-cli /usr/local/julia*
+        sudo docker system prune -af > /dev/null 2>&1 || true
+        echo "removal took $(( $(date +%s) - start )) s"
+        touch "$RUNNER_TEMP/disk-removal.done"
+        EOF
+        nohup bash "$RUNNER_TEMP/remove-software.sh" > "$RUNNER_TEMP/disk-removal.log" 2>&1 &
+
+    - name: Install packages
+      if: steps.settings.outputs.build == 'true'
+      shell: bash
+      env:
+        CACHE_VARIANT: ${{ inputs.cache_variant }}
+      run: |
+        set -euo pipefail
+        # The list of cache-warm, plus the software Vulkan driver (GPU tests) and zstd. mold for the dev variants
+        # only, as cache-warm: env.sh puts the mold linker into the environment, which is part of the cache key.
+        extra='mesa-vulkan-drivers zstd'
+        if [ "$CACHE_VARIANT" != release ]; then extra="$extra mold"; fi
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends \
+          gcc g++ libasound2-dev libfontconfig-dev libgit2-dev libglib2.0-dev libssl-dev libva-dev \
+          libvulkan1 libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev make cmake clang lld \
+          llvm jq git curl gettext-base elfutils libsqlite3-dev musl-tools musl-dev build-essential \
+          pkg-config python3 $extra > /dev/null
+        if ! command -v llvm-objcopy > /dev/null; then
+          sudo ln -s "$(ls /usr/bin/llvm-objcopy-* | sort -V | tail -n1)" /usr/local/bin/llvm-objcopy
+        fi
+
+    - name: Check out this repository at app_base
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        ref: ${{ inputs.app_base }}
+        fetch-depth: 0
+        persist-credentials: false
+
+    # The same commands and environment as cache-warm's step of the same name, so the cache key matches.
+    - name: Install the Rust toolchain and set the build environment
+      id: target
+      if: steps.settings.outputs.build == 'true'
+      shell: bash
+      env:
+        BONGOS_WORKSPACE: /mnt/bongos-workspace
+        BONGOS_UNIFIED_FEATURES: ${{ inputs.cache_variant == 'dev-unified' && '1' || '' }}
+        BONGOS_RELEASE_BUILD: ${{ inputs.cache_variant == 'release' && '1' || '' }}
+      run: |
+        set -euo pipefail
+        sudo mkdir -p "$BONGOS_WORKSPACE"
+        sudo chown "$USER" "$BONGOS_WORKSPACE"
+        export RUSTUP_HOME="$BONGOS_WORKSPACE/rustup" CARGO_HOME="$BONGOS_WORKSPACE/cargo"
+        mkdir -p "$RUSTUP_HOME" "$CARGO_HOME"
+        rustup toolchain install
+        if [ -n "$BONGOS_RELEASE_BUILD" ]; then echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"; fi
+        # shellcheck disable=SC1091
+        . script/bongos/env.sh
+        env | grep -E '^(CARGO_|RUSTUP_HOME=|RUSTC_BOOTSTRAP=|BONGOS_|CC=|CXX=)' | grep -v '^CARGO_BUILD_JOBS=' >> "$GITHUB_ENV"
+        echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+        echo "rel=$(realpath -m --relative-to="$GITHUB_WORKSPACE" "$CARGO_TARGET_DIR")" >> "$GITHUB_OUTPUT"
+
+    - name: Restore the dependency cache (read only)
+      if: steps.settings.outputs.build == 'true'
+      uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+      with:
+        workspaces: ". -> ${{ steps.target.outputs.rel }}"
+        shared-key: ${{ inputs.cache_variant }}-${{ inputs.runner_image }}
+        add-job-id-key: false
+        # Only cache-warm on main writes a cache.
+        save-if: 'false'
+
+    - name: Set incremental builds and install nextest
+      if: steps.settings.outputs.build == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        # rust-cache sets CARGO_INCREMENTAL=0 for every later step; step jobs turn it back on.
+        echo "CARGO_INCREMENTAL=$JOB_INCREMENTAL" >> "$GITHUB_ENV"
+        ver=$(sed -n 's/^nextest-version = { required = "\([0-9.]*\)" }.*/\1/p' .config/nextest.toml)
+        if [ -z "$ver" ]; then
+          echo "::error::no required nextest version in .config/nextest.toml"
+          exit 1
+        fi
+        mkdir -p "$RUNNER_TEMP/nextest"
+        curl -fsSL -o "$RUNNER_TEMP/nextest/nextest.tar.gz" \
+          "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$ver/cargo-nextest-$ver-x86_64-unknown-linux-gnu.tar.gz"
+        tar xzf "$RUNNER_TEMP/nextest/nextest.tar.gz" -C "$CARGO_HOME/bin"
+        rm -rf "$RUNNER_TEMP/nextest"
+        cargo nextest --version
+
+    - name: Clone the coordination repository
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.coord_token }}
+        COORD_REPO: ${{ inputs.coord_repo }}
+      run: |
+        set -euo pipefail
+        # git asks gh for credentials, and gh reads GH_TOKEN from each step's environment: no token is written to disk.
+        git config --global credential.https://github.com.helper ''
+        git config --global --add credential.https://github.com.helper '!gh auth git-credential'
+        git config --global user.name 'bongos runner'
+        git config --global user.email 'runner@users.noreply.github.com'
+        rm -rf "$AUTOPILOT_PRIVATE"
+        git clone --quiet --branch "$AUTOPILOT_COORD_REF" "https://github.com/$COORD_REPO.git" "$AUTOPILOT_PRIVATE"
+        test -f "$AUTOPILOT_PRIVATE/autopilot/runner/job.sh"
+        git -C "$AUTOPILOT_PRIVATE" log -1 --format='pipeline code at %h %s'
+
+    - name: Check the job before it claims anything
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.coord_token }}
+        COORD_REPO: ${{ inputs.coord_repo }}
+        CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_token }}
+      run: bash "$AUTOPILOT_PRIVATE/autopilot/runner/job.sh" check
+
+    - name: Install the Claude CLI
+      shell: bash
+      env:
+        CLAUDE_VERSION: ${{ inputs.claude_version }}
+      run: |
+        set -euo pipefail
+        npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@$CLAUDE_VERSION" > /dev/null
+        v=$(claude --version)
+        case "$v" in
+          "$CLAUDE_VERSION"|"$CLAUDE_VERSION "*) echo "claude $v" ;;
+          *) echo "::error::claude --version says '$v', not $CLAUDE_VERSION"; exit 1 ;;
+        esac
+
+    - name: Download the code search index
+      id: index
+      shell: bash
+      env:
+        WANT_INDEX: ${{ inputs.index }}
+        TAG: ${{ inputs.index_tag }}
+        REPO: ${{ github.repository }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        # Uses the index workflows' own install and restore. A job without an index carries on with grep.
+        s="$GITHUB_WORKSPACE/.github/scripts/colgrep-index.sh"
+        ok=0
+        if [ "$WANT_INDEX" != true ]; then
+          echo "no index wanted"
+        elif [ ! -f "$s" ]; then
+          echo "::warning::$s is missing; the job runs without the index"
+        elif ! bash "$s" install; then
+          echo "::warning::colgrep install failed; the job runs without the index"
+        elif ! bash "$s" restore; then
+          echo "::warning::index download failed; the job runs without the index"
+        elif [ ! -d "$HOME/.local/share/colgrep" ]; then
+          echo "::warning::no published index under $TAG; the job runs without the index"
+        else
+          ok=1
+        fi
+        if [ "$ok" != 1 ]; then echo "BONGOS_RUNNER_NO_INDEX=1" >> "$GITHUB_ENV"; fi
+        echo "ok=$ok" >> "$GITHUB_OUTPUT"
+
+    - name: Re-embed what the checkout changed
+      if: steps.index.outputs.ok == '1'
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! timeout 900 colgrep init -y .; then
+          echo "::warning::colgrep init failed; the job runs without the index"
+          echo "BONGOS_RUNNER_NO_INDEX=1" >> "$GITHUB_ENV"
+        fi
+
+    - name: Wait for the removal of preinstalled software
+      if: steps.settings.outputs.build == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        for _ in $(seq 1 120); do
+          if [ -e "$RUNNER_TEMP/disk-removal.done" ]; then break; fi
+          sleep 10
+        done
+        cat "$RUNNER_TEMP/disk-removal.log" || true
+        if [ ! -e "$RUNNER_TEMP/disk-removal.done" ]; then
+          echo "::warning::the removal of preinstalled software has not finished after 20 minutes"
+        fi
+        df -h /
+
+    - name: Claim the ticket
+      id: claim
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.coord_token }}
+        COORD_REPO: ${{ inputs.coord_repo }}
+      run: bash "$AUTOPILOT_PRIVATE/autopilot/runner/job.sh" claim
+
+    - name: Run the job
+      if: steps.claim.outputs.claimed == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.coord_token }}
+        COORD_REPO: ${{ inputs.coord_repo }}
+        CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_token }}
+      run: bash "$AUTOPILOT_PRIVATE/autopilot/runner/job.sh" run
+
+    - name: Final step
+      id: final
+      if: always() && github.run_attempt == '1'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.coord_token }}
+        COORD_REPO: ${{ inputs.coord_repo }}
+      run: |
+        set -uo pipefail
+        if [ -n "${JOB_STATE:-}" ] && [ -f "${AUTOPILOT_PRIVATE:-}/autopilot/runner/job.sh" ]; then
+          bash "$AUTOPILOT_PRIVATE/autopilot/runner/job.sh" final
+          rc=$?
+        else
+          echo "::warning::the job stopped before the coordination repository was cloned: no claim, no row"
+          echo "outcome=setup-failed" >> "$GITHUB_OUTPUT"
+          rc=0
+        fi
+        df -h /
+        exit "$rc"
