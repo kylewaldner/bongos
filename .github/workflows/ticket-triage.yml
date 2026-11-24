@@ -1,0 +1,156 @@
+# Ticket triage of the GitHub-hosted pipeline: reads the claims and queues of the coordination repository, looks at the
+# live runs, and (only when runner.toml says so) cedes dead claims, breaks stale locks and starts the next workflows.
+# The script is autopilot/runner/triage.py in the coordination repository, which this job clones from the COORD_REPO
+# secret to $RUNNER_TEMP/coord, outside the workspace. No Claude usage, no ANTHROPIC_API_KEY. With every switch of the
+# committed runner.toml off, a run only reports (the report is the step summary).
+#
+# Started by: workflow_dispatch; repository_dispatch of type `triage` (sent by the trigger workflow of the coordination
+# repository on a push that changes a claim or a queue file, and by the final step of every other workflow); a
+# 10-minute schedule. `schedule` and `repository_dispatch` run only from the default branch, so until this file reaches
+# main nothing starts it: that is intended (no workflow file reaches main before the owner switches the pipeline on).
+#
+# Concurrency: one run at a time, a waiting run is replaced by the newest one, and a running one is never cancelled.
+# No `queue: max`: a polling ping needs only the latest request.
+#
+# Test runs: set the redirect inputs (coord_ref, coord_base, app_base, state_prefix) to their test values. The run is then
+# a test run (the frame's rule, frame.redirect): coord_base, app_base and state_prefix must ALL be redirected, or the
+# job refuses. A test run dispatches only with `--ref` its own test ref (a branch named gh-runners-test-*); a
+# production run refuses to start from any ref but main and always dispatches on main.
+name: ticket-triage
+run-name: ticket-triage ${{ github.event_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      coord_ref:
+        description: "Branch of the coordination repository with the pipeline code (main in production)"
+        default: main
+        type: string
+      coord_base:
+        description: "Branch of the coordination repository whose claims and queues are read (main in production)"
+        default: main
+        type: string
+      app_base:
+        description: "Branch of this repository that dispatched jobs merge into (main in production)"
+        default: main
+        type: string
+      state_prefix:
+        description: "Prefix of state branches, lock, signal and wip refs (empty in production)"
+        default: ''
+        type: string
+  repository_dispatch:
+    types: [triage]
+  schedule:
+    - cron: '*/10 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ticket-triage-${{ inputs.state_prefix || 'production' }}
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      # repository_dispatch and schedule have no inputs: an empty input is the production default.
+      IN_COORD_REF: ${{ inputs.coord_ref || 'main' }}
+      IN_COORD_BASE: ${{ inputs.coord_base || 'main' }}
+      IN_APP_BASE: ${{ inputs.app_base || 'main' }}
+      IN_STATE_PREFIX: ${{ inputs.state_prefix || '' }}
+    steps:
+      - name: Refuse a re-run and an API key
+        env:
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          if [ "$RUN_ATTEMPT" != 1 ]; then
+            echo "::error::run attempt $RUN_ATTEMPT: re-runs are refused; start a new run instead"
+            exit 1
+          fi
+          if [ -n "${ANTHROPIC_API_KEY+set}" ]; then
+            echo "::error::ANTHROPIC_API_KEY is set; pipeline jobs never use it"
+            exit 1
+          fi
+
+      # The bongos workspace: triage lists lock and signal refs and deletes them through this clone's origin.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Clone the coordination repository
+        env:
+          GH_TOKEN: ${{ secrets.COORD_TOKEN }}
+          COORD_REPO: ${{ secrets.COORD_REPO }}
+        run: |
+          set -euo pipefail
+          case "$IN_COORD_REF" in *[!A-Za-z0-9._/-]*|'') echo "::error::coord_ref has a character that is not allowed"; exit 1 ;; esac
+          # git asks gh for credentials, and gh reads GH_TOKEN from each step's environment: no token is written to disk.
+          git config --global credential.https://github.com.helper ''
+          git config --global --add credential.https://github.com.helper '!gh auth git-credential'
+          git config --global user.name 'bongos runner'
+          git config --global user.email 'runner@users.noreply.github.com'
+          git clone --quiet --branch "$IN_COORD_REF" "https://github.com/$COORD_REPO.git" "$RUNNER_TEMP/coord"
+          test -f "$RUNNER_TEMP/coord/autopilot/runner/triage.py"
+          git -C "$RUNNER_TEMP/coord" log -1 --format='pipeline code at %h %s'
+
+      - name: Decide production or test
+        id: mode
+        env:
+          AUTOPILOT_COORD_REF: ${{ env.IN_COORD_REF }}
+          AUTOPILOT_COORD_BASE: ${{ env.IN_COORD_BASE }}
+          AUTOPILOT_APP_BASE: ${{ env.IN_APP_BASE }}
+          AUTOPILOT_STATE_PREFIX: ${{ env.IN_STATE_PREFIX }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # The frame's own redirect rule: any redirect makes a test run, and a test run must redirect every write target.
+          test_run=$(python3 - "$RUNNER_TEMP/coord/autopilot/runner" <<'PY'
+          import sys
+          sys.path.insert(0, sys.argv[1])
+          import frame
+          try:
+              r = frame.redirect()
+          except frame.FrameError as e:
+              print(f"::error::{e}", file=sys.stderr)
+              sys.exit(2)
+          print("1" if r["test"] else "")
+          PY
+          )
+          if [ -n "$test_run" ]; then
+            case "$REF_NAME" in gh-runners-test-*) ;; *) echo "::error::a test run starts only from a gh-runners-test-* branch"; exit 1 ;; esac
+            echo "dispatch_ref=$REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "test run: dispatching only on $REF_NAME"
+          else
+            if [ "$REF_NAME" != main ]; then
+              echo "::error::a production run starts only from main (set every redirect input for a test run)"
+              exit 1
+            fi
+            echo "dispatch_ref=main" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Triage
+        env:
+          # API calls (5,000 an hour) and pushes use the coordination token, not GITHUB_TOKEN.
+          GH_TOKEN: ${{ secrets.COORD_TOKEN }}
+          AUTOPILOT_COORD_REF: ${{ env.IN_COORD_REF }}
+          AUTOPILOT_COORD_BASE: ${{ env.IN_COORD_BASE }}
+          AUTOPILOT_APP_BASE: ${{ env.IN_APP_BASE }}
+          AUTOPILOT_STATE_PREFIX: ${{ env.IN_STATE_PREFIX }}
+          DISPATCH_REF: ${{ steps.mode.outputs.dispatch_ref }}
+        run: |
+          set -euo pipefail
+          coord="$RUNNER_TEMP/coord"
+          export AUTOPILOT_PRIVATE="$coord" AUTOPILOT_WORKTREES="$RUNNER_TEMP/worktrees"
+          mkdir -p "$AUTOPILOT_WORKTREES"
+          # The committed runner.toml of the coordination repository: every switch off, so this only reports. The script
+          # appends its report to $GITHUB_STEP_SUMMARY itself.
+          python3 "$coord/autopilot/runner/triage.py" \
+            --config "$coord/autopilot/runner/runner.toml" \
+            --coord-repo "$coord" \
+            --app-repo "$GITHUB_WORKSPACE" \
+            --ref "$DISPATCH_REF"
