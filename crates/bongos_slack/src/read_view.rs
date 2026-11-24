@@ -375,6 +375,25 @@ pub fn reply_destination(
     })
 }
 
+/// The threads shown in `transcript`, in buffer order, each with the text of the first row of its
+/// parent (or of its first row shown): the thread destinations `slack: post` offers.
+pub fn threads_shown(transcript: &Transcript) -> Vec<(Ts, String)> {
+    let lines: Vec<&str> = transcript.text.split('\n').collect();
+    let mut threads: Vec<(Ts, String)> = Vec::new();
+    for (row, entry) in transcript.index.iter().enumerate() {
+        let Some((_, Some(thread))) = entry else {
+            continue;
+        };
+        if threads.iter().any(|(known, _)| known == thread) {
+            continue;
+        }
+        let first = row_of(transcript, thread).unwrap_or(row);
+        let line = lines.get(first).copied().unwrap_or_default().trim();
+        threads.push((thread.clone(), line.to_string()));
+    }
+    threads
+}
+
 /// The first buffer row of the message `ts`, to keep point on it after a load.
 pub fn row_of(transcript: &Transcript, ts: &Ts) -> Option<usize> {
     transcript
