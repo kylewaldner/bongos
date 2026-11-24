@@ -1,0 +1,90 @@
+# Phase 0 measurement (scratch branch only, never merged): the whole workspace test suite, in one job and split by crate set.
+name: p0-suite
+on:
+  push:
+    branches: [gh-runners-phase0]
+    paths: ['.github/workflows/p0-suite.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      shards: ${{ steps.p.outputs.shards }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: p
+        run: |
+          echo 'shards=[1,2,3,4,5,6,7,8]' >> "$GITHUB_OUTPUT"
+  shard:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJson(needs.plan.outputs.shards) }}
+    name: shard-${{ matrix.shard }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 345
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: '0'
+      CARGO_PROFILE_DEV_SPLIT_DEBUGINFO: 'off'
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_SPLIT_DEBUGINFO: 'off'
+      BONGOS_SKIP_GIT_HEAD_WATCH: '1'
+      CC: clang
+      CXX: clang++
+      RUSTUP_HOME: /mnt/bongos-workspace/rustup
+      CARGO_HOME: /mnt/bongos-workspace/cargo
+      CARGO_TARGET_DIR: /mnt/bongos-workspace/target
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup
+        run: |
+          . p0/lib.sh
+          start_watch
+          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends gcc g++ libasound2-dev libfontconfig-dev libgit2-dev libglib2.0-dev libssl-dev libva-dev libvulkan1 libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev make cmake clang lld llvm jq git curl gettext-base elfutils libsqlite3-dev musl-tools musl-dev build-essential pkg-config python3 mold >/dev/null
+          sudo mkdir -p /mnt/bongos-workspace; sudo chown "$USER" /mnt/bongos-workspace
+          mkdir -p "$CARGO_HOME/bin" "$CARGO_TARGET_DIR"
+          rustup toolchain install >/dev/null 2>&1
+          curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C "$CARGO_HOME/bin"
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+          printf '#!/bin/sh\nexec clang "$@" -fuse-ld=mold\n' | sudo tee /usr/local/bin/bongos-mold-linker >/dev/null; sudo chmod 755 /usr/local/bin/bongos-mold-linker
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/bongos-mold-linker" >> "$GITHUB_ENV"
+          echo "MEASURE shard=${{ matrix.shard }} setup_done root_avail_mb=$(avail_root)"
+      - name: Cache dependencies (read only)
+        id: cache
+        uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        with:
+          workspaces: ". -> ../../../../../mnt/bongos-workspace/target"
+          shared-key: p0-dev
+          save-if: false
+      - name: Report cache
+        run: echo "MEASURE shard=${{ matrix.shard }} cache_hit=${{ steps.cache.outputs.cache-hit }}"
+      - name: Pick this shard's crates
+        run: |
+          cargo metadata --no-deps --locked --format-version 1 | jq -r '.packages[] | select(.targets[] | .kind[] | IN("lib","bin","test","proc-macro")) | .name' | sort -u > "$RUNNER_TEMP/all.txt"
+          echo "MEASURE shard=${{ matrix.shard }} workspace_crates=$(wc -l < "$RUNNER_TEMP/all.txt")"
+          awk -v k=${{ matrix.shard }} -v n=8 '(NR-1)%n==k-1' "$RUNNER_TEMP/all.txt" > "$RUNNER_TEMP/mine.txt"
+          echo "MEASURE shard=${{ matrix.shard }} shard_crates=$(wc -l < "$RUNNER_TEMP/mine.txt")"
+      - name: Build the shard's tests
+        run: |
+          . p0/lib.sh
+          args=$(sed 's/^/-p /' "$RUNNER_TEMP/mine.txt" | tr '\n' ' ')
+          timed shard-build cargo nextest run $args --lib --bins --tests --locked --no-run
+          du -sm "$CARGO_TARGET_DIR" | sed "s/^/MEASURE shard=${{ matrix.shard }} target_mb /"
+      - name: Run the shard's tests
+        run: |
+          . p0/lib.sh
+          args=$(sed 's/^/-p /' "$RUNNER_TEMP/mine.txt" | tr '\n' ' ')
+          timed shard-test cargo nextest run $args --lib --bins --tests --locked --no-fail-fast --profile gate --color never 2>&1 | tail -60
+          echo "MEASURE shard=${{ matrix.shard }} done"
+      - name: Peaks
+        if: always()
+        run: . p0/lib.sh; report_watch
