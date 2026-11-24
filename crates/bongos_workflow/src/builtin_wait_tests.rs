@@ -723,6 +723,17 @@ fn enterprise_tokens_reach_gh_only_for_the_remote_or_gh_host() {
     let upper = "https://GHE.acme.com/acme/widgets/pull/7";
     assert!(has_tokens(&gh_env(base.clone(), upper, Some(https_remote))));
 
+    // A query or fragment after the path leaves the host the remote's.
+    for pr in [
+        "https://ghe.acme.com/acme/widgets/pull/7?x=1",
+        "https://ghe.acme.com/acme/widgets/pull/7#frag",
+    ] {
+        assert!(
+            has_tokens(&gh_env(base.clone(), pr, Some(enterprise_remote))),
+            "{pr}"
+        );
+    }
+
     // `GH_HOST`: a number goes to it, and so does a URL on it.
     assert!(has_tokens(&gh_env(with_gh_host.clone(), "42", None)));
     let on_gh_host = "https://ghe.other.com/other/thing/pull/1";
@@ -745,6 +756,9 @@ fn enterprise_tokens_reach_gh_only_for_the_remote_or_gh_host() {
         "https://ghe.acme.com@evil.example/acme/widgets/pull/7",
         "https://evil.example:8443/acme/widgets/pull/7",
         "https://evil.example/not-a-pull-request",
+        // A `?` or `#` ends the authority, so what follows it is not the host.
+        "https://evil.example?@ghe.acme.com/acme/widgets/pull/1",
+        "https://evil.example#@ghe.acme.com/acme/widgets/pull/1",
     ] {
         let out = gh_env(with_gh_host.clone(), pr, Some(enterprise_remote));
         assert!(no_tokens(&out), "{pr}: {out:?}");

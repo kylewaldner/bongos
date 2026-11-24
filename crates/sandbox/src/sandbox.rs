@@ -16,7 +16,8 @@
 //! purpose: hiding the bus would break tools that read their login from the keyring (`gh` would
 //! then need `GH_TOKEN`). The sandbox therefore is not a boundary against the session bus: treat
 //! a sandboxed program as able to read the user's stored secrets and to run code as the user
-//! through the bus. The filesystem and network policies still hold for the program itself.
+//! through the bus. Through the bus a sandboxed program can also get around the filesystem and
+//! network policies, so they bind only programs that do not use the bus.
 
 use std::{
     collections::HashMap,
@@ -58,6 +59,7 @@ pub enum SandboxFsPolicy {
     Unrestricted,
     /// Reads are allowed everywhere; writes are confined to these directory
     /// subtrees (and the standard ephemeral locations the platform provides).
+    /// A program that uses the D-Bus session bus can get around this (see the module docs).
     Restricted { writable_paths: Vec<PathBuf> },
 }
 
@@ -67,6 +69,7 @@ pub enum SandboxNetPolicy {
     /// Allow unrestricted outbound network access.
     Unrestricted,
     /// Block all outbound network access.
+    /// A program that uses the D-Bus session bus can get around this (see the module docs).
     Blocked,
     /// Allow outbound HTTP(S) only to these hostnames (exact hosts or
     /// leading-`*.` subdomain wildcards), enforced by an in-process proxy.

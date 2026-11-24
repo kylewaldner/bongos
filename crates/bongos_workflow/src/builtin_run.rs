@@ -454,7 +454,8 @@ impl WaitNode {
         }
     }
 
-    pub fn with_sandbox_wrap(mut self, sandbox_wrap: SandboxWrap) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_sandbox_wrap(mut self, sandbox_wrap: SandboxWrap) -> Self {
         self.sandbox_wrap = sandbox_wrap;
         self
     }
