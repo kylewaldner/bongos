@@ -437,4 +437,12 @@ runs:
           rc=0
         fi
         df -h /
+        # The runner mode reset the workspace to the job's base (a design job: the base's main), where this action
+        # may not exist; the runner's post steps read action.yml from the workspace, so put back the commit the
+        # workflow started from (the job is over: nothing reads the workspace any more).
+        if git -C "$GITHUB_WORKSPACE" cat-file -e "$GITHUB_SHA^{commit}" 2>/dev/null ||
+           git -C "$GITHUB_WORKSPACE" fetch --quiet --depth=1 origin "$GITHUB_SHA"; then
+          git -C "$GITHUB_WORKSPACE" checkout --quiet --force --detach "$GITHUB_SHA" ||
+            echo "::warning::could not restore the workspace to $GITHUB_SHA; the post steps may fail"
+        fi
         exit "$rc"
