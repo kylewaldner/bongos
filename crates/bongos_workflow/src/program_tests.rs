@@ -21,9 +21,10 @@ use tempfile::TempDir;
 
 use crate::runner_program::{
     Clock, DENIALS_END, DENIALS_FILE, GitGuard, INTERPRETER_FIX, Interpreter, MCP_REFUSAL,
-    PollPlan, ProgramCaps, ProgramNode, ProgramRunner, ProgramSettings, SNAPSHOT_NEEDS_SANDBOX,
-    SUMMARY_FILE, SandboxProbe, WORK_DIR_NEEDS_SANDBOX, add_git_config, git_metadata_needed,
-    hide_in_bubblewrap, os_sandbox_probe, remove_symlinks,
+    POLICY_FILE, PollPlan, ProgramCaps, ProgramNode, ProgramRunner, ProgramSettings,
+    SNAPSHOT_NEEDS_SANDBOX, STATE_FILE, SUMMARY_FILE, SandboxProbe, WORK_DIR_NEEDS_SANDBOX,
+    add_git_config, check_policy_outside_writable, git_metadata_needed, hide_in_bubblewrap,
+    os_sandbox_probe, remove_symlinks,
 };
 use crate::runtime::Finish;
 
@@ -1914,5 +1915,101 @@ fn a_bad_script_result_gets_the_one_validation_message() {
     assert_eq!(
         outcome.unwrap_err().detail,
         "Result failed validation at `/status`: expected one of \"one-shot\", \"planned\", \"waiting\", \"done\", got \"maybe\""
+    );
+}
+
+/// Starts `node` and returns the refusal, checking that nothing of the try was written.
+fn refused_start(fixture: &mut Fixture, node: ProgramNode) -> Failure {
+    let try_dir = node.try_dir.clone();
+    let failure = fixture.runner.start("run-1", &key(), 1, node).unwrap_err();
+    for name in [POLICY_FILE, STATE_FILE, SUMMARY_FILE] {
+        assert!(!try_dir.join(name).exists(), "{name} was written");
+    }
+    failure
+}
+
+#[test]
+fn a_lane_directory_holding_the_run_records_refuses_the_start() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    let mut node = fixture.node("pass");
+    let lane = fixture.path("record");
+    std::fs::create_dir_all(&lane).unwrap();
+    node.extra_writable = vec![lane.clone()];
+    let failure = refused_start(&mut fixture, node);
+    assert_eq!(failure.reason, FailureReason::PermissionDenied);
+    assert_eq!(
+        failure.detail,
+        format!(
+            "a writable directory of this node contains its own policy file: {}",
+            lane.display()
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_writable_directory_pointing_at_the_try_directory_refuses_the_start() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    let mut node = fixture.node("pass");
+    std::fs::create_dir_all(&node.try_dir).unwrap();
+    let link = fixture.path("lane-link");
+    std::os::unix::fs::symlink(&node.try_dir, &link).unwrap();
+    node.extra_writable = vec![link.clone()];
+    let failure = refused_start(&mut fixture, node);
+    assert_eq!(failure.reason, FailureReason::PermissionDenied);
+    assert_eq!(
+        failure.detail,
+        format!(
+            "a writable directory of this node contains its own policy file: {}",
+            link.display()
+        )
+    );
+}
+
+#[test]
+fn a_node_whose_policy_is_outside_its_writable_directories_passes_the_check() {
+    let Some(fixture) = Fixture::new() else {
+        return;
+    };
+    let mut node = fixture.node("pass");
+    let lane = fixture.path("lane");
+    std::fs::create_dir_all(&lane).unwrap();
+    std::fs::create_dir_all(&node.scratch).unwrap();
+    std::fs::create_dir_all(&node.try_dir).unwrap();
+    node.extra_writable = vec![lane];
+    assert_eq!(check_policy_outside_writable(&node, &node.try_dir), Ok(()));
+}
+
+#[test]
+fn a_missing_try_directory_is_made_before_the_check_and_the_start_passes() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    let node = fixture.node(&script("", "'done'"));
+    let try_dir = node.try_dir.clone();
+    assert!(!try_dir.exists());
+    fixture.start(node);
+    assert!(try_dir.join(POLICY_FILE).is_file());
+    assert_eq!(fixture.wait().outcome, Ok(json!({ "status": "done" })));
+}
+
+#[test]
+fn a_writable_directory_that_cannot_be_resolved_refuses_the_start_and_is_named() {
+    let Some(mut fixture) = Fixture::new() else {
+        return;
+    };
+    let mut node = fixture.node("pass");
+    let missing = fixture.path("missing-lane");
+    node.extra_writable = vec![missing.clone()];
+    let failure = refused_start(&mut fixture, node);
+    assert_eq!(failure.reason, FailureReason::PermissionDenied);
+    assert!(
+        failure.detail.contains(&format!("{}: ", missing.display())),
+        "{}",
+        failure.detail
     );
 }
