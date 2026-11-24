@@ -3,6 +3,9 @@
 # saved only after its build succeeds (no cache-on-failure) and only on main. Every other job restores with
 # save-if false. Workspace crates are never cached (rust-cache removes them before saving).
 #
+# Every job that restores one of these caches must set the same CARGO_*, RUST* and BONGOS_* values as this
+# workflow before its cache step (rust-cache hashes them into the key), including CARGO_BUILD_JOBS on release and no
+# CARGO_TERM_COLOR (color is passed as --color never instead).
 # The environment of each build is what script/bongos/env.sh sets, written to GITHUB_ENV before the cache step, so
 # the cache key sees the same values a job that sources env.sh would. A job that restores one of these caches must
 # set the same values before its cache step, with the same shared-key and the same workspaces path.
@@ -32,7 +35,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {name: dev, runner: ubuntu-24.04, unified: '', release: ''}
+          # dev runs on the release job's runner (ubuntu-22.04), where the whole suite is built, so the toolchain, glibc and
+          # system libraries match; mold is installed and used there (stage 11 must do the same for its suite step).
+          - {name: dev, runner: ubuntu-22.04, unified: '', release: ''}
           - {name: dev-unified, runner: ubuntu-24.04, unified: '1', release: ''}
           # The oldest Ubuntu LTS runner GitHub still hosts, as release.yml does, for glibc compatibility.
           - {name: release, runner: ubuntu-22.04, unified: '', release: '1'}
@@ -43,7 +48,6 @@ jobs:
       BONGOS_WORKSPACE: /mnt/bongos-workspace
       BONGOS_UNIFIED_FEATURES: ${{ matrix.unified }}
       BONGOS_RELEASE_BUILD: ${{ matrix.release }}
-      CARGO_TERM_COLOR: never
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -95,7 +99,8 @@ jobs:
           # The target directory is outside the checkout; rust-cache joins it onto the workspace path, so it is
           # given relative to the checkout. The cache action sets CARGO_INCREMENTAL=0; every variant is built that way.
           workspaces: ". -> ${{ steps.target.outputs.rel }}"
-          shared-key: ${{ matrix.name }}
+          # The runner is part of the key: a cache built on one image is not restored on another.
+          shared-key: ${{ matrix.name }}-${{ matrix.runner }}
           add-job-id-key: false
           # Written only by this workflow, only on main, and (by default) only after a successful job.
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -103,13 +108,15 @@ jobs:
         if: matrix.release != '1'
         run: |
           set -euo pipefail
-          cargo test --workspace --lib --bins --tests --locked --no-run
-          cargo build -p bongos -p cli --locked
-      - name: Build the dependencies (release)
+          cargo test --workspace --lib --bins --tests --locked --no-run --color never
+          cargo build -p bongos -p cli --locked --color never
+      - name: Build the dependencies (release, the real bundle build)
         if: matrix.release == '1'
         run: |
           set -euo pipefail
-          cargo build --release --locked --package bongos --package cli
+          . script/bongos/env.sh
+          mkdir -p "$BONGOS_SMOKE_SCRATCH" "$BONGOS_TMPDIR"
+          script/bongos/bundle-linux --out "$RUNNER_TEMP/dist"
       - name: Sizes
         if: always()
         run: |

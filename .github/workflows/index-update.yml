@@ -19,6 +19,10 @@ on:
       - 'tooling/**'
       - 'script/**'
       - 'Cargo.toml'
+      - 'assets/**'
+      - 'docs/**'
+      - '.config/**'
+      - '.github/**'
 
 permissions:
   contents: read
@@ -37,7 +41,7 @@ jobs:
     env:
       TAG: ${{ vars.INDEX_TAG || 'colgrep-index' }}
       REPO: ${{ github.repository }}
-      GH_TOKEN: ${{ github.token }}
+      COLGREP_VERSION: ${{ vars.COLGREP_VERSION || 'v1.8.5' }}
       TRIGGER_SHA: ${{ github.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -49,8 +53,12 @@ jobs:
       - name: Index the current main
         run: .github/scripts/colgrep-index.sh checkout
       - name: Restore the newest published index
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: .github/scripts/colgrep-index.sh restore
       - name: Re-embed what changed
         run: .github/scripts/colgrep-index.sh build
       - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: .github/scripts/colgrep-index.sh publish

@@ -16,12 +16,12 @@ set -euo pipefail
 
 : "${TAG:?TAG is not set}"
 : "${REPO:?REPO is not set}"
-: "${COLGREP_VERSION:=latest}"
+: "${COLGREP_VERSION:=v1.8.5}"
 : "${ORT_VERSION:=1.23.2}"
 : "${KEEP_ASSETS:=2}"
 
 asset_re='^colgrep-index-[0-9a-f]{40}-[0-9]+\.tar\.zst$'
-scratch="${RUNNER_TEMP:?RUNNER_TEMP is not set}/colgrep-index"
+scratch="${RUNNER_TEMP:?RUNNER_TEMP is not set}/index-scratch"
 mkdir -p "$scratch"
 
 # A test tag must never match release.yml's v* trigger or collide with an app release.
@@ -42,24 +42,27 @@ newest_asset() {
     return 1
   fi
   printf '%s' "$out" | jq -r --arg re "$asset_re" \
-    '[.assets[] | select(.name | test($re))] | sort_by(.created_at) | last // empty | [.name, (.name | capture("^colgrep-index-(?<sha>[0-9a-f]{40})-").sha)] | @tsv'
+    '[.assets[] | select(.state == "uploaded" and (.name | test($re)))] | sort_by(.created_at) | last // empty | [.name, (.name | capture("^colgrep-index-(?<sha>[0-9a-f]{40})-").sha)] | @tsv'
 }
 
 # Prints every matching asset name, newest upload first.
 assets_newest_first() {
   gh api "repos/$REPO/releases/tags/$TAG" |
-    jq -r --arg re "$asset_re" '[.assets[] | select(.name | test($re))] | sort_by(.created_at) | reverse | .[].name'
+    jq -r --arg re "$asset_re" '[.assets[] | select(.state == "uploaded" and (.name | test($re)))] | sort_by(.created_at) | reverse | .[].name'
 }
 
 cmd_install() {
-  local base d lib
-  if [ "$COLGREP_VERSION" = latest ]; then
-    base=https://github.com/lightonai/next-plaid/releases/latest/download
-  else
-    base="https://github.com/lightonai/next-plaid/releases/download/$COLGREP_VERSION"
-  fi
-  curl -fsSL "$base/colgrep-x86_64-unknown-linux-gnu.tar.xz" | tar xJ -C "$RUNNER_TEMP"
-  d=$(ls -d "$RUNNER_TEMP"/colgrep-*/ | head -1)
+  local base name d lib
+  # COLGREP_VERSION is a release tag of lightonai/next-plaid (a variable or input may override the default).
+  base="https://github.com/lightonai/next-plaid/releases/download/$COLGREP_VERSION"
+  name=colgrep-x86_64-unknown-linux-gnu.tar.xz
+  mkdir -p "$RUNNER_TEMP/colgrep-dl"
+  curl -fsSL -o "$RUNNER_TEMP/colgrep-dl/$name" "$base/$name"
+  curl -fsSL -o "$RUNNER_TEMP/colgrep-dl/$name.sha256" "$base/$name.sha256"
+  (cd "$RUNNER_TEMP/colgrep-dl" && sha256sum -c "$name.sha256")
+  tar xJ -C "$RUNNER_TEMP" -f "$RUNNER_TEMP/colgrep-dl/$name"
+  d="$RUNNER_TEMP/colgrep-x86_64-unknown-linux-gnu"
+  test -x "$d/colgrep"
   echo "$d" >> "$GITHUB_PATH"
   "$d/colgrep" --version
   python3 -m venv "$RUNNER_TEMP/ort"
@@ -106,7 +109,10 @@ cmd_publish() {
   # Guard 3: re-read the newest published asset now, and upload only when this run's commit is that asset's
   # commit or a descendant of it. Otherwise exit successfully with the published assets untouched.
   row=$(newest_asset)
-  if [ -n "$row" ]; then
+  if [ -n "$row" ] && [ "${REPLACE:-}" = true ]; then
+    # index-rebuild with replace: skips guard 3 (a deliberate replacement of a broken or older index); guard 4 stays.
+    echo "::warning::replace is set: guard 3 skipped, uploading $own over the published index"
+  elif [ -n "$row" ]; then
     pub_name=${row%%$'\t'*}
     pub_sha=${row##*$'\t'}
     if [ "$pub_sha" != "$own" ]; then
@@ -114,11 +120,11 @@ cmd_publish() {
         git fetch --no-tags origin "$pub_sha" 2>/dev/null || true
       fi
       if ! git cat-file -e "$pub_sha^{commit}" 2>/dev/null; then
-        echo "the newest published index ($pub_name) is built from $pub_sha, which this checkout does not have; not uploading"
+        echo "::warning::the newest published index ($pub_name) is built from $pub_sha, which this checkout does not have; not uploading"
         return 0
       fi
       if ! git merge-base --is-ancestor "$pub_sha" "$own"; then
-        echo "the newest published index ($pub_name) is not an ancestor of $own; not uploading"
+        echo "::warning::the newest published index ($pub_name) is not an ancestor of $own; not uploading"
         return 0
       fi
     fi
