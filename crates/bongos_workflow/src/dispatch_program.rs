@@ -231,7 +231,7 @@ fn todo_of(binding: &RunBinding) -> TodoRef {
 }
 
 /// The node's scratch directory, beside the run's worktrees and outside the record.
-fn scratch_dir(binding: &RunBinding, key: &NodeKey, try_number: u32) -> PathBuf {
+pub(crate) fn scratch_dir(binding: &RunBinding, key: &NodeKey, try_number: u32) -> PathBuf {
     binding
         .worktree
         .run_dir
@@ -254,16 +254,19 @@ fn common_git_dir(worktree: &Path) -> Option<PathBuf> {
 
 /// The hosts of the task repository's push remote, or [`NO_ORIGIN`].
 pub(crate) fn task_remote_hosts(git: &Git, binding: &RunBinding) -> Result<Vec<String>, String> {
+    let url = task_remote_url(git, binding).ok_or_else(|| NO_ORIGIN.to_string())?;
+    remote_hosts(&url).ok_or_else(|| NO_ORIGIN.to_string())
+}
+
+/// The push URL of the task repository's `origin` remote, if it has one.
+pub(crate) fn task_remote_url(git: &Git, binding: &RunBinding) -> Option<String> {
     let task_tree = binding
         .checkout
         .worktree
         .clone()
         .unwrap_or_else(|| binding.worktree.path.clone());
     let root = futures::executor::block_on(repository_root(git, &task_tree)).unwrap_or(task_tree);
-    let url =
-        futures::executor::block_on(git.run(&root, &["remote", "get-url", "--push", "origin"]))
-            .map_err(|_| NO_ORIGIN.to_string())?;
-    remote_hosts(&url).ok_or_else(|| NO_ORIGIN.to_string())
+    futures::executor::block_on(git.run(&root, &["remote", "get-url", "--push", "origin"])).ok()
 }
 
 /// The host of a remote URL and its subdomain pattern: `https://github.com/o/r.git`,
@@ -305,7 +308,7 @@ pub(crate) fn remote_hosts(url: &str) -> Option<Vec<String>> {
 }
 
 /// `network` with `@remote` replaced by `hosts`.
-fn expand_remote(network: &[String], hosts: &[String]) -> Vec<String> {
+pub(crate) fn expand_remote(network: &[String], hosts: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for entry in network {
         if entry == REMOTE_ENTRY {

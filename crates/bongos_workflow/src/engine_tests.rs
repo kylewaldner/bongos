@@ -367,3 +367,33 @@ fn a_reloaded_run_of_a_refusing_project_refuses_unsandboxed_starts(cx: &mut Test
         bongos_workflow_model::unsandboxed::Mode::Refuse
     );
 }
+
+/// The placed path (the run found its project, which has no switch) stays Allow, so the
+/// Refuse above comes from the switch and not from the unplaced fail-closed path.
+#[gpui::test]
+fn a_reloaded_run_of_a_project_without_the_switch_keeps_the_allow_mode(cx: &mut TestAppContext) {
+    let world = World::new();
+    let run = seed(&world, "single", mid_node);
+    let linked = linked(&world, FakeRunner::new(), cx);
+    let repo = project_repo(&world.root.join("project"));
+    let engine = linked.engine.with_project_lookup(ProjectLookup {
+        repo_of: Arc::new(move |_, _| Some(repo.clone())),
+        switch_of: Arc::new(|_| None),
+    });
+    cx.update(|cx| engine.attach(cx));
+    cx.run_until_parked();
+
+    advance(cx, 1);
+    assert_eq!(engine.lifecycle().all_runs(), vec![run.clone()]);
+    let snapshot = RunnerSnapshot {
+        programs: crate::runner_program::ProgramSettings {
+            unsandboxed: bongos_workflow_model::unsandboxed::Mode::Allow,
+            ..crate::runner_program::ProgramSettings::default()
+        },
+        ..engine.runner_inputs().snapshot()
+    };
+    assert_eq!(
+        snapshot.unsandboxed_mode(&run),
+        bongos_workflow_model::unsandboxed::Mode::Allow
+    );
+}
