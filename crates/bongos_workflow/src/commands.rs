@@ -1,9 +1,10 @@
 //! The handlers of `workflow: validate`, `workflow: new` and `workflow: edit definition`, and of
 //! the run commands (`run`, `pause`, `halt`, `resume`, `retry step`, `retry step fresh`,
-//! `restart`, `cancel`, `approve`, `revise`, `copy resume command`). While `workflows.enabled` is
-//! false each only shows the off toast; no engine exists and nothing is read. File work runs on a
-//! background task and the result comes back to the workspace. The run commands act on the active
-//! run of the task at point and are thin: the decisions are the engine's.
+//! `restart`, `cancel`, `approve`, `revise`, `cancel gate`, `copy resume command`). While
+//! `workflows.enabled` is false each only shows the off toast; no engine exists and nothing is
+//! read. File work runs on a background task and the result comes back to the workspace. The run
+//! commands act on the active run of the task at point and are thin: the decisions are the
+//! engine's.
 
 use bongos_workflow_model::definition::{FieldType, ItemType};
 use bongos_workflow_model::layers::DEFINITION_FILE;
@@ -156,6 +157,10 @@ pub(crate) fn edit_definition(
 pub const NO_RUN: &str = "No workflow run here; select a task with an active run";
 /// The toast when `workflow: run` finds no task.
 pub const NO_TASK: &str = "Select a leaf task to run its workflow";
+/// The toast when `workflow: cancel gate` finds no step waiting to start.
+pub const NO_START_GATE: &str = "The run has no step waiting for approval to start";
+/// The toast when a start gate was cancelled.
+pub const GATE_CANCELLED: &str = "Cancelled the step; it fails and is not retried";
 
 fn register_run_commands(workspace: &mut Workspace) {
     on::<workflow::Run>(workspace, |engine, workspace, window, cx| {
@@ -310,6 +315,14 @@ fn register_run_commands(workspace: &mut Workspace) {
             cx,
         );
     });
+    on_run::<workflow::CancelGate>(workspace, |engine, run, workspace, _, cx| {
+        let Some(key) = engine.start_gates(&run).into_iter().next() else {
+            show_toast(workspace, NO_START_GATE.to_string(), cx);
+            return;
+        };
+        let cancelled = engine.cancel_gate(&run, &key, cx);
+        report(workspace, cancelled.map(|()| GATE_CANCELLED), cx);
+    });
     on_run::<workflow::CopyResumeCommand>(workspace, |engine, run, workspace, _, cx| match engine
         .resume_command(&run)
     {
@@ -394,6 +407,11 @@ fn remote_verb<A: Action>() -> Option<(WorkflowVerb, bool)> {
         (
             std::any::TypeId::of::<workflow::Revise>(),
             WorkflowVerb::Revise,
+            false,
+        ),
+        (
+            std::any::TypeId::of::<workflow::CancelGate>(),
+            WorkflowVerb::CancelGate,
             false,
         ),
         (

@@ -154,6 +154,8 @@ pub struct GateCard {
     pub question: String,
     /// The typed result the gate holds, when it is an `after` gate.
     pub result: Option<String>,
+    /// A built-in's start gate: approved as is or cancelled, never revised.
+    pub start_gate: bool,
 }
 
 /// What the detail pane shows about one node.
@@ -224,6 +226,7 @@ impl Snapshot {
                     .last_finish(key)
                     .and_then(|finished| finished.result.as_ref())
                     .map(pretty),
+                start_gate: state.person_only_gates.contains(key),
             })
             .collect();
         let outcomes = outcomes::collect(&data.definition, state)
@@ -726,6 +729,14 @@ impl RunView {
         approved.map_err(|refusal| refusal.to_string())
     }
 
+    /// Cancels the start gate of a card: the same call `workflow: cancel gate` makes. The step
+    /// fails with `GateCancelled` and is not retried.
+    pub fn cancel_gate(&mut self, key: &NodeKey, cx: &mut Context<Self>) -> Result<(), String> {
+        let cancelled = self.engine.cancel_gate(&self.run, key, cx);
+        self.refresh(cx);
+        cancelled.map_err(|refusal| refusal.to_string())
+    }
+
     fn render_header(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         v_flex()
@@ -928,6 +939,21 @@ impl RunView {
             .p_2()
             .children(snapshot.gates.iter().enumerate().map(|(index, gate)| {
                 let key = gate.key.clone();
+                // A start gate asks about an exact text: it is cancelled, not revised.
+                let second = if gate.start_gate {
+                    let key = gate.key.clone();
+                    Button::new(("run-view-cancel-gate", index), "Cancel step").on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            if let Err(message) = this.cancel_gate(&key, cx) {
+                                log::warn!("workflows: cancel gate from the run view: {message}");
+                            }
+                        }),
+                    )
+                } else {
+                    Button::new(("run-view-revise", index), "Revise").on_click(cx.listener(
+                        |_, _, window, cx| window.dispatch_action(Box::new(workflow::Revise), cx),
+                    ))
+                };
                 v_flex()
                     .gap_1()
                     .p_2()
@@ -956,11 +982,7 @@ impl RunView {
                                         }
                                     })),
                             )
-                            .child(Button::new(("run-view-revise", index), "Revise").on_click(
-                                cx.listener(|_, _, window, cx| {
-                                    window.dispatch_action(Box::new(workflow::Revise), cx)
-                                }),
-                            )),
+                            .child(second),
                     )
             }))
     }

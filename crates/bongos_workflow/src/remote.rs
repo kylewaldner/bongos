@@ -27,6 +27,8 @@ pub enum WorkflowVerb {
     Restart,
     Approve,
     Revise,
+    /// Cancels a built-in's start gate: its step fails with `GateCancelled` and is not retried.
+    CancelGate,
     ClearFinished,
 }
 
@@ -105,7 +107,8 @@ fn refused(refusal: Refusal) -> String {
 
 /// Runs `verb` in this process's engine, as the writer. Resolves with the text to show: what
 /// was done, or the engine's refusal. `person` is whether the peer that sent it may attest a
-/// person at a window: every verb that closes a gate refuses a built-in's start gate without one.
+/// person at a window: every verb that closes or cancels a gate refuses a built-in's start gate
+/// without one.
 pub fn execute(
     verb: WorkflowVerb,
     payload: WorkflowPayload,
@@ -197,6 +200,20 @@ pub fn execute(
             engine
                 .revise(&run, &key, payload.comment.unwrap_or_default(), cx)
                 .map(|()| "Sent back for revision".to_string())
+                .map_err(refused)
+        }
+        WorkflowVerb::CancelGate => {
+            let key = engine
+                .start_gates(&run)
+                .into_iter()
+                .next()
+                .ok_or_else(|| crate::commands::NO_START_GATE.to_string())?;
+            engine
+                .refuse_unattested(&run, &key, person)
+                .map_err(refused)?;
+            engine
+                .cancel_gate(&run, &key, cx)
+                .map(|()| crate::commands::GATE_CANCELLED.to_string())
                 .map_err(refused)
         }
         WorkflowVerb::Start | WorkflowVerb::ClearFinished => unreachable!("handled above"),

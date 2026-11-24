@@ -22,6 +22,7 @@ const NAMES: &[&str] = &[
     "workflow::Cancel",
     "workflow::Approve",
     "workflow::Revise",
+    "workflow::CancelGate",
     "workflow::OpenLogs",
     "workflow::ShowRuns",
     "workflow::ShowRun",

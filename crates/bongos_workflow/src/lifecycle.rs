@@ -1268,6 +1268,20 @@ impl<R: Runner> Lifecycle<R> {
             .unwrap_or_default()
     }
 
+    /// The open start gates of built-ins in `run`, the gates `workflow: cancel gate` cancels.
+    pub fn start_gates(&self, run: &str) -> Vec<NodeKey> {
+        self.state(run)
+            .map(|state| {
+                state
+                    .person_only_gates
+                    .iter()
+                    .filter(|key| state.open_gates.contains_key(*key))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The task checkout `run` was started from (its worktree and branch).
     pub fn task_checkout(&self, run: &str) -> Option<&TaskCheckout> {
         self.entry(run).ok().map(|entry| &entry.task)

@@ -228,6 +228,7 @@ async fn nothing_is_read_or_written_while_off(cx: &mut TestAppContext) {
         "workflow::Cancel",
         "workflow::Approve",
         "workflow::Revise",
+        "workflow::CancelGate",
         "workflow::CopyResumeCommand",
     ] {
         dispatch(name, cx);

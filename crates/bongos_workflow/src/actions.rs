@@ -41,6 +41,9 @@ pub mod workflow {
             Approve,
             /// Sends the open gate back with notes.
             Revise,
+            /// Cancels the step the run asks about before it starts; the step fails and is not
+            /// retried.
+            CancelGate,
             /// Opens the logs of the run.
             OpenLogs,
             /// Shows the runs of every task.
@@ -84,6 +87,7 @@ pub fn action_types() -> Vec<TypeId> {
         TypeId::of::<workflow::Cancel>(),
         TypeId::of::<workflow::Approve>(),
         TypeId::of::<workflow::Revise>(),
+        TypeId::of::<workflow::CancelGate>(),
         TypeId::of::<workflow::OpenLogs>(),
         TypeId::of::<workflow::ShowRuns>(),
         TypeId::of::<workflow::ShowRun>(),

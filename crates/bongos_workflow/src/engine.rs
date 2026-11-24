@@ -1186,6 +1186,11 @@ impl WorkflowEngine {
         self.lifecycle().open_gates(run)
     }
 
+    /// The open start gates of built-ins in `run`, which `workflow: cancel gate` cancels.
+    pub fn start_gates(&self, run: &RunId) -> Vec<NodeKey> {
+        self.lifecycle().start_gates(run)
+    }
+
     /// The fields of the held result of the gate at `key`, which `workflow: approve` may edit.
     pub fn gate_fields(&self, run: &RunId, key: &NodeKey) -> Vec<GateField> {
         self.lifecycle().gate_fields(run, key)

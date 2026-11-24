@@ -33,6 +33,7 @@ const WORKFLOW_KEYS: &[(&str, &str)] = &[
 /// Commands that stay in the palette with no key.
 const UNBOUND: &[&str] = &[
     "workflow::RetryStepFresh",
+    "workflow::CancelGate",
     "workflow::CopyResumeCommand",
     "workflow::DumpRunView",
     "workflow::DumpEngine",
