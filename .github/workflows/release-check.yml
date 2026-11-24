@@ -290,6 +290,11 @@ jobs:
           export RUSTUP_HOME="$BONGOS_WORKSPACE/rustup" CARGO_HOME="$BONGOS_WORKSPACE/cargo"
           unset CARGO_BUILD_JOBS
           echo "CARGO_BUILD_JOBS=" >> "$GITHUB_ENV"
+          # the tarball is built and uploaded (smoke unpacks it): its 11 GB release profile is not used again, and the
+          # whole-suite build needs about 52 GiB more
+          df -h /
+          rm -rf "${CARGO_TARGET_DIR:?}/release"
+          df -h /
           # set by the release environment; env.sh refuses a configured directory that does not exist
           mkdir -p "${BONGOS_TMPDIR:-$BONGOS_WORKSPACE/scratch/tmp}" "${BONGOS_SMOKE_SCRATCH:-$BONGOS_WORKSPACE/scratch/smoke}"
           # shellcheck disable=SC1091
