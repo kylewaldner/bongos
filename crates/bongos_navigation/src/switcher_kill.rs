@@ -8,7 +8,7 @@
 use std::{collections::HashMap, rc::Rc};
 
 use bongos_minibuffer::{ReadKey, SessionHandle, error, message, read_key};
-use gpui::{App, Context, Entity, EntityId, Global, Window};
+use gpui::{App, Context, Entity, EntityId, Global, WeakEntity, Window};
 use util::ResultExt as _;
 use workspace::item::SaveOptions;
 use workspace::{
@@ -33,7 +33,9 @@ pub(crate) struct Kept {
 #[derive(Clone)]
 pub(crate) struct Active {
     pub(crate) handle: SessionHandle,
-    preview: Entity<PreviewSession>,
+    /// Weak: the open session owns the preview, and a strong handle here would keep the project of a
+    /// closed window alive.
+    preview: WeakEntity<PreviewSession>,
 }
 
 #[derive(Default)]
@@ -50,9 +52,13 @@ pub(crate) fn register(
     handle: SessionHandle,
     preview: Entity<PreviewSession>,
 ) {
-    cx.default_global::<Switchers>()
-        .by_workspace
-        .insert(workspace, Active { handle, preview });
+    cx.default_global::<Switchers>().by_workspace.insert(
+        workspace,
+        Active {
+            handle,
+            preview: preview.downgrade(),
+        },
+    );
 }
 
 pub(crate) fn current(cx: &App, workspace: EntityId) -> Option<Active> {
@@ -63,11 +69,19 @@ pub(crate) fn current(cx: &App, workspace: EntityId) -> Option<Active> {
         .cloned()
 }
 
-fn find_item(pane: &Entity<Pane>, item: EntityId, cx: &App) -> Option<Box<dyn ItemHandle>> {
-    pane.read(cx)
+/// The item with id `item` and the pane that holds it now, which is not always the pane it was in.
+fn find_item(
+    workspace: &WeakEntity<Workspace>,
+    item: EntityId,
+    cx: &App,
+) -> Option<(Entity<Pane>, Box<dyn ItemHandle>)> {
+    let pane = workspace.upgrade()?.read(cx).pane_for_item_id(item)?;
+    let handle = pane
+        .read(cx)
         .items()
         .find(|candidate| candidate.item_id() == item)
-        .map(|candidate| candidate.boxed_clone())
+        .map(|candidate| candidate.boxed_clone())?;
+    Some((pane, handle))
 }
 
 /// Kills the highlighted buffer.
@@ -90,7 +104,7 @@ pub fn kill(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
         return;
     };
     if item.is_dirty(cx) {
-        ask(&active, workspace, item, pane, window, cx);
+        ask(&active, workspace, item, window, cx);
         return;
     }
     let closing = pane.update(cx, |pane, cx| {
@@ -111,9 +125,11 @@ pub fn kill(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
 fn refresh(active: &Active, workspace: &Workspace, window: &mut Window, cx: &mut App) {
     let rows = switcher::candidates(workspace, cx);
     if rows.is_empty() {
-        active.preview.update(cx, |preview, cx| {
-            preview.update(Preview::NoCandidate, window, cx)
-        });
+        if let Some(preview) = active.preview.upgrade() {
+            preview.update(cx, |preview, cx| {
+                preview.update(Preview::NoCandidate, window, cx)
+            });
+        }
     }
     active.handle.set_candidates(rows, window, cx);
 }
@@ -124,7 +140,6 @@ fn ask(
     active: &Active,
     workspace: &mut Workspace,
     item: Box<dyn ItemHandle>,
-    pane: Entity<Pane>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -147,6 +162,7 @@ fn ask(
         })
     };
     let on_cancel = reopen.clone();
+    let answer_workspace = weak_workspace.clone();
     let prompt = ReadKey::new(
         HOST,
         format!("{name} has unsaved changes: (s)ave, (d)iscard, (c)ancel"),
@@ -156,7 +172,16 @@ fn ask(
     .key('c', "")
     .default('c')
     .on_answer(move |key, window, cx| {
-        answer(key, &name, &pane, item_id, &project, &reopen, window, cx)
+        answer(
+            key,
+            &name,
+            &answer_workspace,
+            item_id,
+            &project,
+            &reopen,
+            window,
+            cx,
+        )
     })
     .on_cancel(move |window, cx| on_cancel(window, cx));
     // After the closing session has finished, which is deferred.
@@ -171,7 +196,7 @@ fn ask(
 fn answer(
     key: char,
     name: &str,
-    pane: &Entity<Pane>,
+    workspace: &WeakEntity<Workspace>,
     item_id: EntityId,
     project: &Entity<project::Project>,
     reopen: &Rc<dyn Fn(&mut Window, &mut App)>,
@@ -179,7 +204,9 @@ fn answer(
     cx: &mut App,
 ) {
     // Closed elsewhere while the question was open: nothing to save or discard.
-    let Some(item) = find_item(pane, item_id, cx).filter(|_| matches!(key, 's' | 'd')) else {
+    // The item may have moved to another pane, so it is found by id in the whole workspace.
+    let Some((pane, item)) = find_item(workspace, item_id, cx).filter(|_| matches!(key, 's' | 'd'))
+    else {
         reopen(window, cx);
         return;
     };
@@ -206,7 +233,7 @@ fn answer(
             pane.close_item_by_id(item_id, SaveIntent::Save, window, cx)
         })
     };
-    let (pane, name) = (pane.clone(), name.to_string());
+    let (workspace, name) = (workspace.clone(), name.to_string());
     window
         .spawn(cx, async move |cx| {
             let saved = saving.await;
@@ -214,7 +241,8 @@ fn answer(
                 // Only a saved item closes; one that is dirty again keeps its edits.
                 let closing = cx
                     .update(|window, cx| {
-                        find_item(&pane, item_id, cx).filter(|item| !item.is_dirty(cx))?;
+                        let (pane, item) = find_item(&workspace, item_id, cx)?;
+                        (!item.is_dirty(cx)).then_some(())?;
                         Some(pane.update(cx, |pane, cx| {
                             pane.close_item_by_id(item_id, SaveIntent::Skip, window, cx)
                         }))

@@ -655,7 +655,7 @@ async fn two_panes_with_an_item_to_move(
     (panes, moved.entity_id())
 }
 
-/// Opens the switcher on `moved.txt`, picks the M-o entry `key` and returns the pane count.
+/// Opens the switcher on `moved.txt`, opens the M-o menu and answers it with `keys`.
 fn move_through_menu(workspace: &Entity<Workspace>, keys: &str, cx: &mut VisualTestContext) {
     let handle = open_switcher(workspace, cx);
     set_input(&handle, "moved", cx);
