@@ -18,6 +18,7 @@ use text::{Anchor, ToPoint as _};
 use workspace::{Pane, Workspace, searchable::SearchableItem as _};
 
 use crate::find::engine::{self, FindRequest, FindRow};
+use crate::find::export;
 use crate::find::flag_history;
 use crate::preview::{Preview, PreviewSession, PreviewTarget};
 use crate::registry;
@@ -25,6 +26,8 @@ use crate::target::{self, PaneChoice};
 
 /// The name the session is routed by (`minibuffer.enabled_for`) and its history.
 pub const HOST: &str = "find_in_files";
+/// The key context of the picker's session, under `Minibuffer`.
+pub const KEY_CONTEXT: &str = "FindInFiles";
 /// The name of the history of the input.
 pub const HISTORY: &str = "find-in-files";
 
@@ -89,6 +92,16 @@ impl FindPicker {
     /// What the input holds.
     pub fn input(&self) -> String {
         self.input.borrow().clone()
+    }
+
+    /// What the picker searches for now: its input, flags, scope and open buffers.
+    pub(crate) fn request(&self) -> FindRequest {
+        let mut request = FindRequest::new(&self.input.borrow(), self.flags())
+            .buffers(self.buffers.borrow().clone());
+        if let Some(dir) = &self.base_dir {
+            request = request.base_dir(dir.clone());
+        }
+        request
     }
 
     /// Replaces the flags, shows them in the prompt and searches again. With the open buffers
@@ -205,6 +218,16 @@ impl FindPicker {
         if is_current {
             registry::unregister(cx, id);
         }
+    }
+
+    /// Opens every match of the current query in a results multibuffer.
+    fn export(&self, window: &mut Window, cx: &mut App) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            export::open(self, workspace, window, cx)
+        });
     }
 
     /// Opens the match of `value` in `pane`, or in the default pane when `None`. The origin's
@@ -397,6 +420,7 @@ pub fn open_with(
     };
     let mut session = Session::completing_read(HOST, prompt)
         .history(HISTORY)
+        .key_context(KEY_CONTEXT)
         .source(Source::Dynamic(Box::new(source)))
         .initial_input(seed);
     if select_input {
@@ -428,7 +452,11 @@ pub fn open_with(
             move |outcome, window, cx| {
                 picker.remember_flags(cx);
                 if let Outcome::Candidate(value) = outcome {
-                    picker.open_row(value, None, window, cx);
+                    if matches!(value.downcast_ref::<FindRow>(), Some(FindRow::More { .. })) {
+                        picker.export(window, cx);
+                    } else {
+                        picker.open_row(value, None, window, cx);
+                    }
                 }
             }
         });
