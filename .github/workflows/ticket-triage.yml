@@ -142,6 +142,9 @@ jobs:
           AUTOPILOT_APP_BASE: ${{ env.IN_APP_BASE }}
           AUTOPILOT_STATE_PREFIX: ${{ env.IN_STATE_PREFIX }}
           DISPATCH_REF: ${{ steps.mode.outputs.dispatch_ref }}
+          # The lane table of the owner's machine is not valid here: run.py skips its host-layout check in runner mode
+          # (the dependency graph imports run.py).
+          BONGOS_RUNNER_MODE: '1'
         run: |
           set -euo pipefail
           coord="$RUNNER_TEMP/coord"
