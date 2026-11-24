@@ -48,6 +48,9 @@ inputs:
   lanes:
     description: "Jobs this run holds for the ticket (1 or 2), written into the claim"
     default: '1'
+  pipeline_depth:
+    description: "Stacking depth of a step run after triage and the plan job narrowed it (0 or 1)"
+    default: '0'
   coord_ref:
     description: "Branch of the coordination repository the job checks out for pipeline code"
     default: main
@@ -120,6 +123,7 @@ runs:
         IN_TICKET: ${{ inputs.ticket }}
         IN_LANE: ${{ inputs.lane }}
         IN_LANES: ${{ inputs.lanes }}
+        IN_PIPELINE_DEPTH: ${{ inputs.pipeline_depth }}
         IN_COORD_REF: ${{ inputs.coord_ref }}
         IN_COORD_BASE: ${{ inputs.coord_base }}
         IN_APP_BASE: ${{ inputs.app_base }}
@@ -168,6 +172,7 @@ runs:
         put JOB_TICKET "$IN_TICKET"
         put JOB_LANE "$IN_LANE"
         put JOB_LANES "$IN_LANES"
+        put JOB_PIPELINE_DEPTH "$IN_PIPELINE_DEPTH"
         put JOB_MODEL "$IN_MODEL"
         put JOB_BUDGET_HOURS "$IN_BUDGET_HOURS"
         put JOB_RUN_TIMEOUT_MINUTES "$IN_RUN_TIMEOUT_MINUTES"

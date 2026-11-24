@@ -2,6 +2,11 @@
 # ticket=<feature dir> -f lanes=<n> -f pipeline_depth=<n>` (plus the redirect inputs only when they are not their
 # production default). The run name ends with the ticket as its last word: triage ties a run to its ticket by it.
 #
+# A small `plan` job decides whether lane `b` runs (autopilot/runner/plan.py in the coordination repository): only with
+# the `two_lanes` switch on, two lanes dispatched, and a remaining step graph with two steps that can run at the same
+# time, or (with `stacking` also on) a child that may be stacked. The two lanes relay through signal refs and the shared
+# state branch; lane b never claims, it confirms lane a's claim of this run.
+#
 # Lane job `a` runs consecutive steps of the feature on one runner with incremental builds on, so the compiled target
 # stays warm: each step is the local step job (implement, gate.py light and full with --scope affected, review where
 # the prompt requires it, at most 2 fix rounds, merge into topic/<dir> through merge_step.py, docs pull request). The
@@ -23,7 +28,7 @@ on:
         required: true
         type: string
       lanes:
-        description: "Lane jobs of this run, after triage narrowed lanes_per_feature (only 1 until lane b exists)"
+        description: "Lane jobs of this run, after triage narrowed lanes_per_feature (1 or 2; the plan job may lower it)"
         default: '1'
         type: string
       pipeline_depth:
@@ -59,17 +64,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Stage 16 adds here, before lane-a: a small `plan` job that reads the remaining step graph and says whether lane b
-  # runs (two_lanes, and stacking), and lane-a then gets `needs: plan`. Until then the run has one lane.
-
-  lane-a:
-    # The job name must contain lane-a: the runner mode's liveness check reads it from the Actions API.
-    name: step lane-a
+  plan:
+    # Reads the step graph and runner.toml in the coordination repository; prints the decision, starts no agent.
+    name: plan
     runs-on: ubuntu-24.04
-    # run.py stops at 300 minutes; the final step ends by about 329 (see job.sh's time line).
-    timeout-minutes: 345
+    timeout-minutes: 10
     permissions:
       contents: read
+    outputs:
+      lanes: ${{ steps.plan.outputs.lanes }}
+      pipeline_depth: ${{ steps.plan.outputs.pipeline_depth }}
     steps:
       - name: Check the dispatch inputs
         shell: bash
@@ -78,13 +82,47 @@ jobs:
           IN_DEPTH: ${{ inputs.pipeline_depth }}
         run: |
           set -euo pipefail
-          # One lane until lane b exists (stage 16); triage passes lanes=1 while two_lanes is off.
-          if [ "$IN_LANES" != 1 ]; then
-            echo "::error::lanes is '$IN_LANES': this workflow runs one lane; nothing is claimed"
-            exit 1
-          fi
+          case "$IN_LANES" in 1|2) ;; *) echo "::error::lanes must be 1 or 2"; exit 1 ;; esac
           case "$IN_DEPTH" in 0|1) ;; *) echo "::error::pipeline_depth must be 0 or 1"; exit 1 ;; esac
 
+      - name: Decide the lanes
+        id: plan
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.COORD_TOKEN }}
+          COORD_REPO: ${{ secrets.COORD_REPO }}
+          IN_TICKET: ${{ inputs.ticket }}
+          IN_LANES: ${{ inputs.lanes }}
+          IN_DEPTH: ${{ inputs.pipeline_depth }}
+          IN_COORD_REF: ${{ inputs.coord_ref }}
+          IN_COORD_BASE: ${{ inputs.coord_base }}
+          AUTOPILOT_STATE_PREFIX: ${{ inputs.state_prefix }}
+        run: |
+          set -euo pipefail
+          if [ "$IN_LANES" = 1 ]; then
+            # one lane dispatched: nothing to read
+            { echo "lanes=1"; echo "pipeline_depth=0"; } >> "$GITHUB_OUTPUT"
+            echo "one lane dispatched"
+            exit 0
+          fi
+          # git asks gh for credentials, and gh reads GH_TOKEN from this step's environment: no token is written to disk.
+          git config --global credential.https://github.com.helper ''
+          git config --global --add credential.https://github.com.helper '!gh auth git-credential'
+          coord="$RUNNER_TEMP/coord"
+          git clone --quiet --branch "$IN_COORD_REF" "https://github.com/$COORD_REPO.git" "$coord"
+          python3 "$coord/autopilot/runner/plan.py" --ticket "$IN_TICKET" --lanes "$IN_LANES" \
+            --pipeline-depth "$IN_DEPTH" --coord-repo "$coord" --coord-base "$IN_COORD_BASE"
+
+  lane-a:
+    # The job name must contain lane-a: the runner mode's liveness check reads it from the Actions API.
+    name: step lane-a
+    needs: plan
+    runs-on: ubuntu-24.04
+    # run.py stops at 300 minutes; the final step ends by about 329 (see job.sh's time line).
+    timeout-minutes: 345
+    permissions:
+      contents: read
+    steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -94,7 +132,9 @@ jobs:
           kind: step
           ticket: ${{ inputs.ticket }}
           lane: a
-          lanes: ${{ inputs.lanes }}
+          # the plan's lanes go into the claim: triage counts a live two-lane run as 2 jobs
+          lanes: ${{ needs.plan.outputs.lanes }}
+          pipeline_depth: ${{ needs.plan.outputs.pipeline_depth }}
           build: 'true'
           # cache-warm's dev-unified-ubuntu-24.04 cache (lanes.toml has unified_features on); incremental is on for step
           # jobs (the action's auto)
@@ -109,5 +149,36 @@ jobs:
           state_prefix: ${{ inputs.state_prefix }}
           index_tag: ${{ inputs.index_tag }}
 
-  # Stage 16 adds here a `lane-b` job (name `step lane-b`, `needs: plan`, `if:` the plan says two lanes), the same
-  # steps with `lane: b`: it never claims, it confirms lane a's claim of this run.
+  lane-b:
+    # Only when the plan says two lanes. It never claims: it confirms lane a's claim of this run, then relays with lane a
+    # (signal refs under refs/signals/<state_prefix><ticket>/<run id>/). The name must contain lane-b (liveness).
+    name: step lane-b
+    needs: plan
+    if: needs.plan.outputs.lanes == '2'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 345
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/pipeline-job
+        with:
+          kind: step
+          ticket: ${{ inputs.ticket }}
+          lane: b
+          lanes: ${{ needs.plan.outputs.lanes }}
+          pipeline_depth: ${{ needs.plan.outputs.pipeline_depth }}
+          build: 'true'
+          cache_variant: dev-unified
+          runner_image: ubuntu-24.04
+          claude_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          coord_token: ${{ secrets.COORD_TOKEN }}
+          coord_repo: ${{ secrets.COORD_REPO }}
+          coord_ref: ${{ inputs.coord_ref }}
+          coord_base: ${{ inputs.coord_base }}
+          app_base: ${{ inputs.app_base }}
+          state_prefix: ${{ inputs.state_prefix }}
+          index_tag: ${{ inputs.index_tag }}
