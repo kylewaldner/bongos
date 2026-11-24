@@ -1155,6 +1155,21 @@ impl WorkflowEngine {
         self.act(cx, |lifecycle, _| lifecycle.revise(run, key, comment))
     }
 
+    /// Answers `run`'s pending ask to run without the OS sandbox ([`Lifecycle::answer_unsandboxed`]):
+    /// `allowed` lets every program and wait of the run go without it for the rest of the run in
+    /// this process; otherwise its held keys fail `refused: no OS sandbox`. `by` is who answered.
+    pub fn answer_unsandboxed(
+        &self,
+        run: &RunId,
+        allowed: bool,
+        by: &str,
+        cx: &mut App,
+    ) -> Result<(), Refusal> {
+        self.act(cx, |lifecycle, _| {
+            lifecycle.answer_unsandboxed(run, allowed, by)
+        })
+    }
+
     /// The worktrees a halted run is edited in.
     pub fn halt_worktrees(&self, run: &RunId) -> Option<HaltWorktrees> {
         self.lifecycle().halt_worktrees(run)

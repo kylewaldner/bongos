@@ -12,6 +12,7 @@ pub mod builtin_run;
 pub mod builtin_wait;
 mod commands;
 pub mod completion;
+pub mod consent;
 pub mod definitions;
 pub mod dispatch;
 mod dispatch_agent;

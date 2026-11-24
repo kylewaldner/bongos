@@ -39,6 +39,7 @@ use crate::WorkflowsSettings;
 use crate::builtin_merge::{
     ProjectMergeRefusal, ProjectMergeRequest, ProjectMerged, merge_project_run,
 };
+use crate::consent::{self, Grant, WallClock};
 use crate::definitions::{self, DefinitionError};
 use crate::mcp;
 use crate::runtime::{
@@ -55,6 +56,9 @@ pub const RUNS_DIR: &str = "runs";
 pub const RUN_FILE: &str = "run.toml";
 /// Who closes a gate from the app.
 pub const BY_PERSON: &str = "person";
+/// The refusal of an answer to a sandbox ask when the run has none pending.
+pub const NOTHING_TO_ANSWER: &str =
+    "This run is not waiting for an answer about running without a sandbox.";
 /// The heading a revision comment goes under in the node's prompt.
 pub const REVISION_HEADING: &str = "Revision requested:";
 
@@ -1066,6 +1070,8 @@ pub struct Lifecycle<R: Runner> {
     /// ([`Self::observe_runs`]), in start order. Nothing drives them here and no command reaches
     /// them: every command looks among `runs` only.
     observed: Vec<ObservedRun>,
+    /// The wall clock an answer to a sandbox ask is timed by; tests set a fixed one.
+    clock: WallClock,
 }
 
 /// A run another process drives, as its records on disk say.
@@ -1107,7 +1113,49 @@ impl<R: Runner> Lifecycle<R> {
             events: Vec::new(),
             moving: Vec::new(),
             observed: Vec::new(),
+            clock: consent::system_clock(),
         }
+    }
+
+    /// Times the answers to sandbox asks by `clock` from now on.
+    pub fn set_wall_clock(&mut self, clock: WallClock) {
+        self.clock = clock;
+    }
+
+    /// Answers `run`'s pending ask to run its programs without the OS sandbox, as `by`, at the
+    /// lifecycle's clock. Allowed: `ConsentAnswered { allowed: true }` is appended, then (only once
+    /// it is written) the run is granted for the rest of its life in this process and its held
+    /// keys start again. Stopped: `ConsentAnswered { allowed: false }` is appended and replay
+    /// fails each held key `refused: no OS sandbox`. Refused when nothing is pending (a second
+    /// answer finds the first took it) and when the answer cannot be written (the ask stays).
+    pub fn answer_unsandboxed(
+        &mut self,
+        run: &str,
+        allowed: bool,
+        by: &str,
+    ) -> Result<(), Refusal> {
+        self.entry(run)?;
+        let at = consent::rfc3339((self.clock)());
+        self.runtime
+            .answer_consent(run, allowed, by, at)
+            .map_err(|error| match error {
+                RuntimeError::NothingAsked(_) => {
+                    Refusal::new(RefusalKind::WrongState, NOTHING_TO_ANSWER, "")
+                }
+                other => Refusal::runtime(other),
+            })?;
+        self.note(run);
+        Ok(())
+    }
+
+    /// The question `run`'s pending sandbox ask puts to a person; `None` when nothing is pending.
+    pub fn consent_question(&self, run: &str) -> Option<String> {
+        consent::question(&self.state(run)?)
+    }
+
+    /// The grant that lets `run`'s programs run without the OS sandbox in this process, if any.
+    pub fn consent_grant(&self, run: &str) -> Option<Grant> {
+        self.runtime.consents().granted(run)
     }
 
     /// While `on`, a start or restart of a run under `files` (a project's files) is refused: the

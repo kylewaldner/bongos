@@ -20,6 +20,7 @@ use bongos_workflow_model::{EnvEdit, Failure, FailureReason, NodeKey, RunState, 
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+use crate::consent::Grant;
 use crate::dispatch::{NodeKind, RunnerSnapshot};
 use crate::dispatch_program::{
     NO_ORIGIN, ProgramNodes, program_permit, remote_hosts, task_remote_hosts,
@@ -130,6 +131,7 @@ fn start(
             state: &state,
             budget_left_usd: None,
             binding: Some(binding),
+            grant: None,
         },
         binding,
         snapshot,
@@ -308,6 +310,7 @@ fn start_probe(
             state: &state,
             budget_left_usd: None,
             binding: Some(binding),
+            grant: None,
         },
         binding,
         snapshot,
@@ -452,6 +455,10 @@ fn unattended_and_heal_runs_refuse_whatever_the_mode() {
         unattended,
         started_by: Some(started_by),
     };
+    let grant = Grant {
+        at: "2026-01-02T03:04:05Z".to_string(),
+        by: "person".to_string(),
+    };
     let never = [
         by(true, StartedBy::Person),
         by(true, StartedBy::Lane),
@@ -460,7 +467,13 @@ fn unattended_and_heal_runs_refuse_whatever_the_mode() {
     ];
     for facts in never {
         for mode in [Mode::Fallback, Mode::Ask, Mode::Refuse, Mode::Allow] {
-            assert_eq!(program_permit(&facts, mode), Permit::Refuse, "{facts:?}");
+            for grant in [None, Some(&grant)] {
+                assert_eq!(
+                    program_permit(&facts, mode, grant),
+                    Permit::Refuse,
+                    "{facts:?}"
+                );
+            }
         }
         for mode in [Mode::Ask, Mode::Allow] {
             let failure = start_with_facts(facts, mode).unwrap_err();
@@ -472,13 +485,23 @@ fn unattended_and_heal_runs_refuse_whatever_the_mode() {
         }
     }
     assert_eq!(
-        program_permit(&by(false, StartedBy::Person), Mode::Ask),
+        program_permit(&by(false, StartedBy::Person), Mode::Ask, None),
         Permit::Ask
     );
     assert_eq!(
-        program_permit(&by(false, StartedBy::Lane), Mode::Allow),
+        program_permit(&by(false, StartedBy::Lane), Mode::Allow, None),
         Permit::Allowed(AllowedBy::Setting)
     );
+    // A person's grant in the store is the permit, under `allow` too.
+    for mode in [Mode::Ask, Mode::Allow] {
+        assert_eq!(
+            program_permit(&by(false, StartedBy::Person), mode, Some(&grant)),
+            Permit::Allowed(AllowedBy::RunConsent {
+                at: "2026-01-02T03:04:05Z".to_string(),
+                by: "person".to_string(),
+            })
+        );
+    }
 }
 
 #[test]

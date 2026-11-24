@@ -10,6 +10,7 @@ use bongos_workflow_model::state_doc::{self, Paths, RunIdentity};
 use bongos_workflow_model::unsandboxed::{self, AllowedBy, Mode, Permit};
 use bongos_workflow_model::{Failure, FailureReason, NodeKey};
 
+use crate::consent::Grant;
 use crate::dispatch::{NodeKind, RunnerSnapshot};
 use crate::dispatch_agent::node_worktree;
 use crate::lifecycle::definition_copy_dir;
@@ -151,7 +152,7 @@ impl NodeKind for ProgramNodes {
         let snapshot = binding.setup.snapshot;
         let mode = unsandboxed::effective_mode(inputs.programs.unsandboxed, false);
         let program_node = ProgramNode {
-            permit: program_permit(&binding.setup.facts, mode),
+            permit: program_permit(&binding.setup.facts, mode, node.grant.as_ref()),
             mode,
             // Only the OS sandbox keeps a project's files folder, which holds every run's
             // records, read-only around a run's work directory.
@@ -201,16 +202,18 @@ impl NodeKind for ProgramNodes {
     }
 }
 
-/// The run's word on a program starting without the OS sandbox, from its facts and the
-/// effective mode. An unattended run, a heal run and a run whose record was not read never run
-/// unsandboxed (`Refuse`): nobody is there to answer, and a healer must not reach past the
-/// sandbox. Any other run asks, or under `allow` is allowed by the setting.
-pub(crate) fn program_permit(facts: &RunFacts, mode: Mode) -> Permit {
-    match facts.started_by {
-        None | Some(StartedBy::Healer) => Permit::Refuse,
-        Some(_) if facts.unattended => Permit::Refuse,
-        Some(_) if mode == Mode::Allow => Permit::Allowed(AllowedBy::Setting),
-        Some(_) => Permit::Ask,
+/// The run's word on a program starting without the OS sandbox, from its facts, the effective
+/// mode and the run's grant in the consent store. An unattended run, a heal run and a run whose
+/// record was not read never run unsandboxed (`Refuse`), whatever the store holds: nobody is
+/// there to answer, and a healer must not reach past the sandbox. Any other run is allowed by a
+/// person's grant, else under `allow` by the setting, else asks.
+pub(crate) fn program_permit(facts: &RunFacts, mode: Mode, grant: Option<&Grant>) -> Permit {
+    match (facts.started_by, grant) {
+        (None | Some(StartedBy::Healer), _) => Permit::Refuse,
+        _ if facts.unattended => Permit::Refuse,
+        (Some(_), Some(grant)) => Permit::Allowed(grant.allowed_by()),
+        (Some(_), None) if mode == Mode::Allow => Permit::Allowed(AllowedBy::Setting),
+        (Some(_), None) => Permit::Ask,
     }
 }
 
