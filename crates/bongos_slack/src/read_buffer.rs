@@ -108,11 +108,7 @@ async fn ask<T: 'static>(
 }
 
 /// Looks up the authors of `messages` that are not known yet, so the text shows their names.
-async fn resolve_authors(
-    service: &Entity<SlackService>,
-    messages: &[Message],
-    cx: &mut AsyncApp,
-) {
+async fn resolve_authors(service: &Entity<SlackService>, messages: &[Message], cx: &mut AsyncApp) {
     let known = service.read_with(cx, |service, _| service.user_names());
     let mut unknown: Vec<UserId> = Vec::new();
     for user in messages.iter().filter_map(|message| message.user.clone()) {
@@ -179,7 +175,10 @@ pub fn link_label(link: &MessageLink, entries: &[ConversationEntry]) -> String {
     entries
         .iter()
         .find(|entry| entry.id == link.conversation)
-        .map_or_else(|| link.conversation.to_string(), |entry| entry.label.clone())
+        .map_or_else(
+            || link.conversation.to_string(),
+            |entry| entry.label.clone(),
+        )
 }
 
 /// The read buffers that are open, by their buffer.
@@ -209,7 +208,9 @@ impl ReadSession {
         label: String,
         cx: &mut App,
     ) -> Entity<Self> {
-        buffer.update(cx, |buffer, cx| buffer.set_capability(Capability::ReadOnly, cx));
+        buffer.update(cx, |buffer, cx| {
+            buffer.set_capability(Capability::ReadOnly, cx)
+        });
         let session = cx.new(|cx| {
             let subscriptions = vec![
                 // A rate-limit wait shows in the header while a load runs.
@@ -242,7 +243,9 @@ impl ReadSession {
             session
         });
         let id = buffer.entity_id();
-        cx.default_global::<Sessions>().0.insert(id, session.clone());
+        cx.default_global::<Sessions>()
+            .0
+            .insert(id, session.clone());
         cx.observe_release(&buffer, move |_, cx| {
             cx.default_global::<Sessions>().0.remove(&id);
         })
@@ -252,7 +255,10 @@ impl ReadSession {
 
     /// The session whose text is `buffer`.
     pub fn for_buffer(buffer: &Entity<Buffer>, cx: &App) -> Option<Entity<Self>> {
-        cx.try_global::<Sessions>()?.0.get(&buffer.entity_id()).cloned()
+        cx.try_global::<Sessions>()?
+            .0
+            .get(&buffer.entity_id())
+            .cloned()
     }
 
     /// The buffer title, `Slack: #name`.

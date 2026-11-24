@@ -161,7 +161,9 @@ pub(crate) fn load_older(
         Ok(None) => {}
         Err(error) => {
             workspace
-                .update(cx, |workspace, cx| show_toast(workspace, error.to_string(), cx))
+                .update(cx, |workspace, cx| {
+                    show_toast(workspace, error.to_string(), cx)
+                })
                 .ok();
         }
     })
@@ -199,7 +201,10 @@ pub(crate) fn read_thread_command(
     let weak = cx.entity().downgrade();
     let session = Session::completing_read(HOST, "Slack message link: ")
         .free_input(true)
-        .accept(|input| MessageLink::parse(input).is_some(), "not a Slack message link")
+        .accept(
+            |input| MessageLink::parse(input).is_some(),
+            "not a Slack message link",
+        )
         .on_confirm(move |outcome, window, cx| {
             let Outcome::Input(text) = outcome else {
                 return;

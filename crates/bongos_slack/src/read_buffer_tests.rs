@@ -68,7 +68,10 @@ fn history_page(range: std::ops::RangeInclusive<u64>, older: bool) -> Page<Messa
     }
 }
 
-fn open_session(fixture: &Fixture, cx: &mut TestAppContext) -> (Entity<Buffer>, Entity<ReadSession>) {
+fn open_session(
+    fixture: &Fixture,
+    cx: &mut TestAppContext,
+) -> (Entity<Buffer>, Entity<ReadSession>) {
     let buffer = cx.new(|cx| Buffer::local("", cx));
     let session = cx.update(|cx| {
         ReadSession::open(
@@ -122,12 +125,14 @@ async fn picker_lists_conversations_and_rereads_a_copy_older_than_five_minutes(
 
     // Older than five minutes: the list is read again when the picker opens.
     cx.executor().advance_clock(Duration::from_secs(2));
-    fixture.fake.push_conversations(Ok(conversations(vec![conversation(
-        "C3",
-        ConversationKind::Channel,
-        "random",
-        None,
-    )])));
+    fixture
+        .fake
+        .push_conversations(Ok(conversations(vec![conversation(
+            "C3",
+            ConversationKind::Channel,
+            "random",
+            None,
+        )])));
     let entries = cx
         .update(|cx| conversation_entries(fixture.service.clone(), cx))
         .await
@@ -153,11 +158,18 @@ async fn reading_a_channel_opens_a_read_only_buffer_with_the_transcript(cx: &mut
         .await
         .unwrap();
 
-    assert_eq!(session.read_with(cx, |session, _| session.title()), "Slack: #general");
-    assert_eq!(buffer.read_with(cx, |buffer, _| buffer.capability()), Capability::ReadOnly);
+    assert_eq!(
+        session.read_with(cx, |session, _| session.title()),
+        "Slack: #general"
+    );
+    assert_eq!(
+        buffer.read_with(cx, |buffer, _| buffer.capability()),
+        Capability::ReadOnly
+    );
     let shown = text(&buffer, cx);
     assert!(
-        shown.starts_with("Showing 3 messages (older messages exist: slack: load older messages)\n"),
+        shown
+            .starts_with("Showing 3 messages (older messages exist: slack: load older messages)\n"),
         "{shown}"
     );
     for n in 1..=3 {
@@ -168,7 +180,10 @@ async fn reading_a_channel_opens_a_read_only_buffer_with_the_transcript(cx: &mut
         shown
     );
     let found = cx.update(|cx| ReadSession::for_buffer(&buffer, cx));
-    assert_eq!(found.map(|found| found.entity_id()), Some(session.entity_id()));
+    assert_eq!(
+        found.map(|found| found.entity_id()),
+        Some(session.entity_id())
+    );
 }
 
 #[gpui::test]
@@ -193,12 +208,21 @@ async fn wait_line_shows_from_the_service_and_clears_when_the_load_finishes(
     cx.run_until_parked();
 
     let waiting = text(&buffer, cx);
-    assert_eq!(waiting.lines().nth(1), Some("Slack asked to wait 10 seconds"), "{waiting}");
+    assert_eq!(
+        waiting.lines().nth(1),
+        Some("Slack asked to wait 10 seconds"),
+        "{waiting}"
+    );
     assert!(session.read_with(cx, |session, _| session.is_loading()));
 
     cx.executor().advance_clock(Duration::from_secs(10));
     cx.run_until_parked();
-    assert!(landing.borrow().as_ref().is_some_and(|result| result.is_ok()));
+    assert!(
+        landing
+            .borrow()
+            .as_ref()
+            .is_some_and(|result| result.is_ok())
+    );
     let done = text(&buffer, cx);
     assert!(!done.contains("Slack asked to wait"), "{done}");
     assert!(done.contains("message 2"), "{done}");
@@ -234,10 +258,14 @@ async fn load_older_keeps_point_on_the_same_message(cx: &mut TestAppContext) {
     assert!(text(&buffer, cx).contains("message 1"));
     assert!(text(&buffer, cx).contains("this is the start of the conversation"));
     // The second request asked for messages older than the oldest shown.
-    let latest = fixture.fake.calls().into_iter().filter_map(|call| match call {
-        Call::History { latest, .. } => Some(latest),
-        _ => None,
-    });
+    let latest = fixture
+        .fake
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            Call::History { latest, .. } => Some(latest),
+            _ => None,
+        });
     assert_eq!(latest.collect::<Vec<_>>(), vec![None, Some(ts(3))]);
 
     // Nothing is older now.
@@ -309,12 +337,18 @@ async fn read_thread_works_from_point_and_from_a_message_link(cx: &mut TestAppCo
         .lines()
         .position(|line| line.contains("message 2"))
         .unwrap();
-    assert_eq!(session.read_with(cx, |session, _| session.thread_at(row)), Some(ts(2)));
+    assert_eq!(
+        session.read_with(cx, |session, _| session.thread_at(row)),
+        Some(ts(2))
+    );
     let plain = text(&buffer, cx)
         .lines()
         .position(|line| line.contains("message 1"))
         .unwrap();
-    assert_eq!(session.read_with(cx, |session, _| session.thread_at(plain)), Some(ts(1)));
+    assert_eq!(
+        session.read_with(cx, |session, _| session.thread_at(plain)),
+        Some(ts(1))
+    );
 
     // From a message link: parsed without any request, then the replies are read.
     let link = MessageLink::parse("https://acme.slack.com/archives/C1/p1730000002000100").unwrap();
@@ -330,7 +364,14 @@ async fn read_thread_works_from_point_and_from_a_message_link(cx: &mut TestAppCo
         next: None,
     }));
     let transcript = cx
-        .update(|cx| read_thread(fixture.service.clone(), link.conversation.clone(), link.thread(), cx))
+        .update(|cx| {
+            read_thread(
+                fixture.service.clone(),
+                link.conversation.clone(),
+                link.thread(),
+                cx,
+            )
+        })
         .await
         .unwrap();
     assert!(transcript.text.contains("message 2"), "{}", transcript.text);
@@ -341,7 +382,10 @@ async fn read_thread_works_from_point_and_from_a_message_link(cx: &mut TestAppCo
     }];
     assert_eq!(link_label(&link, &entries), "#general");
     assert_eq!(
-        link_label(&MessageLink::parse("https://acme.slack.com/archives/C9/p1730000002000100").unwrap(), &entries),
+        link_label(
+            &MessageLink::parse("https://acme.slack.com/archives/C9/p1730000002000100").unwrap(),
+            &entries
+        ),
         "C9"
     );
 }

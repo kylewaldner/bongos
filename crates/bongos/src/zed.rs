@@ -51,6 +51,8 @@ mod quick_action_bar;
 mod rectangle_keymap_tests;
 pub mod remote_debug;
 #[cfg(test)]
+mod slack_read_tests;
+#[cfg(test)]
 mod symbol_keymap_tests;
 #[cfg(test)]
 mod undo_tree_keymap_tests;
@@ -66,8 +68,6 @@ pub(crate) mod windows_only_instance;
 mod work_keymap_tests;
 #[cfg(test)]
 mod workflow_keymap_tests;
-#[cfg(test)]
-mod slack_read_tests;
 #[cfg(test)]
 mod workflow_tests;
 
