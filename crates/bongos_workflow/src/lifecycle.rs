@@ -838,6 +838,10 @@ fn setup_of(record: &RunToml, tree: &WorkTree, project_dir: &Path) -> RunSetup {
         snapshot: snapshot.is_some(),
         work_dir: matches!(record.tree, Some(RunTreeRecord::Work)),
         project,
+        facts: crate::runtime::RunFacts {
+            unattended: record.unattended.is_some_and(|choice| choice.value),
+            started_by: Some(record.started_by),
+        },
     }
 }
 

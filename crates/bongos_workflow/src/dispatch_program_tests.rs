@@ -1,8 +1,9 @@
 //! Tests of the program node kind: a script run through [`ProgramNodes`] reads its state document
 //! and routes by its result, `@remote` in a node's network list becomes the host of the task
 //! repository's push remote, a program of a snapshot run never runs without the OS sandbox, and a
-//! program of a lane run gets the lane's variables and may write its named directories. Each run
-//! test skips when no Python 3.8+ is on `PATH`. The OS sandbox is replaced by a probe that says
+//! program of a lane run gets the lane's variables and may write its named directories, and the
+//! run's facts and the mode decide a start without the sandbox. Each run test that spawns a script
+//! skips when no Python 3.8+ is on `PATH`. The OS sandbox is replaced by a probe that says
 //! it is unavailable; the clock is fake; every directory is a
 //! temp dir.
 
@@ -13,15 +14,19 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bongos_workflow_model::inputs::{Input, InputValue};
+use bongos_workflow_model::record::StartedBy;
+use bongos_workflow_model::unsandboxed::{AllowedBy, Mode, Permit};
 use bongos_workflow_model::{EnvEdit, Failure, FailureReason, NodeKey, RunState, parse};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use crate::dispatch::{NodeKind, RunnerSnapshot};
-use crate::dispatch_program::{NO_ORIGIN, ProgramNodes, remote_hosts, task_remote_hosts};
+use crate::dispatch_program::{
+    NO_ORIGIN, ProgramNodes, program_permit, remote_hosts, task_remote_hosts,
+};
 use crate::dispatch_tests::binding;
-use crate::runner_program::{Clock, Interpreter, SandboxProbe};
-use crate::runtime::{Finish, NodeStart, RunBinding, RunSetup};
+use crate::runner_program::{Clock, Interpreter, ProgramSettings, SandboxProbe};
+use crate::runtime::{Finish, NodeStart, RunBinding, RunFacts, RunSetup};
 use crate::worktrees::Git;
 
 const FLOW: &str = r#"
@@ -413,4 +418,82 @@ fn a_program_of_a_lane_run_gets_its_variables_and_may_write_its_named_directorie
     assert!(target.join("changed.txt").exists());
     assert!(binding.worktree.path.join("changed.txt").exists());
     assert!(!writes.contains("denied"), "{writes}");
+}
+
+/// A snapshot whose interpreter does not exist, under `mode`: a start that gets past the sandbox
+/// decision fails at the spawn with `program interpreter missing`. Needs no Python.
+fn no_python(root: &Path, mode: Mode) -> RunnerSnapshot {
+    RunnerSnapshot {
+        interpreter: Some(Ok(Interpreter {
+            program: root.join("no-such-python"),
+            version: (3, 12),
+        })),
+        base_env: base_env(root),
+        programs: ProgramSettings {
+            unsandboxed: mode,
+            ..ProgramSettings::default()
+        },
+        ..RunnerSnapshot::default()
+    }
+}
+
+/// Starts the `check` node of a plain run with `facts` under `mode`, with no sandbox.
+fn start_with_facts(facts: RunFacts, mode: Mode) -> Result<(), Failure> {
+    let root = TempDir::new().unwrap();
+    let mut binding = binding(root.path(), "plain");
+    fs::create_dir_all(&binding.worktree.path).unwrap();
+    binding.setup.facts = facts;
+    start_probe(&mut kind(), &binding, &no_python(root.path(), mode))
+}
+
+#[test]
+fn unattended_and_heal_runs_refuse_whatever_the_mode() {
+    let by = |unattended, started_by| RunFacts {
+        unattended,
+        started_by: Some(started_by),
+    };
+    let never = [
+        by(true, StartedBy::Person),
+        by(true, StartedBy::Lane),
+        by(false, StartedBy::Healer),
+        RunFacts::default(),
+    ];
+    for facts in never {
+        for mode in [Mode::Fallback, Mode::Ask, Mode::Refuse, Mode::Allow] {
+            assert_eq!(program_permit(&facts, mode), Permit::Refuse, "{facts:?}");
+        }
+        for mode in [Mode::Ask, Mode::Allow] {
+            let failure = start_with_facts(facts, mode).unwrap_err();
+            assert_eq!(
+                failure.reason,
+                FailureReason::SandboxRefused,
+                "{facts:?} {mode:?}"
+            );
+        }
+    }
+    assert_eq!(
+        program_permit(&by(false, StartedBy::Person), Mode::Ask),
+        Permit::Ask
+    );
+    assert_eq!(
+        program_permit(&by(false, StartedBy::Lane), Mode::Allow),
+        Permit::Allowed(AllowedBy::Setting)
+    );
+}
+
+#[test]
+fn an_attended_run_asks_and_under_fallback_runs_as_before() {
+    let person = RunFacts {
+        unattended: false,
+        started_by: Some(StartedBy::Person),
+    };
+    let failure = start_with_facts(person, Mode::Ask).unwrap_err();
+    assert_eq!(failure.reason, FailureReason::SandboxRequired);
+    assert_eq!(failure.node, Some(NodeKey::new("check", 1)));
+    // Fallback (the default) gets past the decision to the spawn, as before; so does a run whose
+    // facts refuse, since fallback never consults the permit.
+    for facts in [person, RunFacts::default()] {
+        let failure = start_with_facts(facts, Mode::Fallback).unwrap_err();
+        assert_eq!(failure.reason, FailureReason::ProgramInterpreterMissing);
+    }
 }

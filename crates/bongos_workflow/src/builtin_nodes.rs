@@ -15,13 +15,14 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use bongos_workflow_model::definition::NodeKind;
+use bongos_workflow_model::unsandboxed::{Mode, Permit};
 use bongos_workflow_model::{Definition, Failure, NodeKey, RunState};
 use gpui::{App, Global};
 
 use crate::runtime::{Finish, RunBinding};
 
 /// What a built-in is told when one of its keys starts.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct BuiltinStart<'a> {
     pub run: &'a str,
     pub definition: &'a Definition,
@@ -31,6 +32,11 @@ pub struct BuiltinStart<'a> {
     pub try_number: u32,
     /// The run's binding, when the lifecycle bound it: its task worktree and branches.
     pub binding: Option<&'a RunBinding>,
+    /// The run's word on running a program without the OS sandbox, as a program node gets it
+    /// ([`crate::runner_program::ProgramNode::permit`]); `Refuse` for a run with no binding.
+    pub permit: Permit,
+    /// The effective `workflows.programs.unsandboxed` mode. No built-in reads either yet.
+    pub mode: Mode,
 }
 
 /// A program node the app supplies in code. Its methods are called with the runtime locked, so

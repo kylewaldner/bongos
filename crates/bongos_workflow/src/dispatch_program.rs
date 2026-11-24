@@ -5,8 +5,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bongos_workflow_model::record::TodoRef;
+use bongos_workflow_model::record::{StartedBy, TodoRef};
 use bongos_workflow_model::state_doc::{self, Paths, RunIdentity};
+use bongos_workflow_model::unsandboxed::{self, AllowedBy, Mode, Permit};
 use bongos_workflow_model::{Failure, FailureReason, NodeKey};
 
 use crate::dispatch::{NodeKind, RunnerSnapshot};
@@ -17,7 +18,7 @@ use crate::run_view::try_dir;
 use crate::runner_program::{
     Clock, Interpreter, PollPlan, ProgramCaps, ProgramNode, ProgramRunner, SandboxProbe,
 };
-use crate::runtime::{Finish, NodeStart, RunBinding};
+use crate::runtime::{Finish, NodeStart, RunBinding, RunFacts};
 use crate::worktrees::{Git, repository_root};
 
 /// The network entry that stands for the host of the task repository's push remote.
@@ -148,7 +149,10 @@ impl NodeKind for ProgramNodes {
         );
         let try_dir = try_dir(&binding.attempt_dir, key, node.try_number);
         let snapshot = binding.setup.snapshot;
+        let mode = unsandboxed::effective_mode(inputs.programs.unsandboxed, false);
         let program_node = ProgramNode {
+            permit: program_permit(&binding.setup.facts, mode),
+            mode,
             // Only the OS sandbox keeps a project's files folder, which holds every run's
             // records, read-only around a run's work directory.
             needs_sandbox: binding.setup.work_dir,
@@ -193,6 +197,19 @@ impl NodeKind for ProgramNodes {
         if let Some(runner) = &mut self.runner {
             runner.stop(tries);
         }
+    }
+}
+
+/// The run's word on a program starting without the OS sandbox, from its facts and the
+/// effective mode. An unattended run, a heal run and a run whose record was not read never run
+/// unsandboxed (`Refuse`): nobody is there to answer, and a healer must not reach past the
+/// sandbox. Any other run asks, or under `allow` is allowed by the setting.
+pub(crate) fn program_permit(facts: &RunFacts, mode: Mode) -> Permit {
+    match facts.started_by {
+        None | Some(StartedBy::Healer) => Permit::Refuse,
+        Some(_) if facts.unattended => Permit::Refuse,
+        Some(_) if mode == Mode::Allow => Permit::Allowed(AllowedBy::Setting),
+        Some(_) => Permit::Ask,
     }
 }
 

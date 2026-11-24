@@ -574,6 +574,7 @@ fn a_lane_run_records_its_lane_directories_and_edits_and_a_plain_start_none() {
     assert_eq!(setup.lane, request.lane);
     assert_eq!(setup.lane_dirs, request.lane_dirs);
     assert_eq!(setup.env, request.env);
+    assert_eq!(setup.facts.started_by, Some(StartedBy::Lane));
     assert_eq!(setup.writable_dirs(), vec![target.clone()]);
     let record = lifecycle.record(&run).unwrap();
     assert_eq!(record.env, request.env);
@@ -590,7 +591,17 @@ fn a_lane_run_records_its_lane_directories_and_edits_and_a_plain_start_none() {
     let run = world
         .start(&mut lifecycle, with_workflow("single"))
         .unwrap();
-    assert_eq!(lifecycle.binding(&run).unwrap().setup, RunSetup::default());
+    // Only the facts of its record are known: a person started it, attended.
+    assert_eq!(
+        lifecycle.binding(&run).unwrap().setup,
+        RunSetup {
+            facts: crate::runtime::RunFacts {
+                unattended: false,
+                started_by: Some(StartedBy::Person),
+            },
+            ..RunSetup::default()
+        }
+    );
     assert!(RunSetup::default().env_edits().is_empty());
     let text = fs::read_to_string(lifecycle.run_dir(&run).unwrap().join("run.toml")).unwrap();
     for field in ["tree", "definitions", "env", "lane_dirs"] {
