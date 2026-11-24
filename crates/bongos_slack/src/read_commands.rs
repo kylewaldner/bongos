@@ -213,7 +213,7 @@ pub(crate) fn read_thread_command(
                 return;
             };
             let service = service.clone();
-            weak.update(cx, |workspace, cx| {
+            weak.update(cx, |_, cx| {
                 let label = {
                     let service = service.read(cx);
                     let entries = service
