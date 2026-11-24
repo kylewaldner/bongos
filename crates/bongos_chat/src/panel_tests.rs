@@ -242,12 +242,13 @@ async fn test_the_layout_is_written_to_the_record_and_restored(cx: &mut TestAppC
     })
     .await;
     let restored = workspace.update_in(cx, |workspace, window, cx| {
-        let (weak, project, fs) = (
+        let (weak, project, fs, clock) = (
             workspace.weak_handle(),
             workspace.project().clone(),
             workspace.app_state().fs.clone(),
+            workspace.pane_history_timestamp(),
         );
-        cx.new(|cx| SessionView::new(id.clone(), weak, project, fs, window, cx))
+        cx.new(|cx| SessionView::new(id.clone(), weak, project, fs, clock, window, cx))
     });
     assert_eq!(pane_count(&restored, cx), 1);
 

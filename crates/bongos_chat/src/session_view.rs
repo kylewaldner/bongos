@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicUsize};
 
 use bongos_chat_model::{ChatRecord, Layout};
 use collections::HashMap;
@@ -125,6 +125,7 @@ impl Focusable for SessionView {
 fn new_pane(
     workspace: WeakEntity<Workspace>,
     project: Entity<Project>,
+    pane_history_timestamp: Arc<AtomicUsize>,
     window: &mut Window,
     cx: &mut Context<SessionView>,
 ) -> Entity<Pane> {
@@ -132,7 +133,7 @@ fn new_pane(
         let mut pane = Pane::new(
             workspace,
             project,
-            Default::default(),
+            pane_history_timestamp,
             None,
             gpui::NoAction.boxed_clone(),
             false,
@@ -153,6 +154,7 @@ impl SessionView {
         workspace: WeakEntity<Workspace>,
         project: Entity<Project>,
         fs: Arc<dyn Fs>,
+        pane_history_timestamp: Arc<AtomicUsize>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -162,8 +164,20 @@ impl SessionView {
                 Some(store.find(&chat_id)?.entry.record()?.layout)
             })
             .unwrap_or_default();
-        let terminal_pane = new_pane(workspace.clone(), project.clone(), window, cx);
-        let prompts_pane = new_pane(workspace.clone(), project.clone(), window, cx);
+        let terminal_pane = new_pane(
+            workspace.clone(),
+            project.clone(),
+            pane_history_timestamp.clone(),
+            window,
+            cx,
+        );
+        let prompts_pane = new_pane(
+            workspace.clone(),
+            project.clone(),
+            pane_history_timestamp,
+            window,
+            cx,
+        );
         let mut subscriptions = Vec::new();
         for pane in [&terminal_pane, &prompts_pane] {
             subscriptions.push(cx.subscribe_in(

@@ -599,12 +599,13 @@ async fn test_the_state_survives_a_new_panel(cx: &mut TestAppContext) {
 
 fn new_panel(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Entity<ChatPanel> {
     workspace.update_in(cx, |workspace, window, cx| {
-        let (weak, project, fs) = (
+        let (weak, project, fs, clock) = (
             workspace.weak_handle(),
             workspace.project().clone(),
             workspace.app_state().fs.clone(),
+            workspace.pane_history_timestamp(),
         );
-        cx.new(|cx| ChatPanel::new(weak, project, fs, window, cx))
+        cx.new(|cx| ChatPanel::new(weak, project, fs, clock, window, cx))
     })
 }
 

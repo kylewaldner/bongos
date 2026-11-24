@@ -408,6 +408,8 @@ pub struct Pane {
     dedicated: bool,
     was_focused: bool,
     active_item_index: usize,
+    preview: Option<AnyView>,
+    focus_timestamp: Option<usize>,
     content_override: Option<AnyView>,
     preview_item_id: Option<EntityId>,
     last_focus_handle_by_item: HashMap<EntityId, WeakFocusHandle>,
@@ -590,6 +592,8 @@ impl Pane {
             badge: None,
             dedicated: false,
             active_item_index: 0,
+            preview: None,
+            focus_timestamp: None,
             content_override: None,
             preview_item_id: None,
             max_tabs,
@@ -683,7 +687,29 @@ impl Pane {
                 .is_some_and(|item| item.item_focus_handle(cx).contains_focused(window, cx))
     }
 
+    /// A view drawn in place of the toolbar and the active item (and of the empty-pane
+    /// placeholder) while set. The tab bar, items and history are untouched, and it is not
+    /// serialized.
+    pub fn set_preview(&mut self, preview: Option<AnyView>, cx: &mut Context<Self>) {
+        self.preview = preview;
+        cx.notify();
+    }
+
+    pub fn preview(&self) -> Option<&AnyView> {
+        self.preview.as_ref()
+    }
+
+    /// The tick of the workspace's shared clock at which this pane last took focus.
+    pub fn focus_timestamp(&self) -> Option<usize> {
+        self.focus_timestamp
+    }
+
     fn focus_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_timestamp = Some(
+            self.next_activation_timestamp
+                .fetch_add(1, Ordering::SeqCst)
+                + 1,
+        );
         if !self.was_focused {
             self.was_focused = true;
             self.update_history(self.active_item_index);
@@ -4546,7 +4572,15 @@ impl Render for Pane {
                         div.on_drag_move::<ExternalPaths>(cx.listener(Self::handle_drag_move))
                     })
                     .map(|div| {
-                        if let Some(item) = self.active_item() {
+                        if let Some(preview) = self.preview.clone() {
+                            div.id("pane_placeholder").v_flex().size_full().child(
+                                gpui::div()
+                                    .size_full()
+                                    .overflow_hidden()
+                                    .child(preview)
+                                    .debug_selector(|| "pane-preview".into()),
+                            )
+                        } else if let Some(item) = self.active_item() {
                             div.id("pane_placeholder")
                                 .v_flex()
                                 .size_full()
@@ -9507,6 +9541,202 @@ mod tests {
                 assert_pane_ids_on_axis(&workspace, expected_ids, expected_axis, cx);
             }
         }
+    }
+
+    struct PreviewProbe;
+
+    impl Render for PreviewProbe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().debug_selector(|| "preview-probe".into())
+        }
+    }
+
+    /// An item and a toolbar item that mark where they are drawn, so a test can tell whether the
+    /// pane drew them.
+    struct DrawnItem {
+        focus_handle: gpui::FocusHandle,
+    }
+
+    impl EventEmitter<()> for DrawnItem {}
+
+    impl Focusable for DrawnItem {
+        fn focus_handle(&self, _cx: &App) -> gpui::FocusHandle {
+            self.focus_handle.clone()
+        }
+    }
+
+    impl Render for DrawnItem {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().debug_selector(|| "drawn-item".into())
+        }
+    }
+
+    impl Item for DrawnItem {
+        type Event = ();
+
+        fn tab_content_text(&self, _detail: usize, _cx: &App) -> gpui::SharedString {
+            "drawn".into()
+        }
+    }
+
+    struct DrawnToolbarItem;
+
+    impl EventEmitter<crate::ToolbarItemEvent> for DrawnToolbarItem {}
+
+    impl Render for DrawnToolbarItem {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w_4().h_4().debug_selector(|| "drawn-toolbar".into())
+        }
+    }
+
+    impl crate::ToolbarItemView for DrawnToolbarItem {
+        fn set_active_pane_item(
+            &mut self,
+            _: Option<&dyn crate::ItemHandle>,
+            _: &mut Window,
+            _: &mut Context<Self>,
+        ) -> crate::ToolbarItemLocation {
+            crate::ToolbarItemLocation::PrimaryLeft
+        }
+    }
+
+    async fn pane_with_drawn_item(
+        cx: &mut TestAppContext,
+    ) -> (Entity<Pane>, &mut VisualTestContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        pane.update_in(cx, |pane, window, cx| {
+            let item = cx.new(|cx| DrawnItem {
+                focus_handle: cx.focus_handle(),
+            });
+            pane.add_item(Box::new(item), true, false, None, window, cx);
+            let toolbar_item = cx.new(|_| DrawnToolbarItem);
+            pane.toolbar()
+                .update(cx, |toolbar, cx| toolbar.add_item(toolbar_item, window, cx));
+        });
+        cx.run_until_parked();
+        (pane, cx)
+    }
+
+    #[gpui::test]
+    async fn test_preview_replaces_toolbar_and_item_and_clears(cx: &mut TestAppContext) {
+        let (pane, cx) = pane_with_drawn_item(cx).await;
+        assert!(cx.debug_bounds("drawn-item").is_some());
+        assert!(cx.debug_bounds("drawn-toolbar").is_some());
+        assert!(cx.debug_bounds("pane-preview").is_none());
+
+        let probe: AnyView = cx.new(|_| PreviewProbe).into();
+        pane.update(cx, |pane, cx| pane.set_preview(Some(probe.clone()), cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pane-preview").is_some());
+        assert!(cx.debug_bounds("preview-probe").is_some());
+        assert!(cx.debug_bounds("drawn-item").is_none());
+        assert!(cx.debug_bounds("drawn-toolbar").is_none());
+        pane.read_with(cx, |pane, _| {
+            assert_eq!(
+                pane.preview().map(|view| view.entity_id()),
+                Some(probe.entity_id())
+            );
+        });
+
+        pane.update(cx, |pane, cx| pane.set_preview(None, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pane-preview").is_none());
+        assert!(cx.debug_bounds("drawn-item").is_some());
+        assert!(cx.debug_bounds("drawn-toolbar").is_some());
+        pane.read_with(cx, |pane, _| assert!(pane.preview().is_none()));
+    }
+
+    #[gpui::test]
+    async fn test_preview_changes_no_pane_state(cx: &mut TestAppContext) {
+        let (pane, cx) = pane_with_drawn_item(cx).await;
+        add_labeled_item(&pane, "B", false, cx);
+        let state = |pane: &Entity<Pane>, cx: &mut VisualTestContext| {
+            pane.read_with(cx, |pane, _| {
+                (
+                    pane.items().map(|item| item.item_id()).collect::<Vec<_>>(),
+                    pane.active_item_index(),
+                    pane.activation_history()
+                        .iter()
+                        .map(|entry| (entry.entity_id, entry.timestamp))
+                        .collect::<Vec<_>>(),
+                    pane.nav_history().stack_depths(),
+                    pane.is_zoomed(),
+                    pane.focus_timestamp(),
+                )
+            })
+        };
+        let before = state(&pane, cx);
+        let probe: AnyView = cx.new(|_| PreviewProbe).into();
+        pane.update(cx, |pane, cx| pane.set_preview(Some(probe), cx));
+        cx.run_until_parked();
+        assert_eq!(state(&pane, cx), before);
+        pane.update(cx, |pane, cx| pane.set_preview(None, cx));
+        cx.run_until_parked();
+        assert_eq!(state(&pane, cx), before);
+    }
+
+    #[gpui::test]
+    async fn test_empty_pane_draws_the_preview(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        assert_item_labels(&pane, [], cx);
+        assert!(cx.debug_bounds("pane-preview").is_none());
+
+        let probe: AnyView = cx.new(|_| PreviewProbe).into();
+        pane.update(cx, |pane, cx| pane.set_preview(Some(probe), cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pane-preview").is_some());
+        assert!(cx.debug_bounds("preview-probe").is_some());
+
+        pane.update(cx, |pane, cx| pane.set_preview(None, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pane-preview").is_none());
+    }
+
+    #[gpui::test]
+    async fn test_focus_stamps_the_pane_and_leaves_the_activation_history(cx: &mut TestAppContext) {
+        let (pane, cx) = pane_with_drawn_item(cx).await;
+        let clock = pane.read_with(cx, |pane, cx| {
+            pane.workspace
+                .upgrade()
+                .expect("a workspace")
+                .read(cx)
+                .pane_history_timestamp()
+        });
+        pane.update_in(cx, |pane, window, cx| {
+            window.focus(&pane.focus_handle(cx), cx)
+        });
+        cx.run_until_parked();
+        let first = pane
+            .read_with(cx, |pane, _| pane.focus_timestamp())
+            .expect("focusing stamps the pane");
+        assert!(first <= clock.load(Ordering::SeqCst));
+
+        let history = |pane: &Entity<Pane>, cx: &mut VisualTestContext| {
+            pane.read_with(cx, |pane, _| {
+                pane.activation_history()
+                    .iter()
+                    .map(|entry| (entry.entity_id, entry.timestamp))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let before = history(&pane, cx);
+        // The pane is focused already, so this focus-in changes only the focus stamp.
+        pane.update_in(cx, |pane, window, cx| pane.focus_in(window, cx));
+        let second = pane
+            .read_with(cx, |pane, _| pane.focus_timestamp())
+            .expect("stamped");
+        assert!(second > first);
+        assert_eq!(history(&pane, cx), before);
     }
 
     mod property_test {
