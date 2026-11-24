@@ -9,6 +9,14 @@ permissions:
   contents: read
 jobs:
   linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: debug-lines, debug: line-tables-only, jobs: ''}
+          - {name: jobs2, debug: '', jobs: '2'}
+          - {name: both, debug: line-tables-only, jobs: '2'}
+    name: release-${{ matrix.name }}
     runs-on: ubuntu-22.04
     timeout-minutes: 345
     env:
@@ -20,6 +28,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Variant settings
+        run: |
+          if [ -n "${{ matrix.debug }}" ]; then echo "CARGO_PROFILE_RELEASE_DEBUG=${{ matrix.debug }}" >> "$GITHUB_ENV"; fi
+          if [ -n "${{ matrix.jobs }}" ]; then echo "CARGO_BUILD_JOBS=${{ matrix.jobs }}" >> "$GITHUB_ENV"; fi
+          echo "MEASURE variant=${{ matrix.name }}"
       - name: Start sampling
         run: . p0/lib.sh; echo "MEASURE start root_avail_mb=$(avail_root)"; start_watch
       - name: Install build dependencies
@@ -38,8 +51,9 @@ jobs:
         uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
         with:
           workspaces: ". -> ../../../../../mnt/bongos-workspace/target"
-          shared-key: p0-release3
+          shared-key: p0-release-mem-${{ matrix.name }}
           cache-on-failure: true
+          save-if: false
       - name: Cache result
         run: |
           echo "MEASURE cache_hit=${{ steps.cache.outputs.cache-hit }} attempt=${{ github.run_attempt }}"
