@@ -39,6 +39,10 @@ pub mod workflow {
             Cancel,
             /// Approves the open gate of the run.
             Approve,
+            /// Lets the run go without an OS sandbox this once.
+            AllowUnsandboxedOnce,
+            /// Stops the run instead of letting it go without an OS sandbox.
+            RefuseUnsandboxed,
             /// Sends the open gate back with notes.
             Revise,
             /// Opens the logs of the run.
@@ -83,6 +87,8 @@ pub fn action_types() -> Vec<TypeId> {
         TypeId::of::<workflow::Restart>(),
         TypeId::of::<workflow::Cancel>(),
         TypeId::of::<workflow::Approve>(),
+        TypeId::of::<workflow::AllowUnsandboxedOnce>(),
+        TypeId::of::<workflow::RefuseUnsandboxed>(),
         TypeId::of::<workflow::Revise>(),
         TypeId::of::<workflow::OpenLogs>(),
         TypeId::of::<workflow::ShowRuns>(),

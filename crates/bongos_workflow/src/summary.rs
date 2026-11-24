@@ -20,16 +20,18 @@ use crate::runner_program::{ProgramCaps, ProgramSettings};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxState {
     Sandboxed,
-    /// The reason the sandbox cannot be created: programs run unconfined.
+    /// The reason the sandbox cannot be created. With no working OS sandbox a program asks or
+    /// refuses; it runs unsandboxed only when a person approved or the setting allowed it.
     NotSandboxed(String),
 }
 
 impl SandboxState {
-    /// `sandboxed`, or `not sandboxed: <reason>` (the words of a try's summary).
+    /// `sandboxed`, or `none: <reason> (programs ask or refuse)`. A try's summary says
+    /// "unsandboxed (...)" only when a person approved or the setting allowed it.
     pub fn label(&self) -> String {
         match self {
             Self::Sandboxed => "sandboxed".to_string(),
-            Self::NotSandboxed(reason) => format!("not sandboxed: {reason}"),
+            Self::NotSandboxed(reason) => format!("none: {reason} (programs ask or refuse)"),
         }
     }
 }

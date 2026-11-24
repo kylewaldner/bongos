@@ -51,10 +51,16 @@ pub enum FailureReason {
     /// A checks node gave no verdict and the definition has no route for that. The run is held
     /// on the node rather than failed, so a resume reruns just that node.
     CheckNoVerdict,
+    /// A program start found no OS sandbox and needs a person's answer before it may run
+    /// unsandboxed. Internal: the runtime turns it into a question and never records it as a try.
+    SandboxRequired,
+    /// A program start found no OS sandbox and was refused (by the setting, the project, the
+    /// person, or because the run is unattended). Never retried.
+    SandboxRefused,
 }
 
 impl FailureReason {
-    pub const ALL: [FailureReason; 23] = [
+    pub const ALL: [FailureReason; 25] = [
         Self::NodeOutputInvalid,
         Self::AgentExitedNonzero,
         Self::ProgramExitedNonzero,
@@ -78,6 +84,8 @@ impl FailureReason {
         Self::InterruptedNotResumed,
         Self::FailureEndReached,
         Self::CheckNoVerdict,
+        Self::SandboxRequired,
+        Self::SandboxRefused,
     ];
 
     /// The text the run view and the run record show.
@@ -106,6 +114,8 @@ impl FailureReason {
             Self::InterruptedNotResumed => "interrupted and not resumed",
             Self::FailureEndReached => "failure end reached",
             Self::CheckNoVerdict => "check had no verdict",
+            Self::SandboxRequired => "needs an answer: no OS sandbox",
+            Self::SandboxRefused => crate::unsandboxed::REFUSED_TEXT,
         }
     }
 
@@ -141,6 +151,9 @@ impl FailureReason {
             | Self::InterruptedNotResumed
             | Self::FailureEndReached
             | Self::CheckNoVerdict => FailureClass::Task,
+            // A missing sandbox is the machine, not the definition. Both stay Task even if an
+            // environment class appears: an unattended run must end, not wait for the machine.
+            Self::SandboxRequired | Self::SandboxRefused => FailureClass::Task,
         }
     }
 

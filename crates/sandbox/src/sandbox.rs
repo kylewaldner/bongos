@@ -5,6 +5,19 @@
 //! Bubblewrap inside WSL. Restricted-network policies are enforced by an
 //! in-process HTTP/HTTPS proxy (the `http_proxy` crate) that this crate
 //! constructs and owns; callers only describe intent via [`SandboxPolicy`].
+//!
+//! # D-Bus session bus
+//!
+//! On Linux the session bus (`$XDG_RUNTIME_DIR/bus`, usually `/run/user/<uid>/bus`) stays
+//! reachable inside the sandbox: the whole filesystem is bound read-only, and connecting to a
+//! Unix socket is not a write, so a sandboxed program can talk to every service on the user's
+//! bus. That includes the Secret Service (the keyring, where `gh` and other tools keep their
+//! tokens) and `systemd --user` (which can start units outside the sandbox). This is accepted on
+//! purpose: hiding the bus would break tools that read their login from the keyring (`gh` would
+//! then need `GH_TOKEN`). The sandbox therefore is not a boundary against the session bus: treat
+//! a sandboxed program as able to read the user's stored secrets and to run code as the user
+//! through the bus. Through the bus a sandboxed program can also get around the filesystem and
+//! network policies, so they bind only programs that do not use the bus.
 
 use std::{
     collections::HashMap,
@@ -58,6 +71,7 @@ pub enum SandboxFsPolicy {
     Unrestricted,
     /// Reads are allowed everywhere; writes are confined to these directory
     /// subtrees (and the standard ephemeral locations the platform provides).
+    /// A program that uses the D-Bus session bus can get around this (see the module docs).
     Restricted { writable_paths: Vec<PathBuf> },
 }
 
@@ -67,9 +81,11 @@ pub enum SandboxNetPolicy {
     /// Allow unrestricted outbound network access.
     Unrestricted,
     /// Block all outbound network access.
+    /// A program that uses the D-Bus session bus can get around this (see the module docs).
     Blocked,
     /// Allow outbound HTTP(S) only to these hostnames (exact hosts or
     /// leading-`*.` subdomain wildcards), enforced by an in-process proxy.
+    /// A program that uses the D-Bus session bus can get around this (see the module docs).
     Restricted { allowed_domains: Vec<String> },
 }
 
@@ -402,7 +418,8 @@ impl Sandbox {
 
     /// Check whether the platform sandbox can be created for `policy` without
     /// actually building a command or spawning the proxy. On Linux this runs a
-    /// brief `bwrap` probe (call it off the main thread).
+    /// brief `bwrap` probe (call it off the main thread); on macOS it checks that Seatbelt's
+    /// launcher is an executable file.
     pub fn can_create(policy: &SandboxPolicy, cwd: Option<&Path>) -> Result<(), SandboxError> {
         #[cfg(target_os = "linux")]
         {
@@ -423,7 +440,13 @@ impl Sandbox {
             }
             Ok(())
         }
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        // Seatbelt's launcher is run by a fixed path, so the probe checks that it is there.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (policy, cwd);
+            macos_seatbelt::check_launcher().map_err(map_anyhow_error)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
         {
             let _ = (policy, cwd);
             Ok(())
