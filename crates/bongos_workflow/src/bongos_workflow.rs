@@ -34,6 +34,7 @@ pub mod runner_codex;
 pub mod runner_program;
 pub mod runs_panel;
 pub mod runtime;
+mod sandbox_switch;
 mod settings;
 pub mod shipped;
 pub mod sources;
@@ -65,6 +66,7 @@ pub fn init(cx: &mut App) {
     WorkflowsSettings::register(cx);
     landing::register(cx);
     builtin_run::register(cx);
+    sandbox_switch::register(cx);
     engine::init(cx);
 }
 

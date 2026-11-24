@@ -505,6 +505,25 @@ fn unattended_and_heal_runs_refuse_whatever_the_mode() {
 }
 
 #[test]
+fn a_project_sandbox_switch_refuse_wins_over_the_allow_setting() {
+    let person = RunFacts {
+        unattended: false,
+        started_by: Some(StartedBy::Person),
+    };
+    // Allowed by the setting alone, the start gets past the decision to the spawn.
+    let failure = start_with_facts(person, Mode::Allow).unwrap_err();
+    assert_eq!(failure.reason, FailureReason::ProgramInterpreterMissing);
+    let root = TempDir::new().unwrap();
+    let mut binding = binding(root.path(), "plain");
+    fs::create_dir_all(&binding.worktree.path).unwrap();
+    binding.setup.facts = person;
+    let mut snapshot = no_python(root.path(), Mode::Allow);
+    snapshot.refusing_runs.insert("run-1".to_string());
+    let failure = start_probe(&mut kind(), &binding, &snapshot).unwrap_err();
+    assert_eq!(failure.reason, FailureReason::SandboxRefused);
+}
+
+#[test]
 fn an_attended_run_asks_and_under_fallback_runs_as_before() {
     let person = RunFacts {
         unattended: false,

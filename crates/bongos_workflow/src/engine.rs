@@ -33,7 +33,7 @@ use bongos_work_model::now;
 use bongos_work_model::store::{Task, WorkTree};
 use bongos_workflow_model::definition::{AgentKind, Outcome};
 use bongos_workflow_model::layers::DEFINITION_FILE;
-use bongos_workflow_model::record::{StartedBy, TodoRef};
+use bongos_workflow_model::record::{RunSubject, StartedBy, TodoRef};
 use bongos_workflow_model::{
     Definition, Failure, FailureReason, Layer, LayerDirs, NodeKey, RunState, ValidationContext,
 };
@@ -63,6 +63,7 @@ use crate::project_sources::{self, RunProjects, WorkHolds, WorkflowActivity, Wor
 use crate::runner_claude::ClaudeCli;
 use crate::runner_program::Interpreter;
 use crate::runtime::{Runner, Settlement};
+use crate::sandbox_switch;
 use crate::shipped::Template;
 use crate::task_link::{self, Completed, Finale, Next, StoreWrites, TaskWrites, WriteCommand};
 use crate::worktrees::{Git, RunWorktree, TaskCheckout};
@@ -84,6 +85,24 @@ pub enum EditTarget {
     /// A definition of a project repository: its folder under `definitions/` (`workflows/<dir>`),
     /// opened in a new working copy of the repository.
     WorkingCopy { repo: ProjectRepo, folder: PathBuf },
+}
+
+/// How the engine finds the project repository of a run's task and reads its
+/// `runs.unsandboxed`: [`bongos_work::project_repo_of`] and the project's value in the app; tests
+/// script both.
+#[derive(Clone)]
+pub(crate) struct ProjectLookup {
+    pub(crate) repo_of: Arc<dyn Fn(&Task, &App) -> Option<ProjectRepo> + Send + Sync>,
+    pub(crate) switch_of: Arc<dyn Fn(&ProjectRepo) -> Option<toml::Value> + Send + Sync>,
+}
+
+impl Default for ProjectLookup {
+    fn default() -> Self {
+        Self {
+            repo_of: Arc::new(|task, cx| bongos_work::project_repo_of(task, cx)),
+            switch_of: Arc::new(|repo| repo.project_value(sandbox_switch::RUNS_UNSANDBOXED).value),
+        }
+    }
 }
 
 /// The layers one command reads, with the commit its project layer came from and the guard
@@ -109,6 +128,12 @@ pub struct WorkflowEngine {
     merger: Merger,
     /// The project repository of each run started in a new-format project.
     projects: RunProjects,
+    /// The runs loaded from disk whose project is not known yet ([`Self::place_runs`]).
+    unplaced: Arc<Mutex<BTreeSet<RunId>>>,
+    /// The runs whose `runs.unsandboxed` was warned about as misread.
+    misread: Arc<Mutex<BTreeSet<RunId>>>,
+    /// How a loaded run's project and its `runs.unsandboxed` are read.
+    lookup: ProjectLookup,
     /// The projects a restore holds new work back in.
     holds: WorkHolds,
     /// The runs a landing check started and waits for.
@@ -342,6 +367,9 @@ impl WorkflowEngine {
             writes: Arc::new(StoreWrites),
             merger: git_merger(),
             projects: Arc::default(),
+            unplaced: Arc::default(),
+            misread: Arc::default(),
+            lookup: ProjectLookup::default(),
             holds: WorkHolds::default(),
             landing_waiters: Arc::default(),
             mcp: McpState::default(),
@@ -367,13 +395,122 @@ impl WorkflowEngine {
     fn refresh_runner_inputs(&self, cx: &App) {
         let reading = AppReading::read(&self.mcp.cache, cx);
         let previous = self.inputs.snapshot();
-        let next = self
+        let mut next = self
             .snapshots
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .refresh(&previous, reading);
+        next.refusing_runs = self.refusing_runs(cx);
         if next != previous {
             self.inputs.set(next);
+        }
+    }
+
+    /// The runs whose project's `runs.unsandboxed` refuses unsandboxed starts, read at every
+    /// refresh ([`sandbox_switch::refusing_runs`]). The loaded runs whose project is not known
+    /// yet are placed again first; those still unplaced refuse too (fail closed).
+    fn refusing_runs(&self, cx: &App) -> BTreeSet<RunId> {
+        self.place_unplaced(cx);
+        let projects = self
+            .projects
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let values = projects
+            .into_iter()
+            .map(|(run, repo)| {
+                let value = (self.lookup.switch_of)(&repo);
+                (run, value)
+            })
+            .collect::<Vec<_>>();
+        let mut misread = self.misread.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut refusing = sandbox_switch::refusing_runs(values, &misread);
+        *misread = refusing.misread;
+        drop(misread);
+        for warning in refusing.warnings {
+            log::warn!("workflows: {warning}");
+        }
+        refusing.runs.extend(
+            self.unplaced
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .cloned(),
+        );
+        refusing.runs
+    }
+
+    /// [`Self::place_runs`] of the loaded runs whose project is not known yet, when there are any
+    /// and the work tree is loaded.
+    fn place_unplaced(&self, cx: &App) {
+        let unplaced = self
+            .unplaced
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if unplaced.is_empty() {
+            return;
+        }
+        if let Some(tree) = self.writes.tree(cx) {
+            self.place_runs(unplaced, &tree, cx);
+        }
+    }
+
+    /// Records the project repository of each of `runs` (loaded from disk, so the start never
+    /// recorded it) for [`Self::refusing_runs`] and the restore holds. A run whose subject is not
+    /// in `tree`, or whose new-format project's repository is not open yet, stays unplaced: it
+    /// refuses unsandboxed starts and is placed again at every refresh. A run of an old-format
+    /// project has no project repository and nothing to place.
+    fn place_runs(&self, runs: impl IntoIterator<Item = RunId>, tree: &WorkTree, cx: &App) {
+        let subjects: Vec<(RunId, Option<RunSubject>)> = {
+            let lifecycle = self.lifecycle();
+            runs.into_iter()
+                .map(|run| {
+                    let subject = lifecycle.record(&run).map(|record| record.subject.clone());
+                    (run, subject)
+                })
+                .collect()
+        };
+        let mut placed = Vec::new();
+        let mut unplaced = Vec::new();
+        let mut done = Vec::new();
+        for (run, subject) in subjects {
+            let task = match &subject {
+                // A run no longer loaded has nothing to place.
+                None => None,
+                Some(RunSubject::Task { id }) => tree.task_by_id(id),
+                Some(RunSubject::Project { id }) => tree
+                    .projects
+                    .iter()
+                    .map(|project| &project.task)
+                    .find(|task| task.id() == Some(id.as_str())),
+            };
+            match (subject.is_some(), task) {
+                (false, _) => done.push(run),
+                (true, None) => unplaced.push(run),
+                (true, Some(task)) => match (self.lookup.repo_of)(task, cx) {
+                    Some(repo) => placed.push((run, repo)),
+                    None if task.definition.is_some() => unplaced.push(run),
+                    None => done.push(run),
+                },
+            }
+        }
+        {
+            let mut projects = self.projects.lock().unwrap_or_else(PoisonError::into_inner);
+            for (run, repo) in &placed {
+                projects.insert(run.clone(), repo.clone());
+            }
+        }
+        let mut waiting = self.unplaced.lock().unwrap_or_else(PoisonError::into_inner);
+        for run in placed.iter().map(|(run, _)| run).chain(&done) {
+            waiting.remove(run);
+        }
+        for run in unplaced {
+            if waiting.insert(run.clone()) {
+                log::warn!(
+                    "workflows: run {run}: its project is not open yet, so it starts nothing unsandboxed until it is"
+                );
+            }
         }
     }
 
@@ -433,6 +570,7 @@ impl WorkflowEngine {
                 if !report.loaded.is_empty() {
                     log::info!("workflows: loaded {} runs", report.loaded.len());
                 }
+                self.place_runs(report.loaded, &tree, cx);
             }
             Err(error) => log::error!("workflows: could not load the runs: {error}"),
         }
@@ -603,6 +741,13 @@ impl WorkflowEngine {
     /// The same engine writing task changes through `writes`.
     pub fn with_task_writes(mut self, writes: Arc<dyn TaskWrites>) -> Self {
         self.writes = writes;
+        self
+    }
+
+    /// The same engine finding projects and their `runs.unsandboxed` through `lookup`.
+    #[cfg(test)]
+    pub(crate) fn with_project_lookup(mut self, lookup: ProjectLookup) -> Self {
+        self.lookup = lookup;
         self
     }
 
@@ -1206,6 +1351,12 @@ impl WorkflowEngine {
                 let mut projects = self.projects.lock().unwrap_or_else(PoisonError::into_inner);
                 for run in &outcome.cleared {
                     projects.remove(run);
+                }
+            }
+            {
+                let mut unplaced = self.unplaced.lock().unwrap_or_else(PoisonError::into_inner);
+                for run in &outcome.cleared {
+                    unplaced.remove(run);
                 }
             }
             LiveModesRegistry::changed(cx);
