@@ -193,7 +193,7 @@ impl Render for InputField {
                     .py_1p5()
                     .flex_grow_1()
                     .text_color(style.text_color)
-                    .rounded_md()
+                    .rounded(CORNER_RADIUS)
                     .bg(style.background_color)
                     .border_1()
                     .border_color(style.border_color)

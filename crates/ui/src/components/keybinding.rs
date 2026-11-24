@@ -387,6 +387,7 @@ impl RenderOnce for Key {
                 }
             })
             .h(size)
+            .font_family(mono_label_font(cx))
             .text_size(size)
             .line_height(relative(1.))
             .text_color(self.color.unwrap_or(Color::Muted).color(cx))

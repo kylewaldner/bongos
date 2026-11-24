@@ -22681,10 +22681,13 @@ async fn test_completions_default_resolve_data_handling(cx: &mut TestAppContext)
         editor.context_menu_prev(&ContextMenuPrevious, window, cx);
     });
     cx.run_until_parked();
-    // Completions that have already been resolved are skipped.
+    // Completions that have already been resolved are skipped. The last rendered range now holds 10
+    // entries (it held 13 before): list rows have a 28 px minimum height, so fewer rows fit in the
+    // menu. That range, expanded by 4 items before it, gives the last 14 items, of which the final
+    // 4 were already resolved above.
     assert_eq!(
         *resolved_items.lock(),
-        items[items.len() - 17..items.len() - 4]
+        items[items.len() - 14..items.len() - 4]
             .iter()
             .cloned()
             .map(|mut item| {
