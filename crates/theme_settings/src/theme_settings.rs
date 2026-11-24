@@ -5,6 +5,8 @@
 //! This crate provides theme settings integration for Zed,
 //! bridging the theme system with the settings infrastructure.
 
+#[cfg(test)]
+mod inner_light_tests;
 mod schema;
 mod settings;
 #[cfg(test)]
