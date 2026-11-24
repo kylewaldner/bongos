@@ -1,0 +1,56 @@
+# Designs one feature: the design-lane job (design_ahead.md) of the pipeline for the ticket triage dispatched. It reads
+# code and never builds: no removal of preinstalled software, no dependency cache, no Rust toolchain; it downloads the
+# code search index. The frame (claim, run, final step) is the pipeline-job action. Started only by workflow_dispatch
+# (ticket-triage); the cap of concurrent design jobs is triage's (cap.feature-design), and the ticket's claim keeps two
+# runs off one ticket, so there is no concurrency group.
+name: feature-design
+# Triage ties a run to its ticket by the last word of the run's title.
+run-name: feature-design ${{ inputs.ticket }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      ticket:
+        description: The feature directory to design (for example 17-navigation-pickers)
+        required: true
+        type: string
+      coord_base:
+        description: Branch of the coordination repository that claim and design pull requests target
+        type: string
+        default: main
+      app_base:
+        description: Branch of this repository the job checks out
+        type: string
+        default: main
+      state_prefix:
+        description: Prefix of the state branches, lock refs and snapshot branches (empty in production)
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  design:
+    name: design lane-a
+    runs-on: ubuntu-24.04
+    timeout-minutes: 345
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/pipeline-job
+        with:
+          kind: design
+          ticket: ${{ inputs.ticket }}
+          build: 'false'
+          index: 'true'
+          runner_image: ubuntu-24.04
+          claude_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          coord_token: ${{ secrets.COORD_TOKEN }}
+          coord_repo: ${{ secrets.COORD_REPO }}
+          coord_base: ${{ inputs.coord_base }}
+          app_base: ${{ inputs.app_base }}
+          state_prefix: ${{ inputs.state_prefix }}
