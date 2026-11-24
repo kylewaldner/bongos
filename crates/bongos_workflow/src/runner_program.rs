@@ -333,6 +333,8 @@ pub struct ProgramNode {
     /// The script, resolved to a file.
     pub script: PathBuf,
     pub output: Vec<OutputField>,
+    /// The node's compiled schema; the result is checked against it.
+    pub schema: std::sync::Arc<bongos_workflow_model::OutputSchema>,
     pub permissions: Permissions,
     pub caps: ProgramCaps,
     pub polls: Option<PollPlan>,
@@ -1252,7 +1254,7 @@ pub fn classify(
             );
         }
     };
-    schema::check(&node.output, &value)
+    schema::check(&node.schema, &value)
         .or_else(|problems| fail(FailureReason::ProgramResultInvalid, problems))
 }
 

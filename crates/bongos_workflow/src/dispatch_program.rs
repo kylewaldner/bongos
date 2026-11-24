@@ -159,6 +159,7 @@ impl NodeKind for ProgramNodes {
             needs_sandbox: binding.setup.work_dir,
             script,
             output: definition_node.output.clone(),
+            schema: definition_node.schema.clone(),
             permissions,
             caps: ProgramCaps::resolve(definition_node, &inputs.programs),
             polls: definition_node

@@ -140,6 +140,7 @@ fn node(definition: &Definition, name: &str, root: &Path, try_number: u32) -> Cl
         caps: NodeCaps::resolve(definition, declared, &AgentDefaults::default()),
         output: declared.output.clone(),
         schema: declared.schema.clone(),
+        schema_text: declared.schema.document().to_string(),
         mcp_exclude: Vec::new(),
         mcp_installed: ["broken", "github", "linear"]
             .iter()
@@ -728,4 +729,76 @@ fn a_valid_result_routes_through_the_runtime() {
             .iter()
             .all(|(_, cost, session)| *cost > 0.0 && session.is_some())
     );
+}
+
+#[test]
+fn the_json_schema_flag_is_the_text_of_the_schema_file() {
+    let root = TempDir::new().unwrap();
+    let definition = definition();
+    let declared = definition.node("triage").unwrap();
+    let file = crate::lifecycle::schema_file(root.path(), 0, "triage");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &file,
+        "{ \"type\": \"object\",  \"title\": \"as written\" }\n",
+    )
+    .unwrap();
+    let mut claude_node = node(&definition, "triage", root.path(), 1);
+    claude_node.schema_text = crate::lifecycle::schema_text(root.path(), 0, declared).unwrap();
+    let args = cli(&[], root.path()).args(&claude_node, Path::new("/record/system.md"));
+    let at = args.iter().position(|arg| arg == "--json-schema").unwrap();
+    assert_eq!(args[at + 1], std::fs::read_to_string(&file).unwrap());
+}
+
+#[test]
+fn a_bad_structured_result_gets_the_one_validation_message() {
+    let (finish, _root) = run_one("invalid", |_| {});
+    let message = failure(&finish).detail.clone();
+    // The same text a script's bad result gets: both go through `schema::check`.
+    assert_eq!(
+        message,
+        "Result failed validation at `/mode`: expected one of \"one-shot\", \"planned\", got \"maybe\""
+    );
+}
+
+#[test]
+fn a_data_field_of_a_file_schema_reaches_the_recorded_result() {
+    use bongos_workflow_model::definition::{FieldType, OutputField};
+    let field = |name: &str, field_type| OutputField {
+        name: name.to_string(),
+        line: 0,
+        field_type,
+        optional: false,
+        outcome: None,
+    };
+    let document = json!({
+        "type": "object",
+        "required": ["mode", "why"],
+        "properties": { "mode": { "type": "string" }, "why": { "type": ["string", "number"] } },
+    });
+    let schema = bongos_workflow_model::OutputSchema::compile(
+        document,
+        vec![
+            field("mode", FieldType::Text),
+            field("why", FieldType::Data),
+        ],
+    )
+    .unwrap();
+    let (finish, root) = run_one("success", |node| {
+        node.schema = std::sync::Arc::new(schema);
+    });
+    assert_eq!(
+        finish.outcome,
+        Ok(json!({ "mode": "one-shot", "why": "trivial" }))
+    );
+    let recorded: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            root.path()
+                .join("record/nodes/triage/1-1")
+                .join(RESULT_FILE),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(recorded["why"], json!("trivial"));
 }

@@ -1007,6 +1007,52 @@ pub fn definition_copy_dir(attempt_dir: &Path, rev: u32) -> PathBuf {
     attempt_dir.join("definition").join(rev.to_string())
 }
 
+/// `<attempt dir>/schemas/<rev>/<node>.json`: the node's one schema document of definition
+/// revision `rev`, beside `definition/<rev>` and never inside it, so it cannot clash with a
+/// definition's own `schemas/<name>.json` or change the definition hash. The file only feeds the
+/// agents; nothing reads it back to validate.
+pub fn schema_file(attempt_dir: &Path, rev: u32, node: &str) -> PathBuf {
+    attempt_dir
+        .join("schemas")
+        .join(rev.to_string())
+        .join(format!("{node}.json"))
+}
+
+/// Writes every node's document of `definition` to `schemas/<rev>/`.
+fn write_schemas(attempt_dir: &Path, rev: u32, definition: &Definition) -> std::io::Result<()> {
+    let dir = attempt_dir.join("schemas").join(rev.to_string());
+    if dir.exists() {
+        fs::remove_dir_all(&dir)?;
+    }
+    fs::create_dir_all(&dir)?;
+    for node in &definition.nodes {
+        fs::write(
+            schema_file(attempt_dir, rev, &node.name),
+            node.schema.document().to_string(),
+        )?;
+    }
+    Ok(())
+}
+
+/// The text of the node's schema file for revision `rev`. A run from before the files existed has
+/// none: it is written from the node's stored document then.
+pub fn schema_text(attempt_dir: &Path, rev: u32, node: &Node) -> Result<String, String> {
+    let path = schema_file(attempt_dir, rev, &node.name);
+    match fs::read_to_string(&path) {
+        Ok(text) => Ok(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let text = node.schema.document().to_string();
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
+            }
+            fs::write(&path, &text).map_err(|error| format!("{}: {error}", path.display()))?;
+            Ok(text)
+        }
+        Err(error) => Err(format!("{}: {error}", path.display())),
+    }
+}
+
 /// The live runs and their records, over a [`Runtime`].
 pub struct Lifecycle<R: Runner> {
     runtime: Runtime<R>,
@@ -3058,6 +3104,7 @@ impl<R: Runner> Lifecycle<R> {
         let loop_bound = self.settings.limits.loop_bound;
         let copy = definition_copy_dir(&attempt_dir, 0);
         copy_dir(source, &copy).map_err(Refusal::io)?;
+        write_schemas(&attempt_dir, 0, &definition).map_err(Refusal::io)?;
         entry.record.attempts.push(Attempt {
             n,
             created,
@@ -3117,10 +3164,18 @@ impl<R: Runner> Lifecycle<R> {
                     )
                 })
         });
+        let attempt_dir = self.runs[index].attempt_dir();
         let fresh = match checked {
+            Ok(fresh) => write_schemas(&attempt_dir, rev, &fresh)
+                .map(|()| fresh)
+                .map_err(Refusal::io),
+            Err(refusal) => Err(refusal),
+        };
+        let fresh = match fresh {
             Ok(fresh) => fresh,
             Err(refusal) => {
                 fs::remove_dir_all(&copy).ok();
+                fs::remove_dir_all(attempt_dir.join("schemas").join(rev.to_string())).ok();
                 return Err(refusal);
             }
         };
@@ -3159,13 +3214,19 @@ impl<R: Runner> Lifecycle<R> {
             .definition(run)
             .ok_or_else(|| unknown_run(run))?;
         let node = definition.node(&key.node).ok_or_else(|| unknown_run(run))?;
-        if !node.output.iter().any(|output| output.name == field) {
+        if !node
+            .schema
+            .fields()
+            .iter()
+            .any(|output| output.name == field)
+        {
             return Err(Refusal::new(
                 RefusalKind::InvalidEdit,
                 format!("Node '{}' has no output field '{field}'.", key.node),
                 format!(
                     "Edit one of: {}.",
-                    node.output
+                    node.schema
+                        .fields()
                         .iter()
                         .map(|output| output.name.as_str())
                         .collect::<Vec<_>>()
@@ -3184,7 +3245,7 @@ impl<R: Runner> Lifecycle<R> {
             ));
         };
         result.insert(field.clone(), value.clone());
-        schema::check(&node.output, &Value::Object(result)).map_err(|detail| {
+        schema::check(&node.schema, &Value::Object(result)).map_err(|detail| {
             Refusal::new(
                 RefusalKind::InvalidEdit,
                 format!(
@@ -3403,7 +3464,17 @@ fn load_definition(
 fn read_definition(dir: &Path) -> Result<Definition, String> {
     let file = dir.join(DEFINITION_FILE);
     let text = fs::read_to_string(&file).map_err(|error| format!("{}: {error}", file.display()))?;
-    parse(&text).map_err(|error| error.to_string())
+    let mut definition = parse(&text).map_err(|error| error.to_string())?;
+    // A node with `output_schema` takes its fields and its compiled schema from the file in `dir`.
+    for node in &mut definition.nodes {
+        if node.output_schema.is_some() && node.output.is_empty() {
+            let schema = bongos_workflow_model::document(node, dir)
+                .map_err(|diagnostic| diagnostic.message)?;
+            node.output = schema.fields().to_vec();
+            node.schema = std::sync::Arc::new(schema);
+        }
+    }
+    Ok(definition)
 }
 
 /// The agent CLIs, the interpreter and the MCP servers the definition needs, in that order.
@@ -3607,7 +3678,7 @@ fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
 
 /// A stable hash of the files under `dir` (FNV-1a over their relative paths and contents, in
 /// path order), as `fnv1a64:<hex>`.
-fn hash_dir(dir: &Path) -> String {
+pub(crate) fn hash_dir(dir: &Path) -> String {
     fn walk(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) {
         for item in fs::read_dir(dir).into_iter().flatten().flatten() {
             let path = item.path();
