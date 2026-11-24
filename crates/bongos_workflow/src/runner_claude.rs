@@ -191,6 +191,11 @@ impl NodeCaps {
 pub struct ClaudeNode {
     pub caps: NodeCaps,
     pub output: Vec<OutputField>,
+    /// The node's compiled schema; every result is checked against it.
+    pub schema: std::sync::Arc<bongos_workflow_model::OutputSchema>,
+    /// The text of the schema file of the run's current definition revision, handed to the CLI
+    /// with `--json-schema`. It is never read back to validate.
+    pub schema_text: String,
     /// Servers `workflows.mcp_exclude` removes (`--disallowedTools mcp__<name>__*`).
     pub mcp_exclude: Vec<String>,
     /// The MCP servers discovered for Claude (`mcp::discover`); a start that allows one that is not
@@ -315,7 +320,7 @@ impl ClaudeCli {
             args.push(caps.max_cost_usd.to_string());
         }
         args.push("--json-schema".to_string());
-        args.push(schema::json_schema(&node.output).to_string());
+        args.push(node.schema_text.clone());
         args.push("--append-system-prompt-file".to_string());
         args.push(system_file.to_string_lossy().into_owned());
         args.push("--session-id".to_string());
@@ -618,7 +623,7 @@ pub fn classify(
             FailureReason::NodeOutputInvalid,
             "the agent returned no structured result".to_string(),
         ),
-        Some(value) => match schema::check(&node.output, value) {
+        Some(value) => match schema::check(&node.schema, value) {
             Ok(typed) => done(Ok(typed.to_json())),
             Err(problems) => fail(FailureReason::NodeOutputInvalid, problems),
         },

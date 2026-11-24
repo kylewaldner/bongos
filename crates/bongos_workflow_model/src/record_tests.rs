@@ -92,6 +92,15 @@ fn every_event() -> Vec<Event> {
                 "tests: the runner crashed",
             ),
         },
+        Event::ConsentAsked {
+            key: plan.clone(),
+            reason: "bwrap not found".to_string(),
+        },
+        Event::ConsentAnswered {
+            allowed: true,
+            by: "person".to_string(),
+            at: "2026-01-02T03:04:05Z".to_string(),
+        },
         Event::DefinitionReloaded { rev: 2 },
         Event::Ended {
             state: EndState::Failed,
@@ -1025,4 +1034,174 @@ fn host_and_lane_starts_round_trip() {
             started_by
         );
     }
+}
+
+fn consent_asked(key: &NodeKey) -> Event {
+    Event::ConsentAsked {
+        key: key.clone(),
+        reason: "bwrap not found".to_string(),
+    }
+}
+
+fn consent_answered(allowed: bool) -> Event {
+    Event::ConsentAnswered {
+        allowed,
+        by: "person".to_string(),
+        at: "2026-01-02T03:04:05Z".to_string(),
+    }
+}
+
+#[test]
+fn replay_of_consent_ask_then_answer_releases_the_held_keys() {
+    let first = key("lint");
+    let second = key("format");
+    let base = vec![
+        Event::Created,
+        consent_asked(&first),
+        consent_asked(&second),
+        consent_asked(&first),
+    ];
+    let state = replay(&base);
+    assert_eq!(
+        state.consent_pending,
+        Some(ConsentPending {
+            reason: "bwrap not found".to_string(),
+            keys: vec![first.clone(), second.clone()],
+        }),
+        "a later ask joins the pending one, each key once"
+    );
+    assert_eq!(state.held.len(), 2);
+    assert_eq!(state.held[&first].reason, FailureReason::SandboxRequired);
+    assert!(state.finished.is_empty(), "an ask is not a try");
+    assert!(state.ended.is_none());
+
+    let mut allowed = base.clone();
+    allowed.push(consent_answered(true));
+    let state = replay(&allowed);
+    assert!(state.held.is_empty(), "allowed keys are ready to start");
+    assert!(state.finished.is_empty(), "nothing failed");
+    assert_eq!(state.consent_pending, None);
+    assert_eq!(
+        state.consent_history,
+        vec![ConsentAnswer {
+            allowed: true,
+            by: "person".to_string(),
+            at: "2026-01-02T03:04:05Z".to_string(),
+        }]
+    );
+
+    let mut stopped = base;
+    stopped.push(consent_answered(false));
+    let state = replay(&stopped);
+    assert!(state.held.is_empty());
+    assert_eq!(state.consent_pending, None);
+    assert_eq!(state.consent_history.len(), 1);
+    assert!(!state.consent_history[0].allowed);
+    let failed: Vec<_> = state
+        .finished
+        .iter()
+        .map(|finished| {
+            let failure = finished.failure.as_ref().unwrap();
+            (finished.key.clone(), failure.reason, finished.had_start)
+        })
+        .collect();
+    assert_eq!(
+        failed,
+        vec![
+            (first, FailureReason::SandboxRefused, false),
+            (second, FailureReason::SandboxRefused, false),
+        ],
+        "a stop fails each held key with nothing run"
+    );
+    assert_eq!(state.cost_usd, 0.0);
+}
+
+#[test]
+fn a_resume_or_a_new_start_of_the_held_keys_clears_the_pending_ask() {
+    let lint = key("lint");
+    let format = key("format");
+    // Ask, then resume: the resume releases the held key, so nothing is pending and a later
+    // answer (which the writer refuses) releases and fails nothing.
+    let mut events = vec![Event::Created, consent_asked(&lint), Event::Resumed];
+    let state = replay(&events);
+    assert_eq!(
+        state.consent_pending, None,
+        "a resume leaves no ask pending"
+    );
+    assert!(state.held.is_empty());
+    events.push(consent_answered(false));
+    let state = replay(&events);
+    assert_eq!(state.consent_pending, None);
+    assert!(state.finished.is_empty(), "a stale answer fails nothing");
+    assert_eq!(state.consent_history.len(), 1);
+
+    // After the resume a new ask is a new one, never joined to the stale one.
+    events.push(consent_asked(&format));
+    let state = replay(&events);
+    assert_eq!(
+        state.consent_pending.map(|pending| pending.keys),
+        Some(vec![format.clone()])
+    );
+
+    // A new start of one held key drops it from the ask; once no held key is left, the ask goes.
+    let events = vec![
+        Event::Created,
+        consent_asked(&lint),
+        consent_asked(&format),
+        started(&lint, 1),
+    ];
+    let state = replay(&events);
+    assert_eq!(
+        state.consent_pending.as_ref().map(|pending| &pending.keys),
+        Some(&vec![format.clone()])
+    );
+    let mut events = events;
+    events.push(started(&format, 1));
+    assert_eq!(replay(&events).consent_pending, None);
+}
+
+#[test]
+fn replay_never_yields_a_grant() {
+    let lint = key("lint");
+    let events = vec![Event::Created, consent_asked(&lint), consent_answered(true)];
+    let state = replay(&events);
+    // The state after an allow is the state of a run that never asked, plus the answer in its
+    // history: nothing in it says the run may go unsandboxed.
+    let mut expected = replay(&[Event::Created]);
+    expected.consent_history = state.consent_history.clone();
+    assert_eq!(state, expected);
+
+    // The next unsandboxed start asks again, and replay shows it pending again.
+    let mut again = events;
+    again.push(consent_asked(&lint));
+    let state = replay(&again);
+    assert_eq!(
+        state.consent_pending.map(|pending| pending.keys),
+        Some(vec![lint.clone()])
+    );
+    assert_eq!(state.held[&lint].reason, FailureReason::SandboxRequired);
+}
+
+#[test]
+fn a_log_without_consent_events_has_no_consent_state() {
+    let empty = RunState::default();
+    assert_eq!(empty.consent_pending, None);
+    assert!(empty.consent_history.is_empty());
+
+    let plan = key("plan");
+    let events = vec![
+        Event::Created,
+        started(&plan, 1),
+        finished(&plan, 1, json!({ "done": true }), 0.5),
+        Event::Held {
+            key: plan.clone(),
+            failure: Failure::new(FailureReason::CheckNoVerdict, Some(plan.clone()), "x"),
+        },
+        Event::Resumed,
+    ];
+    let state = replay(&events);
+    assert_eq!(state.consent_pending, None);
+    assert!(state.consent_history.is_empty());
+    assert_eq!(state.finished.len(), 1);
+    assert!(state.held.is_empty());
 }

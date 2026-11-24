@@ -42,7 +42,7 @@
 #
 # This shim is a guardrail, not a security boundary: Python code in the same
 # process can always defeat an audit hook. The OS sandbox is the boundary; a run
-# without it ("not sandboxed" in the try's summary) is not hard-confined. Known
+# without it ("unsandboxed" in the try's summary) is not hard-confined. Known
 # gaps, accepted for that reason: a walk through closures (__closure__,
 # cell_contents) reaches the hook's state; os.link checks only the destination;
 # binding a unix socket creates a file anywhere; the arguments and environment of

@@ -19,10 +19,29 @@
 //! - `command`: the declared argv; exit 0 is satisfied, a nonzero exit is waiting.
 //! - `deploy`: satisfied at once when the task's `merge_is_ship` is on (D15); else the declared
 //!   command as for `command`; with no command, a gate "Confirm deploy of <pr>?" opens.
+//!
+//! How a pass starts its process is [`WaitRequest::launch`], decided once when the wait starts
+//! (crate::builtin_run). It runs inside the OS sandbox: the task worktree is the working directory
+//! and read-only, git's directories are protected, the only writable place is a per-try scratch
+//! directory (emptied before each pass) that is also `TMPDIR`, the network reaches only the
+//! wait's hosts, and the environment is cleared down to [`WaitRequest::env`], `TMPDIR` and the
+//! sandbox's own proxy variables. `gh` is told the repository with `--repo`, since it cannot ask
+//! git. `gh`'s GitHub Enterprise tokens reach it only for the task remote's host or `GH_HOST`,
+//! and `GH_TOKEN` and `GITHUB_TOKEN` only for those or github.com ([`gh_env`]). The sandbox
+//! leaves the D-Bus session bus reachable, so a pass can read the user's
+//! keyring (that is how `gh` finds its login), and a program that uses the bus can get around
+//! the filesystem and network limits above. With no sandbox and a person's (or the setting's)
+//! word, the same cleared environment and scratch directory are used without the sandbox. A pass
+//! whose sandbox cannot be set up fails; it never runs outside the sandbox.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::time::Duration;
+
+use futures::FutureExt as _;
+use futures::future::LocalBoxFuture;
+use sandbox::{CommandAndArgs, Sandbox, SandboxError, SandboxPolicy, WrappedCommand};
 
 /// What the wait waits for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +63,25 @@ impl WaitCondition {
             _ => None,
         }
     }
+
+    /// Whether the condition asks `gh`.
+    pub fn uses_gh(self) -> bool {
+        matches!(self, Self::CiGreen | Self::PrMerged)
+    }
+}
+
+/// How each pass of a wait starts `gh` or the declared command.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum WaitLaunch {
+    /// As the user, with the writer's whole environment, unconfined: only for a pass that runs no
+    /// process under the decision, and for tests.
+    #[default]
+    AsUser,
+    /// Inside the OS sandbox with this policy, the environment cleared.
+    Sandboxed(SandboxPolicy),
+    /// No sandbox, by a person's or the setting's word: the environment cleared and `TMPDIR` the
+    /// scratch directory, as in the sandbox.
+    Unsandboxed,
 }
 
 /// One pass of a wait.
@@ -64,6 +102,46 @@ pub struct WaitRequest {
     /// the bound is [`WaitOutcome::TimedOut`].
     pub elapsed: Duration,
     pub give_up: Option<Duration>,
+    /// How each pass starts its process.
+    pub launch: WaitLaunch,
+    /// The variables a confined pass gets, besides `TMPDIR` and the sandbox's proxy variables.
+    pub env: BTreeMap<String, String>,
+    /// The try's scratch directory: a confined pass's `TMPDIR` and only writable place.
+    pub scratch: PathBuf,
+    /// The repository `gh` is told with `--repo`, as `owner/name`; set for a confined pass.
+    pub repo: Option<String>,
+    /// Sets up a sandboxed pass's sandbox and wraps its command: [`wrap_in_sandbox`] unless a
+    /// test makes it fail.
+    pub sandbox_wrap: SandboxWrap,
+}
+
+/// Builds the sandbox for `policy` and wraps `command` in it, returning both: the sandbox owns
+/// the network proxy, so it must live until the wrapped process has ended.
+pub type SandboxWrap =
+    fn(
+        SandboxPolicy,
+        CommandAndArgs,
+    ) -> LocalBoxFuture<'static, Result<(Sandbox, WrappedCommand), SandboxError>>;
+
+/// The real [`SandboxWrap`]: [`Sandbox::new`], then [`Sandbox::wrap`].
+pub fn wrap_in_sandbox(
+    policy: SandboxPolicy,
+    command: CommandAndArgs,
+) -> LocalBoxFuture<'static, Result<(Sandbox, WrappedCommand), SandboxError>> {
+    async move {
+        let mut sandbox = Sandbox::new(policy)?;
+        let wrapped = sandbox.wrap(&command).await?;
+        Ok((sandbox, wrapped))
+    }
+    .boxed_local()
+}
+
+impl WaitRequest {
+    /// Whether a pass starts a process: a `deploy` that ships with the merge, or that opens a
+    /// gate, runs nothing.
+    pub fn runs_a_process(&self) -> bool {
+        self.condition != WaitCondition::Deploy || (!self.merge_is_ship && !self.command.is_empty())
+    }
 }
 
 /// The `result` value strings a pass reports: `waiting` is what the runner's `polls` setting
@@ -127,20 +205,211 @@ fn check_pr(request: &WaitRequest) -> Result<(), WaitOutcome> {
     Ok(())
 }
 
-async fn run(binary: &Path, args: &[String], directory: &Path) -> Result<Output, String> {
-    util::command::new_command(binary)
+/// Runs `binary` with `args` in the task worktree, as [`WaitRequest::launch`] says.
+async fn run(request: &WaitRequest, binary: &Path, args: &[String]) -> Result<Output, String> {
+    let could_not_run =
+        |error: std::io::Error| format!("could not run {}: {error}", binary.display());
+    match &request.launch {
+        WaitLaunch::AsUser => util::command::new_command(binary)
+            .current_dir(&request.worktree)
+            .args(args)
+            .output()
+            .await
+            .map_err(could_not_run),
+        WaitLaunch::Unsandboxed => {
+            let env = confined_env(request)?;
+            run_cleared(binary.as_os_str(), args, &env, &request.worktree)
+                .await
+                .map_err(could_not_run)
+        }
+        WaitLaunch::Sandboxed(policy) => {
+            let env = confined_env(request)?;
+            let unavailable = |error: sandbox::SandboxError| {
+                format!(
+                    "could not set up the sandbox for {}: {error}",
+                    binary.display()
+                )
+            };
+            let command = CommandAndArgs {
+                program: binary.to_string_lossy().into_owned(),
+                args: args.to_vec(),
+                env: env.into_iter().collect(),
+                cwd: Some(request.worktree.clone()),
+            };
+            let (sandbox, wrapped) = (request.sandbox_wrap)(policy.clone(), command)
+                .await
+                .map_err(unavailable)?;
+            // The sandbox owns the network proxy, so it lives until the process has ended. Its
+            // environment is what the pass gets: the one passed in plus the proxy's variables.
+            let output = run_cleared(
+                wrapped.program.as_ref(),
+                &wrapped.args,
+                &wrapped.env,
+                &request.worktree,
+            )
+            .await
+            .map_err(could_not_run);
+            sandbox.drop_on_current_thread();
+            output
+        }
+    }
+}
+
+/// Empties the scratch directory for this pass, and returns the confined environment:
+/// [`WaitRequest::env`] with `TMPDIR` the scratch directory.
+fn confined_env(request: &WaitRequest) -> Result<BTreeMap<String, String>, String> {
+    let scratch = &request.scratch;
+    let failed =
+        |error: std::io::Error| format!("could not prepare {}: {error}", scratch.display());
+    match std::fs::remove_dir_all(scratch) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(failed(error)),
+        _ => {}
+    }
+    std::fs::create_dir_all(scratch).map_err(failed)?;
+    let mut env = request.env.clone();
+    env.insert("TMPDIR".to_string(), scratch.to_string_lossy().into_owned());
+    Ok(env)
+}
+
+/// Runs `program` with exactly `env`, nothing of the writer's own environment.
+async fn run_cleared<K, V>(
+    program: &std::ffi::OsStr,
+    args: &[String],
+    env: impl IntoIterator<Item = (K, V)>,
+    directory: &Path,
+) -> std::io::Result<Output>
+where
+    K: AsRef<std::ffi::OsStr>,
+    V: AsRef<std::ffi::OsStr>,
+{
+    util::command::new_command(program)
         .current_dir(directory)
         .args(args)
+        .env_clear()
+        .envs(env)
         .output()
         .await
-        .map_err(|error| format!("could not run {}: {error}", binary.display()))
+}
+
+/// `args` for `gh`, with `--repo` when the request names the repository.
+fn gh_args(request: &WaitRequest, args: &[&str]) -> Vec<String> {
+    let mut args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+    if let Some(repo) = &request.repo {
+        args.extend(["--repo".to_string(), repo.clone()]);
+    }
+    args
+}
+
+/// `gh`'s tokens for GitHub Enterprise Server hosts: `gh` sends them to whatever host it is asked
+/// about that is not github.com, so [`gh_env`] passes them only to a host the task already trusts.
+pub const ENTERPRISE_TOKENS: &[&str] = &["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"];
+
+/// `gh`'s tokens for github.com: `gh` sends them to whatever host it is asked about, so
+/// [`gh_env`] passes them only to github.com itself or to a host the task already trusts.
+pub const GITHUB_TOKENS: &[&str] = &["GH_TOKEN", "GITHUB_TOKEN"];
+
+/// The environment a confined `gh` pass gets: `env` (the writer's variables picked for the wait)
+/// without [`ENTERPRISE_TOKENS`] and [`GITHUB_TOKENS`] unless the host `gh` will talk to is the
+/// task remote's host or `GH_HOST`; [`GITHUB_TOKENS`] are also kept when that host is exactly
+/// github.com. That host is a URL `pr`'s host; for a number or branch it is `GH_HOST`, else
+/// github.com. A URL `pr` whose host cannot be read never gets the tokens.
+pub fn gh_env(
+    mut env: BTreeMap<String, String>,
+    pr: &str,
+    remote: Option<&str>,
+) -> BTreeMap<String, String> {
+    let gh_host_var = env
+        .get("GH_HOST")
+        .map(|host| host.trim().to_ascii_lowercase())
+        .filter(|host| !host.is_empty());
+    let pr = pr.trim();
+    let target = if pr.contains("://") {
+        crate::dispatch_program::remote_hosts(pr).and_then(|hosts| hosts.into_iter().next())
+    } else {
+        Some(
+            gh_host_var
+                .clone()
+                .unwrap_or_else(|| "github.com".to_string()),
+        )
+    };
+    let remote_host = remote
+        .and_then(crate::dispatch_program::remote_hosts)
+        .and_then(|hosts| hosts.into_iter().next());
+    let trusted = target.as_ref().is_some_and(|target| {
+        Some(target) == remote_host.as_ref() || Some(target) == gh_host_var.as_ref()
+    });
+    if !trusted {
+        for name in ENTERPRISE_TOKENS {
+            env.remove(*name);
+        }
+        if target.as_deref() != Some("github.com") {
+            for name in GITHUB_TOKENS {
+                env.remove(*name);
+            }
+        }
+    }
+    env
+}
+
+/// The host and `owner/name` of a pull request URL such as `https://github.com/o/r/pull/42`.
+pub fn pr_url(pr: &str) -> Option<(String, String)> {
+    let pr = pr.trim();
+    let rest = pr
+        .strip_prefix("https://")
+        .or_else(|| pr.strip_prefix("http://"))?;
+    let (authority, path) = rest.split_once('/')?;
+    let host = authority.rsplit('@').next()?.split(':').next()?;
+    let host = host.to_ascii_lowercase();
+    let path = path.split(['?', '#']).next()?.trim_end_matches('/');
+    let segments: Vec<&str> = path.split('/').collect();
+    match segments.as_slice() {
+        [owner, name, "pull", number, ..]
+            if !host.is_empty()
+                && !number.is_empty()
+                && number.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            Some((host, owner_name(&format!("{owner}/{name}"))?))
+        }
+        _ => None,
+    }
+}
+
+/// The `owner/name` of a GitHub remote URL (`https://github.com/o/r.git`, `git@github.com:o/r`,
+/// `ssh://git@ssh.github.com:443/o/r.git`); `None` for any other host or shape.
+pub fn github_repo(url: &str) -> Option<String> {
+    let url = url.trim();
+    let hosts = crate::dispatch_program::remote_hosts(url)?;
+    if !matches!(
+        hosts.first()?.as_str(),
+        "github.com" | "www.github.com" | "ssh.github.com"
+    ) {
+        return None;
+    }
+    let path = match url.split_once("://") {
+        Some((_, rest)) => rest.split_once('/')?.1,
+        None => url.split_once(':')?.1,
+    };
+    owner_name(path.split(['?', '#']).next()?)
+}
+
+fn owner_name(path: &str) -> Option<String> {
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let (owner, name) = path.split_once('/')?;
+    let part = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    (part(owner) && part(name)).then(|| format!("{owner}/{name}"))
 }
 
 async fn run_declared(request: &WaitRequest) -> WaitOutcome {
     let Some((program, args)) = request.command.split_first() else {
         return WaitOutcome::Failed("the wait declares no command".to_string());
     };
-    match run(Path::new(program), args, &request.worktree).await {
+    match run(request, Path::new(program), args).await {
         Ok(output) if output.status.success() => WaitOutcome::Satisfied,
         Ok(_) => WaitOutcome::Waiting,
         Err(message) => WaitOutcome::Failed(message),
@@ -151,8 +420,8 @@ async fn ci_green(request: &WaitRequest) -> WaitOutcome {
     if let Err(outcome) = check_pr(request) {
         return outcome;
     }
-    let args = ["pr", "checks", &request.pr, "--json", "bucket"].map(String::from);
-    let output = match run(&request.gh, &args, &request.worktree).await {
+    let args = gh_args(request, &["pr", "checks", &request.pr, "--json", "bucket"]);
+    let output = match run(request, &request.gh, &args).await {
         Ok(output) => output,
         Err(message) => return WaitOutcome::Failed(message),
     };
@@ -189,8 +458,8 @@ async fn pr_merged(request: &WaitRequest) -> WaitOutcome {
     if let Err(outcome) = check_pr(request) {
         return outcome;
     }
-    let args = ["pr", "view", &request.pr, "--json", "state"].map(String::from);
-    let output = match run(&request.gh, &args, &request.worktree).await {
+    let args = gh_args(request, &["pr", "view", &request.pr, "--json", "state"]);
+    let output = match run(request, &request.gh, &args).await {
         Ok(output) => output,
         Err(message) => return WaitOutcome::Failed(message),
     };

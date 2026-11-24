@@ -9,10 +9,12 @@ use std::sync::Arc;
 use bongos_confine::private_git::{self, RecoverOutcome};
 use bongos_confine::safe_git::linked_git_dir_from_record;
 use bongos_confine::{HostGit, TreeAccess, TreeGit};
-use bongos_workflow_model::record::TodoRef;
+use bongos_workflow_model::record::{StartedBy, TodoRef};
 use bongos_workflow_model::state_doc::{self, Paths, RunIdentity};
+use bongos_workflow_model::unsandboxed::{AllowedBy, Mode, Permit};
 use bongos_workflow_model::{Failure, FailureReason, NodeKey};
 
+use crate::consent::Grant;
 use crate::dispatch::{NodeKind, RunnerSnapshot};
 use crate::dispatch_agent::node_worktree;
 use crate::lifecycle::definition_copy_dir;
@@ -21,7 +23,7 @@ use crate::run_view::try_dir;
 use crate::runner_program::{
     Clock, Interpreter, PollPlan, ProgramCaps, ProgramNode, ProgramRunner, SandboxProbe,
 };
-use crate::runtime::{Finish, NodeStart, RunBinding};
+use crate::runtime::{Finish, NodeStart, RunBinding, RunFacts};
 use crate::worktrees::{Git, common_dir_of, repository_of};
 
 /// The network entry that stands for the host of the task repository's push remote.
@@ -153,12 +155,17 @@ impl NodeKind for ProgramNodes {
         let try_dir = try_dir(&binding.attempt_dir, key, node.try_number);
         let (host_git, tree_git) = host_git(binding, &worktree)
             .map_err(|detail| fail(FailureReason::WorktreeUnavailable, detail))?;
+        let mode = inputs.unsandboxed_mode(node.run);
         let program_node = ProgramNode {
+            permit: program_permit(&binding.setup.facts, mode, node.grant.as_ref()),
+            mode,
             // Only the OS sandbox keeps a snapshot read-only, and a project's files folder, which
-            // holds every run's records, read-only around a run's work directory.
+            // holds every run's records, read-only around a run's work directory. `branchless()`
+            // is `snapshot || work_dir`, so it covers every tree that needs the sandbox.
             needs_sandbox: binding.setup.branchless(),
             script,
             output: definition_node.output.clone(),
+            schema: definition_node.schema.clone(),
             permissions,
             caps: ProgramCaps::resolve(definition_node, &inputs.programs),
             polls: definition_node
@@ -195,6 +202,21 @@ impl NodeKind for ProgramNodes {
         if let Some(runner) = &mut self.runner {
             runner.stop(tries);
         }
+    }
+}
+
+/// The run's word on a program starting without the OS sandbox, from its facts, the effective
+/// mode and the run's grant in the consent store. An unattended run, a heal run and a run whose
+/// record was not read never run unsandboxed (`Refuse`), whatever the store holds: nobody is
+/// there to answer, and a healer must not reach past the sandbox. Any other run is allowed by a
+/// person's grant, else under `allow` by the setting, else asks.
+pub(crate) fn program_permit(facts: &RunFacts, mode: Mode, grant: Option<&Grant>) -> Permit {
+    match (facts.started_by, grant) {
+        (None | Some(StartedBy::Healer), _) => Permit::Refuse,
+        _ if facts.unattended => Permit::Refuse,
+        (Some(_), Some(grant)) => Permit::Allowed(grant.allowed_by()),
+        (Some(_), None) if mode == Mode::Allow => Permit::Allowed(AllowedBy::Setting),
+        (Some(_), None) => Permit::Ask,
     }
 }
 
@@ -347,12 +369,15 @@ pub(crate) fn scratch_dir(binding: &RunBinding, key: &NodeKey, try_number: u32) 
 
 /// The hosts of the task repository's push remote, or [`NO_ORIGIN`].
 pub(crate) fn task_remote_hosts(git: &Git, binding: &RunBinding) -> Result<Vec<String>, String> {
-    // The repository comes from the run's recorded git directory; no tree is asked.
-    let root = repository_of(&binding.worktree.git_dir).map_err(|_| NO_ORIGIN.to_string())?;
-    let url =
-        futures::executor::block_on(git.run(&root, &["remote", "get-url", "--push", "origin"]))
-            .map_err(|_| NO_ORIGIN.to_string())?;
+    let url = task_remote_url(git, binding).ok_or_else(|| NO_ORIGIN.to_string())?;
     remote_hosts(&url).ok_or_else(|| NO_ORIGIN.to_string())
+}
+
+/// The push URL of the task repository's `origin` remote, if it has one. The repository comes
+/// from the run's recorded git directory; no tree is asked.
+pub(crate) fn task_remote_url(git: &Git, binding: &RunBinding) -> Option<String> {
+    let root = repository_of(&binding.worktree.git_dir).ok()?;
+    futures::executor::block_on(git.run(&root, &["remote", "get-url", "--push", "origin"])).ok()
 }
 
 /// The host of a remote URL and its subdomain pattern: `https://github.com/o/r.git`,
@@ -394,7 +419,7 @@ pub(crate) fn remote_hosts(url: &str) -> Option<Vec<String>> {
 }
 
 /// `network` with `@remote` replaced by `hosts`.
-fn expand_remote(network: &[String], hosts: &[String]) -> Vec<String> {
+pub(crate) fn expand_remote(network: &[String], hosts: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for entry in network {
         if entry == REMOTE_ENTRY {

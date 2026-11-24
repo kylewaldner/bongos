@@ -189,11 +189,23 @@ pub fn wrap_invocation(
     ];
     wrapped_args.extend(args.iter().cloned());
 
-    Ok((
-        "/usr/bin/sandbox-exec".to_string(),
-        wrapped_args,
-        config_file,
-    ))
+    Ok((SANDBOX_EXEC.to_string(), wrapped_args, config_file))
+}
+
+/// Seatbelt's launcher, always run from this fixed path.
+pub(crate) const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+
+/// Whether [`SANDBOX_EXEC`] is an executable file, since it is run by its fixed path and
+/// never looked up.
+pub(crate) fn check_launcher() -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let metadata = std::fs::metadata(SANDBOX_EXEC)
+        .with_context(|| format!("Seatbelt's launcher {SANDBOX_EXEC} is unavailable"))?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        anyhow::bail!("Seatbelt's launcher {SANDBOX_EXEC} is not an executable file");
+    }
+    Ok(())
 }
 
 /// Generate a Seatbelt config string that reads everywhere by default.

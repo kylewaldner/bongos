@@ -389,13 +389,29 @@ pub fn check_parsed_in(
             return (report, None);
         }
     };
-    let definition = match parse(&text) {
+    let mut definition = match parse(&text) {
         Ok(definition) => definition,
         Err(error) => {
             report.load_error = Some(error.to_string());
             return (report, None);
         }
     };
+    // A node with `output_schema` takes its fields and its one compiled schema from the file,
+    // read here at load, before validation looks at the node's routes.
+    let mut schema_errors = Vec::new();
+    let mut from_file = Vec::new();
+    for node in &mut definition.nodes {
+        if node.output_schema.is_some() && node.output.is_empty() {
+            match bongos_workflow_model::document(node, &resolved.dir) {
+                Ok(schema) => {
+                    from_file.push(node.name.clone());
+                    node.output = schema.fields().to_vec();
+                    node.schema = std::sync::Arc::new(schema);
+                }
+                Err(diagnostic) => schema_errors.push(diagnostic),
+            }
+        }
+    }
     let mut context = ValidationContext {
         files: list_files(&resolved.dir),
         ..base
@@ -403,6 +419,20 @@ pub fn check_parsed_in(
     adjust(&definition, &mut context);
     report.warnings = definition.warnings();
     report.diagnostics = validate(&definition, &context);
+    // Fields the loader took from a schema file are not a second declaration beside it.
+    report.diagnostics.retain(|diagnostic| {
+        !(diagnostic
+            .message
+            .starts_with("set either `output` or `output_schema`")
+            && diagnostic
+                .node
+                .as_ref()
+                .is_some_and(|node| from_file.contains(node)))
+    });
+    if !schema_errors.is_empty() {
+        report.diagnostics.extend(schema_errors);
+        report.diagnostics.sort_by_key(|diagnostic| diagnostic.line);
+    }
     (report, Some(definition))
 }
 

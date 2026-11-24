@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 use bongos_chat::model::{Agent, Capabilities};
 use bongos_chat::{AgentCommand, Health, HealthState};
 use bongos_workflow_model::inputs::{Input, InputValue};
-use bongos_workflow_model::record::EndState;
+use bongos_workflow_model::record::{EndState, StartedBy};
+use bongos_workflow_model::unsandboxed::Mode;
 use bongos_workflow_model::{FailureReason, Limits, parse};
 use tempfile::TempDir;
 
@@ -26,8 +27,8 @@ use crate::dispatch::{AppRunner, RunnerInputs, RunnerSnapshot};
 use crate::dispatch_program::ProgramNodes;
 use crate::lifecycle::definition_copy_dir;
 use crate::runner_claude::ClaudeCli;
-use crate::runner_program::{Clock, Interpreter, SandboxProbe};
-use crate::runtime::{RunBinding, RunSpec, Runner, Runtime};
+use crate::runner_program::{Clock, Interpreter, ProgramSettings, SandboxProbe};
+use crate::runtime::{RunBinding, RunFacts, RunSetup, RunSpec, Runner, Runtime};
 use crate::worktrees::{Git, RunWorktree, TaskCheckout, create_branch, create_run};
 
 const RUN: &str = "01890a5d-ac96-774b-bcce-b30200000042";
@@ -180,7 +181,14 @@ impl Repo {
                 source: "task.goal".to_string(),
                 missing: false,
             }],
-            setup: Default::default(),
+            // A person's run; the setting allows a program without the sandbox (the test has none).
+            setup: RunSetup {
+                facts: RunFacts {
+                    unattended: false,
+                    started_by: Some(StartedBy::Person),
+                },
+                ..Default::default()
+            },
         }
     }
 
@@ -402,6 +410,10 @@ fn the_shipped_implement_pr_runs_its_planned_path_to_the_merge() {
         claude: Some(Ok(fake_cli(&claude, &env))),
         interpreter: Some(Ok(interpreter)),
         base_env: env,
+        programs: ProgramSettings {
+            unsandboxed: Mode::Allow,
+            ..ProgramSettings::default()
+        },
         ..RunnerSnapshot::default()
     });
     let mut runner = AppRunner::new(inputs);

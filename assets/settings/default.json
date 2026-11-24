@@ -2967,6 +2967,10 @@
       // MB of output (stdout and stderr together) a program may print; past it the output
       // is dropped and the node fails "output cap hit".
       "max_output_mb": 10,
+      // What a program node does when no OS sandbox is available: "ask" asks a person to
+      // approve the run once, "refuse" never runs it, "allow" runs it unsandboxed without
+      // asking. The default is "ask". A project can only tighten this.
+      "unsandboxed": "ask",
     },
   },
   "lanes": {

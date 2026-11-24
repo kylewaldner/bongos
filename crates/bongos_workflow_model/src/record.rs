@@ -17,7 +17,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::env::EnvEdit;
-use crate::failure::Failure;
+use crate::failure::{Failure, FailureReason};
 use crate::inputs::InputValue;
 
 /// The `schema` of `run.toml` this crate writes.
@@ -217,6 +217,20 @@ pub enum Event {
     /// interrupted: the run continues from its checkpoint by starting the key again.
     ChecksDrained {
         key: NodeKey,
+    },
+    /// A start of `key` found no OS sandbox and needs a person's answer. The key is held; while an
+    /// ask is pending, a later one joins it.
+    ConsentAsked {
+        key: NodeKey,
+        reason: String,
+    },
+    /// A person answered the pending ask, at `at` (RFC 3339). Replay releases the held keys:
+    /// allowed, they are ready to start again; stopped, each fails with `SandboxRefused`. The
+    /// grant itself lives in the writer's memory only; replay never grants.
+    ConsentAnswered {
+        allowed: bool,
+        by: String,
+        at: String,
     },
 }
 
@@ -653,7 +667,8 @@ pub struct FinishedNode {
     pub elapsed_ms: u64,
     pub session_id: Option<String>,
     /// Whether the log had a `NodeStarted` for this try. A finish without one is still recorded:
-    /// replay never invents or discards what the log says.
+    /// replay never invents or discards what the log says. The one finish replay makes itself is
+    /// a stopped `ConsentAnswered`'s `SandboxRefused`, try 0, for each key held on the ask.
     pub had_start: bool,
 }
 
@@ -717,6 +732,21 @@ impl CapReached {
     }
 }
 
+/// The pending ask to run without an OS sandbox: why, and the keys held on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsentPending {
+    pub reason: String,
+    pub keys: Vec<NodeKey>,
+}
+
+/// One answer to an ask to run without an OS sandbox, as `ConsentAnswered` recorded it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsentAnswer {
+    pub allowed: bool,
+    pub by: String,
+    pub at: String,
+}
+
 /// The state of one attempt, rebuilt from its events by [`replay`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RunState {
@@ -760,6 +790,12 @@ pub struct RunState {
     /// can only be damage; the count lets the caller flag them. A `NodeFinished` after the close
     /// is still applied (a try cancelled mid-run reports its cost) and not counted here.
     pub ignored_after_end: usize,
+    /// Set by `ConsentAsked`, cleared by `ConsentAnswered`, and by a `Resumed` or new start that
+    /// leaves no key held on it. Never a grant: no field of the run state says a run may go
+    /// unsandboxed.
+    pub consent_pending: Option<ConsentPending>,
+    /// Every `ConsentAnswered` in log order.
+    pub consent_history: Vec<ConsentAnswer>,
 }
 
 impl RunState {
@@ -846,6 +882,22 @@ fn bump_pass(state: &mut RunState, node: &str, pass: u32) {
     *entry = (*entry).max(pass);
 }
 
+/// Drops from the pending ask every key no longer held on it (a resume or a new start moved it
+/// on), and the ask itself once no key is left: an ask with nothing held is not pending, so a
+/// later ask starts a new one and an answer finds nothing to answer.
+fn prune_consent(state: &mut RunState) {
+    let held = &state.held;
+    if let Some(pending) = state.consent_pending.as_mut() {
+        pending.keys.retain(|key| {
+            held.get(key)
+                .is_some_and(|failure| failure.reason == FailureReason::SandboxRequired)
+        });
+        if pending.keys.is_empty() {
+            state.consent_pending = None;
+        }
+    }
+}
+
 fn apply(state: &mut RunState, event: &Event) {
     match event {
         Event::Created => state.created = true,
@@ -867,6 +919,7 @@ fn apply(state: &mut RunState, event: &Event) {
                     pid_start_time: *pid_start_time,
                 },
             );
+            prune_consent(state);
         }
         Event::NodeFinished {
             key,
@@ -948,9 +1001,11 @@ fn apply(state: &mut RunState, event: &Event) {
             state.halted = false;
             state.cap_reached = None;
             state.held.clear();
+            prune_consent(state);
         }
         Event::Held { key, failure } => {
             state.held.insert(key.clone(), failure.clone());
+            prune_consent(state);
         }
         Event::Interrupted { keys } => {
             for key in keys {
@@ -969,6 +1024,63 @@ fn apply(state: &mut RunState, event: &Event) {
         Event::HandedOver { .. } => {}
         Event::ChecksDrained { key } => {
             state.running.remove(key);
+        }
+        Event::ConsentAsked { key, reason } => {
+            state.held.insert(
+                key.clone(),
+                Failure::new(
+                    FailureReason::SandboxRequired,
+                    Some(key.clone()),
+                    reason.clone(),
+                ),
+            );
+            let pending = state.consent_pending.get_or_insert_with(|| ConsentPending {
+                reason: reason.clone(),
+                keys: Vec::new(),
+            });
+            if !pending.keys.contains(key) {
+                pending.keys.push(key.clone());
+            }
+        }
+        Event::ConsentAnswered { allowed, by, at } => {
+            state.consent_history.push(ConsentAnswer {
+                allowed: *allowed,
+                by: by.clone(),
+                at: at.clone(),
+            });
+            let Some(pending) = state.consent_pending.take() else {
+                return;
+            };
+            for key in pending.keys {
+                // Only keys still held on this ask: a key that a resume or a new start moved on
+                // is not this answer's to release.
+                let held_on_ask = state
+                    .held
+                    .get(&key)
+                    .is_some_and(|failure| failure.reason == FailureReason::SandboxRequired);
+                if !held_on_ask {
+                    continue;
+                }
+                state.held.remove(&key);
+                if !*allowed {
+                    // Nothing ran: the refusal is recorded as a finish without a start, try 0.
+                    state.finished.push(FinishedNode {
+                        key: key.clone(),
+                        try_number: 0,
+                        result: None,
+                        failure: Some(Failure::new(
+                            FailureReason::SandboxRefused,
+                            Some(key.clone()),
+                            format!("nothing ran ({})", pending.reason),
+                        )),
+                        cost_usd: 0.0,
+                        turns: None,
+                        elapsed_ms: 0,
+                        session_id: None,
+                        had_start: false,
+                    });
+                }
+            }
         }
     }
 }
