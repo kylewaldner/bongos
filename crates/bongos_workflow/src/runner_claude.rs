@@ -186,6 +186,8 @@ impl NodeCaps {
 pub struct ClaudeNode {
     pub caps: NodeCaps,
     pub output: Vec<OutputField>,
+    /// The node's compiled schema document, handed to the CLI.
+    pub schema: std::sync::Arc<bongos_workflow_model::OutputSchema>,
     /// Servers `workflows.mcp_exclude` removes (`--disallowedTools mcp__<name>__*`).
     pub mcp_exclude: Vec<String>,
     /// The MCP servers discovered for Claude (`mcp::discover`); a start that allows one that is not
@@ -308,7 +310,7 @@ impl ClaudeCli {
             args.push(caps.max_cost_usd.to_string());
         }
         args.push("--json-schema".to_string());
-        args.push(schema::json_schema(&node.output).to_string());
+        args.push(node.schema.document().to_string());
         args.push("--append-system-prompt-file".to_string());
         args.push(system_file.to_string_lossy().into_owned());
         args.push("--session-id".to_string());

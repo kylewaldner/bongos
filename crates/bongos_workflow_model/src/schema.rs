@@ -2,11 +2,13 @@
 //! against the declared fields (D4). Only the five field types exist, so no validator crate is used.
 
 use std::fmt;
+use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
 
-use crate::definition::{FieldType, ItemType, Outcome, OutputField};
+use crate::definition::{FieldType, ItemType, Node, Outcome, OutputField};
+use crate::validate::{Diagnostic, Severity};
 
 /// A JSON schema for a node's output: an object with one property per field, `required` listing
 /// every field not marked `optional`, and no other properties.
@@ -28,37 +30,56 @@ pub fn json_schema(output: &[OutputField]) -> Value {
     })
 }
 
-/// The schema Codex's `--output-schema` strict mode accepts: every property is `required`, and an
-/// optional field is nullable (`type` is `[T, "null"]`, a choice's `enum` also lists `null`). The
-/// result check treats `null` as an absent optional field.
-pub fn json_schema_strict(output: &[OutputField]) -> Value {
-    let properties = output
-        .iter()
-        .map(|field| {
-            let mut schema = field_schema(&field.field_type);
-            if field.optional {
-                if let Some(object) = schema.as_object_mut() {
-                    if let Some(kind) = object.get("type").cloned() {
+/// The schema Codex's `--output-schema` strict mode accepts, derived from a node's schema
+/// `document`: every property is `required`, and a property the document does not require is
+/// nullable (`type` is `[T, "null"]`, an `enum` also lists `null`). The result check treats `null`
+/// as an absent optional field.
+pub fn json_schema_strict(document: &Value) -> Value {
+    let mut strict = document.clone();
+    let Some(root) = strict.as_object_mut() else {
+        return strict;
+    };
+    let required = root
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|names| {
+            names
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut names = Vec::new();
+    if let Some(Value::Object(properties)) = root.get_mut("properties") {
+        for (name, schema) in properties.iter_mut() {
+            names.push(Value::String(name.clone()));
+            if required.contains(name) {
+                continue;
+            }
+            if let Some(object) = schema.as_object_mut() {
+                match object.get("type").cloned() {
+                    Some(Value::Array(mut kinds)) => {
+                        if !kinds.contains(&json!("null")) {
+                            kinds.push(json!("null"));
+                        }
+                        object.insert("type".to_string(), Value::Array(kinds));
+                    }
+                    Some(kind) => {
                         object.insert("type".to_string(), json!([kind, "null"]));
                     }
-                    if let Some(Value::Array(values)) = object.get_mut("enum") {
-                        values.push(Value::Null);
-                    }
+                    None => {}
+                }
+                if let Some(Value::Array(values)) = object.get_mut("enum")
+                    && !values.contains(&Value::Null)
+                {
+                    values.push(Value::Null);
                 }
             }
-            (field.name.clone(), schema)
-        })
-        .collect::<Map<_, _>>();
-    let required = output
-        .iter()
-        .map(|field| Value::String(field.name.clone()))
-        .collect::<Vec<_>>();
-    json!({
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": false,
-    })
+        }
+    }
+    root.insert("required".to_string(), Value::Array(names));
+    strict
 }
 
 fn field_schema(field_type: &FieldType) -> Value {
@@ -67,6 +88,7 @@ fn field_schema(field_type: &FieldType) -> Value {
         FieldType::Text | FieldType::Path => json!({ "type": "string" }),
         FieldType::Number => json!({ "type": "number" }),
         FieldType::List(item) => json!({ "type": "array", "items": item_schema(*item) }),
+        FieldType::Data => json!({}),
     }
 }
 
@@ -86,6 +108,8 @@ pub enum TypedValue {
     Path(String),
     Number(f64),
     List(Vec<TypedValue>),
+    /// A value of a file schema's field that is none of the other types; kept as given.
+    Data(Value),
 }
 
 impl TypedValue {
@@ -97,6 +121,7 @@ impl TypedValue {
             }
             TypedValue::Number(value) => json!(value),
             TypedValue::List(items) => Value::Array(items.iter().map(Self::to_json).collect()),
+            TypedValue::Data(value) => value.clone(),
         }
     }
 
@@ -106,7 +131,7 @@ impl TypedValue {
             TypedValue::Choice(value) | TypedValue::Text(value) | TypedValue::Path(value) => {
                 Some(value)
             }
-            TypedValue::Number(_) | TypedValue::List(_) => None,
+            TypedValue::Number(_) | TypedValue::List(_) | TypedValue::Data(_) => None,
         }
     }
 }
@@ -214,6 +239,7 @@ fn typed(field_type: &FieldType, value: &Value) -> Result<TypedValue, String> {
         FieldType::Text => item(ItemType::Text, value),
         FieldType::Path => item(ItemType::Path, value),
         FieldType::Number => item(ItemType::Number, value),
+        FieldType::Data => Ok(TypedValue::Data(value.clone())),
         FieldType::List(item_type) => {
             let Value::Array(items) = value else {
                 return Err(format!("expected a list, got {}", kind_of(value)));
@@ -310,6 +336,11 @@ impl OutputSchema {
             fields,
             validator: Arc::new(validator),
         })
+    }
+
+    /// The schema generated from declared `output` fields (the document of [`json_schema`]).
+    pub fn from_fields(fields: &[OutputField]) -> Result<OutputSchema, String> {
+        OutputSchema::compile(json_schema(fields), fields.to_vec())
     }
 
     pub fn document(&self) -> &Value {
@@ -521,4 +552,199 @@ pub fn format_errors(errors: &[CheckError]) -> String {
         lines.push(format!("and {} more", errors.len() - LISTED));
     }
     lines.join("\n")
+}
+
+/// The JSON Schema dialect a file schema may name in `$schema`.
+const DRAFT_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
+
+/// Keywords a file schema may use; every other keyword is a load error.
+const ALLOWED_KEYWORDS: &[&str] = &[
+    "type",
+    "properties",
+    "required",
+    "items",
+    "enum",
+    "additionalProperties",
+    "title",
+    "description",
+    "$schema",
+];
+const ALLOWED_TYPES: &[&str] = &[
+    "string", "number", "integer", "boolean", "array", "object", "null",
+];
+
+/// The one schema document of a node's result type, compiled. A node with `output` gets the
+/// document [`json_schema`] generates; a node with `output_schema` gets the file in `dir`, read
+/// here, checked against the keyword allowlist and mapped to fields (its top-level properties; a
+/// value that is not a string, choice, number or list of strings or numbers is a
+/// [`FieldType::Data`]). This is the only place a schema file is read, at load.
+pub fn document(node: &Node, dir: &Path) -> Result<OutputSchema, Diagnostic> {
+    let fail = |line: usize, message: String| Diagnostic {
+        node: Some(node.name.clone()),
+        line,
+        severity: Severity::Error,
+        message,
+    };
+    let Some(file) = &node.output_schema else {
+        return OutputSchema::from_fields(&node.output).map_err(|message| {
+            fail(
+                node.line,
+                format!("the output schema is invalid: {message}"),
+            )
+        });
+    };
+    let line = file.line;
+    if !node.output.is_empty() {
+        return Err(fail(
+            line,
+            "set either `output` or `output_schema`, not both".to_string(),
+        ));
+    }
+    if !is_worktree_relative(&file.value) {
+        return Err(fail(
+            line,
+            format!(
+                "output_schema '{}' must be a relative path inside the definition directory",
+                file.value
+            ),
+        ));
+    }
+    let text = std::fs::read_to_string(dir.join(&file.value)).map_err(|error| {
+        fail(
+            line,
+            format!("cannot read output_schema '{}': {error}", file.value),
+        )
+    })?;
+    let value: Value = serde_json::from_str(&text).map_err(|error| {
+        fail(
+            line,
+            format!("output_schema '{}' is not valid JSON: {error}", file.value),
+        )
+    })?;
+    let mut problems = Vec::new();
+    check_keywords(&value, "", &mut problems);
+    if let Some(problem) = problems.into_iter().next() {
+        return Err(fail(
+            line,
+            format!("output_schema '{}': {problem}", file.value),
+        ));
+    }
+    let mut fields = fields_of(&value)
+        .map_err(|problem| fail(line, format!("output_schema '{}': {problem}", file.value)))?;
+    for field in &mut fields {
+        field.line = line;
+    }
+    OutputSchema::compile(value, fields).map_err(|message| {
+        fail(
+            line,
+            format!("output_schema '{}' is invalid: {message}", file.value),
+        )
+    })
+}
+
+/// Lists every keyword of `schema` outside the allowlist as "keyword 'k' is not allowed at <path>"
+/// (the path is a JSON Pointer to the keyword), and every malformed use of an allowed one.
+fn check_keywords(schema: &Value, path: &str, problems: &mut Vec<String>) {
+    let at = |path: &str| {
+        if path.is_empty() {
+            "/".to_string()
+        } else {
+            path.to_string()
+        }
+    };
+    let Value::Object(object) = schema else {
+        problems.push(format!("a schema must be an object, at {}", at(path)));
+        return;
+    };
+    for (keyword, value) in object {
+        let here = format!("{path}/{}", keyword.replace('~', "~0").replace('/', "~1"));
+        if !ALLOWED_KEYWORDS.contains(&keyword.as_str()) {
+            problems.push(format!("keyword '{keyword}' is not allowed at {here}"));
+            continue;
+        }
+        match keyword.as_str() {
+            "properties" => match value {
+                Value::Object(properties) => {
+                    for (name, property) in properties {
+                        let name = name.replace('~', "~0").replace('/', "~1");
+                        check_keywords(property, &format!("{here}/{name}"), problems);
+                    }
+                }
+                _ => problems.push(format!("'properties' must be an object, at {here}")),
+            },
+            "items" => check_keywords(value, &here, problems),
+            "additionalProperties" if value != &Value::Bool(false) => problems.push(format!(
+                "'additionalProperties' may only be false, at {here}"
+            )),
+            "$schema" if value.as_str() != Some(DRAFT_2020_12) => {
+                problems.push(format!("'$schema' must be {DRAFT_2020_12}, at {here}"))
+            }
+            "type" => {
+                let names = match value {
+                    Value::String(name) => vec![name.as_str()],
+                    Value::Array(names) => names.iter().filter_map(Value::as_str).collect(),
+                    _ => Vec::new(),
+                };
+                if names.is_empty() || names.iter().any(|name| !ALLOWED_TYPES.contains(name)) {
+                    problems.push(format!("'type' names an unsupported type, at {here}"));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The fields a file schema declares: one per top-level property, optional when not `required`.
+fn fields_of(document: &Value) -> Result<Vec<OutputField>, String> {
+    if document.get("type").and_then(Value::as_str) != Some("object") {
+        return Err("the top level must have \"type\": \"object\"".to_string());
+    }
+    let required = document
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|names| names.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let Some(properties) = document.get("properties").and_then(Value::as_object) else {
+        return Ok(Vec::new());
+    };
+    Ok(properties
+        .iter()
+        .map(|(name, schema)| OutputField {
+            name: name.clone(),
+            line: 0,
+            field_type: field_type_of(schema),
+            optional: !required.contains(&name.as_str()),
+            outcome: None,
+        })
+        .collect())
+}
+
+fn field_type_of(schema: &Value) -> FieldType {
+    let kind = schema.get("type").and_then(Value::as_str);
+    match kind {
+        Some("string") => match schema.get("enum").and_then(Value::as_array) {
+            Some(values) => {
+                let values = values
+                    .iter()
+                    .map(|value| value.as_str().map(str::to_string))
+                    .collect::<Option<Vec<_>>>();
+                match values {
+                    Some(values) if !values.is_empty() => FieldType::Choice(values),
+                    _ => FieldType::Data,
+                }
+            }
+            None => FieldType::Text,
+        },
+        Some("number" | "integer") => FieldType::Number,
+        Some("array") => match schema
+            .get("items")
+            .and_then(|items| items.get("type"))
+            .and_then(Value::as_str)
+        {
+            Some("string") => FieldType::List(ItemType::Text),
+            Some("number" | "integer") => FieldType::List(ItemType::Number),
+            _ => FieldType::Data,
+        },
+        _ => FieldType::Data,
+    }
 }

@@ -38,7 +38,10 @@ pub use record::{
 pub use scheduler::{
     Command, FreshRetryRefusal, Limits, Plan, check_fresh_retry, plan, resume_set, retry_set, step,
 };
-pub use schema::{TypedField, TypedResult, TypedValue, check, json_schema, json_schema_strict};
+pub use schema::{
+    OutputSchema, TypedField, TypedResult, TypedValue, check, document, json_schema,
+    json_schema_strict,
+};
 pub use state_doc::StateDoc;
 pub use template::{Scope, TemplateError};
 pub use validate::{

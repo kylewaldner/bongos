@@ -626,6 +626,14 @@ fn approve_offers_as_is_first_then_each_field_of_the_held_result() {
 }
 
 #[test]
+fn a_gate_edit_of_a_schema_data_field_is_refused() {
+    assert_eq!(
+        parse_field(&FieldType::Data, "{\"a\": 1}"),
+        Err("this field cannot be edited here".to_string())
+    );
+}
+
+#[test]
 fn an_edited_value_is_parsed_by_the_type_of_its_field() {
     let text = |type_, line| parse_field(&type_, line);
     assert_eq!(text(FieldType::Text, "hello"), Ok(json!("hello")));
