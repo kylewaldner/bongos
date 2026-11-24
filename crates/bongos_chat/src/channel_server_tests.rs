@@ -16,10 +16,10 @@ use std::time::Duration;
 
 use bongos_chat_model::channel::client::CHAT_ID_ENV;
 use bongos_chat_model::channel::report::{
-    self, AgentName, ChatId, Event, MAX_LINE_BYTES, ReplyError, Report, Token,
+    self, AgentName, ChatId, Event, MAX_CONNECTIONS, MAX_LINE_BYTES, ReplyError, Report, Token,
 };
 use bongos_chat_model::channel::request::{
-    self, Body, MAX_REQUEST_BYTES, Request, RequestKind, SendError, Value,
+    self, Body, MAX_REPLY_BYTES, MAX_REQUEST_BYTES, Request, RequestKind, SendError, Value,
 };
 use bongos_chat_model::{CHANNEL_SOCKET_ENV, CHANNEL_TOKEN_ENV};
 use futures::StreamExt as _;
@@ -961,4 +961,203 @@ async fn the_client_times_out_cleanly(cx: &mut TestAppContext) {
     held.release.send(()).unwrap();
     held.finished.next().await.expect("the handler finished");
     wait_until_idle(&setup, cx).await;
+}
+
+/// Sets a handler for [`KIND`] that answers with `reply`, saying on the returned channel each time
+/// it is called.
+fn answering_handler(
+    setup: &Setup,
+    cx: &mut TestAppContext,
+    reply: Value,
+) -> futures::channel::mpsc::UnboundedReceiver<()> {
+    let (called_sender, called) = futures::channel::mpsc::unbounded();
+    setup.server.update(cx, |server, _| {
+        server.set_request_handler(RequestKind::new(KIND).unwrap(), move |_chat, _body| {
+            called_sender.unbounded_send(()).ok();
+            reply.clone()
+        })
+    });
+    called
+}
+
+/// Connects, writes `bytes` (not a whole line) and keeps the connection open, returning what the
+/// server replied, from a helper thread. A read timeout far past any test's run guards a hang.
+fn exchange_unfinished(path: &Path, bytes: Vec<u8>) -> futures::channel::oneshot::Receiver<String> {
+    let path = path.to_path_buf();
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    std::thread::spawn(move || {
+        let mut stream = UnixStream::connect(&path).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(60)))
+            .unwrap();
+        stream.write_all(&bytes).unwrap();
+        sender.send(read_reply(&mut stream)).ok();
+    });
+    receiver
+}
+
+#[gpui::test]
+async fn a_kind_with_no_handler_is_answered_unknown_request(cx: &mut TestAppContext) {
+    let setup = running(cx, HOLD);
+    let path = setup.path(cx);
+    let token = ChannelServer::new_token();
+    setup.register(cx, "chat-a", &token);
+
+    let reply = send_request(&path, "chat-a", &token, HOLD).await;
+    assert_eq!(reply, Err(SendError::Refused(ReplyError::UnknownRequest)));
+    wait_until_idle(&setup, cx).await;
+}
+
+#[gpui::test]
+async fn a_panicking_handler_releases_its_connection(cx: &mut TestAppContext) {
+    let setup = running(cx, HOLD);
+    let path = setup.path(cx);
+    setup.server.update(cx, |server, _| {
+        server.set_request_handler(RequestKind::new(KIND).unwrap(), |_chat, _body| {
+            panic!("a handler that panics")
+        })
+    });
+    let token = ChannelServer::new_token();
+    setup.register(cx, "chat-a", &token);
+
+    let reply = send_request(&path, "chat-a", &token, HOLD).await;
+    assert_eq!(
+        reply,
+        Err(SendError::Closed),
+        "no reply, the connection closes"
+    );
+    wait_until_idle(&setup, cx).await;
+    assert_eq!(exchange(&path, report_line("chat-a", &token)).await, OK);
+}
+
+#[gpui::test]
+async fn held_requests_count_against_the_connection_limit(cx: &mut TestAppContext) {
+    let setup = running(cx, HOLD);
+    let path = setup.path(cx);
+    let mut held = held_handler(&setup, cx);
+    let token = ChannelServer::new_token();
+    setup.register(cx, "chat-a", &token);
+
+    let replies: Vec<_> = (0..MAX_CONNECTIONS)
+        .map(|_| spawn_request(&path, "chat-a", &token, HOLD))
+        .collect();
+    for _ in 0..MAX_CONNECTIONS {
+        held.started.next().await.expect("a handler started");
+    }
+    let server = setup.server.clone();
+    assert_eq!(
+        server.read_with(cx, |server, _| server.open_connections()),
+        MAX_CONNECTIONS
+    );
+
+    assert_eq!(
+        exchange(&path, report_line("chat-a", &token)).await,
+        "",
+        "the connection past the limit is closed"
+    );
+    assert!(setup.delivered(cx).is_empty());
+
+    for _ in 0..MAX_CONNECTIONS {
+        held.release.send(()).unwrap();
+    }
+    for reply in replies {
+        assert_eq!(reply.await.unwrap(), Ok(Value::from("done")));
+    }
+    wait_until_idle(&setup, cx).await;
+    assert_eq!(exchange(&path, report_line("chat-a", &token)).await, OK);
+}
+
+#[gpui::test]
+async fn an_oversize_reply_is_answered_too_large(cx: &mut TestAppContext) {
+    let setup = running(cx, HOLD);
+    let path = setup.path(cx);
+    let mut called = answering_handler(&setup, cx, Value::from("a".repeat(MAX_REPLY_BYTES)));
+    let token = ChannelServer::new_token();
+    setup.register(cx, "chat-a", &token);
+
+    let reply = send_request(&path, "chat-a", &token, HOLD).await;
+    assert_eq!(reply, Err(SendError::Refused(ReplyError::TooLarge)));
+    called.next().await.expect("the handler ran");
+    wait_until_idle(&setup, cx).await;
+}
+
+#[gpui::test]
+async fn a_reply_the_client_never_reads_is_dropped_after_the_write_timeout(
+    cx: &mut TestAppContext,
+) {
+    let setup = setup(cx, HOLD);
+    setup.server.update(cx, |server, _| {
+        server.set_write_timeout(Duration::from_millis(50))
+    });
+    set_chats(cx, true, true);
+    let path = setup.path(cx);
+    // Far larger than a socket buffer, so the write cannot finish while nobody reads.
+    let reply_len = MAX_REPLY_BYTES / 2;
+    let mut called = answering_handler(&setup, cx, Value::from("a".repeat(reply_len)));
+    let token = ChannelServer::new_token();
+    setup.register(cx, "chat-a", &token);
+
+    let mut client = UnixStream::connect(&path).unwrap();
+    client
+        .write_all(&padded_request_line("chat-a", &token, 200))
+        .unwrap();
+    called.next().await.expect("the handler ran");
+    // The client holds its end open and never reads; the server gives up and frees the slot.
+    wait_until_idle(&setup, cx).await;
+
+    let mut received = Vec::new();
+    client.read_to_end(&mut received).ok();
+    assert!(
+        received.len() < reply_len && !received.ends_with(b"\n"),
+        "the reply was cut off ({} bytes)",
+        received.len()
+    );
+    assert_eq!(exchange(&path, report_line("chat-a", &token)).await, OK);
+}
+
+#[gpui::test]
+async fn a_long_request_is_refused_from_its_first_4_kib(cx: &mut TestAppContext) {
+    let setup = running(cx, HOLD);
+    let path = setup.path(cx);
+    let calls_seen = echo_handler(&setup, cx);
+    let token = ChannelServer::new_token();
+    setup.register(cx, "chat-a", &token);
+
+    // Only the first 8 KiB of a 256 KiB request are sent, and the connection stays open: the reply
+    // proves the chat and token were checked before the rest was read.
+    let head = |chat: &str, token: &Token| {
+        let mut line = padded_request_line(chat, token, MAX_REQUEST_BYTES);
+        line.truncate(2 * MAX_LINE_BYTES);
+        line
+    };
+    let cases = [
+        (
+            "a bad token",
+            head("chat-a", &ChannelServer::new_token()),
+            "bad token",
+        ),
+        ("an unknown chat", head("chat-z", &token), "unknown chat"),
+    ];
+    for (what, bytes, error) in cases {
+        assert_eq!(
+            exchange_unfinished(&path, bytes).await.unwrap(),
+            refused(error),
+            "{what}"
+        );
+    }
+
+    // A request whose chat and token come only after its first 4 KiB is refused too (padded past
+    // two read chunks, so the server cannot have its newline when it first passes 4 KiB).
+    let late = format!(
+        "{{\"v\":1,\"request\":\"{KIND}\",\"pad\":\"{}\",\"chat\":\"chat-a\",\"token\":\"{}\",\"body\":{{}}}}\n",
+        "a".repeat(2 * MAX_LINE_BYTES),
+        token.as_str()
+    );
+    assert_eq!(
+        exchange(&path, late.into_bytes()).await,
+        refused("bad message")
+    );
+    wait_until_idle(&setup, cx).await;
+    assert!(calls(&calls_seen).is_empty(), "no handler ran");
+    assert!(setup.delivered(cx).is_empty());
 }

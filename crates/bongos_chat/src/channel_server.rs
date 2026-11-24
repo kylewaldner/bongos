@@ -19,8 +19,14 @@
 //! request ([`bongos_chat_model::channel::request`]) instead of a report: it may be up to
 //! [`MAX_REQUEST_BYTES`] long, passes the same uid, chat and token checks, and is answered by the
 //! handler set for its kind ([`ChannelServer::set_request_handler`]), which runs on its own thread.
-//! Every other line keeps the report limit. A request counts against [`MAX_CONNECTIONS`] until its
-//! handler returns; a client that left early loses the reply, and the handler is not cancelled.
+//! Every other line keeps the report limit. A request longer than [`MAX_LINE_BYTES`] has its chat and
+//! token checked from those first bytes ([`request::head_credentials`]) as soon as the line passes
+//! them (at most one more 4 KiB read), so only an authorized client can make the server read on
+//! toward [`MAX_REQUEST_BYTES`]. A request counts against
+//! [`MAX_CONNECTIONS`] until its handler returns and its reply is written; a client that left early
+//! loses the reply, and the handler is not cancelled. A reply not written within the write timeout
+//! ([`REPLY_WRITE_TIMEOUT`] by default) is abandoned and the connection closed, so a client that
+//! stops reading cannot hold its slot.
 
 use std::fs::{self, DirBuilder, Permissions};
 use std::io;
@@ -55,6 +61,9 @@ pub const MAX_SOCKET_PATH_BYTES: usize = 100;
 
 /// How long the accept loop waits after a failed accept (such as too many open files).
 const ACCEPT_RETRY: Duration = Duration::from_millis(100);
+
+/// How long a request's reply may take to write before the connection is closed without it.
+pub const REPLY_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// What decides the socket directory, read from the process by [`SocketDirInputs::from_env`] and
 /// passed by tests, so no test reads the real `$XDG_RUNTIME_DIR`.
@@ -329,6 +338,12 @@ impl Shared {
         Ok(report)
     }
 
+    /// Checks the chat and token in the first [`MAX_LINE_BYTES`] of request `line`.
+    fn check_request_head(&self, line: &[u8]) -> Result<(), ReplyError> {
+        let (chat, token) = request::head_credentials(line).map_err(ParseError::reply_error)?;
+        self.authorize(&chat, &token)
+    }
+
     /// Parses request `line`, checks its chat and token like a report's, and finds its handler.
     fn check_request(&self, line: &[u8]) -> Result<(Request, RequestHandler), ReplyError> {
         let request = request::parse(line).map_err(ParseError::reply_error)?;
@@ -424,6 +439,7 @@ pub type ReportHandler = Rc<dyn Fn(Report, &mut App)>;
 pub struct ChannelServer {
     inputs: SocketDirInputs,
     read_timeout: Duration,
+    write_timeout: Duration,
     on_report: ReportHandler,
     request_handlers: RequestHandlers,
     peer_uid: PeerUid,
@@ -446,6 +462,7 @@ impl ChannelServer {
         let mut this = Self {
             inputs,
             read_timeout: READ_TIMEOUT,
+            write_timeout: REPLY_WRITE_TIMEOUT,
             on_report: Rc::new(|_, _| {}),
             request_handlers: RequestHandlers::default(),
             peer_uid,
@@ -509,7 +526,10 @@ impl ChannelServer {
             self.peer_uid,
             self.read_timeout,
             reports,
-            executor,
+            ReplyWriter {
+                executor,
+                timeout: self.write_timeout,
+            },
         ));
         let deliver = cx.spawn(async move |this, cx| {
             while let Some(report) = received.next().await {
@@ -634,6 +654,11 @@ impl ChannelServer {
         self.read_timeout = timeout;
     }
 
+    /// Replaces [`REPLY_WRITE_TIMEOUT`] for servers started from now on (tests use a short one).
+    pub fn set_write_timeout(&mut self, timeout: Duration) {
+        self.write_timeout = timeout;
+    }
+
     /// The global server, once [`crate::init`] has run.
     pub fn global(cx: &App) -> Option<Entity<ChannelServer>> {
         cx.try_global::<GlobalChannelServer>()
@@ -658,6 +683,30 @@ pub(crate) fn init(cx: &mut App) -> Entity<ChannelServer> {
     server
 }
 
+/// Writes requests' replies, each within `timeout`.
+#[derive(Clone)]
+struct ReplyWriter {
+    executor: BackgroundExecutor,
+    timeout: Duration,
+}
+
+impl ReplyWriter {
+    /// Writes `reply`, giving up after the timeout: a client that stops reading a reply larger than
+    /// the socket buffer would otherwise hold its connection forever. The caller then drops the
+    /// stream, closing it.
+    async fn write(&self, stream: &mut UnixStream, reply: &str) {
+        let write = async {
+            if stream.write_all(reply.as_bytes()).await.is_ok() {
+                stream.flush().await.ok();
+            }
+        };
+        futures::select_biased! {
+            () = write.fuse() => {}
+            () = self.executor.timer(self.timeout).fuse() => {}
+        }
+    }
+}
+
 async fn accept_loop(
     listener: UnixListener,
     shared: Arc<Shared>,
@@ -665,8 +714,9 @@ async fn accept_loop(
     peer_uid: PeerUid,
     read_timeout: Duration,
     reports: UnboundedSender<Report>,
-    executor: BackgroundExecutor,
+    writer: ReplyWriter,
 ) {
+    let executor = writer.executor.clone();
     loop {
         let stream = match listener.accept().await {
             Ok((stream, _)) => stream,
@@ -691,6 +741,7 @@ async fn accept_loop(
                 peer_uid,
                 timeout,
                 reports.clone(),
+                writer.clone(),
             ))
             .detach();
     }
@@ -705,25 +756,29 @@ async fn serve(
     peer_uid: PeerUid,
     timeout: Task<()>,
     reports: UnboundedSender<Report>,
+    writer: ReplyWriter,
 ) {
     if !peer_allowed(peer_uid(&stream).ok(), uid) {
         return;
     }
     let line = futures::select_biased! {
-        line = read_line(&mut stream).fuse() => line,
+        line = read_line(&mut stream, &connection.0).fuse() => line,
         () = timeout.fuse() => return,
     };
-    let Some(Line {
-        bytes: line,
-        request,
-    }) = line
-    else {
-        return;
+    let line = match line {
+        None => return,
+        Some(Line::Report(line)) => line,
+        Some(Line::Request(line)) => {
+            serve_request(stream, connection, &line, &writer).await;
+            return;
+        }
+        Some(Line::RefusedRequest(error)) => {
+            writer
+                .write(&mut stream, &request::render_reply(Err(error)))
+                .await;
+            return;
+        }
     };
-    if request {
-        serve_request(stream, connection, &line).await;
-        return;
-    }
     let checked = connection.0.check(&line);
     let reply = report::render_reply(match &checked {
         Ok(_) => Ok(()),
@@ -738,9 +793,14 @@ async fn serve(
     }
 }
 
-/// Answers one request line. The connection stays counted until the handler returned; a failed write
-/// (the client left) drops the reply quietly.
-async fn serve_request(mut stream: UnixStream, connection: OpenConnection, line: &[u8]) {
+/// Answers one request line. The connection stays counted until the handler returned and its reply
+/// was written or timed out; a failed write (the client left) drops the reply quietly.
+async fn serve_request(
+    mut stream: UnixStream,
+    connection: OpenConnection,
+    line: &[u8],
+    writer: &ReplyWriter,
+) {
     let reply = match connection.0.check_request(line) {
         Ok((request, handler)) => {
             let Some(reply) = run_handler(handler, request.chat, request.body).await else {
@@ -750,9 +810,8 @@ async fn serve_request(mut stream: UnixStream, connection: OpenConnection, line:
         }
         Err(error) => request::render_reply(Err(error)),
     };
-    if stream.write_all(reply.as_bytes()).await.is_ok() {
-        stream.flush().await.ok();
-    }
+    writer.write(&mut stream, &reply).await;
+    drop(stream);
     drop(connection);
 }
 
@@ -769,45 +828,52 @@ async fn run_handler(handler: RequestHandler, chat: ChatId, body: Body) -> Optio
     receiver.await.ok()
 }
 
-/// One line read from a connection, and whether it is a request.
-struct Line {
-    bytes: Vec<u8>,
-    request: bool,
+/// One line read from a connection.
+enum Line {
+    Report(Vec<u8>),
+    Request(Vec<u8>),
+    /// A request longer than [`MAX_LINE_BYTES`] whose chat or token those first bytes refused; the
+    /// rest of it was never read.
+    RefusedRequest(ReplyError),
 }
 
 /// Reads up to and including the first newline. A report stops once it is longer than
 /// [`MAX_LINE_BYTES`] and a request once it is longer than [`MAX_REQUEST_BYTES`] (the parse then
 /// refuses it as too large). Whether the line is a request is decided from its first
-/// [`MAX_LINE_BYTES`] alone, before anything past them is read. `None` on a read error or an empty
-/// connection.
-async fn read_line(stream: &mut UnixStream) -> Option<Line> {
+/// [`MAX_LINE_BYTES`] alone, before anything past them is read, and so are a longer request's chat
+/// and token. `None` on a read error or an empty connection.
+async fn read_line(stream: &mut UnixStream, shared: &Shared) -> Option<Line> {
     let mut line = Vec::new();
     let mut chunk = [0u8; 4096];
     let mut request: Option<bool> = None;
+    let done = |line: Vec<u8>, request: Option<bool>| {
+        let request = request.unwrap_or_else(|| request::is_request(&line));
+        Some(if request {
+            Line::Request(line)
+        } else {
+            Line::Report(line)
+        })
+    };
     loop {
         let read = stream.read(&mut chunk).await.ok()?;
         if read == 0 {
             if line.is_empty() {
                 return None;
             }
-            let request = request.unwrap_or_else(|| request::is_request(&line));
-            return Some(Line {
-                bytes: line,
-                request,
-            });
+            return done(line, request);
         }
         let start = line.len();
         line.extend_from_slice(&chunk[..read]);
         if let Some(end) = line[start..].iter().position(|byte| *byte == b'\n') {
             line.truncate(start + end + 1);
-            let request = request.unwrap_or_else(|| request::is_request(&line));
-            return Some(Line {
-                bytes: line,
-                request,
-            });
+            return done(line, request);
         }
         if request.is_none() && line.len() > MAX_LINE_BYTES {
-            request = Some(request::is_request(&line));
+            let is_request = request::is_request(&line);
+            if is_request && let Err(error) = shared.check_request_head(&line) {
+                return Some(Line::RefusedRequest(error));
+            }
+            request = Some(is_request);
         }
         let limit = if request == Some(true) {
             MAX_REQUEST_BYTES
@@ -815,10 +881,7 @@ async fn read_line(stream: &mut UnixStream) -> Option<Line> {
             MAX_LINE_BYTES
         };
         if line.len() > limit {
-            return Some(Line {
-                bytes: line,
-                request: request.unwrap_or(false),
-            });
+            return done(line, Some(request.unwrap_or(false)));
         }
     }
 }

@@ -13,7 +13,9 @@
 //!
 //! A line is a request when the `request` key of its top-level object appears within its first
 //! [`MAX_LINE_BYTES`]; [`render`] writes that key before the body, so it always does. Any other line
-//! is a report and keeps the report limit, so a report can never grow past [`MAX_LINE_BYTES`].
+//! is a report and keeps the report limit, so a report can never grow past [`MAX_LINE_BYTES`]. A
+//! request's `chat` and `token` must also sit within those bytes ([`head_credentials`]), so the
+//! server checks them before it reads the rest; [`render`] writes both before the body.
 //!
 //! [`send`] is the blocking client: it connects like the reporter, writes one request and waits at
 //! most the given time (in production [`REPLY_WAIT`]) for the reply.
@@ -104,10 +106,23 @@ struct WireIn {
     body: Option<Value>,
 }
 
-/// Whether `line` is a request: its top-level object has a `request` key within the first
-/// [`MAX_LINE_BYTES`]. Only those bytes are looked at, so the caller can decide before reading more.
-pub fn is_request(line: &[u8]) -> bool {
-    let prefix = &line[..line.len().min(MAX_LINE_BYTES)];
+/// The first [`MAX_LINE_BYTES`] of `line`, the only part looked at before the rest is read.
+fn head(line: &[u8]) -> &[u8] {
+    &line[..line.len().min(MAX_LINE_BYTES)]
+}
+
+fn is_json_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
+}
+
+/// Walks the object that `prefix` starts with (after whitespace), calling `on_key` with the raw
+/// bytes of every key directly in it (escapes as written) and the index just past that key's colon.
+/// Stops with `true` once `on_key` returns `true`, and with `false` at the end of the prefix, at the
+/// end of that object, or at once when the prefix does not start with an object.
+fn walk_top_level_keys(prefix: &[u8], mut on_key: impl FnMut(&[u8], usize) -> bool) -> bool {
+    if prefix.iter().find(|byte| !is_json_space(**byte)) != Some(&b'{') {
+        return false;
+    }
     let mut depth = 0usize;
     let mut in_string = false;
     let mut escaped = false;
@@ -142,19 +157,84 @@ pub fn is_request(line: &[u8]) -> bool {
             b'}' | b']' => {
                 depth = depth.saturating_sub(1);
                 closed = None;
+                if depth == 0 {
+                    return false;
+                }
             }
             b':' => {
                 if let Some((start, end)) = closed.take()
-                    && &prefix[start..end] == REQUEST_KEY.as_bytes()
+                    && on_key(&prefix[start..end], index + 1)
                 {
                     return true;
                 }
             }
-            b' ' | b'\t' | b'\r' | b'\n' => {}
+            byte if is_json_space(byte) => {}
             _ => closed = None,
         }
     }
     false
+}
+
+/// Whether `line` is a request: its top-level object has a `request` key within the first
+/// [`MAX_LINE_BYTES`]. Only those bytes are looked at, so the caller can decide before reading more.
+pub fn is_request(line: &[u8]) -> bool {
+    walk_top_level_keys(head(line), |key, _| key == REQUEST_KEY.as_bytes())
+}
+
+/// The JSON string that starts at `start` of `prefix` (after whitespace), decoded, when it ends
+/// within `prefix`.
+fn string_at(prefix: &[u8], start: usize) -> Option<String> {
+    let open = start
+        + prefix[start..]
+            .iter()
+            .position(|byte| !is_json_space(*byte))?;
+    if prefix[open] != b'"' {
+        return None;
+    }
+    let mut escaped = false;
+    let close = open
+        + 1
+        + prefix[open + 1..].iter().position(|&byte| {
+            let closes = !escaped && byte == b'"';
+            escaped = !escaped && byte == b'\\';
+            closes
+        })?;
+    serde_json::from_slice(&prefix[open..=close]).ok()
+}
+
+/// The chat and token of request `line`, read from its first [`MAX_LINE_BYTES`] alone, so a request
+/// can be authorized before the rest of it is read. Both must sit, whole, directly in the top-level
+/// object within those bytes ([`render`] writes them before the body), each once.
+pub fn head_credentials(line: &[u8]) -> Result<(ChatId, Token), ParseError> {
+    let prefix = head(line);
+    let mut chat = None;
+    let mut token = None;
+    let duplicate = walk_top_level_keys(prefix, |key, value| {
+        let slot = match key {
+            b"chat" => &mut chat,
+            b"token" => &mut token,
+            _ => return false,
+        };
+        if slot.is_some() {
+            return true;
+        }
+        *slot = Some(string_at(prefix, value));
+        false
+    });
+    if duplicate {
+        return Err(ParseError::Json);
+    }
+    let chat = chat.ok_or(ParseError::MissingField("chat"))?;
+    let chat = chat
+        .as_deref()
+        .and_then(ChatId::new)
+        .ok_or(ParseError::InvalidField("chat"))?;
+    let token = token.ok_or(ParseError::MissingField("token"))?;
+    let token = token
+        .as_deref()
+        .and_then(Token::new)
+        .ok_or(ParseError::InvalidField("token"))?;
+    Ok((chat, token))
 }
 
 /// Strips one trailing `\n` (and a `\r` before it).
