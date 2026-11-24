@@ -1042,6 +1042,42 @@ fn git_failure(key: &NodeKey, changes: &GitChanges) -> Failure {
     )
 }
 
+/// The start of a node whose writable set reaches its own try directory `dir`, `policy.json` or
+/// `state.json` refuses: the script could rewrite the policy the shim enforces. Paths are
+/// compared canonical, so a symlinked writable directory pointing at the try directory, or one
+/// that is an ancestor of it, counts. A path that cannot be resolved refuses too, named in the
+/// error. `dir` must exist.
+pub fn check_policy_outside_writable(node: &ProgramNode, dir: &Path) -> Result<(), String> {
+    let canonical = |path: &Path| {
+        fs::canonicalize(path).map_err(|error| {
+            format!(
+                "could not resolve a path of this node, so its policy file cannot be shown \
+                 outside its writable directories: {}: {error}",
+                path.display()
+            )
+        })
+    };
+    let dir_canonical = canonical(dir)?;
+    let protected = [
+        dir_canonical.join(POLICY_FILE),
+        dir_canonical.join(STATE_FILE),
+        dir_canonical.clone(),
+    ];
+    for root in node.writable_paths() {
+        let root_canonical = canonical(&root)?;
+        if protected
+            .iter()
+            .any(|path| path.starts_with(&root_canonical))
+        {
+            return Err(format!(
+                "a writable directory of this node contains its own policy file: {}",
+                root.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The environment of a program: the agent runners' names, `BONGOS_STATE`, `BONGOS_RESULT` and
 /// `TMPDIR` in the scratch directory.
 pub fn launch_env(
@@ -1499,6 +1535,10 @@ impl ProgramRunner {
                 format!("could not prepare git for the sandbox: {error}"),
             )
         })?;
+        // Every writable root exists now (the scratch above, the git ones by `prepare_git`), and
+        // nothing of the try is written yet: no shim, state, policy or summary.
+        check_policy_outside_writable(&node, &dir)
+            .map_err(|detail| refuse(FailureReason::PermissionDenied, detail))?;
         let shim = dir.join(SHIM_FILE);
         let state_file = dir.join(STATE_FILE);
         let policy_file = dir.join(POLICY_FILE);
