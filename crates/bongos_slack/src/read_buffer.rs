@@ -261,6 +261,13 @@ impl ReadSession {
             .cloned()
     }
 
+    /// Every read buffer open now.
+    pub fn open_sessions(cx: &App) -> Vec<Entity<Self>> {
+        cx.try_global::<Sessions>()
+            .map(|sessions| sessions.0.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// The buffer title, `Slack: #name`.
     pub fn title(&self) -> String {
         self.view.title()
