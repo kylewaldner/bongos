@@ -7,6 +7,7 @@
 #
 #   jobs:
 #     job:
+#       name: step lane-a                  # a lane job's name says lane-a or lane-b (the liveness check reads it)
 #       runs-on: ubuntu-24.04              # the same image as the runner_image input
 #       timeout-minutes: 345               # the agent step stops near 315 minutes, so the final step still runs
 #       permissions:
@@ -275,6 +276,8 @@ runs:
         set -euo pipefail
         # rust-cache sets CARGO_INCREMENTAL=0 for every later step; step jobs turn it back on.
         echo "CARGO_INCREMENTAL=$JOB_INCREMENTAL" >> "$GITHUB_ENV"
+        # The runner mode builds in the restored target (outside the checkout, which must stay free of untracked files).
+        echo "AUTOPILOT_RUNNER_TARGET=$CARGO_TARGET_DIR" >> "$GITHUB_ENV"
         ver=$(sed -n 's/^nextest-version = { required = "\([0-9.]*\)" }.*/\1/p' .config/nextest.toml)
         if [ -z "$ver" ]; then
           echo "::error::no required nextest version in .config/nextest.toml"
@@ -378,6 +381,18 @@ runs:
           echo "::warning::the removal of preinstalled software has not finished after 20 minutes"
         fi
         df -h /
+
+    - name: Check the workspace has no untracked files
+      shell: bash
+      run: |
+        set -euo pipefail
+        # The runner mode resets this checkout before every job and halts on anything untracked that is not ignored.
+        left=$(git status --porcelain --untracked-files=all)
+        if [ -n "$left" ]; then
+          printf '%s\n' "$left" | head -20
+          echo "::error::the workspace has changed or untracked files after setup; nothing is claimed"
+          exit 1
+        fi
 
     - name: Claim the ticket
       id: claim
