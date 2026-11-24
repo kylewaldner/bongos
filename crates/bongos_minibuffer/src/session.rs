@@ -152,6 +152,7 @@ pub struct Session {
     initial_selection: Option<usize>,
     default: Option<String>,
     free_input: bool,
+    input_on_confirm_input_only: bool,
     accept: Option<InputCheck>,
     history: String,
     keep_history: bool,
@@ -179,6 +180,7 @@ impl Session {
             initial_selection: None,
             default: None,
             free_input: false,
+            input_on_confirm_input_only: false,
             accept: None,
             history: host.to_string(),
             keep_history: true,
@@ -228,6 +230,13 @@ impl Session {
     /// time (C-j).
     pub fn free_input(mut self, free_input: bool) -> Self {
         self.free_input = free_input;
+        self
+    }
+
+    /// With free input, RET answers only a selected row; the input as typed is answered by C-j
+    /// alone.
+    pub fn free_input_only_on_confirm_input(mut self) -> Self {
+        self.input_on_confirm_input_only = true;
         self
     }
 
@@ -366,6 +375,7 @@ pub(crate) struct Core {
     pub(crate) status: RefCell<SharedString>,
     pub(crate) default: Option<String>,
     pub(crate) free_input: bool,
+    pub(crate) input_on_confirm_input_only: bool,
     pub(crate) accept: Option<InputCheck>,
     /// Whether the status shows a refusal, which the next change of the input removes.
     pub(crate) refused: Cell<bool>,
@@ -581,6 +591,7 @@ pub fn open(
         initial_selection,
         default,
         free_input,
+        input_on_confirm_input_only,
         accept,
         history,
         keep_history,
@@ -602,6 +613,7 @@ pub fn open(
         status: RefCell::new(SharedString::default()),
         default,
         free_input,
+        input_on_confirm_input_only,
         accept,
         refused: Cell::new(false),
         history: HistoryStore::global(cx),

@@ -604,10 +604,12 @@ impl PickerDelegate for SessionDelegate {
                     self.query.clone()
                 }),
             },
-            None if self.core.free_input => match self.input_finish(cx) {
-                Some(finish) => finish,
-                None => return,
-            },
+            None if self.core.free_input && !self.core.input_on_confirm_input_only => {
+                match self.input_finish(cx) {
+                    Some(finish) => finish,
+                    None => return,
+                }
+            }
             None => return,
         };
         self.core.finish(finish, true, window, cx);
