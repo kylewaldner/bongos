@@ -104,8 +104,9 @@ export CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG=0
 #      Opt out with BONGOS_NO_MOLD=1.
 #   2. Dev builds write no separate debug files: CARGO_PROFILE_DEV_SPLIT_DEBUGINFO and the build-override
 #      variant are `off`, where Cargo.toml says `unpacked` (one .dwo file per codegen unit, which is a lot of
-#      small writes). With line-tables-only the file and line tables stay in the binary, so backtraces and
-#      panic locations are unchanged; variable inspection in gdb or lldb was already not available with
+#      small writes). With line-tables-only (BONGOS_NO_DEBUGINFO unset, as in local builds) the file and line
+#      tables stay in the binary, so backtraces and panic locations are unchanged; with BONGOS_NO_DEBUGINFO=1
+#      there are no line tables and backtraces show function names only. Variable inspection in gdb or lldb was already not available with
 #      line-tables-only. The `dbg` profile inherits `dev`, so it gets `off` too: its full debug info goes
 #      into the binary. Opt out with BONGOS_KEEP_SPLIT_DEBUGINFO=1.
 # The first build after either setting changes (also by the opt-outs) recompiles a target directory once,
