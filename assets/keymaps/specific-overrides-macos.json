@@ -72,6 +72,20 @@
       "alt-o": "minibuffer::Actions",
     },
   },
+  // The find in files picker (the `FindInFiles` context of its session).
+  {
+    "context": "FindInFiles > Editor",
+    "bindings": {
+      "ctrl-c ctrl-o": "navigation::ExportToMultibuffer",
+      "ctrl-c ctrl-r": "navigation::ReplaceAll",
+      "alt-%": "navigation::ToggleReplace",
+      "alt-r": "navigation::ToggleRegex",
+      "alt-c": "navigation::ToggleCaseSensitive",
+      "alt-w": "navigation::ToggleWholeWord",
+      "alt-b": "navigation::ScopeOpenBuffers",
+      "alt-d": "navigation::ScopeDirectory",
+    },
+  },
   // An isearch session (the `Isearch` context of its prompt). Without `Minibuffer`, so the keys
   // also hold when the prompt is not routed to the strip and opens centered.
   {
@@ -162,6 +176,15 @@
     "context": "Editor && QueryReplaceBatch",
     "bindings": {
       "ctrl-g": "query_replace::Abort",
+    },
+  },
+  // The buffer switcher (the `NavSwitcher` context of its session). Without `Minibuffer`, so the key
+  // also holds when the session opens centered. It is deeper than the Emacs `Editor` row (`ctrl-k`,
+  // kill line).
+  {
+    "context": "NavSwitcher > Editor",
+    "bindings": {
+      "ctrl-k": "navigation::KillBuffer",
     },
   },
   {

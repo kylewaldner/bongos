@@ -50,6 +50,11 @@ impl HistoryStore {
         cx.set_global(self);
     }
 
+    /// The database the rings live in, for what hosts keep next to them.
+    pub fn kvp(&self) -> &KeyValueStore {
+        &self.kvp
+    }
+
     /// The ring of `name`, empty when nothing was stored or the stored data is malformed.
     pub fn ring(&self, name: &str) -> HistoryRing {
         if let Some(ring) = self.rings.borrow().get(name) {

@@ -222,6 +222,8 @@ mod palette_tests;
 #[cfg(test)]
 mod prompts_tests;
 #[cfg(test)]
+mod session_ext_tests;
+#[cfg(test)]
 mod session_tests;
 #[cfg(test)]
 mod settings_tests;

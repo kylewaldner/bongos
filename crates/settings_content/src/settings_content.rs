@@ -256,6 +256,8 @@ pub struct SettingsContent {
     /// Settings for the minibuffer: the strip at the bottom of the window that hosts prompts.
     pub minibuffer: Option<MinibufferSettingsContent>,
 
+    /// Settings for the navigation pickers: the buffer switcher, go to file and find in files.
+    pub navigation: Option<NavigationSettingsContent>,
     /// Settings for the undo tree: a view of a buffer's undo history as a tree.
     pub undo_tree: Option<UndoTreeSettingsContent>,
 
@@ -1439,6 +1441,20 @@ pub struct MinibufferSettingsContent {
     ///
     /// Default: 500
     pub key_hint_delay: Option<u64>,
+}
+
+/// Settings for the navigation pickers.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct NavigationSettingsContent {
+    /// Whether the buffer switcher lists recently closed files after the open buffers.
+    ///
+    /// Default: true
+    pub include_recent_closed: Option<bool>,
+    /// The largest file, in bytes, that a picker preview shows.
+    ///
+    /// Default: 2097152
+    pub preview_max_file_size: Option<u64>,
 }
 
 /// How edits are grouped into undo states.

@@ -577,6 +577,76 @@ async fn query_replace_commands_dispatch_by_name(cx: &mut TestAppContext) {
     });
 }
 
+/// The `navigation` commands, with the palette text of each.
+const NAVIGATION_ACTIONS: [(&str, &str); 17] = [
+    ("navigation::SwitchBuffer", "navigation: switch buffer"),
+    ("navigation::KillBuffer", "navigation: kill buffer"),
+    ("navigation::OpenInPane", "navigation: open in pane"),
+    ("navigation::GoToFile", "navigation: go to file"),
+    (
+        "navigation::GoToFileOtherPane",
+        "navigation: go to file other pane",
+    ),
+    (
+        "navigation::GoToFileSplitRight",
+        "navigation: go to file split right",
+    ),
+    (
+        "navigation::GoToFileSplitDown",
+        "navigation: go to file split down",
+    ),
+    ("navigation::FindInFiles", "navigation: find in files"),
+    ("navigation::ToggleRegex", "navigation: toggle regex"),
+    (
+        "navigation::ToggleCaseSensitive",
+        "navigation: toggle case sensitive",
+    ),
+    (
+        "navigation::ToggleWholeWord",
+        "navigation: toggle whole word",
+    ),
+    (
+        "navigation::ScopeOpenBuffers",
+        "navigation: scope open buffers",
+    ),
+    ("navigation::ScopeDirectory", "navigation: scope directory"),
+    ("navigation::ToggleReplace", "navigation: toggle replace"),
+    ("navigation::ReplaceAll", "navigation: replace all"),
+    (
+        "navigation::ExportToMultibuffer",
+        "navigation: export to multibuffer",
+    ),
+    (
+        "navigation::SearchBufferLines",
+        "navigation: search buffer lines",
+    ),
+];
+
+#[gpui::test]
+async fn navigation_commands_dispatch_by_name(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        for (name, humanized) in NAVIGATION_ACTIONS {
+            let action = cx
+                .build_action(name, None)
+                .unwrap_or_else(|_| panic!("{name} is registered"));
+            assert_eq!(action.name(), name);
+            assert_eq!(command_palette::humanize_action_name(name), humanized);
+        }
+        let names = cx
+            .all_action_names()
+            .iter()
+            .filter(|name| name.starts_with("navigation::"))
+            .count();
+        assert_eq!(names, NAVIGATION_ACTIONS.len());
+        assert!(
+            cx.build_action("navigation::FindInFiles", None)
+                .unwrap()
+                .partial_eq(&bongos_navigation::actions::FindInFiles)
+        );
+    });
+}
+
 /// The `emacs` commands, with the palette text of each.
 const EMACS_ACTIONS: [(&str, &str); 70] = [
     ("emacs::KeyboardQuit", "emacs: keyboard quit"),

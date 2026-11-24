@@ -332,7 +332,9 @@ async fn the_chords_in_an_isearch_session_hand_over(cx: &mut TestAppContext) {
 }
 
 /// No binding of the app uses the chords except the four rows, and each row sits in its own
-/// context: the starters in the Emacs base's editor block, the hand-offs in a session block.
+/// context: the starters in the Emacs base's editor block, the hand-offs in a session block. The
+/// one other use is `alt-%` in the find in files prompt, which switches that prompt to its
+/// replace mode, the same hand-off as in an isearch session.
 #[gpui::test]
 async fn the_chords_shadow_no_other_binding(cx: &mut TestAppContext) {
     init_keymap_test(cx);
@@ -348,7 +350,8 @@ async fn the_chords_shadow_no_other_binding(cx: &mut TestAppContext) {
             let name = binding.action().name();
             assert!(
                 name.starts_with("query_replace::QueryReplace")
-                    || name.starts_with("isearch::QueryReplace"),
+                    || name.starts_with("isearch::QueryReplace")
+                    || name == "navigation::ToggleReplace",
                 "{}: {name} is bound to a query replace chord",
                 platform.emacs
             );
