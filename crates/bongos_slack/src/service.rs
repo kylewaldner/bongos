@@ -43,6 +43,9 @@ use crate::SlackSettings;
 use crate::client;
 use crate::connection::{self, Connection, SlackConnection};
 
+/// The code of an answer that was not Slack's JSON envelope.
+const INVALID_RESPONSE_CODE: &str = "invalid_response";
+
 /// The longest a request waits on a rate limit, from when it began.
 pub const MAX_WAIT: Duration = Duration::from_secs(5 * 60);
 /// How long the answer of a read is reused for the same read.
@@ -263,10 +266,20 @@ impl Operation {
                 cause,
             },
             Self::Post(request) => match cause {
+                // The request was sent and Slack may have posted: anything but an `ok: false`
+                // code, including an answer that could not be read.
                 ApiError::Network | ApiError::Server { .. } => SlackError::PostMaybeNotSent {
                     channel: request.channel.clone(),
                     cause,
                 },
+                ApiError::Other { ref code }
+                    if code == INVALID_RESPONSE_CODE || code == client::TOO_LARGE_CODE =>
+                {
+                    SlackError::PostMaybeNotSent {
+                        channel: request.channel.clone(),
+                        cause,
+                    }
+                }
                 cause => SlackError::PostRefused {
                     channel: request.channel.clone(),
                     cause,
@@ -555,6 +568,7 @@ impl SlackService {
                 let key = read.clone();
                 let running = cx
                     .spawn(async move |this, cx| {
+                        // A joined read shares the first caller's start.
                         let result = run(this.clone(), now, &operation, cx).await;
                         let result = result.map(|done| match done {
                             Done::Answer(answer) => answer,
@@ -621,6 +635,7 @@ impl SlackService {
 
     /// A user, from the session cache when it was seen before.
     pub fn user(&mut self, id: UserId, cx: &mut Context<Self>) -> Task<Result<User, SlackError>> {
+        self.sync_generation(cx);
         if let Some(user) = self.users.get(&id)
             && self.check(cx).is_ok()
         {
@@ -698,7 +713,6 @@ impl SlackService {
             return Task::ready(Err(error));
         }
         log::debug!("Slack post to {destination} from {origin:?}");
-        let began = self.clock.now();
         let operation = Operation::Post(PostRequest {
             channel: destination.conversation,
             text,
@@ -710,6 +724,10 @@ impl SlackService {
             if let Some(previous) = previous {
                 previous.await.ok();
             }
+            // Measured from this post's own turn, not from when it queued behind earlier posts.
+            let began = this
+                .read_with(cx, |this, _| this.clock.now())
+                .map_err(|_| SlackError::NotConnected)?;
             let result = run(this, began, &operation, cx).await;
             drop(finished);
             result.map(|done| match done {

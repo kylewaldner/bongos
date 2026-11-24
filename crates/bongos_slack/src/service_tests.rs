@@ -379,6 +379,64 @@ async fn post_failing_with_network_error_is_not_repeated(cx: &mut TestAppContext
     assert_eq!(posts(&fixture.fake), vec!["deploy done".to_string()]);
 }
 
+async fn failed_post_error(cause: ApiError, cx: &mut TestAppContext) -> SlackError {
+    let fixture = setup(true, cx);
+    fixture.fake.push_post(Err(cause));
+    fixture.fake.push_post(Ok(posted()));
+    let error = fixture
+        .service
+        .update(cx, |service, cx| {
+            service.post(
+                Destination::parse("C1").unwrap(),
+                "deploy done".to_string(),
+                Origin::AttendedRun,
+                cx,
+            )
+        })
+        .await
+        .unwrap_err();
+    cx.run_until_parked();
+    assert_eq!(posts(&fixture.fake), vec!["deploy done".to_string()]);
+    error
+}
+
+#[gpui::test]
+async fn post_failing_with_server_error_is_not_repeated(cx: &mut TestAppContext) {
+    let error = failed_post_error(ApiError::Server { status: 502 }, cx).await;
+    assert!(matches!(error, SlackError::PostMaybeNotSent { .. }));
+    assert!(error.to_string().contains(MAY_NOT_HAVE_BEEN_SENT));
+}
+
+#[gpui::test]
+async fn post_with_unreadable_or_oversized_answer_may_not_have_been_sent(cx: &mut TestAppContext) {
+    for code in ["invalid_response", crate::client::TOO_LARGE_CODE] {
+        let error = failed_post_error(
+            ApiError::Other {
+                code: code.to_string(),
+            },
+            cx,
+        )
+        .await;
+        assert!(
+            matches!(error, SlackError::PostMaybeNotSent { .. }),
+            "{code}"
+        );
+        assert!(error.to_string().contains(MAY_NOT_HAVE_BEEN_SENT));
+    }
+}
+
+#[gpui::test]
+async fn post_refused_with_a_slack_code_says_it_did_not_post(cx: &mut TestAppContext) {
+    let error = failed_post_error(
+        ApiError::Other {
+            code: "is_archived".to_string(),
+        },
+        cx,
+    )
+    .await;
+    assert!(matches!(error, SlackError::PostRefused { .. }));
+}
+
 #[gpui::test]
 async fn posts_run_in_order_and_repeat_only_after_rate_limit(cx: &mut TestAppContext) {
     let fixture = setup(true, cx);
