@@ -13,10 +13,9 @@ name: cache-warm
 
 on:
   push:
-    branches: [main]
+    branches: [gh-runners-test-fixes]
     paths:
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
+      - '.github/workflows/cache-warm.yml'
   schedule:
     # Twice a week, so the 7-day eviction never empties the caches.
     - cron: '23 5 * * 1,4'
@@ -26,7 +25,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: cache-warm
+  group: cache-warm-fixes14
   cancel-in-progress: false
 
 jobs:
@@ -37,10 +36,8 @@ jobs:
         include:
           # dev runs on the release job's runner (ubuntu-22.04), where the whole suite is built, so the toolchain, glibc and
           # system libraries match; mold is installed and used there (stage 11 must do the same for its suite step).
-          - {name: dev, runner: ubuntu-22.04, unified: '', release: ''}
           - {name: dev-unified, runner: ubuntu-24.04, unified: '1', release: ''}
           # The oldest Ubuntu LTS runner GitHub still hosts, as release.yml does, for glibc compatibility.
-          - {name: release, runner: ubuntu-22.04, unified: '', release: '1'}
     name: warm-${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 345
@@ -115,7 +112,7 @@ jobs:
           shared-key: ${{ matrix.name }}-${{ matrix.runner }}
           add-job-id-key: false
           # Written only by this workflow, only on main, and (by default) only after a successful job.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: 'true'
       - name: Build the dependencies (dev and test)
         if: matrix.release != '1'
         run: |
