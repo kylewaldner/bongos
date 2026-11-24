@@ -878,6 +878,11 @@ impl<'a> Walk<'a> {
             .filter_map(|index| self.state.finished[*index].failure.as_ref())
             .skip(floor)
             .collect();
+        // No failure since a retry step's floor: the step's start gate was approved and the new
+        // try has not started yet, whatever the reason of the failure it reruns.
+        if failures.is_empty() {
+            return Status::Ready;
+        }
         let retries = retries_of(self.definition, node, self.limits);
         if is_retried(failure.reason) && failures.len() <= retries {
             return Status::Ready;

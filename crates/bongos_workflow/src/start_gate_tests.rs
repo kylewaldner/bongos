@@ -501,3 +501,103 @@ fn a_start_gate_post_not_sent_fails_the_key_without_asking_again() {
     assert_eq!(end, EndState::Failed);
     assert_eq!(failure.unwrap().reason, FailureReason::PostNotSent);
 }
+
+/// Approves the open start gate, starts the try and fails it with `reason`, until the run
+/// ends failed.
+fn fail_until_ended(runtime: &mut Runtime<FakeRunner>, node: &FakePost, reason: FailureReason) {
+    for _ in 0..20 {
+        if runtime.state(&run_id()).unwrap().ended.is_some() {
+            return;
+        }
+        approve(runtime).unwrap();
+        runtime.tick();
+        node.finish(Err(Failure::new(reason, Some(key()), "it failed")));
+        runtime.tick();
+        runtime.tick();
+    }
+    panic!("the run never ended");
+}
+
+/// A retry step on a failed run reopens it on the key's start gate; the approval starts the try.
+fn rerun_approve_and_start(runtime: &mut Runtime<FakeRunner>, node: &FakePost) {
+    let starts = node.starts();
+    let gates = gates_opened(runtime).len();
+    runtime.rerun(&run_id(), key()).unwrap();
+    runtime.tick();
+    assert_eq!(
+        node.starts(),
+        starts,
+        "the retry step asks before it starts"
+    );
+    assert_eq!(gates_opened(runtime).len(), gates + 1);
+    let state = runtime.state(&run_id()).unwrap();
+    assert_eq!(state.ended, None, "the retry step reopens the run");
+    assert!(state.person_only_gates.contains(&key()));
+
+    approve(runtime).unwrap();
+    runtime.tick();
+    runtime.tick();
+    assert_eq!(node.starts(), starts + 1, "the approval starts the key");
+    let state = runtime.state(&run_id()).unwrap();
+    assert_eq!(state.ended, None);
+    assert!(state.running.contains_key(&key()));
+
+    node.finish(Ok(json!({ "link": "https://example.invalid/p1" })));
+    runtime.tick();
+    let state = runtime.state(&run_id()).unwrap();
+    assert_eq!(state.ended, Some((EndState::Succeeded, None)));
+    assert_eq!(node.starts(), starts + 1);
+}
+
+#[test]
+fn a_start_gate_retry_step_after_post_not_sent_starts_the_key_once_approved() {
+    let temp = TempDir::new().unwrap();
+    let node = FakePost::asking(QUESTION);
+    let mut runtime = runtime(&node);
+    runtime.add(spec(temp.path())).unwrap();
+    runtime.tick();
+    fail_until_ended(&mut runtime, &node, FailureReason::PostNotSent);
+    assert_eq!(node.starts(), 1, "post not sent is never retried by itself");
+
+    rerun_approve_and_start(&mut runtime, &node);
+}
+
+#[test]
+fn a_start_gate_retry_step_after_the_retries_ran_out_starts_the_key_once_approved() {
+    let temp = TempDir::new().unwrap();
+    let node = FakePost::asking(QUESTION);
+    let mut runtime = runtime(&node);
+    runtime.add(spec(temp.path())).unwrap();
+    runtime.tick();
+    fail_until_ended(&mut runtime, &node, FailureReason::ServiceUnavailable);
+    assert!(
+        node.starts() > 1,
+        "a service outage is retried until the budget runs out"
+    );
+
+    rerun_approve_and_start(&mut runtime, &node);
+}
+
+#[test]
+fn a_start_gate_closed_leaves_a_static_gate_on_the_same_key_unapproved() {
+    let gated = POSTED.replace(
+        "use = \"post\"",
+        "use = \"post\"\ngate = { when = \"before\", question = \"Go ahead?\" }",
+    );
+    let definition = parse(&gated).unwrap();
+    let closed = Event::GateClosed {
+        key: key(),
+        by: BY_PERSON.to_string(),
+        edit: None,
+        comment: None,
+    };
+    let state = replay(&[Event::Created, opened(QUESTION), closed]);
+    assert!(state.open_gates.is_empty());
+    let plan = bongos_workflow_model::scheduler::plan(&definition, &state, &Limits::default());
+    assert_eq!(
+        plan.gates_to_open,
+        [key()],
+        "the node's own gate still asks"
+    );
+    assert!(plan.ready.is_empty());
+}

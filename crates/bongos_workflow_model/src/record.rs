@@ -759,8 +759,9 @@ pub struct RunState {
     /// same attempt, so a later `NodeStarted` or `DefinitionReloaded` clears it.
     pub ended: Option<(EndState, Option<Failure>)>,
     pub cancelled: bool,
-    /// For each key restarted by a retry step (the first `NodeStarted` after a failed `Ended`, or
-    /// after the `DefinitionReloaded` of a fresh retry), the number of failed finishes it had
+    /// For each key restarted by a retry step (the first `NodeStarted`, or `person_only`
+    /// `GateOpened` standing for one, after a failed `Ended` or after the `DefinitionReloaded` of
+    /// a fresh retry), the number of failed finishes it had
     /// then. Automatic retries count only the failures after it, so a retry step gives the node
     /// its full `retries` again.
     pub retry_floors: BTreeMap<NodeKey, usize>,
@@ -842,7 +843,18 @@ pub fn replay(events: &[Event]) -> RunState {
             state.ended = None;
             retry_pending = true;
         }
-        if retry_pending && let Event::NodeStarted { key, .. } = event {
+        // The rerun key's floor is set at its start, or at the start gate that stands for it: the
+        // gate's approval must find the key with its retries given back, not failed again.
+        let rerun_key = match event {
+            Event::NodeStarted { key, .. }
+            | Event::GateOpened {
+                key,
+                person_only: true,
+                ..
+            } if retry_pending => Some(key),
+            _ => None,
+        };
+        if let Some(key) = rerun_key {
             let failed = state
                 .finished
                 .iter()
