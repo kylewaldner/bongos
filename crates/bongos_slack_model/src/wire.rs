@@ -24,7 +24,7 @@ pub const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(30);
 /// The `Other` code used when the body has no usable error code.
 const UNKNOWN_CODE: &str = "unknown_error";
 /// The `Other` code used when the body is not what the method documents.
-const INVALID_RESPONSE: &str = "invalid_response";
+pub const INVALID_RESPONSE: &str = "invalid_response";
 
 /// Parses the answer of `auth.test`. The scopes come from the `x-oauth-scopes` header.
 pub fn parse_auth_test(status: u16, headers: &Headers, body: &[u8]) -> Result<AuthInfo, ApiError> {

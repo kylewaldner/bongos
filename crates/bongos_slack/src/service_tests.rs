@@ -12,9 +12,11 @@ use std::time::Duration;
 use bongos_slack_model::fake::{Call, FakeSlack};
 use bongos_slack_model::render::FixedOffset;
 use bongos_slack_model::scopes::SCOPES;
-use bongos_slack_model::types::{ConversationId, Message, Page, Ts};
+use bongos_slack_model::types::{
+    Conversation, ConversationId, ConversationKind, Message, Page, Ts, UserId,
+};
 use bongos_slack_model::{
-    AllowedList, ApiError, Destination, Origin, PostedMessage, SlackApi, SlackToken,
+    AllowedList, ApiError, Destination, Origin, PostedMessage, SlackApi, SlackToken, User,
 };
 use chrono::{DateTime, Utc};
 use gpui::{AppContext as _, BorrowAppContext as _, Entity, TestAppContext};
@@ -546,4 +548,275 @@ async fn status_text_never_holds_the_token(cx: &mut TestAppContext) {
         assert!(!text.contains("xoxp-"), "the status shows a token");
         assert!(!text.contains("TESTSECRET"), "the status shows the token");
     }
+}
+
+fn post_to_c1(
+    fixture: &Fixture,
+    text: &str,
+    cx: &mut TestAppContext,
+) -> gpui::Task<Result<PostedMessage, SlackError>> {
+    let text = text.to_string();
+    fixture.service.update(cx, |service, cx| {
+        service.post(Destination::parse("C1").unwrap(), text, Origin::Kyle, cx)
+    })
+}
+
+fn user(id: &str) -> User {
+    User {
+        id: UserId(id.to_string()),
+        name: id.to_lowercase(),
+        display_name: String::new(),
+        real_name: String::new(),
+    }
+}
+
+fn user_calls(fake: &FakeSlack) -> usize {
+    fake.calls()
+        .into_iter()
+        .filter(|call| matches!(call, Call::User { .. }))
+        .count()
+}
+
+/// Disconnects and connects again, which changes the connection's generation.
+async fn reconnect(fixture: &Fixture, cx: &mut TestAppContext) {
+    cx.update(connection::disconnect).await.unwrap();
+    fixture.fake.push_auth_test(Ok(auth_info("T1", SCOPES)));
+    let now = DateTime::<Utc>::from_timestamp(1_000_000, 0).unwrap();
+    cx.update(|cx| connection::connect(TOKEN, now, cx))
+        .await
+        .unwrap();
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+async fn second_longer_rate_limit_during_a_wait_extends_the_shared_wait(cx: &mut TestAppContext) {
+    let fixture = setup(true, cx);
+    fixture.fake.push_history(Err(limited(10)));
+    fixture.fake.push_history(Err(limited(60)));
+    fixture.fake.push_history(Ok(page("one")));
+    fixture.fake.push_history(Ok(page("two")));
+
+    let first = track(call(&fixture, history("C1"), cx), cx);
+    let second = track(call(&fixture, history("C2"), cx), cx);
+    cx.run_until_parked();
+    let until = fixture
+        .service
+        .read_with(cx, |service, _| service.waiting_until())
+        .expect("waiting");
+    let left = fixture
+        .service
+        .read_with(cx, |service, _| service.wait_left())
+        .expect("waiting");
+    assert_eq!(left, Duration::from_secs(60), "the longer limit won");
+    assert_eq!(history_calls(&fixture.fake).len(), 2);
+
+    // The first limit's ten seconds do not end the wait.
+    cx.executor().advance_clock(Duration::from_secs(10));
+    cx.run_until_parked();
+    assert!(finished(&first).is_none());
+    assert!(finished(&second).is_none());
+    assert_eq!(
+        fixture
+            .service
+            .read_with(cx, |service, _| service.waiting_until()),
+        Some(until)
+    );
+    assert_eq!(history_calls(&fixture.fake).len(), 2);
+
+    cx.executor().advance_clock(Duration::from_secs(50));
+    cx.run_until_parked();
+    assert!(finished(&first).expect("first finished").is_ok());
+    assert!(finished(&second).expect("second finished").is_ok());
+    assert_eq!(history_calls(&fixture.fake).len(), 4);
+}
+
+#[gpui::test]
+async fn unauthorized_post_moves_to_reconnect_and_queued_post_makes_no_request(
+    cx: &mut TestAppContext,
+) {
+    let fixture = setup(true, cx);
+    fixture.fake.push_post(Err(ApiError::Unauthorized {
+        reason: "token_revoked".to_string(),
+    }));
+    fixture.fake.push_post(Ok(posted()));
+
+    let first = track(post_to_c1(&fixture, "one", cx), cx);
+    let second = track(post_to_c1(&fixture, "two", cx), cx);
+    cx.run_until_parked();
+
+    assert_eq!(finished(&first), Some(Err(SlackError::Reconnect)));
+    assert_eq!(finished(&second), Some(Err(SlackError::Reconnect)));
+    assert_eq!(posts(&fixture.fake), vec!["one".to_string()]);
+    assert_eq!(shown(cx), Shown::Reconnect);
+    assert!(matches!(
+        fixture
+            .service
+            .read_with(cx, |service, cx| service.state(cx)),
+        SlackState::Reconnect(_)
+    ));
+    let later = post_to_c1(&fixture, "three", cx).await.unwrap_err();
+    assert_eq!(later.to_string(), RECONNECT_MESSAGE);
+    assert_eq!(posts(&fixture.fake), vec!["one".to_string()]);
+}
+
+#[gpui::test]
+async fn reconnect_drops_the_client_and_every_cache(cx: &mut TestAppContext) {
+    let fixture = setup(true, cx);
+    fixture.fake.push_history(Ok(page("before")));
+    fixture.fake.push_history(Ok(page("after")));
+    fixture.fake.push_conversations(Ok(Page {
+        items: vec![Conversation {
+            id: channel("C1"),
+            kind: ConversationKind::Channel,
+            name: "general".to_string(),
+            user: None,
+        }],
+        next: None,
+    }));
+    fixture.fake.push_conversations(Ok(Page {
+        items: Vec::new(),
+        next: None,
+    }));
+    fixture.fake.push_user(Ok(user("U1")));
+    fixture.fake.push_user(Ok(user("U1")));
+
+    call(&fixture, history("C1"), cx).await.unwrap();
+    let list = fixture
+        .service
+        .update(cx, |service, cx| service.conversation_list(cx))
+        .await
+        .unwrap();
+    assert_eq!(list.len(), 1);
+    fixture
+        .service
+        .update(cx, |service, cx| service.user(UserId("U1".to_string()), cx))
+        .await
+        .unwrap();
+    assert_eq!(fixture.credentials.reads.load(Ordering::SeqCst), 1);
+    assert!(
+        fixture
+            .service
+            .read_with(cx, |service, _| service.cached_conversations().is_some())
+    );
+
+    reconnect(&fixture, cx).await;
+
+    assert!(
+        fixture
+            .service
+            .read_with(cx, |service, _| service.cached_conversations().is_none()),
+        "the conversation list of the old connection was kept"
+    );
+    let again = call(&fixture, history("C1"), cx).await.unwrap();
+    assert_eq!(again, Answer::Messages(page("after")), "a read was reused");
+    assert_eq!(
+        fixture.credentials.reads.load(Ordering::SeqCst),
+        2,
+        "the old client was kept"
+    );
+    let list = fixture
+        .service
+        .update(cx, |service, cx| service.conversation_list(cx))
+        .await
+        .unwrap();
+    assert!(list.is_empty());
+    fixture
+        .service
+        .update(cx, |service, cx| service.user(UserId("U1".to_string()), cx))
+        .await
+        .unwrap();
+    assert_eq!(user_calls(&fixture.fake), 2);
+}
+
+#[gpui::test]
+async fn queued_post_keeps_its_own_five_minute_budget(cx: &mut TestAppContext) {
+    let fixture = setup(true, cx);
+    fixture.fake.push_post(Err(limited(200)));
+    fixture.fake.push_post(Ok(posted()));
+    // The second post's wait ends 450 s after the first post began: past five minutes from
+    // there, but within five minutes of its own turn.
+    fixture.fake.push_post(Err(limited(250)));
+    fixture.fake.push_post(Ok(posted()));
+
+    let first = track(post_to_c1(&fixture, "one", cx), cx);
+    let second = track(post_to_c1(&fixture, "two", cx), cx);
+    cx.run_until_parked();
+    assert_eq!(posts(&fixture.fake), vec!["one".to_string()]);
+
+    cx.executor().advance_clock(Duration::from_secs(200));
+    cx.run_until_parked();
+    assert!(finished(&first).expect("first finished").is_ok());
+    assert!(finished(&second).is_none(), "the second post is waiting");
+    assert_eq!(
+        posts(&fixture.fake),
+        vec!["one".to_string(), "one".to_string(), "two".to_string()]
+    );
+
+    cx.executor().advance_clock(Duration::from_secs(250));
+    cx.run_until_parked();
+    assert!(finished(&second).expect("second finished").is_ok());
+    assert_eq!(posts(&fixture.fake).len(), 4);
+}
+
+#[gpui::test]
+async fn joined_read_checks_the_five_minute_rule_from_its_own_start(cx: &mut TestAppContext) {
+    let fixture = setup(true, cx);
+    fixture.fake.push_history(Err(limited(200)));
+    // At 200 s the repeat is limited again: the wait would end 450 s after the first caller
+    // began, but within five minutes of the later caller's start.
+    fixture.fake.push_history(Err(limited(250)));
+    fixture.fake.push_history(Ok(page("late")));
+
+    let first = track(call(&fixture, history("C1"), cx), cx);
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_secs(190));
+    let joined = track(call(&fixture, history("C1"), cx), cx);
+    cx.run_until_parked();
+    assert_eq!(history_calls(&fixture.fake).len(), 1, "the read was joined");
+
+    cx.executor().advance_clock(Duration::from_secs(10));
+    cx.run_until_parked();
+    assert!(matches!(
+        finished(&first).expect("first finished"),
+        Err(SlackError::RateLimit { .. })
+    ));
+    assert!(finished(&joined).is_none(), "the joined read is waiting");
+
+    cx.executor().advance_clock(Duration::from_secs(250));
+    cx.run_until_parked();
+    assert_eq!(finished(&joined), Some(Ok(Answer::Messages(page("late")))));
+    assert_eq!(history_calls(&fixture.fake).len(), 3);
+}
+
+#[gpui::test]
+async fn user_drops_a_cached_user_after_a_generation_change(cx: &mut TestAppContext) {
+    let fixture = setup(true, cx);
+    fixture.fake.push_user(Ok(user("U1")));
+    fixture.fake.push_user(Ok(user("U1")));
+    let id = UserId("U1".to_string());
+    let ask = |cx: &mut TestAppContext| {
+        let id = id.clone();
+        fixture
+            .service
+            .update(cx, |service, cx| service.user(id, cx))
+    };
+
+    ask(cx).await.unwrap();
+    // Seen once: the session cache answers.
+    ask(cx).await.unwrap();
+    assert_eq!(user_calls(&fixture.fake), 1);
+
+    cx.update(connection::disconnect).await.unwrap();
+    cx.run_until_parked();
+    assert_eq!(ask(cx).await.unwrap_err(), SlackError::NotConnected);
+    assert_eq!(user_calls(&fixture.fake), 1);
+
+    fixture.fake.push_auth_test(Ok(auth_info("T1", SCOPES)));
+    let now = DateTime::<Utc>::from_timestamp(1_000_000, 0).unwrap();
+    cx.update(|cx| connection::connect(TOKEN, now, cx))
+        .await
+        .unwrap();
+    cx.run_until_parked();
+    ask(cx).await.unwrap();
+    assert_eq!(user_calls(&fixture.fake), 2, "the old user was kept");
 }
