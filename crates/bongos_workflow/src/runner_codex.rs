@@ -70,8 +70,11 @@ pub struct CodexNode {
     /// `-m <model>`; `None` leaves the model to the CLI.
     pub model: Option<String>,
     pub output: Vec<OutputField>,
-    /// The node's compiled schema document; the strict variant is derived from it.
+    /// The node's compiled schema; every result is checked against it.
     pub schema: std::sync::Arc<bongos_workflow_model::OutputSchema>,
+    /// The text of the schema file of the run's current definition revision; the strict variant
+    /// is derived from it. It is never read back to validate.
+    pub schema_text: String,
     /// Servers `workflows.mcp_exclude` removes; disabled even when the node names them.
     pub mcp_exclude: Vec<String>,
     /// The MCP servers discovered for Codex (`mcp::discover`).
@@ -417,7 +420,7 @@ pub fn classify(
             "the final message is not JSON".to_string(),
         );
     };
-    match schema::check(&node.output, &value) {
+    match schema::check(&node.schema, &value) {
         Ok(typed) => done(Ok(typed.to_json())),
         Err(problems) => fail(FailureReason::NodeOutputInvalid, problems),
     }
@@ -576,9 +579,10 @@ impl CodexRunner {
         let prompt_file = node.try_dir.join(PROMPT_FILE);
         fs::write(&prompt_file, &node.prompt).map_err(io)?;
         fs::write(node.try_dir.join(SYSTEM_FILE), &node.system).map_err(io)?;
-        let schema_text =
-            serde_json::to_string_pretty(&schema::json_schema_strict(node.schema.document()))
-                .unwrap_or_default();
+        let document = serde_json::from_str(&node.schema_text)
+            .unwrap_or_else(|_| node.schema.document().clone());
+        let schema_text = serde_json::to_string_pretty(&schema::json_schema_strict(&document))
+            .unwrap_or_default();
         fs::write(&schema_file, schema_text).map_err(io)?;
         let stdin_file = node.try_dir.join("stdin.txt");
         fs::write(&stdin_file, stdin_text(&node)).map_err(io)?;

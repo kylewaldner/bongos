@@ -177,106 +177,98 @@ impl TypedResult {
     }
 }
 
-/// Checks a result against the declared fields: an object with every required field, no field
-/// that is not declared, and every value of its declared type. An optional field may be absent or
-/// `null`. Every problem found is listed in the error, separated by "; ".
-pub fn check(output: &[OutputField], value: &Value) -> Result<TypedResult, String> {
+/// Checks a result against a node's schema: [`validate`] first (every problem listed, sorted by
+/// path, see [`format_errors`]), then the conversion with the schema's field list into a
+/// [`TypedResult`]. An optional field that is absent or `null` is not listed. A `Path` value must be
+/// relative and stay inside the worktree; that rule is a post-check reported as a [`CheckError`].
+pub fn check(schema: &OutputSchema, value: &Value) -> Result<TypedResult, String> {
+    if let Err(errors) = validate(schema, value) {
+        return Err(format_errors(&errors));
+    }
     let Value::Object(object) = value else {
-        return Err(format!(
-            "the result must be a JSON object, not {}",
-            kind_of(value)
-        ));
+        return Err(format_errors(&[CheckError {
+            path: "/".to_string(),
+            value: Some(value.clone()),
+            expected: "an object".to_string(),
+        }]));
     };
-
-    let mut problems = Vec::new();
+    let mut errors = Vec::new();
     let mut fields = Vec::new();
-    for field in output {
+    for field in schema.fields() {
+        let name = pointer("", &field.name);
         match object.get(&field.name) {
-            None | Some(Value::Null) if field.optional => {}
-            None => problems.push(format!("missing field '{}'", field.name)),
-            Some(value) => match typed(&field.field_type, value) {
+            None | Some(Value::Null) => {}
+            Some(value) => match typed(&field.field_type, value, &name) {
                 Ok(typed) => fields.push(TypedField {
                     name: field.name.clone(),
                     value: typed,
                     outcome: field.outcome,
                 }),
-                Err(problem) => problems.push(format!("field '{}': {problem}", field.name)),
+                Err(error) => errors.push(error),
             },
         }
     }
-    for key in object.keys() {
-        if !output.iter().any(|field| &field.name == key) {
-            problems.push(format!("unexpected field '{key}'"));
-        }
-    }
-
-    if problems.is_empty() {
+    if errors.is_empty() {
         Ok(TypedResult { fields })
     } else {
-        Err(problems.join("; "))
+        errors.sort_by(|a, b| a.path.cmp(&b.path));
+        Err(format_errors(&errors))
     }
 }
 
-fn typed(field_type: &FieldType, value: &Value) -> Result<TypedValue, String> {
+/// Converts a value the validator accepted. A value that does not fit its declared type (a schema
+/// whose document and field list disagree) is reported as a [`CheckError`] too.
+fn typed(field_type: &FieldType, value: &Value, path: &str) -> Result<TypedValue, CheckError> {
+    let wrong = |expected: &str| CheckError {
+        path: path.to_string(),
+        value: Some(value.clone()),
+        expected: expected.to_string(),
+    };
     match field_type {
-        FieldType::Choice(values) => {
-            let Value::String(value) = value else {
-                return Err(format!("expected a string, got {}", kind_of(value)));
-            };
-            if values.contains(value) {
-                Ok(TypedValue::Choice(value.clone()))
-            } else {
-                Err(format!(
-                    "'{value}' is not one of {}",
-                    values
-                        .iter()
-                        .map(|value| format!("'{value}'"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ))
-            }
-        }
-        FieldType::Text => item(ItemType::Text, value),
-        FieldType::Path => item(ItemType::Path, value),
-        FieldType::Number => item(ItemType::Number, value),
+        FieldType::Choice(_) => match value {
+            Value::String(value) => Ok(TypedValue::Choice(value.clone())),
+            _ => Err(wrong("a string")),
+        },
+        FieldType::Text => item(ItemType::Text, value, path),
+        FieldType::Path => item(ItemType::Path, value, path),
+        FieldType::Number => item(ItemType::Number, value, path),
         FieldType::Data => Ok(TypedValue::Data(value.clone())),
         FieldType::List(item_type) => {
             let Value::Array(items) = value else {
-                return Err(format!("expected a list, got {}", kind_of(value)));
+                return Err(wrong("a list"));
             };
             items
                 .iter()
                 .enumerate()
-                .map(|(index, value)| {
-                    item(*item_type, value).map_err(|problem| format!("item {index}: {problem}"))
-                })
+                .map(|(index, value)| item(*item_type, value, &format!("{path}/{index}")))
                 .collect::<Result<Vec<_>, _>>()
                 .map(TypedValue::List)
         }
     }
 }
 
-fn item(item_type: ItemType, value: &Value) -> Result<TypedValue, String> {
+fn item(item_type: ItemType, value: &Value, path: &str) -> Result<TypedValue, CheckError> {
+    let wrong = |expected: &str| CheckError {
+        path: path.to_string(),
+        value: Some(value.clone()),
+        expected: expected.to_string(),
+    };
     match (item_type, value) {
         (ItemType::Text, Value::String(text)) => Ok(TypedValue::Text(text.clone())),
-        (ItemType::Path, Value::String(path)) => {
-            if is_worktree_relative(path) {
-                Ok(TypedValue::Path(path.clone()))
+        (ItemType::Path, Value::String(text)) => {
+            if is_worktree_relative(text) {
+                Ok(TypedValue::Path(text.clone()))
             } else {
-                Err(format!(
-                    "'{path}' is not a relative path inside the worktree"
-                ))
+                Err(wrong("a relative path inside the worktree"))
             }
         }
         (ItemType::Number, Value::Number(number)) => number
             .as_f64()
             .filter(|number| number.is_finite())
             .map(TypedValue::Number)
-            .ok_or_else(|| format!("{number} is not a finite number")),
-        (ItemType::Text | ItemType::Path, value) => {
-            Err(format!("expected a string, got {}", kind_of(value)))
-        }
-        (ItemType::Number, value) => Err(format!("expected a number, got {}", kind_of(value))),
+            .ok_or_else(|| wrong("a finite number")),
+        (ItemType::Text | ItemType::Path, _) => Err(wrong("a string")),
+        (ItemType::Number, _) => Err(wrong("a number")),
     }
 }
 
@@ -300,17 +292,6 @@ fn is_worktree_relative(path: &str) -> bool {
         }
     }
     depth > 0
-}
-
-fn kind_of(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "a boolean",
-        Value::Number(_) => "a number",
-        Value::String(_) => "a string",
-        Value::Array(_) => "a list",
-        Value::Object(_) => "an object",
-    }
 }
 
 /// A result schema compiled for validation: the checked JSON Schema document (draft 2020-12), the
@@ -381,7 +362,7 @@ pub struct CheckError {
     pub expected: String,
 }
 
-/// Checks `value` against `schema` and returns every problem, sorted by path.
+/// Checks `value` against `schema` and returns the first problem of each value, sorted by path.
 ///
 /// Before validating, a top-level property whose value is `null` is dropped when the field list
 /// declares it optional, or when the schema lists it under `properties` but not under `required`.
@@ -427,6 +408,8 @@ pub fn validate(schema: &OutputSchema, value: &Value) -> Result<(), Vec<CheckErr
         Ok(())
     } else {
         errors.sort_by(|a, b| a.path.cmp(&b.path));
+        // One value can fail several keywords (`type` and `enum`); the first is enough.
+        errors.dedup_by(|a, b| a.path == b.path);
         Err(errors)
     }
 }

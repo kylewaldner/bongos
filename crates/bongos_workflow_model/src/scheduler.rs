@@ -571,17 +571,31 @@ pub fn check_fresh_retry(
         let Some(old_node) = old.node(name) else {
             continue;
         };
-        for field in &old_node.output {
-            match new_node.output.iter().find(|new| new.name == field.name) {
+        for field in old_node.schema.fields() {
+            match new_node
+                .schema
+                .fields()
+                .iter()
+                .find(|new| new.name == field.name)
+            {
                 None => return refuse(format!("drops output field '{}' of '{name}'", field.name)),
-                Some(new) if !compatible(&field.field_type, &new.field_type) => {
+                Some(new)
+                    if !compatible(&field.field_type, &new.field_type)
+                        || (field.field_type == FieldType::Data
+                            && subschema(&old_node.schema, &field.name)
+                                != subschema(&new_node.schema, &field.name)) =>
+                {
                     return refuse(format!("changes output field '{}' of '{name}'", field.name));
                 }
                 Some(_) => {}
             }
         }
-        for field in &new_node.output {
-            let known = old_node.output.iter().any(|old| old.name == field.name);
+        for field in new_node.schema.fields() {
+            let known = old_node
+                .schema
+                .fields()
+                .iter()
+                .any(|old| old.name == field.name);
             if !known && !field.optional {
                 return refuse(format!(
                     "adds required output field '{}' to '{name}'",
@@ -591,6 +605,11 @@ pub fn check_fresh_retry(
         }
     }
     Ok(())
+}
+
+/// The schema of one top-level property in a node's document.
+fn subschema<'a>(schema: &'a crate::schema::OutputSchema, name: &str) -> Option<&'a Value> {
+    schema.document().get("properties")?.get(name)
 }
 
 fn compatible(old: &FieldType, new: &FieldType) -> bool {
@@ -922,7 +941,7 @@ impl<'a> Walk<'a> {
                 result.extend(edit.clone());
             }
         }
-        let typed = match schema::check(&node.output, &value) {
+        let typed = match schema::check(&node.schema, &value) {
             Ok(typed) => typed,
             Err(detail) => {
                 let failure =

@@ -15,6 +15,10 @@ fn output(spec: &str) -> Vec<OutputField> {
     parse(&text).unwrap().nodes[0].output.clone()
 }
 
+fn schema_of(fields: &[OutputField]) -> OutputSchema {
+    OutputSchema::from_fields(fields).unwrap()
+}
+
 fn every_type() -> Vec<OutputField> {
     output(
         r#"{ verdict = { type = "choice", values = ["approve", "changes"] }, summary = { type = "text" }, design = { type = "path", outcome = "document" }, score = { type = "number", optional = true }, items = { type = "list", of = "text" }, files = { type = "list", of = "path", optional = true }, sizes = { type = "list", of = "number", optional = true } }"#,
@@ -77,7 +81,7 @@ fn strict_schema_requires_every_property_and_nulls_the_optional_ones() {
     assert_eq!(schema["additionalProperties"], json!(false));
     // Null is tolerated for an optional field when the result is read.
     let result = check(
-        &every_type(),
+        &schema_of(&every_type()),
         &json!({
             "verdict": "approve", "summary": "s", "design": "d.md", "score": null,
             "items": [], "files": null, "sizes": null,
@@ -98,7 +102,7 @@ fn json_schema_of_no_fields() {
 #[test]
 fn check_accepts_every_field_type() {
     let result = check(
-        &every_type(),
+        &schema_of(&every_type()),
         &json!({
             "verdict": "approve",
             "summary": "done",
@@ -156,7 +160,7 @@ fn check_accepts_every_field_type() {
 #[test]
 fn optional_fields_may_be_absent_or_null() {
     let result = check(
-        &every_type(),
+        &schema_of(&every_type()),
         &json!({
             "verdict": "changes",
             "summary": "",
@@ -175,40 +179,52 @@ fn optional_fields_may_be_absent_or_null() {
 #[test]
 fn missing_fields_are_refused() {
     let error = check(
-        &every_type(),
+        &schema_of(&every_type()),
         &json!({ "verdict": "approve", "summary": "s", "items": [] }),
     )
     .unwrap_err();
-    assert_eq!(error, "missing field 'design'");
+    assert_eq!(
+        error,
+        "Result failed validation at `/design`: expected a value, got nothing"
+    );
     // A required field may not be null.
     let error = check(
-        &output(r#"{ summary = { type = "text" } }"#),
+        &schema_of(&output(r#"{ summary = { type = "text" } }"#)),
         &json!({ "summary": null }),
     )
     .unwrap_err();
-    assert_eq!(error, "field 'summary': expected a string, got null");
+    assert_eq!(
+        error,
+        "Result failed validation at `/summary`: expected a string, got null"
+    );
 }
 
 #[test]
 fn extra_fields_are_refused() {
     let error = check(
-        &output(r#"{ summary = { type = "text" } }"#),
+        &schema_of(&output(r#"{ summary = { type = "text" } }"#)),
         &json!({ "summary": "s", "mood": "good" }),
     )
     .unwrap_err();
-    assert_eq!(error, "unexpected field 'mood'");
+    assert_eq!(
+        error,
+        "Result failed validation at `/mood`: expected no such field, got \"good\""
+    );
 }
 
 #[test]
 fn choice_values_are_closed() {
     let fields = output(r#"{ verdict = { type = "choice", values = ["approve", "changes"] } }"#);
-    let error = check(&fields, &json!({ "verdict": "maybe" })).unwrap_err();
+    let error = check(&schema_of(&fields), &json!({ "verdict": "maybe" })).unwrap_err();
     assert_eq!(
         error,
-        "field 'verdict': 'maybe' is not one of 'approve', 'changes'"
+        "Result failed validation at `/verdict`: expected one of \"approve\", \"changes\", got \"maybe\""
     );
-    let error = check(&fields, &json!({ "verdict": 1 })).unwrap_err();
-    assert_eq!(error, "field 'verdict': expected a string, got a number");
+    let error = check(&schema_of(&fields), &json!({ "verdict": 1 })).unwrap_err();
+    assert_eq!(
+        error,
+        "Result failed validation at `/verdict`: expected a string, got 1"
+    );
 }
 
 #[test]
@@ -217,37 +233,37 @@ fn wrong_types_are_refused() {
         (
             r#"{ f = { type = "text" } }"#,
             json!({ "f": 3 }),
-            "field 'f': expected a string, got a number",
+            "Result failed validation at `/f`: expected a string, got 3",
         ),
         (
             r#"{ f = { type = "path" } }"#,
             json!({ "f": ["a"] }),
-            "field 'f': expected a string, got a list",
+            "Result failed validation at `/f`: expected a string, got [\"a\"]",
         ),
         (
             r#"{ f = { type = "number" } }"#,
             json!({ "f": "3" }),
-            "field 'f': expected a number, got a string",
+            "Result failed validation at `/f`: expected a number, got \"3\"",
         ),
         (
             r#"{ f = { type = "list", of = "text" } }"#,
             json!({ "f": "a" }),
-            "field 'f': expected a list, got a string",
+            "Result failed validation at `/f`: expected a list, got \"a\"",
         ),
         (
             r#"{ f = { type = "list", of = "number" } }"#,
             json!({ "f": [1, "2"] }),
-            "field 'f': item 1: expected a number, got a string",
+            "Result failed validation at `/f/1`: expected a number, got \"2\"",
         ),
         (
             r#"{ f = { type = "list", of = "path" } }"#,
             json!({ "f": ["ok.md", true] }),
-            "field 'f': item 1: expected a string, got a boolean",
+            "Result failed validation at `/f/1`: expected a string, got true",
         ),
     ];
     for (spec, value, expected) in cases {
         assert_eq!(
-            check(&output(spec), &value).unwrap_err(),
+            check(&schema_of(&output(spec)), &value).unwrap_err(),
             expected,
             "{spec}"
         );
@@ -258,14 +274,17 @@ fn wrong_types_are_refused() {
 fn paths_stay_inside_the_worktree() {
     let fields = output(r#"{ f = { type = "path" } }"#);
     for path in ["/etc/passwd", "../outside.md", "a/../../b", "", ".", "a/.."] {
-        let error = check(&fields, &json!({ "f": path })).unwrap_err();
+        let error = check(&schema_of(&fields), &json!({ "f": path })).unwrap_err();
         assert!(
-            error.contains("is not a relative path inside the worktree"),
+            error.contains("expected a relative path inside the worktree"),
             "{path}: {error}"
         );
     }
     for path in ["a.md", "./a.md", "a/../b.md", "docs/sub/c.md"] {
-        assert!(check(&fields, &json!({ "f": path })).is_ok(), "{path}");
+        assert!(
+            check(&schema_of(&fields), &json!({ "f": path })).is_ok(),
+            "{path}"
+        );
     }
 }
 
@@ -273,25 +292,27 @@ fn paths_stay_inside_the_worktree() {
 fn results_must_be_objects() {
     let fields = output(r#"{ f = { type = "text" } }"#);
     assert_eq!(
-        check(&fields, &json!(["f"])).unwrap_err(),
-        "the result must be a JSON object, not a list"
+        check(&schema_of(&fields), &json!(["f"])).unwrap_err(),
+        "Result failed validation at `/`: expected an object, got [\"f\"]"
     );
     assert_eq!(
-        check(&fields, &json!(null)).unwrap_err(),
-        "the result must be a JSON object, not null"
+        check(&schema_of(&fields), &json!(null)).unwrap_err(),
+        "Result failed validation at `/`: expected an object, got null"
     );
 }
 
 #[test]
 fn every_problem_is_listed() {
     let error = check(
-        &output(r#"{ a = { type = "text" }, b = { type = "number" } }"#),
+        &schema_of(&output(
+            r#"{ a = { type = "text" }, b = { type = "number" } }"#,
+        )),
         &json!({ "b": "x", "c": 1 }),
     )
     .unwrap_err();
     assert_eq!(
         error,
-        "missing field 'a'; field 'b': expected a number, got a string; unexpected field 'c'"
+        "Result failed validation at `/a`: expected a value, got nothing\nResult failed validation at `/b`: expected a number, got \"x\"\nResult failed validation at `/c`: expected no such field, got 1"
     );
 }
 
@@ -526,7 +547,7 @@ fn a_nested_object_in_a_schema_becomes_a_data_field() {
         r#"{"type":"object","required":["report"],"properties":{"report":{"type":"object","properties":{"n":{"type":"number"}}}}}"#,
     );
     assert_eq!(schema.fields()[0].field_type, FieldType::Data);
-    let typed = check(schema.fields(), &json!({"report": {"n": 1}})).unwrap();
+    let typed = check(&schema, &json!({"report": {"n": 1}})).unwrap();
     assert_eq!(
         typed.get("report"),
         Some(&TypedValue::Data(json!({"n": 1})))

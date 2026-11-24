@@ -10,7 +10,7 @@ use bongos_workflow_model::template::{Scope, render};
 use bongos_workflow_model::{Failure, FailureReason, NodeKey, RunState};
 
 use crate::dispatch::{NodeKind, RunnerSnapshot};
-use crate::lifecycle::{definition_copy_dir, prompt_with_revision};
+use crate::lifecycle::{definition_copy_dir, prompt_with_revision, schema_text};
 use crate::process::ProcessRecord;
 use crate::run_view::try_dir;
 use crate::runner_claude::{ClaudeCli, ClaudeNode, ClaudeRunner, NodeCaps};
@@ -81,11 +81,18 @@ impl NodeKind for AgentNodes {
             .map_err(|detail| fail(FailureReason::WorktreeUnavailable, detail))?;
         let worktree = node_worktree(key, binding)
             .map_err(|detail| fail(FailureReason::WorktreeUnavailable, detail))?;
+        let schema_text = schema_text(
+            &binding.attempt_dir,
+            node.state.definition_rev.unwrap_or(0),
+            definition_node,
+        )
+        .map_err(|detail| fail(FailureReason::WorktreeUnavailable, detail))?;
         let try_dir = try_dir(&binding.attempt_dir, key, node.try_number);
         let claude_node = ClaudeNode {
             caps,
             output: definition_node.output.clone(),
             schema: definition_node.schema.clone(),
+            schema_text,
             mcp_exclude: inputs.mcp_exclude.clone(),
             mcp_installed: inputs
                 .mcp_installed
