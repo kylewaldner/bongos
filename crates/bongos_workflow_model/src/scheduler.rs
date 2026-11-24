@@ -604,7 +604,8 @@ fn compatible(old: &FieldType, new: &FieldType) -> bool {
 
 /// Whether a failure with this reason is retried automatically. Not retried: failures a rerun of
 /// the same key cannot change (routing, bounds, width, outcomes, a merge conflict), and those that
-/// are Kyle's or the engine's decision (a cancelled gate, an interruption not resumed).
+/// are Kyle's or the engine's decision (a cancelled gate, an interruption not resumed), and a post
+/// that did not go through, since it may have been sent.
 pub fn is_retried(reason: FailureReason) -> bool {
     !matches!(
         reason,
@@ -615,6 +616,7 @@ pub fn is_retried(reason: FailureReason) -> bool {
             | FailureReason::MergeConflict
             | FailureReason::GateCancelled
             | FailureReason::InterruptedNotResumed
+            | FailureReason::PostNotSent
     )
 }
 
@@ -828,6 +830,11 @@ impl<'a> Walk<'a> {
         if self.state.interrupted.contains_key(key) {
             return Status::Interrupted;
         }
+        // An open gate holds the key whatever the node declares: a built-in's start gate is
+        // opened by the runtime on a key whose node has no gate of its own.
+        if self.state.open_gates.contains_key(key) {
+            return Status::Gated;
+        }
         let indices = self.finishes.get(key).map(Vec::as_slice).unwrap_or(&[]);
         let Some(&last) = indices.last() else {
             return self.before_first_try(key, node);
@@ -843,7 +850,12 @@ impl<'a> Walk<'a> {
             .gate
             .as_ref()
             .is_some_and(|gate| gate.when == GateWhen::Before);
-        if !gated || self.state.closed_gates.iter().any(|gate| &gate.key == key) {
+        let closed = self
+            .state
+            .closed_gates
+            .iter()
+            .any(|gate| &gate.key == key && !gate.person_only);
+        if !gated || closed {
             Status::Ready
         } else if self.state.open_gates.contains_key(key) {
             Status::Gated
@@ -903,7 +915,7 @@ impl<'a> Walk<'a> {
                 .state
                 .closed_gates
                 .iter()
-                .filter(|gate| &gate.key == key)
+                .filter(|gate| &gate.key == key && !gate.person_only)
                 .collect();
             let Some(close) = closes.last().filter(|_| closes.len() >= successes) else {
                 return if self.state.open_gates.contains_key(key) {

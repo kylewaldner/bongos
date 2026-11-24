@@ -104,10 +104,12 @@ fn refused(refusal: Refusal) -> String {
 }
 
 /// Runs `verb` in this process's engine, as the writer. Resolves with the text to show: what
-/// was done, or the engine's refusal.
+/// was done, or the engine's refusal. `person` is whether the peer that sent it may attest a
+/// person at a window: every verb that closes a gate refuses a built-in's start gate without one.
 pub fn execute(
     verb: WorkflowVerb,
     payload: WorkflowPayload,
+    person: bool,
     cx: &mut App,
 ) -> Result<String, String> {
     if !WorkflowsSettings::get_global(cx).enabled {
@@ -176,6 +178,9 @@ pub fn execute(
                 .next()
                 .ok_or_else(|| "The run is not waiting at a gate".to_string())?;
             engine
+                .refuse_unattested(&run, &key, person)
+                .map_err(refused)?;
+            engine
                 .approve(&run, &key, payload.edit, cx)
                 .map(|()| "Approved".to_string())
                 .map_err(refused)
@@ -186,6 +191,9 @@ pub fn execute(
                 .into_iter()
                 .next()
                 .ok_or_else(|| "The run is not waiting at a gate".to_string())?;
+            engine
+                .refuse_unattested(&run, &key, person)
+                .map_err(refused)?;
             engine
                 .revise(&run, &key, payload.comment.unwrap_or_default(), cx)
                 .map(|()| "Sent back for revision".to_string())

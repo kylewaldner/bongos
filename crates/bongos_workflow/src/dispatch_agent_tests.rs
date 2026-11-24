@@ -200,6 +200,7 @@ fn a_revision_comment_reaches_the_prompt() {
         by: "person".to_string(),
         edit: None,
         comment: Some("name the file".to_string()),
+        person_only: false,
     });
     let (_, stdin) = run(&world, &state, None).unwrap();
     assert!(stdin.starts_with("Triage the login bug."), "{stdin}");

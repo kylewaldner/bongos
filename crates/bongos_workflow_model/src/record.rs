@@ -7,7 +7,7 @@
 //! truncated last line, which [`parse_log`] drops and reports and [`repair`] cuts off before the
 //! next append.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -160,6 +160,10 @@ pub enum Event {
     GateOpened {
         key: NodeKey,
         question: String,
+        /// A start gate of a built-in: only a person at a window may close it, only as is (no
+        /// edit, no revision), and the key's next start spends it. Absent in older logs.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        person_only: bool,
     },
     GateClosed {
         key: NodeKey,
@@ -669,6 +673,9 @@ pub struct ClosedGate {
     pub by: String,
     pub edit: Option<serde_json::Value>,
     pub comment: Option<String>,
+    /// Whether the gate it closed was a built-in's start gate (`person_only`). A static gate of
+    /// the node never counts such a close as its own.
+    pub person_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -730,6 +737,8 @@ pub struct RunState {
     pub cost_usd: f64,
     /// Gates open now, with their question.
     pub open_gates: BTreeMap<NodeKey, String>,
+    /// The keys of `open_gates` whose gate is a built-in's start gate (`person_only`).
+    pub person_only_gates: BTreeSet<NodeKey>,
     pub closed_gates: Vec<ClosedGate>,
     pub merged: Vec<MergedBranch>,
     pub routes: Vec<TakenRoute>,
@@ -818,10 +827,16 @@ pub fn replay(events: &[Event]) -> RunState {
             }
             continue;
         }
+        // A built-in's start gate opened by a retry step stands for the start it holds back.
         if state.ended.is_some()
             && matches!(
                 event,
-                Event::NodeStarted { .. } | Event::DefinitionReloaded { .. }
+                Event::NodeStarted { .. }
+                    | Event::DefinitionReloaded { .. }
+                    | Event::GateOpened {
+                        person_only: true,
+                        ..
+                    }
             )
         {
             state.ended = None;
@@ -841,6 +856,39 @@ pub fn replay(events: &[Event]) -> RunState {
     state
 }
 
+/// Whether the start gate of `key` asking exactly `question` is approved and not yet spent: the
+/// key's last `GateClosed` is `person`'s and closes a `person_only` `GateOpened` with that
+/// question, and no `NodeStarted` of the key came after it. A changed question, a close by
+/// anyone else or a start since all ask again.
+pub fn start_gate_approved(events: &[Event], key: &NodeKey, question: &str, person: &str) -> bool {
+    let mut asked: Option<&str> = None;
+    let mut approved = false;
+    for event in events {
+        match event {
+            Event::GateOpened {
+                key: opened,
+                question: text,
+                person_only,
+            } if opened == key => {
+                asked = person_only.then_some(text.as_str());
+                approved = false;
+            }
+            Event::GateClosed {
+                key: closed, by, ..
+            } if closed == key => {
+                approved = by == person && asked == Some(question);
+                asked = None;
+            }
+            Event::NodeStarted { key: started, .. } if started == key => {
+                asked = None;
+                approved = false;
+            }
+            _ => {}
+        }
+    }
+    approved
+}
+
 fn bump_pass(state: &mut RunState, node: &str, pass: u32) {
     let entry = state.passes.entry(node.to_string()).or_insert(pass);
     *entry = (*entry).max(pass);
@@ -858,6 +906,10 @@ fn apply(state: &mut RunState, event: &Event) {
         } => {
             state.interrupted.remove(key);
             state.held.remove(key);
+            // A start spends the key's start gate: a cancelled one is recorded as a failed try.
+            if state.person_only_gates.remove(key) {
+                state.open_gates.remove(key);
+            }
             bump_pass(state, &key.node, key.pass);
             state.running.insert(
                 key.clone(),
@@ -899,8 +951,21 @@ fn apply(state: &mut RunState, event: &Event) {
                 had_start,
             });
         }
-        Event::GateOpened { key, question } => {
+        Event::GateOpened {
+            key,
+            question,
+            person_only,
+        } => {
             state.open_gates.insert(key.clone(), question.clone());
+            if *person_only {
+                // It stands where the key's start would: a resume or a retry step that asked
+                // instead of starting leaves the key waiting on the gate, not interrupted or held.
+                state.interrupted.remove(key);
+                state.held.remove(key);
+                state.person_only_gates.insert(key.clone());
+            } else {
+                state.person_only_gates.remove(key);
+            }
         }
         Event::GateClosed {
             key,
@@ -908,12 +973,14 @@ fn apply(state: &mut RunState, event: &Event) {
             edit,
             comment,
         } => {
-            state.open_gates.remove(key);
+            let person_only =
+                state.open_gates.remove(key).is_some() && state.person_only_gates.remove(key);
             state.closed_gates.push(ClosedGate {
                 key: key.clone(),
                 by: by.clone(),
                 edit: edit.clone(),
                 comment: comment.clone(),
+                person_only,
             });
         }
         Event::BranchMerged { join, branch, sha } => state.merged.push(MergedBranch {

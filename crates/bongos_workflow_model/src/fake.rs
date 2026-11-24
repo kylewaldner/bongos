@@ -186,6 +186,7 @@ impl FakeRunner {
                 self.events.push(Event::GateOpened {
                     key: key.clone(),
                     question: "fake question".to_string(),
+                    person_only: false,
                 });
                 self.events.push(Event::GateClosed {
                     key: key.clone(),
