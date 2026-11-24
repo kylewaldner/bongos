@@ -2,12 +2,15 @@ pub mod archive;
 pub mod command;
 pub mod disambiguate;
 pub mod fs;
+#[cfg(not(target_family = "wasm"))]
+pub mod job_roots;
 pub mod markdown;
 pub mod path_list;
 pub mod paths;
 pub mod process;
 pub mod redact;
 pub mod rel_path;
+pub mod rotating_log;
 pub mod schemars;
 pub mod serde;
 pub mod shell;

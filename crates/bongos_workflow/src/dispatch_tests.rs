@@ -77,6 +77,7 @@ pub(crate) fn binding(root: &std::path::Path, workflow: &str) -> RunBinding {
             run_dir: root.join("wt"),
             path: root.join("wt/tree"),
             branch: "branch-1".to_string(),
+            git_dir: root.join("wt/git"),
         },
         checkout: TaskCheckout {
             slug: "task".to_string(),
@@ -84,6 +85,7 @@ pub(crate) fn binding(root: &std::path::Path, workflow: &str) -> RunBinding {
             branch: None,
         },
         inputs: Vec::new(),
+        setup: Default::default(),
     }
 }
 

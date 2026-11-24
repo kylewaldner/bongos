@@ -657,7 +657,7 @@ fn task_link_a_human_only_artifact_never_reaches_a_node() {
     let tree = load(&root);
     let task = tree.task_by_id(LEAF).expect("the leaf loads");
     let definition = parse(CONTEXT).unwrap();
-    let inputs = resolve(&definition, task, &tree, Some(0), &BTreeMap::new());
+    let inputs = resolve(&definition, Some(task), &tree, Some(0), &BTreeMap::new()).unwrap();
     let hidden = |text: &str| !text.contains("secret.md") && !text.contains("hush hush");
 
     // Inputs list the shared artifact only.
@@ -686,7 +686,7 @@ fn task_link_a_human_only_artifact_never_reaches_a_node() {
         RunIdentity {
             id: "run".to_string(),
             workflow: "context".to_string(),
-            todo: todo.clone(),
+            todo: Some(todo.clone()),
             task_id: LEAF.to_string(),
             task_dir: leaf_dir.clone(),
             branch: TASK_BRANCH.to_string(),
@@ -696,6 +696,7 @@ fn task_link_a_human_only_artifact_never_reaches_a_node() {
         Paths {
             worktree: root.join("wt"),
             scratch: root.join("scratch"),
+            trees: Default::default(),
         },
     )
     .to_json();

@@ -447,6 +447,26 @@ definition. The keys are for the Emacs keymap; every command is also in the pale
   (3), `fan_out_width` (8), `retries` (2), `poll_interval_minutes` (5), `wait_give_up_days` (7) and
   `programs` with `python` (null, `python3` then `python` on `PATH`), `max_minutes` (10) and
   `max_output_mb` (10).
+- **Confinement.** Jobs (workflow programs, agent steps and task checks) can write only to their
+  job tree, their scratch directory and the directories they declare (agent steps may also write
+  the agent CLI's own state directories, `~/.claude` and `~/.codex` by default), and the
+  Confinement section of the Work page shows what that means on your machine. On Linux with Bubblewrap, jobs are
+  confined: they never get your repository's shared git data, bongos brings back their commits and
+  branches after each run and checks them, and git run by bongos and by the editor never uses
+  configuration or pointers a job wrote. On macOS jobs are confined by path through Seatbelt: reads
+  are not restricted, and a process a job leaves running may outlive it. With no sandbox available,
+  jobs are not confined; install Bubblewrap (Linux) to get it. Without a usable sandbox, program
+  and agent steps run unsandboxed (and the log says so), except in a main worktree, where they are
+  refused, and task checks refuse to start until Bubblewrap is installed or
+  `confinement.task_checks` is set to false. Two switches turn it on per kind of
+  job: `confinement.task_checks` (on by default) and `confinement.agent_steps` (off by
+  default until the confined Claude Code CLI is verified with a logged-in session and user-scoped
+  MCP servers; a confined Claude Code CLI runs with `CLAUDE_CONFIG_DIR` set to `~/.claude`). Each switch that is off adds a line to the section, for example `Agent steps are
+  not confined (confinement.agent_steps is off)`. `confinement.agent_state_paths` names the paths
+  each agent CLI must write to keep its session and login, `~` being the job's HOME; its defaults
+  are `claude` with `["~/.claude"]` and `codex` with `["~/.codex"]`. To add a
+  path, list it under the CLI's key with the whole list, for example `"agent_state_paths": {
+  "claude": ["~/.claude", "~/.config/claude"] }`.
 - **Privacy.** Workflows run only the local CLIs and scripts a definition names. bongos itself
   contacts no host for them; what leaves the machine is what those programs do themselves: the model
   provider of the `claude` or `codex` you run, and `gh` or the network hosts a program node declares
@@ -581,6 +601,89 @@ scope = "all"
   a row does not turn `stale` while you edit; the done decision recomputes the tree key, so
   `task: complete` still refuses a tree edited after its pass. The `task_checks.tree_key_debounce_ms`
   setting is not used yet.
+
+## Lanes
+
+A lane is a worker that takes one job at a time from a project's tasks and runs a workflow on it, so
+several tasks move forward together without you starting each run. It is on by default;
+`lanes.enabled` set to `false` starts no host, takes no work and hides every lane command and
+the `bongos lanes` words (they say "lanes are off (lanes.enabled)"). Lanes need a project repository
+(`project_repository.enabled`) and the Work view (`work.enabled`). A lane never starts by itself:
+you start them, and they stop at a job boundary, never in the middle of a job.
+
+- **The lane table.** `definitions/lanes/lanes.toml` in the project repository, with `schema = 1`.
+  Each `[[kind]]` is a kind of lane with a `name`, a `count` (lanes `build-1`, `build-2`), the
+  `rules` it may take, `areas` (true unless the kind sets it false), `unattended`, an optional
+  `ahead = { cap = N }` (a free lane of the kind prepares tasks no lane owns yet, at most `cap`
+  at a time, and the area rule does not apply to it) and an optional `binding`. A `[rules.<name>]`
+  says what a lane may take: `work_kind`, `state` (`ready`, `in-progress`, ...), `todo`, and the
+  `workflow` to run (or `use_todo_workflow = true`), with `inputs`, a `staleness` script and a
+  `refresh` workflow. `[[pin]]` sends a `task` to a `lane` or a `kind`. Two tasks whose `areas`
+  tags overlap are not worked on together unless an `[[exempt]]` entry lists the tag in `tags` (or
+  the tasks in `tasks`). `owner = "top"` (default) makes a task's top-level task its owner, `"self"`
+  makes every leaf its own; `on_interruption` is `ask` or `resume`; `dispatcher` names the
+  dispatcher workflow (default `lanes`); `[locations]` sets `worktree_root` and `dirs_root`. An
+  unknown key or a bad value is refused, with its line, when the table lands. A project with no
+  table has one kind `default` with one lane. The table is read at the project's verified commit.
+- **Bindings and tokens.** A kind's `binding` gives its lanes `env` values, named `dirs` (below
+  `<project folder>/lanes/<lane>/<name>` unless `[locations]` or the profile say otherwise),
+  `trees` (`repo`, `mode` of `fresh` or `persistent`, `location`, a `base_tree` with `dirs`) and
+  `floors`. Values in `env` may use these tokens: `{lane}`, `{kind}`, `{lane_index}`, `{project}`
+  (the first 12 hex digits of the project id), `{repo}`, `{live_lanes}`, `{cpus}`, `{dir.<name>}`,
+  and one floored integer division of two numeric tokens or integers, such as `{cpus/live_lanes}`,
+  which is at least 1. An unknown token is refused when the table lands.
+- **Window mode and host mode.** One process holds a project's writer. A window that opens the
+  project first holds it (window mode); `bongos lanes start` from a shell, with or without a
+  display, starts an engine host, a headless process that holds the writer and runs the lanes
+  (host mode; its log is `engine-host-<id>.log` in the logs folder). A window opened while a host
+  runs attaches to it as a client and shows the same lanes at once; closing it leaves the lanes
+  running. `lanes: start` in a window that holds the writer shows a summary of what will run, asks
+  you to confirm, and then hands the writer to a new host; the window becomes a client. Closing the
+  last window while lanes run in it does what `lanes.on_last_window_close` says (`ask`, `keep` or
+  `stop`). A host exits once it has had no client, no active run and no lanes' run for
+  `lanes.host.idle_exit_seconds` (300). The lanes' run lasts until the lanes are stopped or reach
+  their bound; with `lanes.exit_when_idle` true it also ends once every lane is idle and nothing
+  is left to take (no task that could still become ready), so the host then exits. A killed host's
+  runs come back interrupted and wait on you (`lanes.on_interruption` or the table's), or are
+  resumed once with `resume`; no run is resumed twice.
+- **Keys.** `C-c f L` is the prefix: `L` shows the Lanes view, `s` starts, `S` stops, `p`
+  pauses a lane, `c` resumes, `d` shows a dry run (what each lane would take next, and why the rest
+  wait), `j` shows what a lane would take next (it only prints; it changes nothing), `o` adopts a halted or stopped task for a free lane (you
+  pick the task, the lane and give a reason, which goes in the task's history) and `a` accepts the
+  current task graph as the recorded one. Every command is also in the palette (`lanes: ...`). The
+  keys are for the Emacs keymap. A lane whose run fails is halted until you adopt its task, resume or
+  stop it.
+- **The command line.** `bongos lanes start [--within <task>]`,
+  `bongos lanes stop [<lane>]`, `bongos lanes pause <lane>`, `bongos lanes resume <lane>`,
+  `bongos lanes status [--json]`, `bongos lanes dry-run [--json] [--lane <lane>]`,
+  `bongos lanes pick --lane <lane> [--json]`, `bongos run <workflow> --task <id|path>
+  [--queue]`, `bongos host status` and `bongos host stop [--now]`. `--project <name|id|path>` picks the
+  project; without it the project whose folder holds the current directory, else the only one.
+  Each command goes to whichever process holds the writer. With no writer, `lanes start` and `run`
+  start a host; `status`, `dry-run` and `pick` read the project's state without one; the others say
+  nothing is running. `bongos run` starts a hand-started run, never a lane run, in a window or a
+  host. `trigger`, `queue`, `pool` and `profile` are reserved words for later features.
+- **`status --json`.** A document with `schema` (`"lanes-status 1"`), `project`, `header` and
+  `lanes`. `header` has `dispatcher` (`not started`, `running`, `pausing` or `ended`), `lanes`,
+  `running`, `idle`, `waiting`, `paused`, `stopped`, `halted`, `table_commit` and `table_wait`. Each
+  lane has `id`, `kind`, `state` (`running`, `idle`, `paused`, `stopped`, `halted` or `waiting`),
+  `reason`, `task`, `goal`, `run`, `workflow`, `run_lifecycle`, `job_started` and `jobs_done`; a field
+  with no value is `null`. `master_split` appears only while master is split. New fields may be
+  added without a new schema name.
+- **Exit codes.** 0 done; 1 refused (the message is on stderr); 2 usage error or project not
+  found; 3 the host could not start (the path of its log is printed); 4 protocol or version
+  mismatch (stop the host with `bongos host stop` when its jobs end, then run the command again).
+- **Settings.** All under `lanes`, user level: `enabled` (true), `reevaluate_interval` (60
+  seconds between looks for work), `exit_when_idle` (false), `on_interruption` (`ask`),
+  `on_last_window_close` (`ask`), `desktop_notifications` (true), `dry_run_limit` (12),
+  `staleness_timeout_seconds` (60), `save_max_file_bytes` (10485760) and `host` with
+  `idle_exit_seconds` (300), `start_timeout_seconds` (15), `handover_timeout_seconds` (1800) and
+  `log_max_bytes` (1048576).
+- **In the Lanes view.** On the row at point: `enter` opens the run's record (`run.toml`), `t`
+  focuses the task, `p` pauses, `c` resumes, `S` stops the lane, `o` adopts, `d` shows a dry run
+  and `g` refreshes. A lane job runs in the lane's own trees. `dry-run` and `pick` are served by
+  whichever process holds the writer (a running host answers them), and `lanes start` carries
+  `--until`, `--max-jobs` and `--unattended` to the host.
 
 ## Emacs keys
 

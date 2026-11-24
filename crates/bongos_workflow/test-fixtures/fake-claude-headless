@@ -3,8 +3,13 @@
 # events and exits like the real CLI would. Knobs come as extra arguments, since the runner clears
 # the environment:
 #   --fake-scenario NAME  success (default), permission-denied, max-turns, max-budget, invalid,
-#                         missing, logged-out, crash, sleep
+#                         missing, logged-out, crash, sleep, confined
 #   --fake-log DIR        writes DIR/argv (one argument per line), DIR/env and DIR/stdin
+# The confined scenario writes `tree-write` in the working directory, then:
+#   --fake-state DIR      writes DIR/state-write
+#   --fake-outside FILE   writes FILE; a refused write is reported on stderr and as a tool result
+#   --fake-commit         commits (empty) in the working directory with git
+# and then succeeds.
 # `--version`, `--help` and `mcp list` answer like Claude Code 2.1.322 (`mcp list` replays a
 # recorded output).
 
@@ -49,15 +54,23 @@ esac
 
 scenario=success
 log=
+state=
+outside=
+commit=
 for arg in "$@"; do
     case "$want" in
     scenario) scenario=$arg ;;
     log) log=$arg ;;
+    state) state=$arg ;;
+    outside) outside=$arg ;;
     esac
     want=
     case "$arg" in
     --fake-scenario) want=scenario ;;
     --fake-log) want=log ;;
+    --fake-state) want=state ;;
+    --fake-outside) want=outside ;;
+    --fake-commit) commit=1 ;;
     esac
 done
 
@@ -110,6 +123,21 @@ crash)
 sleep)
     echo "$init"
     sleep 600
+    ;;
+confined)
+    echo "$init"
+    echo tree > tree-write || exit 4
+    if [ -n "$state" ]; then
+        echo state > "$state/state-write" || exit 5
+    fi
+    if [ -n "$outside" ] && ! out=$({ echo outside > "$outside"; } 2>&1); then
+        echo "$out" >&2
+        printf '{"type":"user","message":{"content":[{"type":"tool_result","content":"%s","is_error":true}]}}\n' "$out"
+    fi
+    if [ -n "$commit" ]; then
+        git -c user.name=test -c user.email=test@example.invalid commit -q --allow-empty -m inside || exit 6
+    fi
+    grep -v '"subtype":"init"' "$here/claude-success.jsonl"
     ;;
 *)
     echo "unknown fake scenario: $scenario" >&2

@@ -280,8 +280,14 @@ pub struct SettingsContent {
     /// Settings for workflows: runs of node graphs on a task.
     pub workflows: Option<WorkflowsSettingsContent>,
 
+    /// Settings for lanes: background workflow runs hosted by a headless engine process.
+    pub lanes: Option<LanesSettingsContent>,
+
     /// Settings for task checks: scripts and commands that must pass before a task is done.
     pub task_checks: Option<TaskChecksSettingsContent>,
+
+    /// Settings for confining jobs (agent steps and task checks) to their job tree.
+    pub confinement: Option<ConfinementSettingsContent>,
 
     /// Settings related to Vim mode in bongos.
     pub vim: Option<VimSettingsContent>,
@@ -1634,6 +1640,104 @@ pub struct LinearSettingsContent {
     pub enabled: Option<bool>,
 }
 
+/// Settings for lanes.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct LanesSettingsContent {
+    /// Whether lanes are on. While it is off, no engine host starts and it only says "lanes are
+    /// off (lanes.enabled)".
+    ///
+    /// Default: true
+    pub enabled: Option<bool>,
+    /// Seconds between two looks at the project for work a lane could take.
+    ///
+    /// Default: 60
+    pub reevaluate_interval: Option<u64>,
+    /// Whether the engine host exits once every lane is idle and nothing is left to take.
+    ///
+    /// Default: false
+    pub exit_when_idle: Option<bool>,
+    /// What happens to a lane run that an interruption stopped: ask first, or resume it once on
+    /// its own. A project's `lanes.toml` may override it.
+    ///
+    /// Default: ask
+    pub on_interruption: Option<LanesOnInterruption>,
+    /// What closing the last window does while lanes run in it: ask, keep them running in an
+    /// engine host, or stop them.
+    ///
+    /// Default: ask
+    pub on_last_window_close: Option<LanesOnLastWindowClose>,
+    /// Whether a lane run waiting on a person shows a desktop notification.
+    ///
+    /// Default: true
+    pub desktop_notifications: Option<bool>,
+    /// The most picks `lanes: dry run` lists.
+    ///
+    /// Default: 12
+    pub dry_run_limit: Option<u32>,
+    /// Seconds a staleness script may run before it counts as failed.
+    ///
+    /// Default: 60
+    pub staleness_timeout_seconds: Option<u64>,
+    /// The largest file, in bytes, kept when a lane tree is saved before a reset; larger files
+    /// are skipped and listed.
+    ///
+    /// Default: 10485760
+    pub save_max_file_bytes: Option<u64>,
+    /// How the engine host that runs lanes behaves.
+    pub host: Option<LanesHostSettingsContent>,
+}
+
+/// What happens to a lane run that an interruption stopped.
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, MergeFrom,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LanesOnInterruption {
+    /// Ask a person before the run goes on.
+    #[default]
+    Ask,
+    /// Resume the run once on its own.
+    Resume,
+}
+
+/// What closing the last window does while lanes run in it.
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, MergeFrom,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LanesOnLastWindowClose {
+    /// Ask whether to keep the lanes running.
+    #[default]
+    Ask,
+    /// Keep the lanes running in an engine host.
+    Keep,
+    /// Stop the lanes.
+    Stop,
+}
+
+/// Settings of the engine host that runs lanes.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct LanesHostSettingsContent {
+    /// Seconds an engine host with no lane running and no client waits before it exits.
+    ///
+    /// Default: 300
+    pub idle_exit_seconds: Option<u64>,
+    /// Seconds a window waits for a starting engine host to answer.
+    ///
+    /// Default: 15
+    pub start_timeout_seconds: Option<u64>,
+    /// Seconds a handover between a window and an engine host may take.
+    ///
+    /// Default: 1800
+    pub handover_timeout_seconds: Option<u64>,
+    /// The largest the engine host's log grows, in bytes, before it is rotated.
+    ///
+    /// Default: 1048576
+    pub log_max_bytes: Option<u64>,
+}
+
 /// Settings for workflows.
 #[with_fallible_options]
 #[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
@@ -1865,6 +1969,41 @@ pub struct TaskChecksSettingsContent {
     ///
     /// Default: 1000
     pub live_write_ms: Option<u32>,
+}
+
+/// Settings for confining jobs to their job tree, scratch directory and declared directories.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct ConfinementSettingsContent {
+    /// Run agent steps inside the sandbox (writes only to the job tree, scratch, declared
+    /// directories and the agent CLI's own state paths). Off by default until the confined Claude
+    /// Code CLI is verified with a logged-in session and user-scoped MCP servers.
+    ///
+    /// Default: false
+    pub agent_steps: Option<bool>,
+    /// Run task checks inside the sandbox.
+    ///
+    /// Default: true
+    pub task_checks: Option<bool>,
+    /// Paths each agent CLI must write to keep its session and login; `~` is the job's HOME.
+    pub agent_state_paths: Option<ConfinementAgentStatePathsContent>,
+}
+
+/// Paths each agent CLI may write while confined.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct ConfinementAgentStatePathsContent {
+    /// Paths the Claude Code CLI writes.
+    ///
+    /// The CLI runs with `CLAUDE_CONFIG_DIR` set to `~/.claude`, so it keeps its login and
+    /// settings there.
+    ///
+    /// Default: ["~/.claude"]
+    pub claude: Option<Vec<String>>,
+    /// Paths the Codex CLI writes.
+    ///
+    /// Default: ["~/.codex"]
+    pub codex: Option<Vec<String>>,
 }
 
 /// Settings for chat sessions.

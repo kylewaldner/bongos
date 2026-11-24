@@ -2,7 +2,8 @@
 //! PR" and "babysit PR". Each lives under `shipped/<directory>/` as a `workflow.toml` with its
 //! prompts and scripts, embedded in the binary with `include_str!` and written to
 //! `<data dir>/workflows/shipped/<version>/` by [`crate::definitions::materialize`]. They are also
-//! the templates `workflow: new` copies into the profile layer to be edited.
+//! the templates `workflow: new` copies into the profile layer to be edited. The `lanes`
+//! dispatcher ships beside them ([`DISPATCHERS`]) and is no template.
 
 use crate::definitions::ShippedFile;
 
@@ -39,6 +40,14 @@ pub const TEMPLATES: &[Template] = &[
     },
 ];
 
+/// The shipped dispatcher definitions. They are in the shipped layer like the others, but are not
+/// templates: `workflow: new` never copies one, and no run is started on a task with one.
+pub const DISPATCHERS: &[Template] = &[Template {
+    name: "lanes",
+    dir: "lanes",
+    description: "Run the project's lanes",
+}];
+
 macro_rules! shipped_file {
     ($dir:literal, $file:literal) => {
         ShippedFile {
@@ -72,6 +81,7 @@ pub const FILES: &[ShippedFile] = &[
     shipped_file!("babysit-pr", "fix.md"),
     shipped_file!("babysit-pr", "merge_pr.py"),
     shipped_file!("babysit-pr", "push.py"),
+    shipped_file!("lanes", "workflow.toml"),
 ];
 
 /// The template whose workflow name or directory is `key`.

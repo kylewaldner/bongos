@@ -178,6 +178,7 @@ fn probe_bwrap(bwrap: &Path, bwrap_args: &[String]) -> bool {
 pub fn build_bwrap_args(
     writable_directories: &[&Path],
     protected_git_dirs: &[&Path],
+    read_only_masks: &[&Path],
     permissions: SandboxPermissions,
     cwd: Option<&Path>,
     proxy_socket_path: Option<&Path>,
@@ -188,6 +189,7 @@ pub fn build_bwrap_args(
     build_bwrap_args_with_proxy_socket_sandbox_path(
         writable_directories,
         protected_git_dirs,
+        read_only_masks,
         permissions,
         cwd,
         proxy_socket_path,
@@ -198,6 +200,7 @@ pub fn build_bwrap_args(
 fn build_bwrap_args_with_proxy_socket_sandbox_path(
     writable_directories: &[&Path],
     protected_git_dirs: &[&Path],
+    read_only_masks: &[&Path],
     permissions: SandboxPermissions,
     cwd: Option<&Path>,
     proxy_socket_path: Option<&Path>,
@@ -257,6 +260,17 @@ fn build_bwrap_args_with_proxy_socket_sandbox_path(
             let path = canonical.to_string_lossy().into_owned();
             push_bind(&mut args, "--ro-bind", &path, &path);
         }
+    }
+
+    // Read-only masks are re-bound read-only *after* every writable bind, so
+    // they stay read-only in place even inside a writable root (later binds
+    // win). The caller checks that each mask exists before building these
+    // arguments; a mask is bound at its exact path and never widened to an
+    // ancestor.
+    for mask in read_only_masks {
+        let canonical = mask.canonicalize().unwrap_or_else(|_| mask.to_path_buf());
+        let path = canonical.to_string_lossy().into_owned();
+        push_bind(&mut args, "--ro-bind", &path, &path);
     }
 
     for flag in [
@@ -331,7 +345,8 @@ fn prepare_sandbox(
     let bwrap = resolve_bwrap()?;
     // The probe only checks whether a sandbox can be created at all, so Git
     // protection (which doesn't affect createability) is irrelevant here.
-    let bwrap_args = build_bwrap_args(writable_dirs, &[], permissions, cwd, proxy_socket_path);
+    // Read-only masks don't affect createability either.
+    let bwrap_args = build_bwrap_args(writable_dirs, &[], &[], permissions, cwd, proxy_socket_path);
     if !probe_bwrap(&bwrap, &bwrap_args) {
         return Err(LauncherStatus::SandboxProbeFailed);
     }
@@ -360,6 +375,7 @@ pub fn wrap_invocation(
     permissions: SandboxPermissions,
     writable_dirs: &[&Path],
     protected_git_dirs: &[&Path],
+    read_only_masks: &[&Path],
     cwd: Option<&Path>,
     program: &str,
     args: &[String],
@@ -395,6 +411,7 @@ pub fn wrap_invocation(
     let mut bwrap_args = build_bwrap_args_with_proxy_socket_sandbox_path(
         writable_dirs,
         protected_git_dirs,
+        read_only_masks,
         permissions,
         cwd,
         proxy_socket_path,
@@ -649,6 +666,7 @@ mod tests {
         let args = build_bwrap_args(
             &[missing.as_path()],
             &[],
+            &[],
             SandboxPermissions::default(),
             None,
             None,
@@ -672,6 +690,7 @@ mod tests {
         let args = build_bwrap_args(
             &[writable.path()],
             &[],
+            &[],
             SandboxPermissions::default(),
             Some(writable.path()),
             None,
@@ -691,10 +710,11 @@ mod tests {
 
     #[test]
     fn test_build_bwrap_args_network_namespace_follows_permission() {
-        let denied = build_bwrap_args(&[], &[], SandboxPermissions::default(), None, None);
+        let denied = build_bwrap_args(&[], &[], &[], SandboxPermissions::default(), None, None);
         assert!(denied.iter().any(|arg| arg == "--unshare-net"));
 
         let allowed = build_bwrap_args(
+            &[],
             &[],
             &[],
             SandboxPermissions {
@@ -708,6 +728,7 @@ mod tests {
 
         let socket = PathBuf::from("/tmp/zed-proxy.sock");
         let restricted = build_bwrap_args(
+            &[],
             &[],
             &[],
             SandboxPermissions {
@@ -729,10 +750,103 @@ mod tests {
             network: NetworkAccess::None,
             allow_fs_write: true,
         };
-        let args = build_bwrap_args(&[], &[], permissions, None, None);
+        let args = build_bwrap_args(&[], &[], &[], permissions, None, None);
         assert!(windows_contains(&args, &["--bind", "/", "/"]));
         assert!(!windows_contains(&args, &["--ro-bind", "/", "/"]));
         assert!(!windows_contains(&args, &["--tmpfs", "/tmp"]));
+    }
+
+    #[test]
+    fn test_build_bwrap_args_read_only_mask_follows_writable_binds() {
+        let writable = tempfile::tempdir().unwrap();
+        let git_dir = writable.path().join(".git");
+        std::fs::create_dir(&git_dir).unwrap();
+        let mask = writable.path().join("masked");
+        std::fs::create_dir(&mask).unwrap();
+
+        let args = build_bwrap_args(
+            &[writable.path()],
+            &[git_dir.as_path()],
+            &[mask.as_path()],
+            SandboxPermissions::default(),
+            None,
+            None,
+        );
+
+        let writable_str = writable.path().canonicalize().unwrap();
+        let writable_str = writable_str.to_string_lossy().into_owned();
+        let mask_str = mask.canonicalize().unwrap();
+        let mask_str = mask_str.to_string_lossy().into_owned();
+        let git_str = git_dir.canonicalize().unwrap();
+        let git_str = git_str.to_string_lossy().into_owned();
+        let position = |needle: &[&str]| {
+            args.windows(needle.len())
+                .position(|window| window.iter().zip(needle).all(|(a, b)| a == b))
+        };
+        let bind_at = position(&["--bind", &writable_str, &writable_str])
+            .expect("writable root is bound read-write");
+        let git_at = position(&["--ro-bind", &git_str, &git_str]).expect("git dir is protected");
+        let mask_at =
+            position(&["--ro-bind", &mask_str, &mask_str]).expect("mask is bound read-only");
+        assert!(
+            mask_at > bind_at,
+            "mask must follow the writable bind: {args:?}"
+        );
+        assert!(mask_at > git_at, "mask must follow the git binds: {args:?}");
+    }
+
+    #[test]
+    fn test_build_bwrap_args_without_masks_is_unchanged() {
+        let writable = tempfile::tempdir().unwrap();
+        let socket = PathBuf::from("/tmp/zed-proxy.sock");
+        let sandbox_socket = PathBuf::from("/tmp/zed-sandbox-test.sock");
+        let permissions = SandboxPermissions {
+            network: NetworkAccess::LocalhostPort(8080),
+            allow_fs_write: false,
+        };
+        let args = build_bwrap_args_with_proxy_socket_sandbox_path(
+            &[writable.path()],
+            &[],
+            &[],
+            permissions,
+            Some(writable.path()),
+            Some(socket.as_path()),
+            Some(sandbox_socket.as_path()),
+        );
+
+        let writable_str = writable.path().canonicalize().unwrap();
+        let writable_str = writable_str.to_string_lossy().into_owned();
+        let cwd_str = writable.path().to_string_lossy().into_owned();
+        let expected: Vec<String> = [
+            "--ro-bind",
+            "/",
+            "/",
+            "--dev",
+            "/dev",
+            "--proc",
+            "/proc",
+            "--tmpfs",
+            "/tmp",
+            "--bind",
+            &writable_str,
+            &writable_str,
+            "--unshare-user",
+            "--unshare-ipc",
+            "--unshare-uts",
+            "--unshare-pid",
+            "--unshare-cgroup-try",
+            "--die-with-parent",
+            "--unshare-net",
+            "--bind",
+            "/tmp/zed-proxy.sock",
+            "/tmp/zed-sandbox-test.sock",
+            "--chdir",
+            &cwd_str,
+        ]
+        .iter()
+        .map(|arg| arg.to_string())
+        .collect();
+        assert_eq!(args, expected);
     }
 
     #[test]
@@ -808,6 +922,7 @@ mod tests {
             NetworkAccess::None | NetworkAccess::All => None,
         };
         let mut bwrap_args = build_bwrap_args_with_proxy_socket_sandbox_path(
+            &[],
             &[],
             &[],
             permissions,

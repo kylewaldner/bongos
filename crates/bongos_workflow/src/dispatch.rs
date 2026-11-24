@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use bongos_workflow_model::definition::{AgentKind, NodeKind as DefinitionKind};
 use bongos_workflow_model::{Failure, FailureReason, NodeKey};
 
+use crate::agent_confinement::AgentConfinementSettings;
 use crate::dispatch_agent::AgentNodes;
 use crate::dispatch_program::ProgramNodes;
 use crate::lifecycle::agent_of;
@@ -40,6 +41,8 @@ pub struct RunnerSnapshot {
     /// The hosts `@remote` stands for, by run id; a run with no entry takes them from the task
     /// repository's push remote when its node starts.
     pub remote_hosts: BTreeMap<String, Vec<String>>,
+    /// `confinement.agent_steps` and `confinement.agent_state_paths`.
+    pub agent_confinement: AgentConfinementSettings,
 }
 
 /// A shared, replaceable [`RunnerSnapshot`]: the app sets it, the runner reads a copy.
@@ -254,6 +257,11 @@ impl Runner for AppRunner {
                 format!("join '{join}' was handed an empty branch"),
             ));
         };
+        // A run on a snapshot or in a work directory has no branches: every key ran in its one
+        // tree, so the join has nothing to merge and no commit to name.
+        if binding.setup.branchless() {
+            return Ok(String::new());
+        }
         merge_into_run(&self.git, &binding.worktree, fan, *index)
     }
 }
@@ -276,5 +284,5 @@ fn merge_into_run(git: &Git, run: &RunWorktree, fan: &str, index: u32) -> Result
             ));
         }
     }
-    futures::executor::block_on(git.run(&run.path, &["rev-parse", "HEAD"])).map_err(git_failure)
+    futures::executor::block_on(git.run_at(run.at(), &["rev-parse", "HEAD"])).map_err(git_failure)
 }

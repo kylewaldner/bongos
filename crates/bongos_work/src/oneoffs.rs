@@ -9,7 +9,7 @@ use std::sync::{Arc, LazyLock};
 use anyhow::Context as _;
 use bongos_project_repo::{
     CreateRequest, Git, GitError, LoadedProject, Location, ProjectRepo, ProjectRepositorySettings,
-    RepositoryLocations, StateHandle, StateStore,
+    RepositoryLocations, StateEvent, StateHandle,
 };
 use bongos_work_model::commands::{self as model, NewTask};
 use bongos_work_model::layout;
@@ -20,9 +20,10 @@ use util::ResultExt as _;
 use workspace::Workspace;
 
 use crate::commands::{ready, show_toast, submit};
+use crate::opening::{OpenedProject, ProjectOpener, ProjectOpening, open_as_writer};
 use crate::project_repos::{open_repos, serve_now};
 use crate::projects::{create_request, locations_path};
-use crate::register_project_repo;
+use crate::register_project_repo_following;
 
 /// Held while the one-offs project is looked up or made, so two one-offs asked for at once make
 /// one project.
@@ -137,8 +138,12 @@ pub(crate) fn new_oneoff(
             .unwrap_or(true);
         if !open {
             let backup = settings.backup_options();
+            let opener = workspace
+                .update(cx, |_, cx| ProjectOpening::opener(cx))
+                .ok()
+                .flatten();
             let loaded = cx
-                .background_spawn(async move { load_location(location, backup).await })
+                .background_spawn(async move { load_location(location, backup, opener).await })
                 .await;
             let loaded = match loaded {
                 Ok(loaded) => loaded,
@@ -177,14 +182,39 @@ pub(crate) fn new_oneoff(
 async fn load_location(
     location: Location,
     backup: bongos_project_repo::BackupOptions,
-) -> anyhow::Result<Arc<LoadedProject>> {
+    opener: Option<ProjectOpener>,
+) -> anyhow::Result<Opened> {
     let git = Git::locate()?;
-    let writer = StateStore::open_writer(&location)?;
-    let repo = ProjectRepo::new(location, git).with_state(StateHandle::Writer(Arc::new(writer)));
+    let opened = match opener {
+        Some(opener) => opener(&location)?,
+        None => open_as_writer(&location)?,
+    };
+    let (repo, changes) = match opened {
+        OpenedProject::Writer(writer) => (
+            ProjectRepo::new(location, git).with_state(StateHandle::Writer(writer)),
+            None,
+        ),
+        OpenedProject::Client {
+            reader,
+            sink,
+            changes,
+        } => {
+            let repo =
+                ProjectRepo::new(location, git).with_state(StateHandle::Reader(Arc::new(reader)));
+            repo.replace_sink(sink);
+            (repo, changes)
+        }
+    };
     repo.set_backup_options(backup);
     let loaded = LoadedProject::new(repo);
     loaded.load().await?;
-    anyhow::Ok(loaded)
+    anyhow::Ok(Opened { loaded, changes })
+}
+
+/// A project opened and loaded, with the changes another process's writer reports.
+struct Opened {
+    loaded: Arc<LoadedProject>,
+    changes: Option<futures::channel::mpsc::UnboundedReceiver<StateEvent>>,
 }
 
 /// Opens the project repository at `location` and serves it in the Work view, unless this
@@ -200,9 +230,10 @@ pub(crate) async fn open_location(location: Location, cx: &mut AsyncApp) -> anyh
         return Ok(());
     }
     let backup = cx.update(|cx| ProjectRepositorySettings::get_global(cx).backup_options());
+    let opener = cx.update(|cx| ProjectOpening::opener(cx));
     let id = location.id.clone();
     let loaded = cx
-        .background_spawn(async move { load_location(location, backup).await })
+        .background_spawn(async move { load_location(location, backup, opener).await })
         .await?;
     // Another open of this location may have been served while this one loaded.
     cx.update(|cx| {
@@ -232,9 +263,11 @@ pub(crate) async fn open_known_projects(locations_path: PathBuf, cx: &mut AsyncA
 }
 
 /// Serves `loaded` in the Work view at once and keeps it registered.
-fn serve(loaded: Arc<LoadedProject>, cx: &mut App) {
+fn serve(opened: Opened, cx: &mut App) {
+    let Opened { loaded, changes } = opened;
     serve_now(&loaded, cx);
-    let registration = register_project_repo(loaded, cx);
+    ProjectOpening::served(&loaded, cx);
+    let registration = register_project_repo_following(loaded, changes, cx);
     cx.default_global::<OpenedOneoffs>().0.push(registration);
 }
 

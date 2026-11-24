@@ -9,6 +9,7 @@
 //! `test-support`) drives it with scripted results.
 
 pub mod definition;
+pub mod env;
 pub mod failure;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake;
@@ -23,18 +24,25 @@ pub mod template;
 pub mod validate;
 
 pub use definition::{Definition, ParseError, Warning, parse};
+pub use env::EnvEdit;
 pub use failure::{Failure, FailureClass, FailureReason};
 pub use inputs::{InputValue, resolve};
 pub use layers::{Layer, LayerDirs, Resolution, Resolved};
 pub use layout::{GraphLayout, LayoutArc, LayoutEdge, LayoutNode, layout};
-pub use record::{Event, NodeKey, ParsedLog, RunState, RunToml, append, parse_log, repair, replay};
+pub use record::{
+    Event, LaneRef, NodeKey, ParsedLog, RunState, RunSubject, RunToml, RunTreeRecord,
+    UnattendedChoice, UnattendedSource, append, parse_log, repair, replay,
+};
 pub use scheduler::{
     Command, FreshRetryRefusal, Limits, Plan, check_fresh_retry, plan, resume_set, retry_set, step,
 };
 pub use schema::{TypedField, TypedResult, TypedValue, check, json_schema, json_schema_strict};
 pub use state_doc::StateDoc;
 pub use template::{Scope, TemplateError};
-pub use validate::{Ceilings, Diagnostic, Severity, ValidationContext, has_errors, validate};
+pub use validate::{
+    Ceilings, Diagnostic, Severity, ValidationContext, has_errors, project_subject_problems,
+    validate,
+};
 
 #[cfg(test)]
 mod definition_tests;

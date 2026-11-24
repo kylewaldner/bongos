@@ -28,12 +28,17 @@ use tempfile::TempDir;
 use crate::WorkflowsSettings;
 use crate::engine::{EngineRunner, WorkflowEngine};
 use crate::lifecycle::{
-    GitWorktrees, Lifecycle, Offer, RefusalKind, RunStatus, RunWorktrees, StartChecks,
-    StartContext, StartRequest, WorkflowEvent, attempt_dir, definition_copy_dir,
+    GitWorktrees, Lifecycle, Offer, RefusalKind, RunStatus, RunTree, RunWorktrees, StartChecks,
+    StartContext, StartRequest, WorkflowEvent, active_runs_on_disk, attempt_dir,
+    definition_copy_dir,
 };
 use crate::runtime::Runner;
 use crate::runtime::fake::FakeRunner;
 use crate::worktrees::{Git, RunWorktree, TaskCheckout, WorktreeError};
+use bongos_workflow_model::record::StartedBy;
+use bongos_workflow_model::{
+    LaneRef, RunSubject, RunToml, RunTreeRecord, UnattendedChoice, UnattendedSource,
+};
 
 const LEAF: &str = "leaf-id";
 const GROUP: &str = "group-id";
@@ -280,8 +285,31 @@ impl RunWorktrees for DirWorktrees {
         let path = run_dir.join("run");
         fs::create_dir_all(&path).unwrap();
         Ok(RunWorktree {
+            git_dir: run_dir.join("git"),
             run_dir,
             path,
+            branch: format!("{TASK_BRANCH}-run-{attempt}"),
+        })
+    }
+
+    fn lane(
+        &mut self,
+        task: &TaskCheckout,
+        run_id: &str,
+        attempt: u32,
+        path: &Path,
+        _common_dir: Option<&Path>,
+        _settings: &WorkflowsSettings,
+    ) -> Result<RunWorktree, WorktreeError> {
+        if let Some(error) = self.error.lock().unwrap().clone() {
+            return Err(error);
+        }
+        let run_dir = self.root.join(format!("{}-{run_id}-{attempt}", task.slug));
+        fs::create_dir_all(&run_dir).unwrap();
+        Ok(RunWorktree {
+            git_dir: run_dir.join("git"),
+            run_dir,
+            path: path.to_path_buf(),
             branch: format!("{TASK_BRANCH}-run-{attempt}"),
         })
     }
@@ -435,6 +463,7 @@ impl World {
             active_run,
             checks: &self.checks,
             definition_commit: None,
+            definitions: None,
         };
         lifecycle.start(request, &self.dirs, &context)
     }
@@ -637,8 +666,8 @@ fn start_refusals_come_in_order_with_their_fix() {
     assert_eq!(fs::read_dir(&runs_dir).unwrap().count(), 1);
     let record = lifecycle.record(&run).unwrap();
     assert_eq!(record.workflow, "full");
-    assert_eq!(record.todo.index, 1);
-    assert_eq!(record.todo.name, "implement");
+    assert_eq!(record.todo.as_ref().unwrap().index, 1);
+    assert_eq!(record.todo.as_ref().unwrap().name, "implement");
     assert_eq!(record.attempts.len(), 1);
     assert!(runs_dir.join(&run).join("run.toml").is_file());
     assert!(
@@ -1116,7 +1145,7 @@ fn restart_makes_a_new_attempt_with_a_new_worktree_and_no_reused_result() {
             .collect::<Vec<_>>(),
         [1, 2]
     );
-    assert_eq!(record.todo.name, "implement");
+    assert_eq!(record.todo.as_ref().unwrap().name, "implement");
 
     // No earlier result: the new attempt starts from nothing, on the latest definition.
     let state = lifecycle.state(&run).unwrap();
@@ -1171,8 +1200,14 @@ fn halt_then_resume_reruns_the_node_in_the_same_worktree_with_the_hand_edit() {
         std::slice::from_ref(&key)
     );
 
+    assert_eq!(lifecycle.progressing_runs(), std::slice::from_ref(&run));
     lifecycle.halt(&run).unwrap();
     assert_eq!(lifecycle.status(&run), Some(RunStatus::Halted));
+    assert_eq!(lifecycle.active_runs(), std::slice::from_ref(&run));
+    assert!(
+        lifecycle.progressing_runs().is_empty(),
+        "a halted run waits for a person"
+    );
     assert_eq!(lifecycle.runtime().runner().stopped, [(run.clone(), key)]);
     let halted = lifecycle.halt_worktrees(&run).unwrap();
     let worktree = lifecycle.worktree(&run).unwrap().path.clone();
@@ -1502,6 +1537,133 @@ fn load_runs_kills_a_leftover_process_with_a_matching_start_time() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     assert_eq!(lifecycle.state(&run).unwrap().interrupted.len(), 1);
+}
+
+/// A client window must not load the runs of a project another process writes: loading marks a
+/// node in flight interrupted in that process's log (and stops its process).
+#[test]
+fn load_runs_except_leaves_the_runs_under_a_skipped_folder_alone() {
+    let world = World::new();
+    let run = seed(&world, "single", mid_node);
+    let before = fs::read(events_of(&world, &run)).unwrap();
+
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle
+        .load_runs_except(&world.tree, &[world.root.join("work/app")])
+        .unwrap();
+    assert!(report.loaded.is_empty(), "{report:?}");
+    assert!(report.orphans.is_empty(), "{report:?}");
+    assert!(lifecycle.state(&run).is_none());
+    assert_eq!(fs::read(events_of(&world, &run)).unwrap(), before);
+
+    let report = lifecycle
+        .load_runs_except(&world.tree, &[world.root.join("elsewhere")])
+        .unwrap();
+    assert_eq!(report.loaded, vec![run.clone()], "{report:?}");
+    assert_eq!(lifecycle.state(&run).unwrap().interrupted.len(), 1);
+}
+
+/// A client window shows the runs of a project another process writes, read from their records:
+/// the Runs panel rows, the status item and the needs-you list see them, nothing drives them, no
+/// command reaches them and none of their files changes; what the host writes later is seen at
+/// the next read, and an unchanged run is not read again as a change.
+#[test]
+fn observe_runs_shows_the_runs_another_process_writes_without_touching_them() {
+    let world = World::new();
+    let files = world.root.join("work/app");
+    let mut host = world.lifecycle();
+    host.runtime_mut()
+        .runner_mut()
+        .script("work", json!({ "summary": "draft", "verdict": "ship" }));
+    let run = world.start(&mut host, with_workflow("reviewed")).unwrap();
+    settle(&mut host);
+    assert_eq!(host.status(&run), Some(RunStatus::Running));
+    let record = fs::read(run_dir_of(&world, &run).join("run.toml")).unwrap();
+    let log = fs::read(events_of(&world, &run)).unwrap();
+
+    let mut client = world.lifecycle();
+    let report = client
+        .load_runs_except(&world.tree, std::slice::from_ref(&files))
+        .unwrap();
+    assert!(report.loaded.is_empty(), "{report:?}");
+    assert!(client.shown_runs().is_empty(), "nothing read yet");
+    assert!(client.observe_runs(&world.tree, std::slice::from_ref(&files)));
+    assert!(client.all_runs().is_empty(), "the client drives no run");
+    assert!(client.state(&run).is_none());
+    assert!(client.is_observed(&run));
+    assert_eq!(client.shown_runs(), vec![run.clone()]);
+    assert_eq!(client.shown_active_runs(), vec![run.clone()]);
+    assert_eq!(client.shown_task_of(&run), Some(LEAF));
+    assert_eq!(client.shown_record(&run).unwrap().workflow, "reviewed");
+    assert!(client.shown_definition(&run).is_some());
+    assert_eq!(
+        client.shown_attempt_dir(&run),
+        Some(attempt_dir(&run_dir_of(&world, &run), 1))
+    );
+    let rows = crate::runs_panel::RunRow::all(&client);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].run, run);
+    assert_eq!(rows[0].status, RunStatus::Running);
+    assert_eq!(rows[0].nodes, vec!["work".to_string()]);
+    assert_eq!(
+        crate::status_item::Summary::of(&client).running,
+        vec!["work".to_string()]
+    );
+    assert!(crate::gates::needs_you(&client).is_empty());
+
+    // Nothing drives it here, no command reaches it, and nothing is written for it.
+    client.tick();
+    assert!(client.runtime().runner().started.is_empty());
+    assert!(client.take_events().is_empty());
+    assert!(client.cancel(&run).is_err());
+    assert!(client.pause(&run).is_err());
+    assert_eq!(fs::read(events_of(&world, &run)).unwrap(), log);
+    assert_eq!(
+        fs::read(run_dir_of(&world, &run).join("run.toml")).unwrap(),
+        record
+    );
+    assert!(
+        !client.observe_runs(&world.tree, std::slice::from_ref(&files)),
+        "no file changed"
+    );
+
+    // The host finishes the step and the run waits at its gate: the next read shows it.
+    finish_all(&mut host);
+    assert!(client.observe_runs(&world.tree, std::slice::from_ref(&files)));
+    assert_eq!(client.shown_state(&run).unwrap().open_gates.len(), 1);
+    let needs = crate::gates::needs_you(&client);
+    assert_eq!(needs.len(), 1, "{needs:?}");
+    assert_eq!(needs[0].task_id, LEAF);
+    assert_eq!(crate::status_item::Summary::of(&client).needing, 1);
+    assert!(client.take_events().is_empty());
+
+    // A cleared run is no longer shown, and neither is any once the project is not another's.
+    fs::write(run_dir_of(&world, &run).join("cleared"), "").unwrap();
+    assert!(client.observe_runs(&world.tree, std::slice::from_ref(&files)));
+    assert!(client.shown_runs().is_empty());
+    fs::remove_file(run_dir_of(&world, &run).join("cleared")).unwrap();
+    assert!(client.observe_runs(&world.tree, std::slice::from_ref(&files)));
+    assert!(client.observe_runs(&world.tree, &[]));
+    assert!(client.shown_runs().is_empty());
+    assert!(!client.is_observed(&run));
+}
+
+/// A run the client takes over (its project's writer came back) is shown once, as its own.
+#[test]
+fn a_run_loaded_here_is_no_longer_shown_from_its_records() {
+    let world = World::new();
+    let files = world.root.join("work/app");
+    let run = seed(&world, "single", mid_node);
+    let mut client = world.lifecycle();
+    assert!(client.observe_runs(&world.tree, std::slice::from_ref(&files)));
+    assert!(client.is_observed(&run));
+    let report = client.load_runs(&world.tree).unwrap();
+    assert_eq!(report.loaded, vec![run.clone()], "{report:?}");
+    assert!(!client.is_observed(&run));
+    assert_eq!(client.shown_runs(), vec![run.clone()]);
+    // A later read leaves a run this process drives alone.
+    client.observe_runs(&world.tree, std::slice::from_ref(&files));
+    assert_eq!(client.shown_runs(), vec![run]);
 }
 
 #[test]
@@ -1962,10 +2124,10 @@ fn an_edited_gate_field_is_what_the_next_node_state_holds() {
         bongos_workflow_model::state_doc::RunIdentity {
             id: run.clone(),
             workflow: "reviewed".to_string(),
-            todo: bongos_workflow_model::record::TodoRef {
+            todo: Some(bongos_workflow_model::record::TodoRef {
                 index: 1,
                 name: "implement".to_string(),
-            },
+            }),
             task_id: LEAF.to_string(),
             task_dir: world.root.clone(),
             branch: TASK_BRANCH.to_string(),
@@ -1975,6 +2137,7 @@ fn an_edited_gate_field_is_what_the_next_node_state_holds() {
         bongos_workflow_model::state_doc::Paths {
             worktree: world.root.clone(),
             scratch: world.root.clone(),
+            trees: Default::default(),
         },
     );
     let value: serde_json::Value = serde_json::from_str(&doc.to_json()).unwrap();
@@ -1986,3 +2149,377 @@ fn an_edited_gate_field_is_what_the_next_node_state_holds() {
 
 #[path = "landing_tests.rs"]
 mod landing_tests;
+
+#[path = "project_run_tests.rs"]
+mod project_run_tests;
+
+/// `SINGLE` with the inputs `inputs` (lines of the `[inputs]` table), named `name`.
+fn with_inputs(name: &str, inputs: &str) -> String {
+    SINGLE
+        .replace("\"single\"", &format!("\"{name}\""))
+        .replace(
+            "start = \"work\"\n",
+            &format!("start = \"work\"\n\n[inputs]\n{inputs}\n"),
+        )
+}
+
+fn project_request(workflow: &str) -> StartRequest {
+    StartRequest {
+        workflow: Some(workflow.to_string()),
+        ..StartRequest::project(GROUP)
+    }
+}
+
+#[test]
+fn a_project_subject_start_of_a_workflow_that_reads_the_task_is_refused_naming_the_input() {
+    let world = World::new();
+    write_definition(
+        world.profile(),
+        "goaled",
+        &with_inputs("goaled", r#"goal = { type = "text", from = "task.goal" }"#),
+    );
+    let mut lifecycle = world.lifecycle();
+    let mut request = project_request("goaled");
+    // An override does not make a task source usable: the workflow reads the task.
+    request
+        .overrides
+        .insert("goal".to_string(), InputValue::Text("Tidy".to_string()));
+    let refusal = world.start(&mut lifecycle, request).unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::NeedsTask);
+    assert_eq!(
+        refusal.message,
+        "input goal reads task.goal; a run with no task cannot use it"
+    );
+    let text = fs::read_to_string(world.profile().join("goaled").join(DEFINITION_FILE)).unwrap();
+    let problems = bongos_workflow_model::project_subject_problems(
+        &bongos_workflow_model::parse(&text).unwrap(),
+    );
+    assert_eq!(problems.len(), 1);
+    assert_eq!(problems[0].message, refusal.message);
+    assert!(lifecycle.all_runs().is_empty(), "nothing started");
+}
+
+#[test]
+fn a_project_subject_start_resolves_its_inputs_from_overrides_alone() {
+    let world = World::new();
+    write_definition(
+        world.profile(),
+        "briefed",
+        &with_inputs(
+            "briefed",
+            r#"brief = { type = "text", from = "literal:draft" }
+mode = { type = "text", from = "literal:fast" }"#,
+        ),
+    );
+    let mut lifecycle = world.lifecycle();
+    // Every input resolves from the override or its literal, with no task.
+    let mut request = project_request("briefed");
+    request
+        .overrides
+        .insert("brief".to_string(), InputValue::Text("Tidy".to_string()));
+    let run = world.start(&mut lifecycle, request).unwrap();
+    let inputs: Vec<(String, Option<InputValue>)> = lifecycle
+        .record(&run)
+        .unwrap()
+        .inputs
+        .iter()
+        .map(|input| (input.name.clone(), input.value.clone()))
+        .collect();
+    assert_eq!(
+        inputs,
+        vec![
+            (
+                "brief".to_string(),
+                Some(InputValue::Text("Tidy".to_string()))
+            ),
+            (
+                "mode".to_string(),
+                Some(InputValue::Text("fast".to_string()))
+            ),
+        ]
+    );
+    lifecycle.cancel(&run).unwrap();
+
+    // An unknown project and a start with no workflow named are refused first.
+    let refusal = world
+        .start(&mut lifecycle, StartRequest::project("nowhere"))
+        .unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::UnknownProject);
+    let refusal = world
+        .start(&mut lifecycle, StartRequest::project(GROUP))
+        .unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::UnknownWorkflow);
+}
+
+#[test]
+fn a_dispatcher_is_never_started_as_a_run() {
+    let world = World::new();
+    let dir = world.profile().join("lanes");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join(DEFINITION_FILE),
+        "schema = 1\nname = \"lanes\"\ndispatcher = true\n",
+    )
+    .unwrap();
+    let mut lifecycle = world.lifecycle();
+    let refusal = world
+        .start(&mut lifecycle, with_workflow("lanes"))
+        .unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::Unsupported, "{refusal}");
+    assert!(lifecycle.all_runs().is_empty());
+}
+
+/// The lanes' dispatcher starts as a project run, the one way a dispatcher runs.
+#[test]
+fn a_dispatcher_starts_as_a_project_run_but_not_as_a_task_run() {
+    let world = World::new();
+    let dir = world.profile().join("lanes");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join(DEFINITION_FILE),
+        "schema = 1\nname = \"lanes\"\ndispatcher = true\n",
+    )
+    .unwrap();
+    let mut lifecycle = world.lifecycle();
+    let refusal = world
+        .start(&mut lifecycle, with_workflow("lanes"))
+        .unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::Unsupported, "{refusal}");
+    assert!(lifecycle.all_runs().is_empty());
+
+    let run = world
+        .start(&mut lifecycle, project_request("lanes"))
+        .unwrap();
+    assert_eq!(lifecycle.all_runs(), vec![run.clone()]);
+    let record = lifecycle.record(&run).unwrap();
+    assert_eq!(record.workflow, "lanes");
+    assert_eq!(
+        record.subject,
+        RunSubject::Project {
+            id: GROUP.to_string()
+        }
+    );
+}
+
+#[test]
+fn the_active_runs_on_disk_name_each_task_with_a_run_that_holds_it() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    assert!(active_runs_on_disk(&world.tree).is_empty());
+    let run = world
+        .start(&mut lifecycle, with_workflow("single"))
+        .unwrap();
+    assert_eq!(
+        active_runs_on_disk(&world.tree),
+        BTreeMap::from([(LEAF.to_string(), run.clone())])
+    );
+    lifecycle.cancel(&run).unwrap();
+    assert!(active_runs_on_disk(&world.tree).is_empty());
+}
+
+fn build_lane() -> Option<LaneRef> {
+    Some(LaneRef {
+        id: "build-1".to_string(),
+        kind: "build".to_string(),
+    })
+}
+
+#[test]
+fn a_task_run_in_a_lane_tree_works_there_and_keeps_its_run_directory_across_a_reload() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    let tree = world.root.join("lane-build-1");
+    fs::create_dir_all(&tree).unwrap();
+    let request = StartRequest {
+        lane: build_lane(),
+        started_by: StartedBy::Lane,
+        tree: RunTree::Lane {
+            path: tree.clone(),
+            common_dir: None,
+            base: None,
+            start: None,
+            merge_into: None,
+        },
+        ..with_workflow("single")
+    };
+    let run = world.start(&mut lifecycle, request).unwrap();
+    let binding = lifecycle.binding(&run).unwrap();
+    assert_eq!(binding.worktree.path, tree);
+    assert_ne!(binding.worktree.run_dir, tree);
+    assert!(!binding.worktree.run_dir.starts_with(&tree));
+    let text = fs::read_to_string(lifecycle.run_dir(&run).unwrap().join("run.toml")).unwrap();
+    let record = RunToml::parse(&text).unwrap();
+    assert_eq!(
+        record.tree,
+        Some(RunTreeRecord::Lane {
+            path: tree,
+            run_dir: binding.worktree.run_dir.clone(),
+        })
+    );
+
+    let mut reloaded = world.lifecycle();
+    reloaded.load_runs(&world.tree).unwrap();
+    let again = reloaded.binding(&run).unwrap();
+    assert_eq!(again.worktree, binding.worktree);
+}
+
+#[test]
+fn a_lane_tree_with_no_lane_is_a_bad_request() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    let request = StartRequest {
+        tree: RunTree::Lane {
+            path: world.root.join("lane"),
+            common_dir: None,
+            base: None,
+            start: None,
+            merge_into: None,
+        },
+        ..with_workflow("single")
+    };
+    let refusal = world.start(&mut lifecycle, request).unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::BadRequest, "{refusal}");
+    assert!(lifecycle.all_runs().is_empty());
+}
+
+#[test]
+fn a_lane_tree_with_a_start_or_a_task_run_on_a_snapshot_or_named_repository_is_refused() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    for tree in [
+        RunTree::Lane {
+            path: world.root.join("lane"),
+            common_dir: None,
+            base: None,
+            start: Some("main".to_string()),
+            merge_into: None,
+        },
+        RunTree::Snapshot {
+            path: world.root.join("snapshot"),
+        },
+        RunTree::Fresh {
+            repo: Some(world.root.join("repo")),
+            base: None,
+            merge_into: None,
+        },
+    ] {
+        let request = StartRequest {
+            tree,
+            lane: build_lane(),
+            ..with_workflow("single")
+        };
+        let refusal = world.start(&mut lifecycle, request).unwrap_err();
+        assert_eq!(refusal.kind, RefusalKind::Unsupported, "{refusal}");
+    }
+    assert!(lifecycle.all_runs().is_empty());
+}
+
+#[test]
+fn a_task_start_records_its_reserved_id_parent_lane_and_unattended_choice() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    let id = bongos_work_model::new_id();
+    let request = StartRequest {
+        run_id: Some(id.clone()),
+        parent: Some("parent-run".to_string()),
+        lane: Some(LaneRef {
+            id: "lane-1".to_string(),
+            kind: "build".to_string(),
+        }),
+        unattended: Some(UnattendedChoice {
+            value: true,
+            source: UnattendedSource::Lane,
+        }),
+        started_by: StartedBy::Lane,
+        ..with_workflow("single")
+    };
+    let run = world.start(&mut lifecycle, request.clone()).unwrap();
+    assert_eq!(run, id);
+    let text = fs::read_to_string(lifecycle.run_dir(&run).unwrap().join("run.toml")).unwrap();
+    let record = RunToml::parse(&text).unwrap();
+    assert_eq!(
+        record.subject,
+        RunSubject::Task {
+            id: LEAF.to_string()
+        }
+    );
+    assert_eq!(record.task_id, LEAF);
+    assert_eq!(record.parent.as_deref(), Some("parent-run"));
+    assert_eq!(record.lane, request.lane);
+    assert_eq!(record.unattended, request.unattended);
+    assert_eq!(record.started_by, StartedBy::Lane);
+    assert_eq!(record.todo.as_ref().unwrap().name, "implement");
+
+    // The reserved id is taken now, and an id that is no UUID v7 is refused.
+    for bad in [id, "not-a-uuid".to_string()] {
+        let request = StartRequest {
+            run_id: Some(bad),
+            ..with_workflow("single")
+        };
+        let refusal = world.start(&mut lifecycle, request).unwrap_err();
+        assert_eq!(refusal.kind, RefusalKind::BadRequest, "{refusal}");
+    }
+}
+
+#[test]
+fn a_definition_commit_the_layers_were_not_read_from_is_refused() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    let request = StartRequest {
+        definition_commit: Some(bongos_project_repo::CommitId("a".repeat(40))),
+        ..with_workflow("single")
+    };
+    let refusal = world.start(&mut lifecycle, request).unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::BadRequest, "{refusal}");
+    assert!(lifecycle.all_runs().is_empty());
+}
+
+// A take-back loads again only the runs its handover moved: a run another handover moved to
+// another process stays there, and a run loaded already is not loaded twice.
+#[test]
+fn load_new_runs_loads_only_the_named_runs_not_loaded_yet() {
+    let world = World::new();
+    let ours = seed(&world, "single", mid_node);
+    let moved_elsewhere = seed(&world, "single", mid_node);
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle
+        .load_new_runs(&world.tree, std::slice::from_ref(&ours))
+        .unwrap();
+    assert_eq!(report.loaded, vec![ours.clone()]);
+    assert_eq!(lifecycle.all_runs(), vec![ours.clone()]);
+
+    let report = lifecycle
+        .load_new_runs(&world.tree, std::slice::from_ref(&ours))
+        .unwrap();
+    assert!(report.loaded.is_empty(), "{report:?}");
+    assert!(lifecycle.state(&moved_elsewhere).is_none());
+}
+
+// While a project's writer moves, no run starts or restarts under its files; elsewhere, and once
+// the move ends, they do.
+#[test]
+fn no_run_starts_or_restarts_under_a_project_whose_writer_moves() {
+    let world = World::new();
+    let mut lifecycle = world.lifecycle();
+    let run = world
+        .start(&mut lifecycle, with_workflow("single"))
+        .unwrap();
+    finish_all(&mut lifecycle);
+    let files = world.root.join("work");
+
+    lifecycle.refuse_starts_under(&world.root.join("elsewhere"), true);
+    lifecycle.refuse_starts_under(&files, true);
+    let refusal = lifecycle.restart(&run, &world.dirs, None).unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::Held);
+    let refusal = world
+        .start(&mut lifecycle, with_workflow("single"))
+        .unwrap_err();
+    assert_eq!(refusal.kind, RefusalKind::Held);
+    assert_eq!(lifecycle.all_runs(), vec![run.clone()]);
+
+    lifecycle.refuse_starts_under(&files, false);
+    let started = world
+        .start(&mut lifecycle, with_workflow("single"))
+        .unwrap();
+    assert_ne!(started, run);
+}

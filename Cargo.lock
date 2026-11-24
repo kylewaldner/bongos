@@ -2051,16 +2051,20 @@ dependencies = [
  "bongos_chat",
  "bongos_chat_model",
  "bongos_checks",
+ "bongos_confine",
  "bongos_emacs",
+ "bongos_engine_host",
  "bongos_extensions",
  "bongos_isearch",
  "bongos_java",
  "bongos_kotlin",
+ "bongos_lanes",
  "bongos_language_status",
  "bongos_languages",
  "bongos_linear",
  "bongos_minibuffer",
  "bongos_net",
+ "bongos_project_repo",
  "bongos_prompts",
  "bongos_query_replace",
  "bongos_terraform",
@@ -2356,6 +2360,7 @@ dependencies = [
  "anyhow",
  "async-task",
  "bongos_checks_model",
+ "bongos_confine",
  "bongos_project_repo",
  "bongos_project_repo_model",
  "bongos_work",
@@ -2372,6 +2377,7 @@ dependencies = [
  "project",
  "regex",
  "release_channel",
+ "sandbox",
  "semver",
  "serde",
  "serde_json",
@@ -2400,6 +2406,25 @@ dependencies = [
  "sha2",
  "thiserror 2.0.17",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "bongos_confine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures 0.3.32",
+ "git",
+ "gpui",
+ "libc",
+ "log",
+ "paths",
+ "sandbox",
+ "smol",
+ "tempfile",
+ "text",
+ "thiserror 2.0.17",
+ "util",
 ]
 
 [[package]]
@@ -2438,6 +2463,35 @@ dependencies = [
  "serde",
  "serde_json",
  "unicode-width",
+]
+
+[[package]]
+name = "bongos_engine_host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bongos_checks",
+ "bongos_project_repo",
+ "bongos_project_repo_model",
+ "bongos_version",
+ "bongos_work",
+ "bongos_work_model",
+ "bongos_workflow",
+ "bongos_workflow_model",
+ "chrono",
+ "futures 0.3.32",
+ "gpui",
+ "libc",
+ "log",
+ "parking_lot",
+ "paths",
+ "serde",
+ "serde_json",
+ "settings",
+ "sha2",
+ "tempfile",
+ "toml 0.8.23",
+ "util",
 ]
 
 [[package]]
@@ -2588,6 +2642,60 @@ dependencies = [
 ]
 
 [[package]]
+name = "bongos_lanes"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bongos_checks",
+ "bongos_confine",
+ "bongos_emacs",
+ "bongos_engine_host",
+ "bongos_lanes_model",
+ "bongos_project_repo",
+ "bongos_project_repo_model",
+ "bongos_work",
+ "bongos_work_model",
+ "bongos_workflow",
+ "bongos_workflow_model",
+ "chrono",
+ "command_palette_hooks",
+ "editor",
+ "fs",
+ "futures 0.3.32",
+ "gpui",
+ "language",
+ "log",
+ "menu",
+ "project",
+ "release_channel",
+ "semver",
+ "serde",
+ "serde_json",
+ "settings",
+ "smol",
+ "tempfile",
+ "thiserror 2.0.17",
+ "toml 0.8.23",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
+name = "bongos_lanes_model"
+version = "0.1.0"
+dependencies = [
+ "bongos_work_model",
+ "bongos_workflow_model",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.17",
+ "toml 0.8.23",
+ "toml_edit 0.22.27",
+]
+
+[[package]]
 name = "bongos_language_status"
 version = "0.1.0"
 dependencies = [
@@ -2728,6 +2836,7 @@ name = "bongos_project_repo"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bongos_confine",
  "bongos_project_repo_model",
  "bongos_work_model",
  "chrono",
@@ -2980,6 +3089,7 @@ dependencies = [
  "anyhow",
  "bongos_builder_model",
  "bongos_chat",
+ "bongos_confine",
  "bongos_minibuffer",
  "bongos_project_repo",
  "bongos_project_repo_model",
@@ -2988,6 +3098,7 @@ dependencies = [
  "bongos_workflow_model",
  "chrono",
  "command_palette_hooks",
+ "ctor",
  "editor",
  "fs",
  "futures 0.3.32",
@@ -3001,6 +3112,7 @@ dependencies = [
  "release_channel",
  "sandbox",
  "semver",
+ "serde",
  "serde_json",
  "settings",
  "sysinfo 0.37.2",
@@ -3595,6 +3707,7 @@ dependencies = [
  "anyhow",
  "askpass",
  "bongos_version",
+ "chrono",
  "clap",
  "clap_complete",
  "clap_complete_nushell",
@@ -3606,6 +3719,7 @@ dependencies = [
  "exec",
  "fork",
  "ipc-channel",
+ "libc",
  "parking_lot",
  "paths",
  "plist",
@@ -3613,7 +3727,10 @@ dependencies = [
  "release_channel",
  "serde",
  "serde_json",
+ "serde_json_lenient",
+ "sha2",
  "tempfile",
+ "toml 0.8.23",
  "util",
  "walkdir",
  "windows 0.61.3",
@@ -6960,6 +7077,7 @@ dependencies = [
  "http_client",
  "itertools 0.14.0",
  "log",
+ "nix 0.29.0",
  "parking_lot",
  "pretty_assertions",
  "rand 0.9.4",
@@ -14997,6 +15115,7 @@ dependencies = [
  "agent_skills",
  "anyhow",
  "audio",
+ "bongos_confine",
  "bongos_linear",
  "bongos_work",
  "cloud_api_types",

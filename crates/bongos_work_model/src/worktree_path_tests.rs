@@ -405,3 +405,37 @@ fn the_too_long_message_names_path_and_setting() {
         "{message}"
     );
 }
+
+#[test]
+fn the_fixed_root_stops_before_the_first_token() {
+    let root =
+        |template: &str| fixed_root(template, Path::new(REPOSITORY), Path::new(HOME)).unwrap();
+    assert_eq!(
+        root("/mnt/fast/wt/{repo}/{slug}"),
+        PathBuf::from("/mnt/fast/wt")
+    );
+    assert_eq!(
+        root("/mnt/fast/wt-{repo}/{slug}"),
+        PathBuf::from("/mnt/fast")
+    );
+    assert_eq!(root("/mnt/fast/wt"), PathBuf::from("/mnt/fast/wt"));
+    assert_eq!(root("/mnt/fast/wt/"), PathBuf::from("/mnt/fast/wt"));
+    assert_eq!(root("~/trees/{slug}"), PathBuf::from("/home/ada/trees"));
+    assert_eq!(root("~"), PathBuf::from("/home/ada"));
+    assert_eq!(root("trees/{repo}"), PathBuf::from("/home/ada/code/trees"));
+    assert_eq!(root("{repo}-trees"), PathBuf::from("/home/ada/code"));
+}
+
+#[test]
+fn only_settings_sources_fall_back() {
+    assert!(Source::Own.falls_back());
+    assert!(Source::Default.falls_back());
+    assert!(Source::Central.falls_back());
+    assert!(!Source::Project.falls_back());
+    assert!(!Source::Lane.falls_back());
+    let profile = Source::Profile {
+        name: "fast-disk".to_string(),
+    };
+    assert!(!profile.falls_back());
+    assert_eq!(profile.label(), "from project profile fast-disk");
+}

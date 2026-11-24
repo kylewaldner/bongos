@@ -11,10 +11,12 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::env::EnvEdit;
 use crate::failure::Failure;
 use crate::inputs::InputValue;
 
@@ -150,6 +152,10 @@ pub enum Event {
         elapsed_ms: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
+        /// The writes a confined agent step's sandbox refused, each as the annotation naming
+        /// the rule. Absent in older logs and for an unconfined try.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        confinement_refusals: Vec<String>,
     },
     GateOpened {
         key: NodeKey,
@@ -201,6 +207,17 @@ pub enum Event {
         failure: Option<Failure>,
     },
     Cancelled,
+    /// The app handed the run to the app process `to_pid` after a drain. Informational: replay
+    /// judges an interruption over the events before it exactly as it would without it, so a run
+    /// with a started key and no finish still comes back interrupted.
+    HandedOver {
+        to_pid: u32,
+    },
+    /// A drain stopped the check of the checks key `key`. The key no longer runs and is not
+    /// interrupted: the run continues from its checkpoint by starting the key again.
+    ChecksDrained {
+        key: NodeKey,
+    },
 }
 
 impl Event {
@@ -317,12 +334,70 @@ pub enum StartedBy {
     Healer,
     /// A landing check of a project repository started it.
     Landing,
+    /// A lane started it.
+    Lane,
+    /// It was started from the shell.
+    Host,
+}
+
+impl StartedBy {
+    /// Whether the run counts toward `workflows.max_concurrent_runs`: every run but a lane's or a
+    /// landing check's, which start whatever the hand-started runs hold.
+    pub fn counts_toward_run_limit(self) -> bool {
+        !matches!(self, Self::Lane | Self::Landing)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TodoRef {
     pub index: usize,
     pub name: String,
+}
+
+/// What a run works on: a task, or a whole project (a run with no task).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RunSubject {
+    Task { id: String },
+    Project { id: String },
+}
+
+impl RunSubject {
+    /// The task id, `None` for a project subject.
+    pub fn task_id(&self) -> Option<&str> {
+        match self {
+            Self::Task { id } => Some(id),
+            Self::Project { .. } => None,
+        }
+    }
+
+    /// The value `run.toml` mirrors in `task_id` for older readers: the task id, or empty.
+    pub fn task_id_mirror(&self) -> String {
+        self.task_id().unwrap_or_default().to_string()
+    }
+}
+
+/// The lane a run belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LaneRef {
+    pub id: String,
+    pub kind: String,
+}
+
+/// Where an unattended choice came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnattendedSource {
+    Start,
+    Lane,
+    Project,
+}
+
+/// Whether a run runs unattended, and who decided it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct UnattendedChoice {
+    pub value: bool,
+    pub source: UnattendedSource,
 }
 
 /// A resolved input as `run.toml` keeps it. A value that was missing is not written.
@@ -347,6 +422,11 @@ pub struct Attempt {
     pub definition_commit: Option<String>,
     pub worktree: String,
     pub branch: String,
+    /// The run worktree's linked git directory, read when the worktree was made, which host git
+    /// names explicitly instead of discovering one from the tree. `None` for records older than
+    /// the field; the lifecycle fills it in when it loads such a record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_dir: Option<String>,
     /// `workflows.loop_bound` as it was when the attempt began: the passes of a loop whose route
     /// sets no `max_passes`. A relaunch keeps it; `None` for records older than the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -356,6 +436,7 @@ pub struct Attempt {
 /// `runs/<run id>/run.toml`: the run's identity, written at create and when an attempt is added.
 /// Times are RFC 3339 strings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "RunTomlFile")]
 pub struct RunToml {
     pub schema: u32,
     /// A UUID v7 ([`is_uuid_v7`]).
@@ -363,14 +444,127 @@ pub struct RunToml {
     pub workflow: String,
     /// `shipped`, `profile` or `project`.
     pub layer: String,
+    /// What the run works on. Authoritative: a record older than the field reads as the task of
+    /// `task_id`.
+    pub subject: RunSubject,
+    /// A mirror of `subject` for older readers: the task id, or empty for a project subject.
     pub task_id: String,
     pub created: String,
     pub started_by: StartedBy,
-    pub todo: TodoRef,
+    /// The run that started this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<LaneRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unattended: Option<UnattendedChoice>,
+    /// The tree the run works in when it is not the task's own run worktree; `None` for a task
+    /// run, as records older than the field read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<RunTreeRecord>,
+    /// The definitions an agent of a project-subject run is pointed at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definitions: Option<PathBuf>,
+    /// Edits to the environment of the run's nodes, applied in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<EnvEdit>,
+    /// The named directories of the run's lane, by name: in the nodes' environment and writable
+    /// by its programs.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub lane_dirs: BTreeMap<String, PathBuf>,
+    /// The todo the run completes; `None` for a project subject.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todo: Option<TodoRef>,
     #[serde(default)]
     pub inputs: Vec<RecordedInput>,
     #[serde(default)]
     pub attempts: Vec<Attempt>,
+}
+
+/// The tree a run works in, as `run.toml` keeps it when it is not the task's own run worktree.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RunTreeRecord {
+    /// A run worktree of the repository `repo`, on a run branch made from `base`; the success end
+    /// merges the run branch into `merge_into` when it is set.
+    Repository {
+        repo: PathBuf,
+        base: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        merge_into: Option<String>,
+    },
+    /// A materialized tree at `path` the run reads and never writes.
+    Snapshot { path: PathBuf },
+    /// The run's own work directory in its project's files folder, `work/<run id>`: no
+    /// repository, no branch, nothing merged.
+    Work,
+    /// A lane's persistent tree at `path`, which the lane put on the run branch of the first
+    /// attempt before the start; `run_dir` holds that attempt's fan-out worktrees and scratch. A
+    /// later attempt runs in a fresh run worktree, as any task run does.
+    Lane { path: PathBuf, run_dir: PathBuf },
+}
+
+/// `run.toml` as written, where `subject` may be missing (records older than the field).
+#[derive(Deserialize)]
+struct RunTomlFile {
+    schema: u32,
+    id: String,
+    workflow: String,
+    layer: String,
+    #[serde(default)]
+    subject: Option<RunSubject>,
+    #[serde(default)]
+    task_id: String,
+    created: String,
+    started_by: StartedBy,
+    #[serde(default)]
+    parent: Option<String>,
+    #[serde(default)]
+    lane: Option<LaneRef>,
+    #[serde(default)]
+    unattended: Option<UnattendedChoice>,
+    #[serde(default)]
+    tree: Option<RunTreeRecord>,
+    #[serde(default)]
+    definitions: Option<PathBuf>,
+    #[serde(default)]
+    env: Vec<EnvEdit>,
+    #[serde(default)]
+    lane_dirs: BTreeMap<String, PathBuf>,
+    #[serde(default)]
+    todo: Option<TodoRef>,
+    #[serde(default)]
+    inputs: Vec<RecordedInput>,
+    #[serde(default)]
+    attempts: Vec<Attempt>,
+}
+
+impl From<RunTomlFile> for RunToml {
+    fn from(file: RunTomlFile) -> Self {
+        let subject = file.subject.unwrap_or_else(|| RunSubject::Task {
+            id: file.task_id.clone(),
+        });
+        Self {
+            schema: file.schema,
+            id: file.id,
+            workflow: file.workflow,
+            layer: file.layer,
+            task_id: subject.task_id_mirror(),
+            subject,
+            created: file.created,
+            started_by: file.started_by,
+            parent: file.parent,
+            lane: file.lane,
+            unattended: file.unattended,
+            tree: file.tree,
+            definitions: file.definitions,
+            env: file.env,
+            lane_dirs: file.lane_dirs,
+            todo: file.todo,
+            inputs: file.inputs,
+            attempts: file.attempts,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -683,6 +877,7 @@ fn apply(state: &mut RunState, event: &Event) {
             turns,
             elapsed_ms,
             session_id,
+            confinement_refusals: _,
         } => {
             let had_start = match state.running.get(key) {
                 Some(running) if running.try_number == *try_number => {
@@ -771,5 +966,9 @@ fn apply(state: &mut RunState, event: &Event) {
             state.ended = Some((*end, failure.clone()));
         }
         Event::Cancelled => state.cancelled = true,
+        Event::HandedOver { .. } => {}
+        Event::ChecksDrained { key } => {
+            state.running.remove(key);
+        }
     }
 }

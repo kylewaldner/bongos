@@ -632,6 +632,7 @@ fn a_revised_gate_reruns_the_node() {
             turns: None,
             elapsed_ms: 0,
             session_id: None,
+            confinement_refusals: Vec::new(),
         },
         Event::GateOpened {
             key: review.clone(),
@@ -666,6 +667,7 @@ fn finished(key: &NodeKey, result: Value) -> Event {
         turns: None,
         elapsed_ms: 0,
         session_id: None,
+        confinement_refusals: Vec::new(),
     }
 }
 
@@ -1090,6 +1092,7 @@ kind = "success"
             turns: None,
             elapsed_ms: 0,
             session_id: None,
+            confinement_refusals: Vec::new(),
         },
     ];
     let commands = step(&definition, &replay(&events), &Limits::default(), 0);
@@ -1196,4 +1199,16 @@ fn a_cycle_reached_by_a_cross_edge_is_bounded_by_the_loop_bound() {
         failure.detail
     );
     assert_eq!(run.starts_of("a"), 2);
+}
+
+#[test]
+fn the_scheduler_never_drives_a_dispatcher() {
+    let dispatcher = definition("schema = 1\nname = \"lanes\"\ndispatcher = true\n");
+    let state = replay(&[Event::Created, Event::Queued]);
+    assert_eq!(step(&dispatcher, &state, &Limits::default(), 4), Vec::new());
+    assert!(
+        plan(&dispatcher, &state, &Limits::default())
+            .ready
+            .is_empty()
+    );
 }

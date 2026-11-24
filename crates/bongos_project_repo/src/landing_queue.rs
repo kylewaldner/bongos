@@ -145,6 +145,9 @@ pub(crate) struct Engine {
     pub(crate) last_events: Mutex<std::collections::HashMap<String, crate::LandingEvent>>,
     /// The changes a `land` or `check` of this process is working on.
     pub(crate) landing: Mutex<std::collections::HashMap<String, crate::landing::LandMode>>,
+    /// The quick edits of this process made and not yet through their landing: from before
+    /// their row is written until `land_quick_edit` returns.
+    pub(crate) quick_edits_to_land: Mutex<std::collections::HashSet<String>>,
     /// The timer of the deadlines; the real one unless a test set its own.
     pub(crate) timer: Mutex<Option<Timer>>,
     /// Snapshots, pushes, thinning and the run record copy.

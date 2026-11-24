@@ -1,6 +1,10 @@
 //! Static provenance for bongos: its own version and the Zed release it was forked from.
 //! Nothing here is compared with anything remote.
 
+/// Wire-format version of the engine host protocol, shared by the CLI and the app's engine
+/// host. Bump it on every change to the engine host's wire format. Dev builds embed no commit
+/// sha, so this is what lets them still detect a stale CLI.
+pub const ENGINE_HOST_PROTOCOL: u32 = 1;
 /// The bongos version. The app's `AppVersion` stays at the Zed base version on purpose.
 pub const VERSION: &str = "0.1.0";
 /// The Zed tag bongos was forked from.

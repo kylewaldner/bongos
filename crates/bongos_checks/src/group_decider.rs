@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use bongos_checks_model::evidence::{Current, StartedBy, satisfied};
 use bongos_checks_model::{Row, effective_set};
-use bongos_project_repo::{Git, ProjectRepo, StateRead, StateWriter};
+use bongos_project_repo::{ProjectRepo, StateRead, StateWriter};
 use bongos_project_repo_model::DefinitionTree;
 use futures::FutureExt as _;
 use futures::channel::oneshot;
@@ -61,6 +61,7 @@ use crate::owed::{LastChild, LastRow, OwedMarker, last_row_in, put_last, uses_un
 use crate::process::StopHandle;
 use crate::retained::{KeptTree, delete_ref, has_tree, keep_trees, kept_tree, list_refs};
 use crate::settings::TaskChecksSettings;
+use crate::task_git::TaskGit;
 use crate::task_source::{TREE_KEYS_FOLDER, TaskChecks};
 use crate::trees::{EnvBase, SecondTree, SecondTreeLease, TaskTreesRegistry};
 
@@ -215,7 +216,7 @@ async fn compute_child_key(
     };
     let mut keys = TreeKeys::default();
     let key = match keys
-        .key(task.project.git(), &task.index_dir, &repo_trees)
+        .key(&TaskGit::of_task(&task), &task.index_dir, &repo_trees)
         .await
     {
         Ok(key) => key,
@@ -236,7 +237,7 @@ async fn compute_child_key(
     Ok(Computed::Key { key, trees })
 }
 
-async fn keep(git: &Git, task_id: &str, trees: &[(String, PathBuf, String)]) {
+async fn keep(git: &TaskGit, task_id: &str, trees: &[(String, PathBuf, String)]) {
     let kept: Vec<KeptTree> = trees
         .iter()
         .map(|(repo, directory, tree)| KeptTree {
@@ -308,9 +309,7 @@ pub(crate) async fn fill_last_keys(
                     Some(this.update(cx, |engine, _| (engine.now)())?)
                 };
                 let git = this.update(cx, |engine, cx| {
-                    engine
-                        .task(&row.id, cx)
-                        .map(|task| task.project.git().clone())
+                    engine.task(&row.id, cx).map(|task| TaskGit::of_task(&task))
                 })?;
                 if let Some(git) = git {
                     keep(&git, &row.id, &trees).await;
@@ -405,7 +404,7 @@ fn child_key(
 /// several are read from `leaf`'s refs. Each repository's object store must hold its tree. `None`
 /// when the tree is gone.
 async fn recorded_trees(
-    git: &Git,
+    git: &TaskGit,
     key: &str,
     leaf: &str,
     own: &str,
@@ -542,7 +541,7 @@ pub(crate) async fn decide_group(
         })?;
         return Ok(());
     };
-    let git = group_task.project.git().clone();
+    let git = TaskGit::of_task(&group_task);
 
     // The last child's tree key; computed now, on the tree as found, when there is none.
     let mut found = child_key(&snapshot, &pinned.tree, group_id, &last, 0);
@@ -596,13 +595,16 @@ pub(crate) async fn decide_group(
         .and_then(|task| task.repo.clone())
         .unwrap_or_default();
     let repos = repos_of(&rows, &own);
-    let directories = this.update(cx, |engine, cx| {
+    let (directories, primaries) = this.update(cx, |engine, cx| {
         let mut directories = BTreeMap::new();
+        let mut primaries = Vec::new();
         let leaf_tree = leaf_task
             .as_ref()
             .and_then(|task| engine.task_tree(task, cx));
         for repo in &repos {
-            let directory = engine.source.code_repository(repo, cx).or_else(|| {
+            let primary = engine.source.code_repository(repo, cx);
+            primaries.extend(primary.clone());
+            let directory = primary.or_else(|| {
                 (repo == &own)
                     .then(|| leaf_tree.as_ref().map(|tree| tree.path.clone()))
                     .flatten()
@@ -611,8 +613,9 @@ pub(crate) async fn decide_group(
                 directories.insert(repo.clone(), directory);
             }
         }
-        directories
+        (directories, primaries)
     })?;
+    let git = git.with_primaries(primaries);
     let Some(recorded) = recorded_trees(&git, &key, &found.leaf, &own, &repos, &directories).await
     else {
         return write_hold(this, hold(with_note(tree_gone(&leaf_name))), cx);
@@ -841,7 +844,7 @@ impl ChecksEngine {
         let names: Vec<String> = checks.into_iter().map(|(name, _, _)| name).collect();
         let scratch = TaskChecksSettings::get_global(cx).scratch_folder();
         let index_dir = scratch.join(TREE_KEYS_FOLDER);
-        let git = group.project.git().clone();
+        let git = TaskGit::of_task(&group);
         let project = project.to_string();
         let leaf = leaf.to_string();
         // A lent tree is used only apart from every tree a person or a lane works in: the
@@ -1085,7 +1088,8 @@ pub(crate) async fn clean_refs(
         .keys()
         .chain(snapshot.last.values().map(|row| &row.id))
         .collect();
-    let git = repo.git();
+    let git = TaskGit::of(repo).with_primaries(directories.iter().cloned());
+    let git = &git;
     for directory in directories {
         let refs = match list_refs(git, &directory).await {
             Ok(refs) => refs,

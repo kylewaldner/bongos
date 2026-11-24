@@ -521,6 +521,7 @@ mod imp {
                 NetworkAccess::All => SandboxNetPolicy::Unrestricted,
             },
             git: GitSandboxPolicy::default(),
+            read_only_masks: Vec::new(),
         };
         let command = CommandAndArgs {
             program: program.to_string(),

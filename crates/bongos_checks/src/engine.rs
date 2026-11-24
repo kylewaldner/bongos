@@ -40,7 +40,7 @@ use bongos_checks_model::evidence::{
 use bongos_checks_model::section::{Live, TaskSection, TreeState, section};
 use bongos_checks_model::verdict::{NoVerdictReason, Verdict};
 use bongos_checks_model::{Applicability, Row};
-use bongos_project_repo::{Git, MAIN_BRANCH, StateWriter};
+use bongos_project_repo::{MAIN_BRANCH, StateWriter};
 use bongos_workflow::RunId;
 use bongos_workflow_model::NodeKey;
 use futures::StreamExt as _;
@@ -61,6 +61,7 @@ use crate::pools::{CheckClock, CheckPoolsRegistry, ExecutorClock};
 use crate::process::StopHandle;
 use crate::run::{CheckRun, LiveState, Now, RunTree};
 use crate::settings::TaskChecksSettings;
+use crate::task_git::TaskGit;
 use crate::task_source::{TREE_KEYS_FOLDER, TaskChecks, TaskSource, WorkTaskSource};
 use crate::task_tree::{RunWorktrees, TaskTree, WorkflowRunWorktrees, resolve_task_tree};
 use crate::tree_key::{key_inputs_digest, trees_key};
@@ -279,7 +280,7 @@ impl RecordedTrees {
     /// digest of `key_inputs` read from the first tree.
     pub(crate) async fn state(
         &self,
-        git: &Git,
+        git: &TaskGit,
         repos: &[String],
         key_inputs: &[String],
     ) -> Result<(Vec<&RecordedTree>, String, String), NoVerdictReason> {
@@ -421,7 +422,14 @@ pub struct ChecksEngine {
     pub(crate) next_landing: u64,
     /// Receives the jobs of landing checks while the engine lives.
     pub(crate) landing_jobs: Option<Task<()>>,
+    /// The workflow checks keys in flight, read from each [`crate::workflow_node::ChecksNode`]
+    /// over this engine: whether their checks run, or they wait (for the next repeat, behind
+    /// another run of the task, or for the drain to end). A drain names them all.
+    pub(crate) node_tries: Vec<NodeTries>,
 }
+
+/// Reads the `(run, key)` of a checks node's tries in flight.
+pub(crate) type NodeTries = Rc<dyn Fn() -> Vec<(RunId, NodeKey)>>;
 
 impl EventEmitter<ChecksEvent> for ChecksEngine {}
 
@@ -453,6 +461,7 @@ impl ChecksEngine {
             landing: BTreeMap::new(),
             next_landing: 0,
             landing_jobs: None,
+            node_tries: Vec::new(),
         }
     }
 
@@ -812,7 +821,10 @@ impl ChecksEngine {
     ///
     /// Resolves once every run has ended, or once the grace has passed on the engine's clock,
     /// whichever comes first, with the workflow nodes whose runs it stopped (none for manual
-    /// runs). Every landing check that runs is stopped too and answered no verdict, "the engine
+    /// runs) and every other workflow checks key in flight then: one waiting for its next
+    /// repeat, behind another run of its task, or to start while drained. Each such key is
+    /// taken over by whoever drained (its try stops once the run records `ChecksDrained`), so a
+    /// waiting checks key never holds the drain of the workflow runs. Every landing check that runs is stopped too and answered no verdict, "the engine
     /// is moving to the host", once its process has ended (so the landing keeps its trees until
     /// then), and a landing job that arrives while drained is answered so at once; the landing
     /// tries again later.
@@ -861,6 +873,7 @@ impl ChecksEngine {
             TaskChecksSettings::get_global(cx).kill_grace_seconds,
         ));
         let bound = self.clock.sleep(grace);
+        let node_tries = self.node_tries.clone();
         cx.spawn(async move |_, _| {
             if let Some(ended) = ended {
                 let mut ended = ended.fuse();
@@ -873,14 +886,25 @@ impl ChecksEngine {
             for leases in leases {
                 leases.borrow_mut().clear();
             }
+            // Read now, once the runs stopped: a stopped node's try waits again to start, and
+            // a key that finished meanwhile is reported as usual, so it is not named.
+            for tries in &node_tries {
+                for node in tries() {
+                    if !stopped.contains(&node) {
+                        stopped.push(node);
+                    }
+                }
+            }
             stopped
         })
     }
 
     /// Removes the temporary base trees a crash left in the scratch folder: every one whose
-    /// owner process is gone. Resolves with the trees removed. `git` runs the removals.
-    pub fn sweep_scratch(&self, git: Git, cx: &mut Context<Self>) -> Task<Vec<PathBuf>> {
+    /// owner process is gone. Resolves with the trees removed. `git` runs the removals, trusting
+    /// the temporary trees that are linked worktrees of the configured code repositories.
+    pub fn sweep_scratch(&self, git: TaskGit, cx: &mut Context<Self>) -> Task<Vec<PathBuf>> {
         let scratch = TaskChecksSettings::get_global(cx).scratch_folder();
+        let git = git.with_trusted_repositories(self.source.code_repositories(cx));
         cx.background_spawn(async move {
             let index_dir = scratch.join(TREE_KEYS_FOLDER);
             sweep_scratch(&git, &scratch, &index_dir).await
@@ -1312,7 +1336,7 @@ pub(crate) fn repo_trees(
 
 /// The key of `trees`: one tree's own key, or the digest of the sorted (repository, key) pairs.
 pub(crate) async fn key_of(
-    git: &Git,
+    git: &TaskGit,
     trees: &[RepoTree],
     index_dir: &Path,
 ) -> Result<String, NoVerdictReason> {
@@ -1328,7 +1352,7 @@ pub(crate) async fn key_of(
 
 /// The merge-base of each tip's `HEAD` and the task's base branch, resolved now.
 async fn base_commits(
-    git: &Git,
+    git: &TaskGit,
     tips: &[RepoTree],
     branch: Option<&str>,
 ) -> Result<Vec<String>, String> {
@@ -1367,7 +1391,7 @@ async fn base_trees(
     leftovers: &mut Leftovers,
 ) -> Result<Vec<RepoTree>, NoVerdictReason> {
     let task = &plan.task;
-    let git = task.project.git();
+    let git = &TaskGit::of_task(&task);
     let mut protected: Vec<&Path> = tips.iter().map(|tip| tip.path.as_path()).collect();
     protected.push(plan.tree.path.as_path());
     protected.push(task.project.location().repository.as_path());
@@ -1505,7 +1529,7 @@ async fn prepare(
     let task = &plan.task;
     let decl = row.decl.clone();
     let digest = check_digest(&decl, pin)?;
-    let git = task.project.git().clone();
+    let git = TaskGit::of_task(&task);
     if let Some(recorded) = &plan.recorded {
         let (trees, key, key_inputs) = recorded
             .state(&git, &check_repos(task, &decl), &decl.key_inputs)
@@ -1604,7 +1628,7 @@ fn check_run(
         base,
         tree_key: key,
         key_inputs,
-        git: task.project.git().clone(),
+        git: TaskGit::of_task(&task),
         base_branch: task.base_branch.clone(),
         env: first.env,
         output_dir: task.output_dir.clone(),
@@ -1628,6 +1652,8 @@ fn check_run(
         })),
         #[cfg(test)]
         fail_part_end: None,
+        #[cfg(test)]
+        sandbox_probe: None,
     };
     Ok(check_run)
 }

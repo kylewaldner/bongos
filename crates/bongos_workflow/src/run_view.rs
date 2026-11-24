@@ -91,20 +91,24 @@ impl RunData {
     /// The data of `run`, or `None` when the engine does not know it.
     pub fn of(engine: &WorkflowEngine, run: &str, session_limit: usize) -> Option<Self> {
         let lifecycle = engine.lifecycle();
-        let state = lifecycle.state(run)?;
-        let definition = lifecycle.runtime().definition(run)?.clone();
-        let record = lifecycle.record(run)?;
+        let state = lifecycle.shown_state(run)?;
+        let definition = lifecycle.shown_definition(run)?.clone();
+        let record = lifecycle.shown_record(run)?;
         Some(Self {
             run: run.to_string(),
             workflow: record.workflow.clone(),
             layer: record.layer.clone(),
-            todo: record.todo.name.clone(),
+            todo: record
+                .todo
+                .as_ref()
+                .map(|todo| todo.name.clone())
+                .unwrap_or_default(),
             definition,
             state,
             worktree: lifecycle
-                .worktree(run)
+                .shown_worktree(run)
                 .map(|worktree| worktree.path.clone()),
-            attempt_dir: lifecycle.current_attempt_dir(run),
+            attempt_dir: lifecycle.shown_attempt_dir(run),
             session_limit,
             node_status: BTreeMap::new(),
         })
@@ -1242,8 +1246,8 @@ pub const NO_LOG: &str = "The run has no log yet";
 /// last try that started.
 fn log_target(engine: &WorkflowEngine, run: &str, selected: Option<&Selection>) -> Option<PathBuf> {
     let lifecycle = engine.lifecycle();
-    let state = lifecycle.state(run)?;
-    let attempt = lifecycle.current_attempt_dir(run)?;
+    let state = lifecycle.shown_state(run)?;
+    let attempt = lifecycle.shown_attempt_dir(run)?;
     let matches = |key: &NodeKey| {
         selected.is_none_or(|(node, branch)| &key.node == node && &key.branch == branch)
     };
@@ -1276,7 +1280,7 @@ pub(crate) fn register(workspace: &mut Workspace) {
     on_run::<workflow::OpenRunWorktree>(workspace, |engine, run, workspace, window, cx| {
         let path = engine
             .lifecycle()
-            .worktree(&run)
+            .shown_worktree(&run)
             .map(|worktree| worktree.path.clone());
         match path {
             Some(path) => open_worktree(path, window, cx),
@@ -1345,21 +1349,16 @@ fn show_diff(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    let (dir, task_branch, run_branch) = {
+    let (worktree, task_branch) = {
         let lifecycle = engine.lifecycle();
         (
+            lifecycle.shown_worktree(&run).cloned(),
             lifecycle
-                .worktree(&run)
-                .map(|worktree| worktree.path.clone()),
-            lifecycle
-                .task_checkout(&run)
+                .shown_task_checkout(&run)
                 .and_then(|checkout| checkout.branch.clone()),
-            lifecycle
-                .worktree(&run)
-                .map(|worktree| worktree.branch.clone()),
         )
     };
-    let (Some(dir), Some(task_branch), Some(run_branch)) = (dir, task_branch, run_branch) else {
+    let (Some(worktree), Some(task_branch)) = (worktree, task_branch) else {
         show_toast(
             workspace,
             "The run has no branch to compare with its task".to_string(),
@@ -1367,11 +1366,13 @@ fn show_diff(
         );
         return;
     };
-    let range = format!("{task_branch}...{run_branch}");
+    let range = format!("{task_branch}...{}", worktree.branch);
     let title = format!("Run diff {range}");
     let output = cx.background_spawn(async move {
+        // The run tree is job-written: git gets the recorded git directory and, from `SafeGit`,
+        // no external diff, text conversion or driver a job's config or attributes could name.
         Git::new("git")
-            .run(&dir, &["diff", "--no-color", &range])
+            .run_at(worktree.at(), &["diff", "--no-color", &range])
             .await
     });
     cx.spawn_in(window, async move |workspace, cx| {
