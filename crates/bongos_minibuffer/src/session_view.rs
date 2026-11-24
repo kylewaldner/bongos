@@ -49,6 +49,7 @@ impl SessionView {
         source: Source,
         initial_input: String,
         select_initial: bool,
+        initial_selection: Option<usize>,
         key_context: Option<KeyContext>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -70,6 +71,13 @@ impl SessionView {
             if select_initial {
                 picker.update(cx, |picker, cx| picker.select_query(window, cx));
             }
+        }
+        if let Some(index) = initial_selection {
+            picker.update(cx, |picker, _| {
+                picker
+                    .delegate
+                    .select_after_narrowing(index, !initial_input.is_empty())
+            });
         }
         picker.update(cx, |picker, cx| picker.delegate.highlight(window, cx));
         let dismiss = cx.subscribe(&picker, |_, _, _: &DismissEvent, cx| cx.emit(DismissEvent));
@@ -309,6 +317,19 @@ impl SessionDelegate {
         self.shown = Shown::All;
         self.keep_selection = Some(self.selected);
         true
+    }
+
+    /// The row to select: now when nothing narrows the list, else by the pass the input starts.
+    fn select_after_narrowing(&mut self, index: usize, narrowing: bool) {
+        if narrowing {
+            self.keep_selection = Some(index);
+        } else {
+            self.selected = index.min(self.len().saturating_sub(1));
+        }
+    }
+
+    pub(crate) fn selected_row(&self) -> usize {
+        self.selected
     }
 
     pub(crate) fn selected_value(&self) -> Option<Value> {

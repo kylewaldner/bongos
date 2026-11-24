@@ -3,7 +3,9 @@
 //!
 //! Highlighting a row previews the item in its own pane (see [`crate::preview`]) without
 //! activating anything. Confirming opens the pane's dock when the item sits in a closed one, then
-//! activates the item in the pane that holds it.
+//! activates the item in the pane that holds it. After the open items come the recently closed
+//! files, dimmed, which open through the default target. C-k kills the highlighted buffer (see
+//! [`crate::switcher_kill`]) and M-o opens the row in a chosen pane.
 
 use bongos_minibuffer::{
     Candidate, Outcome, Preview as SessionPreview, Session, SessionHandle, Source, Value,
@@ -13,9 +15,19 @@ use bongos_navigation_model::{
     rows::{PanePosition, pane_name},
 };
 use gpui::{App, AppContext as _, Axis, Context, Entity, EntityId, Window};
+use project::ProjectPath;
+use settings::Settings as _;
+use std::collections::HashSet;
 use workspace::{ItemHandle, Pane, Workspace, pane_group::Member};
 
+use crate::NavigationSettings;
+use crate::goto_file_open::{self, FileTarget};
 use crate::preview::{Preview, PreviewSession, PreviewTarget};
+use crate::switcher_kill::{self, Kept};
+use crate::target::{PaneChoice, add_pane_choices, resolve};
+
+/// How many recently closed files the switcher lists.
+const RECENT_CLOSED_LIMIT: usize = 50;
 
 /// The name the switcher's session is routed by.
 pub const HOST: &str = "switch_buffer";
@@ -30,11 +42,11 @@ pub(crate) struct SwitchTarget {
 }
 
 impl SwitchTarget {
-    fn from_value(value: &Value) -> Option<&Self> {
+    pub(crate) fn from_value(value: &Value) -> Option<&Self> {
         value.downcast_ref::<Self>()
     }
 
-    fn item_handle(&self, cx: &App) -> Option<Box<dyn ItemHandle>> {
+    pub(crate) fn item_handle(&self, cx: &App) -> Option<Box<dyn ItemHandle>> {
         self.pane
             .read(cx)
             .items()
@@ -58,45 +70,114 @@ pub(crate) fn start(
     window: &mut Window,
     cx: &mut App,
 ) -> Option<SessionHandle> {
+    start_with(workspace, None, window, cx)
+}
+
+/// Opens the switcher, with the input and selection a kill left behind when `kept` holds them.
+pub(crate) fn start_with(
+    workspace: &Entity<Workspace>,
+    kept: Option<Kept>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<SessionHandle> {
     let preview = cx.new(|cx| PreviewSession::new(workspace, cx));
     let candidates = candidates(workspace.read(cx), cx);
     let weak_workspace = workspace.downgrade();
-    let session = Session::completing_read(HOST, "Switch to buffer: ")
+    let preview_workspace = weak_workspace.clone();
+    let choice_workspace = weak_workspace.clone();
+    let session_preview = preview.clone();
+    let mut session = Session::completing_read(HOST, "Switch to buffer: ")
         .key_context(KEY_CONTEXT)
         .source(Source::Fixed(candidates))
         .on_preview(move |event, window, cx| {
             let event = match event {
-                SessionPreview::Highlight(value) => {
-                    let target = SwitchTarget::from_value(&value)
-                        .and_then(|target| Some((target.pane.clone(), target.item_handle(cx)?)));
-                    match target {
-                        Some((pane, item)) => {
-                            Preview::Highlight(PreviewTarget::Item { pane, item })
-                        }
-                        None => Preview::NoCandidate,
-                    }
-                }
+                SessionPreview::Highlight(value) => preview_target(&value, &preview_workspace, cx)
+                    .map_or(Preview::NoCandidate, Preview::Highlight),
                 SessionPreview::Confirmed => Preview::Confirmed,
                 SessionPreview::Cancelled => Preview::Cancelled,
             };
-            preview.update(cx, |preview, cx| preview.update(event, window, cx));
+            session_preview.update(cx, |preview, cx| preview.update(event, window, cx));
         })
         .on_confirm(move |outcome, window, cx| {
             let Outcome::Candidate(value) = outcome else {
                 return;
             };
-            let Some(target) = SwitchTarget::from_value(&value) else {
-                return;
-            };
             weak_workspace
                 .update(cx, |workspace, cx| {
-                    activate(workspace, &target.pane, target.item, window, cx)
+                    open_row(workspace, &value, &PaneChoice::Default, window, cx)
                 })
                 .ok();
         });
-    Some(workspace.update(cx, |workspace, cx| {
+    if let Some(kept) = kept {
+        session = session
+            .initial_input(kept.input)
+            .initial_selection(kept.selection);
+    }
+    let session = add_pane_choices(
+        session,
+        choice_workspace.clone(),
+        move |value, pane, window, cx| {
+            choice_workspace
+                .update(cx, |workspace, cx| {
+                    open_row(workspace, &value, &PaneChoice::Letter(pane), window, cx)
+                })
+                .ok();
+        },
+    );
+    let handle = workspace.update(cx, |workspace, cx| {
         bongos_minibuffer::open(workspace, session, window, cx)
-    }))
+    });
+    switcher_kill::register(cx, workspace, handle.clone(), preview);
+    Some(handle)
+}
+
+/// What a highlighted row previews: an open item in its own pane, a recently closed file in the
+/// pane the default target resolves to.
+fn preview_target(
+    value: &Value,
+    workspace: &gpui::WeakEntity<Workspace>,
+    cx: &App,
+) -> Option<PreviewTarget> {
+    if let Some(target) = SwitchTarget::from_value(value) {
+        return Some(PreviewTarget::Item {
+            pane: target.pane.clone(),
+            item: target.item_handle(cx)?,
+        });
+    }
+    let FileTarget::Project(path) = value.downcast_ref::<FileTarget>()? else {
+        return None;
+    };
+    let workspace = workspace.upgrade()?;
+    let pane = resolve(workspace.read(cx), &PaneChoice::Default, cx).preview_pane;
+    Some(PreviewTarget::Path {
+        path: path.clone(),
+        row: None,
+        ranges: Vec::new(),
+        pane,
+    })
+}
+
+/// Opens a row. An open item is activated where it is when `choice` is the default, and moved to
+/// the pane `choice` names otherwise, without closing any tab of the pane it leaves. A recently
+/// closed file opens in the pane `choice` realizes.
+fn open_row(
+    workspace: &mut Workspace,
+    value: &Value,
+    choice: &PaneChoice,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if let Some(target) = SwitchTarget::from_value(value) {
+        match choice {
+            PaneChoice::Letter(pane) if *pane != target.pane => {
+                workspace.move_item_keeping_pane(&target.pane, pane, target.item, true, window, cx);
+            }
+            PaneChoice::Letter(pane) => activate(workspace, pane, target.item, window, cx),
+            _ => activate(workspace, &target.pane, target.item, window, cx),
+        }
+    } else if let Some(target) = value.downcast_ref::<FileTarget>() {
+        goto_file_open::open(workspace, target, choice, window, cx);
+    }
 }
 
 /// Opens the dock of `pane` when it sits in a closed one, then activates the item in it.
@@ -120,7 +201,8 @@ fn activate(
     });
 }
 
-/// One row per item of every pane, previous item first and the current one last.
+/// One row per item of every pane, previous item first and the current one last, then the
+/// recently closed files when the setting asks for them.
 pub(crate) fn candidates(workspace: &Workspace, cx: &App) -> Vec<Candidate> {
     let current = workspace
         .active_pane()
@@ -150,11 +232,52 @@ pub(crate) fn candidates(workspace: &Workspace, cx: &App) -> Vec<Candidate> {
             rows.push((id, row(item.as_ref(), &pane, name, in_dock, cx)));
         }
     }
-    mru::order(stamps, current)
+    let mut rows: Vec<Candidate> = mru::order(stamps, current)
         .into_iter()
         .filter_map(|id| {
             let position = rows.iter().position(|(row_id, _)| *row_id == id)?;
             Some(rows.swap_remove(position).1)
+        })
+        .collect();
+    if NavigationSettings::get_global(cx).include_recent_closed {
+        rows.extend(recently_closed(workspace, cx));
+    }
+    rows
+}
+
+/// The files of the recent navigation history that no pane holds open, newest first and dimmed.
+fn recently_closed(workspace: &Workspace, cx: &App) -> Vec<Candidate> {
+    let open: HashSet<ProjectPath> = workspace
+        .item_panes(cx)
+        .iter()
+        .flat_map(|pane| {
+            pane.read(cx)
+                .items()
+                .flat_map(|item| item.project_paths(cx))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    workspace
+        .recent_navigation_history(None, cx)
+        .into_iter()
+        .filter(|(path, _)| !open.contains(path))
+        .take(RECENT_CLOSED_LIMIT)
+        .map(|(path, _)| {
+            let name = path
+                .path
+                .file_name()
+                .unwrap_or_else(|| path.path.as_unix_str())
+                .to_string();
+            let directory = path
+                .path
+                .parent()
+                .map(|parent| parent.as_unix_str().to_string())
+                .filter(|directory| !directory.is_empty());
+            let mut row = Candidate::new(name, FileTarget::Project(path)).kind("closed");
+            if let Some(directory) = directory {
+                row = row.secondary(directory);
+            }
+            row.dimmed()
         })
         .collect()
 }

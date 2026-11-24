@@ -171,6 +171,15 @@
       "ctrl-g": "query_replace::Abort",
     },
   },
+  // The buffer switcher (the `NavSwitcher` context of its session). Without `Minibuffer`, so the key
+  // also holds when the session opens centered. It is deeper than the Emacs `Editor` row (`ctrl-k`,
+  // kill line).
+  {
+    "context": "NavSwitcher > Editor",
+    "bindings": {
+      "ctrl-k": "navigation::KillBuffer",
+    },
+  },
   {
     "context": "ChatList",
     "bindings": {
