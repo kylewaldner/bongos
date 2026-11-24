@@ -779,3 +779,70 @@ async fn the_run_view_buttons_send_the_sandbox_verbs_through_a_remote(cx: &mut T
     assert_eq!(sent.borrow().len(), 3);
     cx.update(|_, cx| assert_eq!(cx.global::<LastToast>().0, "the host is gone"));
 }
+
+/// A remote that records the verb and run of every send.
+struct RunRecordingRemote {
+    sent: std::rc::Rc<std::cell::RefCell<Vec<(WorkflowVerb, Option<String>)>>>,
+}
+
+impl WorkflowRemote for RunRecordingRemote {
+    fn is_remote(&self, _: Option<&str>, _: &gpui::App) -> bool {
+        true
+    }
+
+    fn send(
+        &self,
+        verb: WorkflowVerb,
+        payload: WorkflowPayload,
+        _: &mut gpui::App,
+    ) -> gpui::Task<anyhow::Result<String>> {
+        self.sent.borrow_mut().push((verb, payload.run));
+        gpui::Task::ready(Ok("sent".to_string()))
+    }
+}
+
+#[gpui::test]
+async fn a_press_on_a_view_behind_another_answers_its_own_run(cx: &mut TestAppContext) {
+    let (env, cx) = env(cx, true).await;
+    let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    cx.update(|_, cx| {
+        InstalledWorkflowRemote::install(
+            std::rc::Rc::new(RunRecordingRemote { sent: sent.clone() }),
+            cx,
+        )
+    });
+    let engine = cx.update(|_, cx| cx.global::<WorkflowEngine>().clone());
+    let mut views = Vec::new();
+    for run in ["run-a", "run-b"] {
+        let engine = engine.clone();
+        env.workspace.update_in(cx, |workspace, window, cx| {
+            crate::run_view::show(engine, run.to_string(), workspace, window, cx)
+        });
+        views.push(
+            env.workspace
+                .read_with(cx, |workspace, cx| {
+                    workspace.active_item_as::<crate::run_view::RunView>(cx)
+                })
+                .unwrap(),
+        );
+    }
+    // The view of run-b is in front; the press lands on the view of run-a.
+    let front = env.workspace.read_with(cx, |workspace, cx| {
+        crate::run_view::active_run(workspace, cx)
+    });
+    assert_eq!(front.as_deref(), Some("run-b"));
+    views[0].update_in(cx, |view, window, cx| view.press_consent(true, window, cx));
+    cx.run_until_parked();
+    views[0].update_in(cx, |view, window, cx| view.press_consent(false, window, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        *sent.borrow(),
+        [
+            (
+                WorkflowVerb::AllowUnsandboxedOnce,
+                Some("run-a".to_string())
+            ),
+            (WorkflowVerb::RefuseUnsandboxed, Some("run-a".to_string())),
+        ]
+    );
+}

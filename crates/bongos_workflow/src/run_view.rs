@@ -672,6 +672,8 @@ pub struct RunView {
     selected: Option<Selection>,
     focus_handle: FocusHandle,
     snapshot: Option<Snapshot>,
+    /// The workspace the view was added to, which answers its consent question.
+    workspace: Option<WeakEntity<Workspace>>,
 }
 
 impl EventEmitter<()> for RunView {}
@@ -685,6 +687,7 @@ impl RunView {
             selected: None,
             focus_handle: cx.focus_handle(),
             snapshot: None,
+            workspace: None,
         };
         view.refresh(cx);
         view
@@ -787,15 +790,16 @@ impl RunView {
     /// A press of "Run once without a sandbox" (`allowed`) or "Stop": the command
     /// `workflow: allow unsandboxed once` or `workflow: refuse unsandboxed` with this view in
     /// front, so a run held by another process's writer is answered through the remote and a
-    /// refusal or error shows as a toast, as for the command.
+    /// refusal or error shows as a toast, as for the command. It answers this view's run, which
+    /// is not the active item's when the view is in an inactive pane.
     pub fn press_consent(&mut self, allowed: bool, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.focus_handle, cx);
-        let action: Box<dyn gpui::Action> = if allowed {
-            Box::new(workflow::AllowUnsandboxedOnce)
-        } else {
-            Box::new(workflow::RefuseUnsandboxed)
+        let Some(workspace) = self.workspace.as_ref().and_then(WeakEntity::upgrade) else {
+            return;
         };
-        window.dispatch_action(action, cx);
+        let run = self.run.clone();
+        workspace.update(cx, |workspace, cx| {
+            crate::commands::answer_consent(workspace, run, allowed, window, cx)
+        });
     }
 
     fn render_consent(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1292,6 +1296,15 @@ impl Item for RunView {
     }
 
     fn to_item_events(_event: &(), _f: &mut dyn FnMut(ItemEvent)) {}
+
+    fn added_to_workspace(
+        &mut self,
+        workspace: &mut Workspace,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        self.workspace = Some(workspace.weak_handle());
+    }
 }
 
 /// Shows `run` in the workspace: its open view when there is one, else a new item in the active

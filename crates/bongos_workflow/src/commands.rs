@@ -218,21 +218,11 @@ fn register_run_commands(workspace: &mut Workspace) {
         let cancelled = engine.cancel(&run, cx);
         report(workspace, cancelled.map(|()| "Workflow run cancelled"), cx);
     });
-    on_run::<workflow::AllowUnsandboxedOnce>(workspace, |engine, run, workspace, _, cx| {
-        let answered = engine.answer_unsandboxed(&run, true, crate::lifecycle::BY_PERSON, cx);
-        report(
-            workspace,
-            answered.map(|()| "Allowed this run to go without a sandbox"),
-            cx,
-        );
+    on_run::<workflow::AllowUnsandboxedOnce>(workspace, |_, run, workspace, window, cx| {
+        answer_consent(workspace, run, true, window, cx);
     });
-    on_run::<workflow::RefuseUnsandboxed>(workspace, |engine, run, workspace, _, cx| {
-        let answered = engine.answer_unsandboxed(&run, false, crate::lifecycle::BY_PERSON, cx);
-        report(
-            workspace,
-            answered.map(|()| "Stopped: nothing ran without a sandbox"),
-            cx,
-        );
+    on_run::<workflow::RefuseUnsandboxed>(workspace, |_, run, workspace, window, cx| {
+        answer_consent(workspace, run, false, window, cx);
     });
     on_run::<workflow::Approve>(workspace, |engine, run, workspace, window, cx| {
         let Some(key) = engine.open_gates(&run).into_iter().next() else {
@@ -483,6 +473,50 @@ fn route_remote<A: Action>(
         send_remote(remote, verb, payload, workspace, window, cx);
     }
     true
+}
+
+/// Answers the consent question of `run` as a person: through the writer's remote when another
+/// process holds the engine, else on the local engine, with the outcome as a toast. The run is
+/// the caller's, not the active item's, so a press on a view that is not in front answers its own
+/// run.
+pub(crate) fn answer_consent(
+    workspace: &mut Workspace,
+    run: RunId,
+    allowed: bool,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if !WorkflowsSettings::get_global(cx).enabled {
+        show_toast(workspace, OFF_MESSAGE.to_string(), cx);
+        return;
+    }
+    if let Some(remote) = InstalledWorkflowRemote::get(cx) {
+        let task_id = bongos_work::task_at_point(workspace, window, cx);
+        if remote.is_remote(task_id.as_deref(), cx) {
+            let verb = if allowed {
+                WorkflowVerb::AllowUnsandboxedOnce
+            } else {
+                WorkflowVerb::RefuseUnsandboxed
+            };
+            let payload = WorkflowPayload {
+                run: Some(run),
+                task_id,
+                ..WorkflowPayload::default()
+            };
+            send_remote(remote, verb, payload, workspace, window, cx);
+            return;
+        }
+    }
+    let Some(engine) = WorkflowEngine::ensure(cx) else {
+        return;
+    };
+    let answered = engine.answer_unsandboxed(&run, allowed, crate::lifecycle::BY_PERSON, cx);
+    let done = if allowed {
+        "Allowed this run to go without a sandbox"
+    } else {
+        "Stopped: nothing ran without a sandbox"
+    };
+    report(workspace, answered.map(|()| done), cx);
 }
 
 fn send_remote(
