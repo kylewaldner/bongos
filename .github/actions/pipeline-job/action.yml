@@ -348,6 +348,8 @@ runs:
         TAG: ${{ inputs.index_tag }}
         REPO: ${{ github.repository }}
         GH_TOKEN: ${{ github.token }}
+        # The same pin as the index workflows: the repository variable, else the script's default (v1.8.5).
+        COLGREP_VERSION: ${{ vars.COLGREP_VERSION || 'v1.8.5' }}
       run: |
         set -euo pipefail
         # Uses the index workflows' own install and restore. A job without an index carries on with grep.

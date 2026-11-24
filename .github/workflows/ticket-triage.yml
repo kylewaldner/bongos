@@ -42,6 +42,10 @@ on:
         description: "Release tag of the code search index that dispatched jobs read"
         default: colgrep-index
         type: string
+      cancel:
+        description: "Cede this ticket by name: cancels its live run (needs health_actions; empty: no cancel)"
+        default: ''
+        type: string
   repository_dispatch:
     types: [triage]
   schedule:
@@ -66,6 +70,7 @@ jobs:
       IN_COORD_BASE: ${{ inputs.coord_base || 'main' }}
       IN_APP_BASE: ${{ inputs.app_base || 'main' }}
       IN_STATE_PREFIX: ${{ inputs.state_prefix || '' }}
+      IN_CANCEL: ${{ inputs.cancel || '' }}
       IN_INDEX_TAG: ${{ inputs.index_tag || 'colgrep-index' }}
     steps:
       - name: Refuse a re-run and an API key
@@ -158,8 +163,9 @@ jobs:
           mkdir -p "$AUTOPILOT_WORKTREES"
           # The committed runner.toml of the coordination repository: every switch off, so this only reports. The script
           # appends its report to $GITHUB_STEP_SUMMARY itself.
-          python3 "$coord/autopilot/runner/triage.py" \
-            --config "$coord/autopilot/runner/runner.toml" \
-            --coord-repo "$coord" \
-            --app-repo "$GITHUB_WORKSPACE" \
-            --ref "$DISPATCH_REF"
+          args=(--config "$coord/autopilot/runner/runner.toml" --coord-repo "$coord" --app-repo "$GITHUB_WORKSPACE" --ref "$DISPATCH_REF")
+          if [ -n "$IN_CANCEL" ]; then
+            case "$IN_CANCEL" in *[!A-Za-z0-9._-]*) echo "::error::cancel has a character that is not allowed"; exit 1 ;; esac
+            args+=(--cancel "$IN_CANCEL")   # the mode step above already limited this run to main or a test ref
+          fi
+          python3 "$coord/autopilot/runner/triage.py" "${args[@]}"
