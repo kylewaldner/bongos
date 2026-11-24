@@ -53,6 +53,16 @@ pub(crate) fn fixture_project(root: &TempDir) -> ProjectRepo {
 
 /// [`fixture_project`] whose writer runs `hooks`.
 pub(crate) fn fixture_project_with_hooks(root: &TempDir, hooks: &StateApplyHooks) -> ProjectRepo {
+    let git = Git::locate().expect("git is installed").isolated();
+    fixture_project_with_git(root, hooks, git)
+}
+
+/// [`fixture_project_with_hooks`] reading with `git`.
+pub(crate) fn fixture_project_with_git(
+    root: &TempDir,
+    hooks: &StateApplyHooks,
+    git: Git,
+) -> ProjectRepo {
     let location = location(root);
     let definitions = location.repository.join("definitions");
     for (path, text) in [
@@ -69,7 +79,6 @@ pub(crate) fn fixture_project_with_hooks(root: &TempDir, hooks: &StateApplyHooks
         std::fs::write(path, text).unwrap();
     }
     std::fs::create_dir_all(&location.files).unwrap();
-    let git = Git::locate().expect("git is installed").isolated();
     block_on(async {
         git.init_repo(&location.repository, MAIN_BRANCH)
             .await

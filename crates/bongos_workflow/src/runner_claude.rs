@@ -27,6 +27,9 @@
 //! are missing from `--help` ([`HIDDEN_FLAGS`]); `--allowedTools` only pre-approves tools, so the
 //! runner also passes `--permission-prompts none` when the CLI lists it, which denies whatever
 //! would have asked.
+//!
+//! While `confinement.agent_steps` is on the node carries an [`AgentJob`] and the CLI runs
+//! confined (see [`crate::agent_confinement`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -41,8 +44,10 @@ use bongos_workflow_model::definition::{AgentKind, Node, OutputField};
 use bongos_workflow_model::{Definition, EnvEdit, Failure, FailureReason, NodeKey, schema};
 use serde_json::Value;
 
+use crate::agent_confinement::{self, AgentJob, Running};
 use crate::mcp;
 use crate::process::{NodeProcess, ProcessRecord, group_alive, stop_all};
+use crate::runner_program::{SandboxProbe, os_sandbox_probe};
 use crate::runtime::Finish;
 
 /// The variables taken from the base environment; everything else in it is dropped.
@@ -204,6 +209,8 @@ pub struct ClaudeNode {
     pub node_result: PathBuf,
     /// The session id passed with `--session-id` (a UUID).
     pub session_id: String,
+    /// What the step may write while `confinement.agent_steps` is on; `None` while it is off.
+    pub confinement: Option<AgentJob>,
     /// The run's edits to the environment ([`crate::runtime::RunSetup::env_edits`]).
     pub env: Vec<EnvEdit>,
 }
@@ -362,6 +369,20 @@ pub fn launch_env(
             edits: &node.env,
         },
     )
+}
+
+/// The environment of a confined try: `env` plus `CLAUDE_CONFIG_DIR` set to `<HOME>/.claude`, so
+/// the CLI writes only under that directory (a bound `~/.claude.json` fails on its lock and
+/// temporary files in a read-only home). Without a `HOME` the variable is left unset.
+pub(crate) fn confined_env(mut env: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    if let Some(home) = env.get("HOME").filter(|home| !home.is_empty()) {
+        let dir = Path::new(home).join(".claude");
+        env.insert(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            dir.to_string_lossy().into_owned(),
+        );
+    }
+    env
 }
 
 /// The per-node values behind [`ENV_NAMES`]; shared with the Codex runner.
@@ -713,6 +734,8 @@ struct Try {
     try_number: u32,
     node: ClaudeNode,
     started: Instant,
+    /// The confinement of a confined try, settled once its process group is gone.
+    confined: Option<Running>,
 }
 
 /// Runs Claude node tries: [`ClaudeRunner::start`], [`ClaudeRunner::poll`] and
@@ -721,17 +744,25 @@ struct Try {
 pub struct ClaudeRunner {
     cli: ClaudeCli,
     base_env: BTreeMap<String, String>,
+    probe: SandboxProbe,
     tries: Vec<(Try, NodeProcess)>,
 }
 
 impl ClaudeRunner {
-    /// A runner for `cli`, whose processes get [`PASSED_ENV`] from `base_env`.
+    /// A runner for `cli`, whose processes get [`PASSED_ENV`] from `base_env`, with the real
+    /// sandbox probe for confined tries.
     pub fn new(cli: ClaudeCli, base_env: BTreeMap<String, String>) -> Self {
         Self {
             cli,
             base_env,
+            probe: os_sandbox_probe(),
             tries: Vec::new(),
         }
+    }
+
+    pub fn with_sandbox_probe(mut self, probe: SandboxProbe) -> Self {
+        self.probe = probe;
+        self
     }
 
     pub fn cli(&self) -> &ClaudeCli {
@@ -740,7 +771,8 @@ impl ClaudeRunner {
 
     /// Starts try `try_number` of `key`: writes the prompt and system files into the try
     /// directory, then spawns the CLI in the worktree with the prompt on stdin and its output
-    /// captured in `stream.jsonl` and `stderr.log`.
+    /// captured in `stream.jsonl` and `stderr.log`. A confined try is wrapped in its sandbox
+    /// first, and its system file gets the line naming what it may write.
     pub fn start(
         &mut self,
         run: &str,
@@ -773,17 +805,44 @@ impl ClaudeRunner {
         let prompt_file = node.try_dir.join(PROMPT_FILE);
         let system_file = node.try_dir.join(SYSTEM_FILE);
         fs::write(&prompt_file, &node.prompt).map_err(io)?;
-        fs::write(&system_file, &node.system).map_err(io)?;
         let stdin = File::open(&prompt_file).map_err(io)?;
         let stdout = File::create(node.try_dir.join(STREAM_FILE)).map_err(io)?;
         let stderr = File::create(node.try_dir.join(STDERR_FILE)).map_err(io)?;
 
-        let mut command = Command::new(&self.cli.program);
-        command
-            .args(self.cli.args(&node, &system_file))
-            .current_dir(&node.worktree)
-            .env_clear()
-            .envs(launch_env(&self.base_env, run, key, &node));
+        let args = self.cli.args(&node, &system_file);
+        let env = launch_env(&self.base_env, run, key, &node);
+        let (command, mut confined) = match &node.confinement {
+            None => {
+                fs::write(&system_file, &node.system).map_err(io)?;
+                let mut command = Command::new(&self.cli.program);
+                command
+                    .args(args)
+                    .current_dir(&node.worktree)
+                    .env_clear()
+                    .envs(env);
+                (command, None)
+            }
+            Some(job) => {
+                let env = confined_env(env);
+                let prepared = agent_confinement::prepare(
+                    job,
+                    key,
+                    &node.worktree,
+                    &node.try_dir,
+                    &self.probe,
+                    self.cli.program.to_string_lossy().into_owned(),
+                    args,
+                    env,
+                )?;
+                let system = with_line(&node.system, &prepared.prompt_line);
+                if let Err(error) = fs::write(&system_file, system) {
+                    prepared.abandon();
+                    return Err(io(error));
+                }
+                let command = prepared.command();
+                (command, Some(prepared.start(key)?))
+            }
+        };
         let process = NodeProcess::spawn(
             command,
             Stdio::from(stdin),
@@ -791,6 +850,9 @@ impl ClaudeRunner {
             Stdio::from(stderr),
         )
         .map_err(|error| {
+            if let Some(confined) = confined.take() {
+                confined.abandon();
+            }
             let not_found = error
                 .chain()
                 .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
@@ -817,6 +879,7 @@ impl ClaudeRunner {
                 try_number,
                 node,
                 started: Instant::now(),
+                confined,
             },
             process,
         ));
@@ -873,9 +936,27 @@ impl ClaudeRunner {
                     .any(|(run, key)| *run == entry.run && *key == entry.key)
             });
         self.tries = kept;
-        let mut processes: Vec<NodeProcess> =
-            stopped.into_iter().map(|(_, process)| process).collect();
+        let mut processes: Vec<NodeProcess> = Vec::new();
+        let mut confined = Vec::new();
+        for (entry, process) in stopped {
+            processes.push(process);
+            confined.extend(
+                entry
+                    .confined
+                    .map(|running| (entry.key, entry.node.try_dir, running)),
+            );
+        }
         stop_all(&mut processes);
+        // The process groups are gone: the work of each stopped try is imported all the same.
+        for (key, try_dir, running) in confined {
+            let settled = running.settle(&key, &output_files(&try_dir));
+            if let Some(failure) = settled.failure {
+                log::error!(
+                    "workflows: the git of a stopped agent step: {}",
+                    failure.detail
+                );
+            }
+        }
     }
 
     /// The tries in flight, as `(run, key)`.
@@ -886,8 +967,13 @@ impl ClaudeRunner {
             .collect()
     }
 
-    fn finish(&self, entry: Try, exit: Exit) -> Finish {
-        let classified = classify(
+    fn finish(&self, mut entry: Try, exit: Exit) -> Finish {
+        let settled = entry
+            .confined
+            .take()
+            .map(|running| running.settle(&entry.key, &output_files(&entry.node.try_dir)))
+            .unwrap_or_default();
+        let mut classified = classify(
             &entry.key,
             &entry.node,
             &self.cli.command,
@@ -896,6 +982,9 @@ impl ClaudeRunner {
             &read_tail(&entry.node.try_dir.join(STDERR_FILE), STDERR_TAIL),
             exit,
         );
+        if let Some(failure) = settled.failure {
+            classified.outcome = Err(failure);
+        }
         if let Ok(result) = &classified.outcome {
             let path = entry.node.try_dir.join(RESULT_FILE);
             let text = serde_json::to_string_pretty(result).unwrap_or_default();
@@ -912,6 +1001,23 @@ impl ClaudeRunner {
             turns: classified.turns,
             elapsed_ms: entry.started.elapsed().as_millis() as u64,
             session_id: classified.session_id.or(Some(entry.node.session_id)),
+            confinement_refusals: settled.refusals,
         }
     }
+}
+
+/// `system` with `line` appended on a line of its own.
+pub(crate) fn with_line(system: &str, line: &str) -> String {
+    if system.is_empty() {
+        format!("{line}\n")
+    } else if system.ends_with('\n') {
+        format!("{system}{line}\n")
+    } else {
+        format!("{system}\n{line}\n")
+    }
+}
+
+/// The files a try's CLI writes its output to, read for refused writes.
+pub(crate) fn output_files(try_dir: &Path) -> Vec<PathBuf> {
+    vec![try_dir.join(STREAM_FILE), try_dir.join(STDERR_FILE)]
 }

@@ -3,8 +3,9 @@
 
 use std::path::{Path, PathBuf};
 
-use bongos_project_repo::{Git, GitError};
+use bongos_project_repo::GitError;
 
+use crate::task_git::TaskGit;
 use crate::work_tree::{Problem, ensure_top_level};
 
 /// The outcome of [`changed_files`].
@@ -64,13 +65,16 @@ pub enum ChangedFilesError {
 /// top directory of the working tree; a subdirectory of one is `NotTopLevel`, because the paths
 /// are relative to the top.
 pub async fn changed_files(
-    git: &Git,
+    git: &TaskGit,
     tree: &Path,
     base_branch: Option<&str>,
 ) -> Result<ChangedFiles, ChangedFilesError> {
     let Some(branch) = base_branch else {
         return Ok(ChangedFiles::NoBaseBranch);
     };
+    // These commands never start git inside a nested repository: `diff` gets
+    // `--ignore-submodules=all`, and the rest read only the index, refs and objects.
+    let git = &git.allowing_nested_repositories();
     let merge_base = merge_base(git, tree, branch).await?;
 
     let tracked = git
@@ -109,7 +113,7 @@ pub async fn changed_files(
 /// The merge base of `HEAD` of the working copy at `tree` and `branch`, resolved now. A missing
 /// branch is `BaseBranchMissing`, never a guess; `tree` must be the top of its working tree.
 pub(crate) async fn merge_base(
-    git: &Git,
+    git: &TaskGit,
     tree: &Path,
     branch: &str,
 ) -> Result<String, ChangedFilesError> {
@@ -118,6 +122,8 @@ pub(crate) async fn merge_base(
             branch: branch.to_string(),
         });
     }
+    // `rev-parse` and `merge-base` read only refs and objects, so a nested repository is fine.
+    let git = &git.allowing_nested_repositories();
     ensure_top_level(git, tree)
         .await
         .map_err(|problem| match problem {
@@ -129,7 +135,6 @@ pub(crate) async fn merge_base(
                 path: tree.to_path_buf(),
                 top,
             },
-            Problem::Git(error) => error.into(),
         })?;
 
     let target = format!("{branch}^{{commit}}");

@@ -18,6 +18,7 @@ use crate::engine::RunChecksRequest;
 use crate::engine_tests::{World, finish, set_kill_grace};
 use crate::pools_tests::FakeClock;
 use crate::process::StopHandle;
+use crate::task_git::TaskGit;
 use crate::test_support::{
     FakeSecond, FakeTrees, commit_everything, git_in, init_git_repo, tree_snapshot, write_file,
 };
@@ -42,8 +43,13 @@ run = \"checks/where-log\"
 repos = [\"a\", \"b\"]
 ";
 
-fn git() -> Git {
-    Git::locate().expect("git is installed").isolated()
+/// Task git trusting the linked worktrees of the world's tree.
+fn git(world: &World) -> TaskGit {
+    TaskGit::new(
+        Git::locate().expect("git is installed").isolated(),
+        std::path::PathBuf::new(),
+    )
+    .with_trusted_repositories([world.tree.clone()])
 }
 
 /// A world whose task tree is on the branch `task`, one commit past `main`, with an edit and an
@@ -88,6 +94,7 @@ fn repository(world: &World, name: &str) -> (PathBuf, String) {
     std::fs::create_dir_all(&tree).unwrap();
     init_git_repo(&tree);
     let base = branch_off(&tree, name);
+    world.trust(&tree);
     (tree, base)
 }
 
@@ -278,7 +285,7 @@ async fn a_temporary_tree_dropped_without_its_removal_is_removed(cx: &mut TestAp
     let (world, base) = world(cx, FakeClock::automatic());
     let protected = [world.tree.as_path()];
     let temp = TempTree::create(
-        &git(),
+        &git(&world),
         &world.tree,
         &scratch(&world),
         &base,
@@ -360,7 +367,7 @@ async fn a_leftover_from_a_crash_is_removed_at_the_next_load(cx: &mut TestAppCon
 
     let removed = world
         .engine
-        .update(cx, |engine, cx| engine.sweep_scratch(git(), cx))
+        .update(cx, |engine, cx| engine.sweep_scratch(git(&world), cx))
         .await;
 
     let canonical_scratch = scratch.canonicalize().unwrap();
@@ -400,7 +407,7 @@ async fn a_temporary_tree_git_could_not_add_leaves_no_owner_file(cx: &mut TestAp
     let missing = "0123456789abcdef0123456789abcdef01234567";
 
     let created = TempTree::create(
-        &git(),
+        &git(&world),
         &world.tree,
         &scratch(&world),
         missing,
@@ -462,10 +469,12 @@ async fn a_check_over_two_repositories_runs_in_each_tip_with_its_env(cx: &mut Te
         ("1 of 1", "1 of 1")
     );
     // The key is the digest of the sorted (repository, tree) pairs, whatever their order.
+    let runner = git(&world);
     let key = |tree: &Path| {
         let tree = tree.to_path_buf();
         let index = world.index.clone();
-        async move { tree_key(&git(), &tree, &index).await.unwrap() }
+        let runner = runner.clone();
+        async move { tree_key(&runner, &tree, &index).await.unwrap() }
     };
     let (key_a, key_b) = (key(&tree_a).await, key(&tree_b).await);
     assert_eq!(
@@ -480,7 +489,6 @@ async fn a_check_over_two_repositories_runs_in_each_tip_with_its_env(cx: &mut Te
         digest: record.digest.clone(),
     };
     let pairs = [("a", tree_a.as_path()), ("b", tree_b.as_path())];
-    let runner = git();
     let current = || trees_key(&runner, &pairs, &world.index);
     assert_eq!(
         freshness(&record, Some(&state(current().await.unwrap()))),
@@ -697,16 +705,22 @@ async fn a_stop_during_the_checkout_runs_no_further_git_in_the_lent_tree(cx: &mu
     let stop = StopHandle::default();
     stop.stop();
     assert_eq!(
-        check_out_lent_tree(&git(), &second, &base, &protected, &stop).await,
+        check_out_lent_tree(&git(&world), &second, &base, &protected, &stop).await,
         Err(LentTreeError::Stopped)
     );
     assert_eq!(git_in(&second, &["rev-parse", "HEAD"]), tip);
     assert!(second.join("stray.txt").exists());
 
     // Not stopped: checked out at the base and cleaned, build output kept.
-    check_out_lent_tree(&git(), &second, &base, &protected, &StopHandle::default())
-        .await
-        .unwrap();
+    check_out_lent_tree(
+        &git(&world),
+        &second,
+        &base,
+        &protected,
+        &StopHandle::default(),
+    )
+    .await
+    .unwrap();
     assert_eq!(git_in(&second, &["rev-parse", "HEAD"]), base);
     assert!(!second.join("stray.txt").exists());
     assert!(second.join("ignored/build.out").exists());

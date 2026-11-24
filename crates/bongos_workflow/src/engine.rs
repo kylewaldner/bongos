@@ -266,6 +266,7 @@ impl SnapshotBuilder {
         next.agents = reading.settings.agents.clone();
         next.mcp_exclude = reading.settings.mcp_exclude.clone();
         next.programs = reading.settings.programs.clone();
+        next.agent_confinement = reading.settings.agent_confinement.clone();
         match reading.health {
             Some(found) => {
                 let failed = found.health.state == HealthState::Unchecked;
@@ -1877,11 +1878,13 @@ fn merge_request(context: &SettleContext) -> Option<MergeRequest> {
     Some(MergeRequest {
         task_worktree: context.checkout.worktree.clone()?,
         task_branch: context.checkout.branch.clone()?,
+        run_git_dir: context.worktree.git_dir.clone(),
         run_branch: context.worktree.branch.clone(),
         run_id: context.run.clone(),
         workflow: context.workflow.clone(),
         todo: context.todo.name.clone(),
         style: MergeStyle::default(),
+        job: false,
     })
 }
 

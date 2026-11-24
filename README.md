@@ -447,6 +447,26 @@ definition. The keys are for the Emacs keymap; every command is also in the pale
   (3), `fan_out_width` (8), `retries` (2), `poll_interval_minutes` (5), `wait_give_up_days` (7) and
   `programs` with `python` (null, `python3` then `python` on `PATH`), `max_minutes` (10) and
   `max_output_mb` (10).
+- **Confinement.** Jobs (workflow programs, agent steps and task checks) can write only to their
+  job tree, their scratch directory and the directories they declare (agent steps may also write
+  the agent CLI's own state directories, `~/.claude` and `~/.codex` by default), and the
+  Confinement section of the Work page shows what that means on your machine. On Linux with Bubblewrap, jobs are
+  confined: they never get your repository's shared git data, bongos brings back their commits and
+  branches after each run and checks them, and git run by bongos and by the editor never uses
+  configuration or pointers a job wrote. On macOS jobs are confined by path through Seatbelt: reads
+  are not restricted, and a process a job leaves running may outlive it. With no sandbox available,
+  jobs are not confined; install Bubblewrap (Linux) to get it. Without a usable sandbox, program
+  and agent steps run unsandboxed (and the log says so), except in a main worktree, where they are
+  refused, and task checks refuse to start until Bubblewrap is installed or
+  `confinement.task_checks` is set to false. Two switches turn it on per kind of
+  job: `confinement.task_checks` (on by default) and `confinement.agent_steps` (off by
+  default until the confined Claude Code CLI is verified with a logged-in session and user-scoped
+  MCP servers; a confined Claude Code CLI runs with `CLAUDE_CONFIG_DIR` set to `~/.claude`). Each switch that is off adds a line to the section, for example `Agent steps are
+  not confined (confinement.agent_steps is off)`. `confinement.agent_state_paths` names the paths
+  each agent CLI must write to keep its session and login, `~` being the job's HOME; its defaults
+  are `claude` with `["~/.claude"]` and `codex` with `["~/.codex"]`. To add a
+  path, list it under the CLI's key with the whole list, for example `"agent_state_paths": {
+  "claude": ["~/.claude", "~/.config/claude"] }`.
 - **Privacy.** Workflows run only the local CLIs and scripts a definition names. bongos itself
   contacts no host for them; what leaves the machine is what those programs do themselves: the model
   provider of the `claude` or `codex` you run, and `gh` or the network hosts a program node declares

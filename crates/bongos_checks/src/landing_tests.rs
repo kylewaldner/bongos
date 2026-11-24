@@ -127,6 +127,8 @@ fn world(cx: &mut TestAppContext, enabled: bool, script: &str) -> World {
                 checks.enabled = Some(enabled);
                 checks.no_verdict_reruns = Some(0);
                 checks.kill_grace_seconds = Some(1);
+                // These tests run real scripts; they do not depend on a sandbox.
+                content.confinement.get_or_insert_default().task_checks = Some(false);
             });
         });
         let engine = ChecksEngine::install(

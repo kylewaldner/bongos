@@ -109,6 +109,9 @@ pub struct Finish {
     pub turns: Option<u32>,
     pub elapsed_ms: u64,
     pub session_id: Option<String>,
+    /// The writes the confinement refused, each as the annotation naming the rule; empty for an
+    /// unconfined try.
+    pub confinement_refusals: Vec<String>,
 }
 
 impl Finish {
@@ -123,6 +126,7 @@ impl Finish {
             turns: None,
             elapsed_ms: 0,
             session_id: None,
+            confinement_refusals: Vec::new(),
         }
     }
 }
@@ -1212,6 +1216,7 @@ impl<R: Runner> Runtime<R> {
                 turns: finish.turns,
                 elapsed_ms: finish.elapsed_ms,
                 session_id: finish.session_id,
+                confinement_refusals: finish.confinement_refusals,
             });
             changed = true;
         }
@@ -1440,6 +1445,7 @@ impl<R: Runner> Runtime<R> {
                             turns: None,
                             elapsed_ms: 0,
                             session_id: None,
+                            confinement_refusals: Vec::new(),
                         });
                         return false;
                     }
@@ -1542,6 +1548,7 @@ impl<R: Runner> Runtime<R> {
                     turns: None,
                     elapsed_ms: 0,
                     session_id: None,
+                    confinement_refusals: Vec::new(),
                 });
             }
         }
@@ -1579,6 +1586,7 @@ impl<R: Runner> Runtime<R> {
                 turns: None,
                 elapsed_ms: 0,
                 session_id: None,
+                confinement_refusals: Vec::new(),
             });
         }
     }

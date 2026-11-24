@@ -204,6 +204,8 @@ impl World {
                     let checks = content.task_checks.get_or_insert_default();
                     checks.enabled = Some(true);
                     checks.kill_grace_seconds = Some(1);
+                    // These tests run real scripts; they do not depend on a sandbox.
+                    content.confinement.get_or_insert_default().task_checks = Some(false);
                 });
             });
             let engine = ChecksEngine::new(
@@ -259,6 +261,15 @@ impl World {
             base_branch: Some("main".to_string()),
             output_dir: self.output.clone(),
             index_dir: self.index.clone(),
+            code_repositories: vec![self.tree.clone()],
+        }
+    }
+
+    /// Trusts the linked worktrees of the repository at `repository` for every known task, as
+    /// a configured code repository.
+    pub(crate) fn trust(&self, repository: &Path) {
+        for task in self.source.tasks.borrow_mut().values_mut() {
+            task.code_repositories.push(repository.to_path_buf());
         }
     }
 

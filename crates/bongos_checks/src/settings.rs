@@ -25,6 +25,8 @@ pub struct TaskChecksSettings {
     pub tree_key_debounce_ms: u32,
     /// At most one live-state write per task per this many milliseconds.
     pub live_write_ms: u32,
+    /// `confinement.task_checks`: run each part's process in the sandbox.
+    pub confine: bool,
 }
 
 impl TaskChecksSettings {
@@ -99,6 +101,11 @@ impl Settings for TaskChecksSettings {
             live_write_ms: checks
                 .live_write_ms
                 .expect("default.json defines `task_checks.live_write_ms`"),
+            confine: content
+                .confinement
+                .as_ref()
+                .and_then(|confinement| confinement.task_checks)
+                .unwrap_or(true),
         }
     }
 }

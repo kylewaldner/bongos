@@ -501,7 +501,10 @@ impl Resolver<'_> {
         let mut location = LaneLocation {
             name: name.clone(),
             place,
-            path: folder.join("lanes").join(&lane).join(&name),
+            path: folder
+                .join(bongos_project_repo_model::layout::LANES_DIR)
+                .join(&lane)
+                .join(&name),
             root: folder.clone(),
             layer: Layer::ProjectFolder,
             fallback: None,

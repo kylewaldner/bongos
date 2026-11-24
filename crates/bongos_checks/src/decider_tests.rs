@@ -141,6 +141,8 @@ impl World {
                     let checks = content.task_checks.get_or_insert_default();
                     checks.enabled = Some(true);
                     checks.live_write_ms = Some(0);
+                    // These tests run real scripts; they do not depend on a sandbox.
+                    content.confinement.get_or_insert_default().task_checks = Some(false);
                 });
             });
             ChecksEngine::install(
@@ -190,6 +192,7 @@ impl World {
             base_branch: Some("main".to_string()),
             output_dir: root.join("output"),
             index_dir: root.join("index"),
+            code_repositories: Vec::new(),
         }
     }
 
@@ -572,7 +575,7 @@ fn every_key_of_a_judgment_rests_on_the_first_key_of_each_tree() {
     };
     let (app, lib) = (make("app"), make("lib"));
     let indexes = root.path().join("indexes");
-    let git = Git::locate().unwrap().isolated();
+    let git = crate::task_git::TaskGit::new(Git::locate().unwrap().isolated(), PathBuf::new());
     let tree = |repo: &str, path: &PathBuf| RepoTree {
         repo: repo.to_string(),
         path: path.clone(),

@@ -443,6 +443,11 @@ pub fn prepare_lane_job(
                 ..JobSetup::default()
             });
         };
+        // The repository's common git directory, read in the person's own checkout: the run
+        // trusts it, so git never runs by discovery in the lane's tree.
+        let common_dir = crate::lane_git::common_dir(&git, &primary.repository)
+            .await
+            .map_err(|error| WaitReason::Environment(format!("{lane}: {error}")))?;
         let start = JobStart {
             locations: locations.clone(),
             table_lanes,
@@ -476,6 +481,9 @@ pub fn prepare_lane_job(
             forbidden,
             second_checked: started.second_checked(),
         };
-        Ok(JobSetup::in_lane_tree(started.trees, env, lane_dirs).with_lane_trees(setup))
+        Ok(
+            JobSetup::in_lane_tree(started.trees, common_dir, env, lane_dirs)
+                .with_lane_trees(setup),
+        )
     })
 }

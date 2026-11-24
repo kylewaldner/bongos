@@ -9,12 +9,14 @@ use std::time::{Duration, Instant};
 
 use bongos_chat::model::{Agent, Capabilities};
 use bongos_chat::{AgentCommand, Health, HealthState};
+use bongos_confine::RULE;
 use bongos_workflow_model::definition::AgentKind;
 use bongos_workflow_model::record::ClosedGate;
 use bongos_workflow_model::{Failure, FailureReason, NodeKey, RunState, parse};
 use serde_json::json;
 use tempfile::TempDir;
 
+use crate::agent_confinement::{AgentConfinementSettings, CONFINEMENT_LOG};
 use crate::dispatch::{NodeKind, RunnerSnapshot};
 use crate::dispatch_agent::AgentNodes;
 use crate::dispatch_tests::binding;
@@ -260,4 +262,61 @@ fn a_failed_cli_check_fails_the_node_with_its_failure() {
     assert_eq!(failure.reason, FailureReason::AgentNotInstalledOrLoggedOut);
     assert_eq!(failure.detail, "install Claude Code");
     assert_eq!(failure.node, Some(NodeKey::new("triage", 1)));
+}
+
+#[test]
+fn a_node_is_confined_only_while_agent_steps_is_on() {
+    let definition = parse(FLOW).unwrap();
+    let key = NodeKey::new("triage", 1);
+    for agent_steps in [false, true] {
+        let mut world = world();
+        world.snapshot.agent_confinement = AgentConfinementSettings {
+            agent_steps,
+            claude_state_paths: vec!["~/.claude".to_string()],
+            codex_state_paths: Vec::new(),
+        };
+        let mut kind = AgentNodes::default();
+        let state = RunState::default();
+        kind.start(
+            &NodeStart {
+                run: "run-1",
+                definition: &definition,
+                key: &key,
+                try_number: 1,
+                state: &state,
+                budget_left_usd: None,
+                binding: Some(&world.binding),
+            },
+            &world.binding,
+            &world.snapshot,
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        // The fake's recorded result does not fit this flow's output; only the start matters.
+        while kind.poll().is_empty() {
+            assert!(Instant::now() < deadline, "the fake did not finish");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let try_dir = world.binding.attempt_dir.join("nodes/triage/1-1");
+        let system = fs::read_to_string(try_dir.join("system.md")).unwrap();
+        let log = try_dir.join(CONFINEMENT_LOG);
+        let scratch = world.binding.worktree.run_dir.join("scratch/triage");
+        if agent_steps {
+            let tree = world.binding.worktree.path.canonicalize().unwrap();
+            let line = system.lines().last().unwrap();
+            assert!(line.contains(&*tree.to_string_lossy()), "{line}");
+            assert!(line.contains(RULE), "{line}");
+            // `~/.claude` does not exist in the fixture's HOME: dropped with a warning.
+            let text = fs::read_to_string(&log).unwrap();
+            assert!(
+                text.starts_with("warning: the agent state path ~/.claude"),
+                "{text}"
+            );
+            assert!(scratch.is_dir());
+        } else {
+            assert!(!system.contains(RULE), "{system}");
+            assert!(fs::symlink_metadata(&log).is_err());
+            assert!(fs::symlink_metadata(&scratch).is_err());
+        }
+    }
 }
