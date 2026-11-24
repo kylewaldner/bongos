@@ -2697,7 +2697,8 @@
     // The prompts that open in the minibuffer instead of a centered modal. Names:
     // "command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint",
     // "goto_line", "zap", "isearch", "kill_ring", "query_replace", "set_keybindings", "outline",
-    // "project_symbols", "xref_history", "string_rectangle", "language_extensions".
+    // "project_symbols", "xref_history", "string_rectangle", "language_extensions",
+    // "switch_buffer", "go_to_file", "find_in_files", "search_buffer_lines", "find_directory".
     // Remove a name to bring that prompt back as a centered modal. While the list is empty
     // there is no minibuffer, nothing is routed to it and its commands are hidden.
     "enabled_for": [
@@ -2717,7 +2718,12 @@
       "project_symbols",
       "xref_history",
       "string_rectangle",
-      "language_extensions"
+      "language_extensions",
+      "switch_buffer",
+      "go_to_file",
+      "find_in_files",
+      "search_buffer_lines",
+      "find_directory"
     ],
     // The most candidate rows the minibuffer shows at once.
     "max_rows": 15,
@@ -2729,6 +2735,13 @@
     // Delay in milliseconds before the minibuffer shows the keys typed so far of a pending
     // key sequence.
     "key_hint_delay": 500,
+  },
+  // Settings for the navigation pickers: the buffer switcher, go to file and find in files.
+  "navigation": {
+    // Whether the buffer switcher lists recently closed files after the open buffers.
+    "include_recent_closed": true,
+    // The largest file, in bytes, that a picker preview shows (default 2 MiB).
+    "preview_max_file_size": 2097152,
   },
   // Settings for the undo tree: a view of a buffer's undo history as a tree.
   "undo_tree": {
@@ -2954,6 +2967,10 @@
       // MB of output (stdout and stderr together) a program may print; past it the output
       // is dropped and the node fails "output cap hit".
       "max_output_mb": 10,
+      // What a program node does when no OS sandbox is available: "ask" asks a person to
+      // approve the run once, "refuse" never runs it, "allow" runs it unsandboxed without
+      // asking. The default is "ask". A project can only tighten this.
+      "unsandboxed": "ask",
     },
   },
   "lanes": {

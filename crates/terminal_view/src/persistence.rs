@@ -214,6 +214,7 @@ async fn deserialize_pane_group(
                         workspace.clone(),
                         project.clone(),
                         terminal_panel.active_pane.read(cx).is_zoomed(),
+                        terminal_panel.pane_history_timestamp.clone(),
                         window,
                         cx,
                     )

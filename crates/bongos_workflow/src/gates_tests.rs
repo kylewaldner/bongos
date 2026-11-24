@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use bongos_work::NeedsYou;
 use bongos_work_model::rollup::rollup;
 use bongos_workflow_model::record::Lifecycle as RunLifecycle;
-use bongos_workflow_model::{Limits, parse};
+use bongos_workflow_model::{Limits, RunState, parse};
 use tempfile::TempDir;
 
 use super::*;
@@ -374,4 +374,29 @@ fn a_run_halted_by_the_cost_cap_needs_you_with_the_reason() {
         gates::reasons(&state),
         ["cost cap of $5.00 reached at node implement"]
     );
+}
+
+#[test]
+fn a_held_sandbox_ask_needs_you_and_toasts_once() {
+    use bongos_workflow_model::record::ConsentPending;
+    let asking = RunState {
+        consent_pending: Some(ConsentPending {
+            reason: "bwrap not found".to_string(),
+            keys: vec![NodeKey::new("lint", 1)],
+        }),
+        ..RunState::default()
+    };
+    assert_eq!(
+        gates::reasons(&asking),
+        ["sandbox: lint needs your answer".to_string()]
+    );
+    let mut announced = Announced::default();
+    let first = announced.notices("run-1", &asking);
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert!(first[0].message.contains("sandbox: lint needs your answer"));
+    assert!(announced.notices("run-1", &asking).is_empty(), "once");
+    // Answered, then asking again earns a new toast.
+    assert!(announced.notices("run-1", &RunState::default()).is_empty());
+    assert!(gates::reasons(&RunState::default()).is_empty());
+    assert_eq!(announced.notices("run-1", &asking).len(), 1);
 }

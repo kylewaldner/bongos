@@ -13,6 +13,7 @@ pub mod builtin_run;
 pub mod builtin_wait;
 mod commands;
 pub mod completion;
+pub mod consent;
 pub mod definitions;
 pub mod dispatch;
 mod dispatch_agent;
@@ -34,6 +35,7 @@ pub mod runner_codex;
 pub mod runner_program;
 pub mod runs_panel;
 pub mod runtime;
+mod sandbox_switch;
 mod settings;
 pub mod shipped;
 pub mod sources;
@@ -65,6 +67,7 @@ pub fn init(cx: &mut App) {
     WorkflowsSettings::register(cx);
     landing::register(cx);
     builtin_run::register(cx);
+    sandbox_switch::register(cx);
     engine::init(cx);
 }
 
@@ -126,6 +129,8 @@ mod runner_claude_tests;
 mod runner_codex_tests;
 #[cfg(test)]
 mod runtime_tests;
+#[cfg(test)]
+mod sandbox_scenario_tests;
 #[cfg(test)]
 mod settings_tests;
 #[cfg(test)]

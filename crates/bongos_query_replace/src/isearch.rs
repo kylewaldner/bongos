@@ -70,7 +70,7 @@ pub fn start_from_isearch(seed: QueryReplaceSeed, window: &mut Window, cx: &mut 
                 if let Some(editor) = weak.upgrade() {
                     let mut spec = spec;
                     spec.case = answer.case;
-                    begin(&editor, mode, origin, spec, answer.to, window, cx);
+                    begin(&editor, mode, origin, spec, false, answer.to, window, cx);
                 }
             },
             window,

@@ -31624,6 +31624,8 @@ async fn test_indent_after_input_for_bash(cx: &mut TestAppContext) {
         ˇ    done
         ˇ}
     "});
+    // Wait for the background parse of the new text so the autoindent sees its syntax tree.
+    cx.update_buffer(|buffer, _| buffer.parsing_idle()).await;
     cx.update_editor(|e, window, cx| e.handle_input("#", window, cx));
     cx.wait_for_autoindent_applied().await;
     cx.assert_editor_state(indoc! {"

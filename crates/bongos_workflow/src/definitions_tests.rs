@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use bongos_workflow_model::layers::DEFINITION_FILE;
-use bongos_workflow_model::{Ceilings, Layer, LayerDirs, Severity, ValidationContext};
+use bongos_workflow_model::{Ceilings, Layer, LayerDirs, Resolved, Severity, ValidationContext};
 use tempfile::TempDir;
 
 use crate::definitions::{
@@ -424,4 +424,37 @@ fn validation_hooks_add_their_diagnostics_to_workflow_validate() {
             .iter()
             .all(|diagnostic| !diagnostic.message.starts_with("hooked"))
     );
+}
+
+#[test]
+fn two_loads_of_one_definition_give_equal_nodes_with_the_schema_stored() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path().join("flow");
+    fs::create_dir_all(dir.join("schemas")).unwrap();
+    let document = r#"{"type":"object","required":["summary"],"properties":{"summary":{"type":"string"},"report":{"type":"object"}}}"#;
+    fs::write(dir.join("schemas/result.json"), document).unwrap();
+    fs::write(
+        dir.join(DEFINITION_FILE),
+        "schema = 1\nname = \"flow\"\nstart = \"a\"\n[nodes.a]\nkind = \"agent\"\nprompt = \"p\"\noutput_schema = \"schemas/result.json\"\nroutes = [{ to = \"done\" }]\n[ends.done]\nkind = \"success\"\n",
+    )
+    .unwrap();
+    let resolved = Resolved {
+        name: "flow".to_string(),
+        layer: Layer::Profile,
+        dir,
+        overrides: Vec::new(),
+    };
+    let load =
+        || crate::definitions::check_parsed_in(&resolved, ValidationContext::default(), |_, _| {});
+    let (first_report, first) = load();
+    let (_, second) = load();
+    assert!(first_report.load_error.is_none());
+    let (first, second) = (first.unwrap(), second.unwrap());
+    assert_eq!(first.nodes, second.nodes);
+    let node = &first.nodes[0];
+    assert_eq!(
+        node.schema.document(),
+        &serde_json::from_str::<serde_json::Value>(document).unwrap()
+    );
+    assert_eq!(node.output.len(), 2);
 }
