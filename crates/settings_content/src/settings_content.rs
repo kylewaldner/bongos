@@ -256,6 +256,9 @@ pub struct SettingsContent {
     /// Settings for the minibuffer: the strip at the bottom of the window that hosts prompts.
     pub minibuffer: Option<MinibufferSettingsContent>,
 
+    /// Settings for the undo tree: a view of a buffer's undo history as a tree.
+    pub undo_tree: Option<UndoTreeSettingsContent>,
+
     /// Settings for the Work view: projects and tasks kept as files under `~/.bongos`.
     pub work: Option<WorkSettingsContent>,
 
@@ -1436,6 +1439,33 @@ pub struct MinibufferSettingsContent {
     ///
     /// Default: 500
     pub key_hint_delay: Option<u64>,
+}
+
+/// How edits are grouped into undo states.
+#[derive(
+    Clone, Copy, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq, Eq,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum UndoGroupingContent {
+    /// Group edits the way Emacs does.
+    Emacs,
+    /// Group edits the way the editor always has.
+    #[default]
+    Zed,
+}
+
+/// Settings for the undo tree.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct UndoTreeSettingsContent {
+    /// The most nodes the undo tree keeps. Values below 100 count as 100.
+    ///
+    /// Default: 10000
+    pub node_limit: Option<usize>,
+    /// How edits are grouped into undo states: "emacs" or "zed".
+    ///
+    /// Default: "zed"
+    pub grouping: Option<UndoGroupingContent>,
 }
 
 #[with_fallible_options]

@@ -95,7 +95,10 @@
       "alt-shift-y": "emacs::BrowseKillRing", // browse-kill-ring
       "ctrl-_": "editor::Undo", // undo
       "ctrl-/": "editor::Undo", // undo
-      "ctrl-x u": "editor::Undo", // undo
+      // ctrl-? shadows the base keymap's agent::ToggleFocus: in an editor it is redo.
+      "ctrl-?": "editor::Redo", // undo-redo
+      "alt-_": "editor::Redo", // undo-redo
+      "ctrl-x u": "undo_tree::Vundo", // vundo
       "alt-{": "editor::MoveToStartOfParagraph", // backward-paragraph
       "alt-}": "editor::MoveToEndOfParagraph", // forward-paragraph
       "ctrl-up": "editor::MoveToStartOfParagraph", // backward-paragraph
