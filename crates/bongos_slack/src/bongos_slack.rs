@@ -9,6 +9,7 @@ mod actions;
 pub mod allowed;
 pub mod client;
 pub mod connection;
+pub mod read_view;
 pub mod service;
 mod settings;
 pub mod status_item;
@@ -42,5 +43,7 @@ mod actions_tests;
 mod client_tests;
 #[cfg(test)]
 mod connection_tests;
+#[cfg(test)]
+mod read_view_tests;
 #[cfg(test)]
 mod service_tests;
