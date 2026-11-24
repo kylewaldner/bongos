@@ -1,0 +1,56 @@
+# Keeps the code search index (a release asset under a fixed prerelease tag) current: on a push to main that
+# changes source paths, it restores the newest published index, re-embeds what changed and publishes the result.
+# index-rebuild.yml is the same job built from nothing. Both share one concurrency group, and
+# .github/scripts/colgrep-index.sh holds the four guards against replacing a newer index with an older one:
+#   1. one run at a time (the concurrency group);
+#   2. a run ignores the commit that triggered it and indexes the current origin/main;
+#   3. just before upload it re-reads the newest published asset and uploads only if its own commit is that
+#      asset's commit or a descendant of it, otherwise it exits successfully without uploading;
+#   4. it uploads the new asset under its own name first, and only then deletes the assets older than the previous one.
+# A failed or cancelled run leaves the published assets untouched. No secret is used, only the job's own token.
+name: index-update
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'extensions/**'
+      - 'tooling/**'
+      - 'script/**'
+      - 'Cargo.toml'
+
+permissions:
+  contents: read
+
+concurrency:
+  # The tag is a repository variable only so a test run can use another tag; the default is the production tag.
+  group: colgrep-index-${{ vars.INDEX_TAG || 'colgrep-index' }}
+  cancel-in-progress: false
+
+jobs:
+  index:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ vars.INDEX_TAG || 'colgrep-index' }}
+      REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+      TRIGGER_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install colgrep and ONNX Runtime
+        run: .github/scripts/colgrep-index.sh install
+      - name: Index the current main
+        run: .github/scripts/colgrep-index.sh checkout
+      - name: Restore the newest published index
+        run: .github/scripts/colgrep-index.sh restore
+      - name: Re-embed what changed
+        run: .github/scripts/colgrep-index.sh build
+      - name: Publish
+        run: .github/scripts/colgrep-index.sh publish

@@ -1,0 +1,117 @@
+# Builds the dependency caches that the pipeline jobs restore, and the only workflow that writes one. Three caches,
+# one per build variant the jobs use: dev and test, dev and test with unified features, and release. A cache is
+# saved only after its build succeeds (no cache-on-failure) and only on main. Every other job restores with
+# save-if false. Workspace crates are never cached (rust-cache removes them before saving).
+#
+# The environment of each build is what script/bongos/env.sh sets, written to GITHUB_ENV before the cache step, so
+# the cache key sees the same values a job that sources env.sh would. A job that restores one of these caches must
+# set the same values before its cache step, with the same shared-key and the same workspaces path.
+name: cache-warm
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+  schedule:
+    # Twice a week, so the 7-day eviction never empties the caches.
+    - cron: '23 5 * * 1,4'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cache-warm
+  cancel-in-progress: false
+
+jobs:
+  warm:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: dev, runner: ubuntu-24.04, unified: '', release: ''}
+          - {name: dev-unified, runner: ubuntu-24.04, unified: '1', release: ''}
+          # The oldest Ubuntu LTS runner GitHub still hosts, as release.yml does, for glibc compatibility.
+          - {name: release, runner: ubuntu-22.04, unified: '', release: '1'}
+    name: warm-${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 345
+    env:
+      BONGOS_WORKSPACE: /mnt/bongos-workspace
+      BONGOS_UNIFIED_FEATURES: ${{ matrix.unified }}
+      BONGOS_RELEASE_BUILD: ${{ matrix.release }}
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Add a swap file (release only)
+        if: matrix.release == '1'
+        run: |
+          set -euo pipefail
+          sudo fallocate -l 16G /swap-extra
+          sudo chmod 600 /swap-extra
+          sudo mkswap /swap-extra > /dev/null
+          sudo swapon /swap-extra
+          free -m
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          extra=''
+          if [ -z "$BONGOS_RELEASE_BUILD" ]; then extra=mold; fi
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc g++ libasound2-dev libfontconfig-dev libgit2-dev libglib2.0-dev libssl-dev libva-dev \
+            libvulkan1 libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev make cmake clang lld \
+            llvm jq git curl gettext-base elfutils libsqlite3-dev musl-tools musl-dev build-essential \
+            pkg-config python3 $extra > /dev/null
+          # Ubuntu ships llvm-objcopy only with a version suffix; the release bundle calls it unversioned.
+          if ! command -v llvm-objcopy > /dev/null; then
+            sudo ln -s "$(ls /usr/bin/llvm-objcopy-* | sort -V | tail -n1)" /usr/local/bin/llvm-objcopy
+          fi
+      - name: Install the Rust toolchain and set the build environment
+        run: |
+          set -euo pipefail
+          sudo mkdir -p "$BONGOS_WORKSPACE"
+          sudo chown "$USER" "$BONGOS_WORKSPACE"
+          export RUSTUP_HOME="$BONGOS_WORKSPACE/rustup" CARGO_HOME="$BONGOS_WORKSPACE/cargo"
+          mkdir -p "$RUSTUP_HOME" "$CARGO_HOME"
+          rustup toolchain install
+          if [ -n "$BONGOS_RELEASE_BUILD" ]; then echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"; fi
+          # shellcheck disable=SC1091
+          . script/bongos/env.sh
+          env | grep -E '^(CARGO_|RUSTUP_HOME=|RUSTC_BOOTSTRAP=|BONGOS_|CC=|CXX=)' | grep -v '^CARGO_BUILD_JOBS=' >> "$GITHUB_ENV"
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+          echo "rel=$(realpath -m --relative-to="$GITHUB_WORKSPACE" "$CARGO_TARGET_DIR")" >> "$RUNNER_TEMP/rel"
+      - name: Find the target directory relative to the checkout
+        id: target
+        run: cat "$RUNNER_TEMP/rel" >> "$GITHUB_OUTPUT"
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        with:
+          # The target directory is outside the checkout; rust-cache joins it onto the workspace path, so it is
+          # given relative to the checkout. The cache action sets CARGO_INCREMENTAL=0; every variant is built that way.
+          workspaces: ". -> ${{ steps.target.outputs.rel }}"
+          shared-key: ${{ matrix.name }}
+          add-job-id-key: false
+          # Written only by this workflow, only on main, and (by default) only after a successful job.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build the dependencies (dev and test)
+        if: matrix.release != '1'
+        run: |
+          set -euo pipefail
+          cargo test --workspace --lib --bins --tests --locked --no-run
+          cargo build -p bongos -p cli --locked
+      - name: Build the dependencies (release)
+        if: matrix.release == '1'
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --package bongos --package cli
+      - name: Sizes
+        if: always()
+        run: |
+          du -sm "$CARGO_TARGET_DIR" "$CARGO_HOME" 2>/dev/null || true
+          df -h / /mnt

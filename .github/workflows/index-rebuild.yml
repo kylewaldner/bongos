@@ -1,0 +1,45 @@
+# Builds the code search index from nothing (about 72 minutes), for a model change or a broken index, and publishes
+# it under the same guards as index-update.yml (see there and in .github/scripts/colgrep-index.sh). Started by
+# hand only. It shares index-update's concurrency group, so the two never run at the same time. No secret is used,
+# only the job's own token.
+name: index-rebuild
+
+on:
+  workflow_dispatch:
+    inputs:
+      index_tag:
+        description: Release tag that holds the index. Empty means the repository variable INDEX_TAG, else colgrep-index
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: colgrep-index-${{ inputs.index_tag || vars.INDEX_TAG || 'colgrep-index' }}
+  cancel-in-progress: false
+
+jobs:
+  index:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ inputs.index_tag || vars.INDEX_TAG || 'colgrep-index' }}
+      REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+      TRIGGER_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install colgrep and ONNX Runtime
+        run: .github/scripts/colgrep-index.sh install
+      - name: Index the current main
+        run: .github/scripts/colgrep-index.sh checkout
+      - name: Build the index from nothing
+        run: .github/scripts/colgrep-index.sh build
+      - name: Publish
+        run: .github/scripts/colgrep-index.sh publish
