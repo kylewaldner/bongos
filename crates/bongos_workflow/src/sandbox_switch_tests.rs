@@ -44,6 +44,11 @@ fn judge(master: &[(&str, &str)], change: &[(&str, &str)]) -> ApprovalOpinion {
     let change_root = folder.path().join("change");
     write(&master_root.join("definitions"), master);
     write(&change_root.join("definitions"), change);
+    judge_roots(&master_root, &change_root)
+}
+
+/// What the hook says of a healer's change from the checkout `master_root` to `change_root`.
+fn judge_roots(master_root: &Path, change_root: &Path) -> ApprovalOpinion {
     let tree = DefinitionTree::default();
     SandboxSwitch.judge(&ApprovalInput {
         change_id: "c1",
@@ -53,8 +58,8 @@ fn judge(master: &[(&str, &str)], change: &[(&str, &str)]) -> ApprovalOpinion {
         live: &LiveFacts::default(),
         master: &tree,
         change: &tree,
-        master_root: &master_root,
-        change_root: &change_root,
+        master_root,
+        change_root,
     })
 }
 
@@ -68,25 +73,92 @@ const ENV_CHANGED: &str =
 #[test]
 fn a_misspelled_project_value_refuses_and_warns_once() {
     let values = |value: &str| [("run-1".to_string(), Some(toml::Value::from(value)))];
-    let (refusing, warnings) = refusing_runs(values("refuze"), &BTreeSet::new());
-    assert_eq!(refusing, BTreeSet::from(["run-1".to_string()]));
-    assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].contains("\"refuze\""), "{warnings:?}");
+    let refusing = refusing_runs(values("refuze"), &BTreeSet::new());
+    assert_eq!(refusing.runs, BTreeSet::from(["run-1".to_string()]));
+    assert_eq!(refusing.misread, refusing.runs);
+    assert_eq!(refusing.warnings.len(), 1);
+    assert!(
+        refusing.warnings[0].contains("\"refuze\""),
+        "{:?}",
+        refusing.warnings
+    );
     let snapshot = RunnerSnapshot {
         programs: ProgramSettings {
             unsandboxed: Mode::Allow,
             ..ProgramSettings::default()
         },
-        refusing_runs: refusing.clone(),
+        refusing_runs: refusing.runs.clone(),
         ..RunnerSnapshot::default()
     };
     assert_eq!(snapshot.unsandboxed_mode("run-1"), Mode::Refuse);
     assert_eq!(snapshot.unsandboxed_mode("run-2"), Mode::Allow);
     // The next refresh refuses again without warning again; a run with no value has no override.
-    let (again, warnings) = refusing_runs(values("refuze"), &refusing);
-    assert_eq!((again, warnings), (refusing, Vec::new()));
-    let (none, warnings) = refusing_runs([("run-1".to_string(), None)], &BTreeSet::new());
-    assert!(none.is_empty() && warnings.is_empty());
+    let again = refusing_runs(values("refuze"), &refusing.misread);
+    assert_eq!(again.runs, refusing.runs);
+    assert!(again.warnings.is_empty());
+    let none = refusing_runs([("run-1".to_string(), None)], &BTreeSet::new());
+    assert_eq!(none, super::Refusing::default());
+}
+
+#[test]
+fn a_refusing_value_that_turns_bad_warns() {
+    let values = |value: &str| [("run-1".to_string(), Some(toml::Value::from(value)))];
+    let refusing = refusing_runs(values("refuse"), &BTreeSet::new());
+    assert!(refusing.warnings.is_empty() && refusing.misread.is_empty());
+    let bad = refusing_runs(values("refuze"), &refusing.misread);
+    assert_eq!(bad.runs, refusing.runs);
+    assert_eq!(bad.warnings.len(), 1, "{:?}", bad.warnings);
+}
+
+#[test]
+fn an_unreadable_master_project_file_is_held() {
+    let folder = TempDir::new().unwrap();
+    let master_root = folder.path().join("master");
+    let change_root = folder.path().join("change");
+    write(
+        &change_root.join("definitions"),
+        &[("project.toml", PROJECT)],
+    );
+    let master = master_root.join("definitions");
+    fs::create_dir_all(&master).unwrap();
+    for bytes in [
+        &b"title = \"Shop\n[runs"[..],
+        &b"title = \"Sh\xffop\"\n"[..],
+    ] {
+        fs::write(master.join("project.toml"), bytes).unwrap();
+        assert_eq!(
+            judge_roots(&master_root, &change_root),
+            needs("cannot read runs.unsandboxed")
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_workflow_in_a_folder_with_a_non_utf8_name_is_checked() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let folder = TempDir::new().unwrap();
+    let master_root = folder.path().join("master");
+    let change_root = folder.path().join("change");
+    let name = std::ffi::OsStr::from_bytes(b"sh\xffip");
+    let file = Path::new("definitions/workflows")
+        .join(name)
+        .join("workflow.toml");
+    for (root, text) in [
+        (&master_root, wait("deploy-ready", "")),
+        (&change_root, wait("deploy-ready", "[\"DEPLOY_TOKEN\"]")),
+    ] {
+        let path = root.join(&file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    assert_eq!(
+        judge_roots(&master_root, &change_root),
+        needs(
+            "changes the workflow sandbox switch nodes.deploy.with.env in \
+             workflows/sh\u{FFFD}ip/workflow.toml"
+        )
+    );
 }
 
 #[test]
