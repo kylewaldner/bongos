@@ -41,6 +41,8 @@ pub(crate) mod move_to_applications;
 mod open_listener;
 mod open_url_modal;
 #[cfg(test)]
+mod navigation_keymap_tests;
+#[cfg(test)]
 mod prompts_keymap_tests;
 #[cfg(test)]
 mod query_replace_keymap_tests;
