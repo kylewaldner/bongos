@@ -784,6 +784,20 @@ impl RunView {
         answered.map_err(|refusal| refusal.to_string())
     }
 
+    /// A press of "Run once without a sandbox" (`allowed`) or "Stop": the command
+    /// `workflow: allow unsandboxed once` or `workflow: refuse unsandboxed` with this view in
+    /// front, so a run held by another process's writer is answered through the remote and a
+    /// refusal or error shows as a toast, as for the command.
+    pub fn press_consent(&mut self, allowed: bool, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus_handle, cx);
+        let action: Box<dyn gpui::Action> = if allowed {
+            Box::new(workflow::AllowUnsandboxedOnce)
+        } else {
+            Box::new(workflow::RefuseUnsandboxed)
+        };
+        window.dispatch_action(action, cx);
+    }
+
     fn render_consent(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         v_flex()
@@ -804,23 +818,17 @@ impl RunView {
                             .child(
                                 Button::new("run-view-allow-unsandboxed", ALLOW_UNSANDBOXED_LABEL)
                                     .style(ButtonStyle::Filled)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if let Err(message) = this.allow_unsandboxed(cx) {
-                                            log::warn!(
-                                                "workflows: allow unsandboxed from the run view: {message}"
-                                            );
-                                        }
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.press_consent(true, window, cx);
                                     })),
                             )
-                            .child(Button::new("run-view-stop-unsandboxed", STOP_LABEL).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    if let Err(message) = this.refuse_unsandboxed(cx) {
-                                        log::warn!(
-                                            "workflows: stop from the run view: {message}"
-                                        );
-                                    }
-                                }),
-                            )),
+                            .child(
+                                Button::new("run-view-stop-unsandboxed", STOP_LABEL).on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.press_consent(false, window, cx);
+                                    }),
+                                ),
+                            ),
                     )
             }))
             .children(snapshot.consent_history.iter().map(|row| {

@@ -726,3 +726,56 @@ async fn a_remote_run_sends_the_sandbox_verbs_and_shows_a_failed_send(cx: &mut T
     assert_eq!(sent.borrow().len(), 3);
     cx.update(|_, cx| assert_eq!(cx.global::<LastToast>().0, "the host is gone"));
 }
+
+#[gpui::test]
+async fn the_run_view_buttons_send_the_sandbox_verbs_through_a_remote(cx: &mut TestAppContext) {
+    let (env, cx) = env(cx, true).await;
+    let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    cx.update(|_, cx| {
+        InstalledWorkflowRemote::install(
+            std::rc::Rc::new(RecordingRemote {
+                sent: sent.clone(),
+                reply: Ok("sent"),
+            }),
+            cx,
+        )
+    });
+    // A view of a run this process does not hold: the writer is another process.
+    let engine = cx.update(|_, cx| cx.global::<WorkflowEngine>().clone());
+    env.workspace.update_in(cx, |workspace, window, cx| {
+        crate::run_view::show(engine, "held-elsewhere".to_string(), workspace, window, cx)
+    });
+    let view = env
+        .workspace
+        .read_with(cx, |workspace, cx| {
+            workspace.active_item_as::<crate::run_view::RunView>(cx)
+        })
+        .unwrap();
+    view.update_in(cx, |view, window, cx| view.press_consent(true, window, cx));
+    cx.run_until_parked();
+    view.update_in(cx, |view, window, cx| view.press_consent(false, window, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        *sent.borrow(),
+        [
+            WorkflowVerb::AllowUnsandboxedOnce,
+            WorkflowVerb::RefuseUnsandboxed
+        ]
+    );
+    cx.update(|_, cx| assert_eq!(cx.global::<LastToast>().0, "sent"));
+
+    // A failed send shows its error as a toast.
+    cx.update(|_, cx| {
+        InstalledWorkflowRemote::install(
+            std::rc::Rc::new(RecordingRemote {
+                sent: sent.clone(),
+                reply: Err("the host is gone"),
+            }),
+            cx,
+        )
+    });
+    view.update_in(cx, |view, window, cx| view.press_consent(true, window, cx));
+    cx.run_until_parked();
+    assert_eq!(sent.borrow().len(), 3);
+    cx.update(|_, cx| assert_eq!(cx.global::<LastToast>().0, "the host is gone"));
+}

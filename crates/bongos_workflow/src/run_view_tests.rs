@@ -345,7 +345,7 @@ fn fake_now() -> DateTime<Utc> {
 
 /// A run of `sandboxed` whose node finds no OS sandbox, so it asks, on an engine whose answers
 /// are timed by the fake clock, with a view of it.
-fn asked_run(cx: &mut TestAppContext) -> (WorkflowEngine, String, Entity<RunView>) {
+fn asked_run(cx: &mut TestAppContext) -> (WorkflowEngine, String, Entity<RunView>, World) {
     let world = world();
     write_definition(world.profile(), "sandboxed", SANDBOXED);
     fs::write(
@@ -373,15 +373,13 @@ fn asked_run(cx: &mut TestAppContext) -> (WorkflowEngine, String, Entity<RunView
     let engine = WorkflowEngine::with_lifecycle(world.dirs.clone(), lifecycle);
     let run = start(&engine, &world, "sandboxed", cx);
     let view = view(&engine, &run, cx);
-    // The world's temp directory must outlive the test.
-    std::mem::forget(world);
-    (engine, run, view)
+    (engine, run, view, world)
 }
 
 #[gpui::test]
 fn the_buttons_answer_the_ask_through_the_lifecycle(cx: &mut TestAppContext) {
     // Allow: the ask is answered, the run is granted and its held node starts.
-    let (engine, run, view) = asked_run(cx);
+    let (engine, run, view, _world) = asked_run(cx);
     let text = cx.update(|cx| view.read(cx).text());
     assert!(
         text.contains("sandbox ask: Program node 'lint' was not run"),
@@ -400,13 +398,14 @@ fn the_buttons_answer_the_ask_through_the_lifecycle(cx: &mut TestAppContext) {
     assert_eq!(engine.lifecycle().consent_question(&run), None);
     assert!(engine.lifecycle().consent_grant(&run).is_some());
     // A second window answering finds nothing to answer.
-    let second = cx.update(|cx| view.update(cx, |view, cx| view.allow_unsandboxed(cx)));
+    let other_window = self::view(&engine, &run, cx);
+    let second = cx.update(|cx| other_window.update(cx, |view, cx| view.allow_unsandboxed(cx)));
     assert_eq!(second, Err(NOTHING_TO_ANSWER.to_string()));
     let text = cx.update(|cx| view.read(cx).text());
     assert!(!text.contains("sandbox ask:"), "{text}");
 
     // Stop: the ask is answered and nothing is granted.
-    let (engine, run, view) = asked_run(cx);
+    let (engine, run, view, _world) = asked_run(cx);
     cx.update(|cx| view.update(cx, |view, cx| view.refuse_unsandboxed(cx)))
         .unwrap();
     assert_eq!(engine.lifecycle().consent_question(&run), None);
@@ -419,7 +418,7 @@ fn the_buttons_answer_the_ask_through_the_lifecycle(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn the_unsandboxed_note_shows_only_while_a_grant_is_live(cx: &mut TestAppContext) {
-    let (engine, run, view) = asked_run(cx);
+    let (engine, run, view, _world) = asked_run(cx);
     let shows = |cx: &mut TestAppContext| {
         cx.update(|cx| {
             view.update(cx, |view, cx| {
@@ -439,7 +438,7 @@ fn the_unsandboxed_note_shows_only_while_a_grant_is_live(cx: &mut TestAppContext
 
 #[gpui::test]
 fn history_rows_show_the_time_of_the_fake_clock(cx: &mut TestAppContext) {
-    let (_engine, _run, view) = asked_run(cx);
+    let (_engine, _run, view, _world) = asked_run(cx);
     cx.update(|cx| view.update(cx, |view, cx| view.allow_unsandboxed(cx)))
         .unwrap();
     let expected = format!(
