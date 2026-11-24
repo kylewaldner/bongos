@@ -727,6 +727,8 @@ fn enterprise_tokens_reach_gh_only_for_the_remote_or_gh_host() {
     for pr in [
         "https://ghe.acme.com/acme/widgets/pull/7?x=1",
         "https://ghe.acme.com/acme/widgets/pull/7#frag",
+        // Userinfo is not the host: the host after the last `@` is the remote's.
+        "https://user@ghe.acme.com/acme/widgets/pull/7",
     ] {
         assert!(
             has_tokens(&gh_env(base.clone(), pr, Some(enterprise_remote))),
