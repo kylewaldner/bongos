@@ -145,6 +145,7 @@ jobs:
           test -f "$AUTOPILOT_PRIVATE/autopilot/runner/release_job.py"
           git -C "$AUTOPILOT_PRIVATE" log -1 --format='pipeline code at %h'
 
+      # Test run 2: the test state branch now has its protocol.conf.
       - name: TEST ONLY switch release_is_authority on for this run
         run: |
           set -euo pipefail
