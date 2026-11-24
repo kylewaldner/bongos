@@ -1,8 +1,10 @@
 //! The app side of the bongos Slack integration: the `slack` settings and the `slack` actions,
-//! hidden from the command palette while `slack.enabled` is false (the default). The actions
-//! have no handlers yet, and nothing here reaches the network.
+//! hidden from the command palette while `slack.enabled` is false (the default), and the HTTP
+//! client of the Slack Web API (`client`). The actions have no handlers yet, so nothing sends a
+//! request yet.
 
 mod actions;
+pub mod client;
 mod settings;
 
 use ::settings::Settings as _;
@@ -18,3 +20,5 @@ pub fn init(cx: &mut App) {
 
 #[cfg(test)]
 mod actions_tests;
+#[cfg(test)]
+mod client_tests;
