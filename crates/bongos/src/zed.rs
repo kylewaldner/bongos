@@ -38,6 +38,8 @@ mod migrate;
 mod minibuffer_keymap_tests;
 #[cfg(target_os = "macos")]
 pub(crate) mod move_to_applications;
+#[cfg(test)]
+mod navigation_keymap_tests;
 mod open_listener;
 mod open_url_modal;
 #[cfg(test)]

@@ -201,6 +201,17 @@ async fn lines_input_is_seeded_with_the_symbol_at_point(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
+async fn lines_typing_replaces_the_seed(cx: &mut TestAppContext) {
+    let (workspace, editor, mut cx) = setup(cx, content()).await;
+    let cx = &mut cx;
+    put_cursor(&editor, 5, 6, cx);
+    let handle = open_picker(&workspace, cx);
+    assert_eq!(cx.read(|cx| handle.input(cx)).as_deref(), Some("target"));
+    cx.simulate_input("widget");
+    assert_eq!(cx.read(|cx| handle.input(cx)).as_deref(), Some("widget"));
+}
+
+#[gpui::test]
 async fn lines_narrowing_keeps_the_matching_lines_in_order(cx: &mut TestAppContext) {
     let (workspace, _editor, mut cx) = setup(cx, content()).await;
     let cx = &mut cx;

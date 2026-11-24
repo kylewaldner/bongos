@@ -169,6 +169,9 @@ pub(crate) fn start(
         });
     if seed.is_empty() {
         session = session.initial_selection(cursor.row as usize);
+    } else {
+        // Typing replaces the seed, as in find in files.
+        session = session.select_initial_input();
     }
     if let Some(path) = path {
         session = add_pane_choices(

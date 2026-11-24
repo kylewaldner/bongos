@@ -18,16 +18,14 @@ pub mod test_support;
 pub use settings::NavigationSettings;
 
 use ::settings::Settings as _;
-use command_palette_hooks::CommandPaletteFilter;
 use gpui::App;
 
 /// The action namespace.
 pub const NAMESPACE: &str = "navigation";
 
-/// Registers the settings, declares each action's prefix argument, hides the namespace and
-/// registers the actions of every workspace.
+/// Registers the settings, declares each action's prefix argument and registers the actions of
+/// every workspace. The namespace is shown in the command palette.
 pub fn init(cx: &mut App) {
     NavigationSettings::register(cx);
-    CommandPaletteFilter::update_global(cx, |filter, _| filter.hide_namespace(NAMESPACE));
     actions::init(cx);
 }

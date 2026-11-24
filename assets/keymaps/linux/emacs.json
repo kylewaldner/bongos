@@ -84,7 +84,7 @@
       "ctrl-alt-z": "emacs::ZapBackToChar", // zap-back-to-char
       "ctrl-alt-shift-z": "emacs::ZapBackUpToChar", // zap-back-up-to-char
       "alt-.": "emacs::XrefFindDefinitions", // xref-find-definitions
-      "alt-?": "editor::FindAllReferences", // xref-find-references
+      "alt-s /": "navigation::SearchBufferLines", // consult-line
       "ctrl-x h": "editor::SelectAll", // mark-whole-buffer
       "ctrl-d": "editor::Delete", // delete-char
       "alt-d": "emacs::KillWord", // kill-word
@@ -259,7 +259,8 @@
     "bindings": {
       "alt-x": "command_palette::Toggle", // execute-extended-command
       "ctrl-h e": "minibuffer::ShowMessages", // view-echo-area-messages (ctrl-h is a pending prefix)
-      "ctrl-x b": ["tab_switcher::Toggle", { "confirm_on_release": false }], // switch-to-buffer
+      "ctrl-x b": "navigation::SwitchBuffer", // switch-to-buffer
+      "alt-?": "navigation::FindInFiles", // project-find-regexp (references stay on alt-shift-f12)
       "ctrl-x ctrl-b": ["tab_switcher::Toggle", { "confirm_on_release": false }], // list-buffers
       // "ctrl-x ctrl-c": "workspace::CloseWindow" // in case you only want to exit the current bongos instance
       "ctrl-x ctrl-c": "zed::Quit", // save-buffers-kill-terminal
@@ -277,7 +278,8 @@
       "ctrl-x +": "window::BalancePanes", // balance-windows
       "ctrl-x \\": "window::SwapPanes", // window-swap-states
       "ctrl-x alt-o": "window::MoveBufferToPane", // buf-move to another window
-      "ctrl-x ctrl-f": "file_finder::Toggle", // find-file
+      "ctrl-x ctrl-f": "navigation::GoToFile", // find-file
+      "ctrl-x 4 ctrl-f": "navigation::GoToFileOtherPane", // find-file-other-window
       "ctrl-x ctrl-s": "workspace::Save", // save-buffer
       "ctrl-x ctrl-.": "emacs::PopGlobalMark", // pop-global-mark
       "ctrl-x ctrl-w": "workspace::SaveAs", // write-file
@@ -414,6 +416,7 @@
       // ...
       "ctrl-x ctrl-c": null, // save-buffers-kill-terminal
       "ctrl-x ctrl-f": null, // find-file
+      "ctrl-x 4 ctrl-f": null, // find-file-other-window
       "ctrl-x ctrl-s": null, // save-buffer
       "ctrl-x ctrl-w": null, // write-file
       "ctrl-x s": null, // save-some-buffers

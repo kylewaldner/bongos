@@ -1049,6 +1049,38 @@ happened, such as `Replaced 12 occurrences` or `Replaced 12, skipped 3`.
 `minibuffer.enabled_for` names `query_replace` by default, so the prompts and the questions are in
 the strip. Remove it from that list to get them as a centered modal; the keys are the same.
 
+## Navigation pickers
+
+Four pickers move you around a project, in the minibuffer strip by default. Under the Emacs base
+keymap these keys open them:
+
+| Key | Action | What it does |
+|---|---|---|
+| C-x b | `navigation::SwitchBuffer` | open the buffer switcher; C-x b RET goes back to the previous buffer |
+| C-x C-f | `navigation::GoToFile` | go to a file by path; C-g closes it and opens nothing |
+| C-x 4 C-f | `navigation::GoToFileOtherPane` | the same, opening the file in another pane |
+| M-? | `navigation::FindInFiles` | find a query in the files of the project |
+| M-s / | `navigation::SearchBufferLines` | search the lines of the current buffer; RET jumps to the line |
+
+M-? replaced find-all-references; references stay on alt-shift-f12 and in M-x.
+
+Keys inside the pickers:
+
+| Key | Action | What it does |
+|---|---|---|
+| C-k | `navigation::KillBuffer` | in the switcher, kill the selected buffer |
+| C-c C-o | `navigation::ExportToMultibuffer` | in find in files, export the matches to a results multibuffer |
+| C-c C-r | `navigation::ReplaceAll` | in find in files, replace in all matches |
+| M-% | `navigation::ToggleReplace` | in find in files, show or hide the replace field |
+| M-r, M-c, M-w | `navigation::ToggleRegex`, `ToggleCaseSensitive`, `ToggleWholeWord` | in find in files, toggle regex, case sensitivity and whole words |
+| M-b, M-d | `navigation::ScopeOpenBuffers`, `ScopeDirectory` | in find in files, limit the search to open buffers or to a directory |
+
+`minibuffer.enabled_for` routes them with the names `switch_buffer`, `go_to_file`, `find_in_files`
+and `search_buffer_lines`; remove a name to get that picker as a centered modal. Two settings:
+
+- `navigation.include_recent_closed` (true): the switcher also lists recently closed files.
+- `navigation.preview_max_file_size` (2097152 bytes): the largest file the preview pane shows.
+
 ## Symbol jump and goto stack
 
 M-n and M-p jump between the occurrences of the symbol at the cursor, as `symbol-overlay` does in
@@ -1092,7 +1124,7 @@ prefix. It is on by default. The matches show in a list above the strip and focu
 it was when the prompt ends.
 
 `minibuffer.enabled_for` names the prompts that use the strip. Its default is
-`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch", "kill_ring", "query_replace", "set_keybindings", "outline", "project_symbols", "string_rectangle", "language_extensions"]`. Remove a name
+`["command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint", "goto_line", "zap", "isearch", "kill_ring", "query_replace", "set_keybindings", "outline", "project_symbols", "xref_history", "string_rectangle", "language_extensions", "switch_buffer", "go_to_file", "find_in_files", "search_buffer_lines"]`. Remove a name
 to bring that prompt back as a centered modal, for example:
 
 ```json

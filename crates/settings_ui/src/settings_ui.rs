@@ -6423,6 +6423,33 @@ pub mod test {
         );
     }
 
+    #[gpui::test]
+    async fn test_navigation_settings_are_listed_on_a_page(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| register_settings(cx));
+        cx.update(|cx| {
+            let app_state = AppState::test(cx);
+            AppState::set_global(app_state, cx);
+        });
+        let paths: Vec<&str> = cx.update(|cx| {
+            crate::page_data::settings_data(cx)
+                .into_iter()
+                .flat_map(|page| page.items.into_vec())
+                .filter_map(|item| match item {
+                    SettingsPageItem::SettingItem(item) => item.field.json_path(),
+                    _ => None,
+                })
+                .filter(|path| path.starts_with("navigation."))
+                .collect()
+        });
+        assert_eq!(
+            paths,
+            [
+                "navigation.include_recent_closed",
+                "navigation.preview_max_file_size"
+            ]
+        );
+    }
+
     struct BaseKeymapDropdownView {
         field: SettingField<settings::BaseKeymapContent>,
     }

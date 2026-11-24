@@ -87,14 +87,14 @@ async fn in_session_actions_echo_no_navigation_picker_without_a_session(cx: &mut
 }
 
 #[gpui::test]
-async fn the_navigation_namespace_is_hidden_from_the_command_palette(cx: &mut TestAppContext) {
+async fn the_navigation_namespace_is_shown_in_the_command_palette(cx: &mut TestAppContext) {
     init(cx);
     cx.update(|cx| {
         let action = cx
             .build_action("navigation::SwitchBuffer", None)
             .expect("navigation::SwitchBuffer is registered");
         assert!(
-            CommandPaletteFilter::try_global(cx)
+            !CommandPaletteFilter::try_global(cx)
                 .expect("the filter is installed")
                 .is_hidden(action.as_ref())
         );
