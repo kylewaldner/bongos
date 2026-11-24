@@ -5566,9 +5566,66 @@ fn search_and_files_page() -> SettingsPage {
         ]
     }
 
+    fn navigation_section() -> [SettingsPageItem; 3] {
+        [
+            SettingsPageItem::SectionHeader("Navigation Pickers"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Include Recently Closed",
+                description: "Whether the buffer switcher lists recently closed files after the open buffers.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("navigation.include_recent_closed"),
+                    pick: |settings_content| {
+                        settings_content
+                            .navigation
+                            .as_ref()?
+                            .include_recent_closed
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .navigation
+                            .get_or_insert_default()
+                            .include_recent_closed = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Preview Max File Size",
+                description: "The largest file, in bytes, that a picker preview shows.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("navigation.preview_max_file_size"),
+                    pick: |settings_content| {
+                        settings_content
+                            .navigation
+                            .as_ref()?
+                            .preview_max_file_size
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .navigation
+                            .get_or_insert_default()
+                            .preview_max_file_size = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
     SettingsPage {
         title: "Search & Files",
-        items: concat_sections![search_section(), file_finder_section(), file_scan_section()],
+        items: concat_sections![
+            search_section(),
+            file_finder_section(),
+            file_scan_section(),
+            navigation_section()
+        ],
     }
 }
 
