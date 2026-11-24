@@ -187,6 +187,9 @@ pub enum ConnectError {
     SecretStore(String),
     /// The secret was stored but `connection.toml` was not written; the cause is redacted.
     File(String),
+    /// A replace to another workspace stored the secret but could not remove the previous
+    /// workspace's `allowed.toml`; the cause is redacted.
+    ClearAllowed(String),
 }
 
 impl fmt::Display for ConnectError {
@@ -220,6 +223,11 @@ impl fmt::Display for ConnectError {
                 "The Slack token was stored but {CONNECTION_FILE} could not be written ({cause}); \
                  not connected"
             ),
+            Self::ClearAllowed(cause) => write!(
+                f,
+                "The Slack token was stored but {ALLOWED_FILE} of the previous workspace could not \
+                 be removed ({cause}); not connected"
+            ),
         }
     }
 }
@@ -228,6 +236,8 @@ impl fmt::Display for ConnectError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DisconnectError {
     AlreadyRunning,
+    /// Nothing is connected, so nothing was touched (not even the credential store).
+    NotConnected,
     /// Deleting the secret failed; the connection stays. The cause is redacted.
     SecretStore(String),
     /// The secret is gone but a file could not be removed; the cause is redacted.
@@ -237,7 +247,10 @@ pub enum DisconnectError {
 impl fmt::Display for DisconnectError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::AlreadyRunning => f.write_str("Slack: a connect is already running"),
+            Self::AlreadyRunning => {
+                f.write_str("Slack: a connect or a disconnect is already running")
+            }
+            Self::NotConnected => f.write_str("Slack is not connected"),
             Self::SecretStore(cause) => write!(
                 f,
                 "Could not delete the Slack token from the secret store ({cause}); still connected"
@@ -276,14 +289,23 @@ pub fn check_scopes(granted: &[String]) -> Result<(), ConnectError> {
 }
 
 /// The connection state of the application.
-struct SlackConnection {
+pub(crate) struct SlackConnection {
     dir: PathBuf,
     connection: Option<Connection>,
     /// A connect or a disconnect is running.
     busy: bool,
+    /// Bumped whenever `connection` changes, so a client or cache of an earlier connection is
+    /// never used for a later one.
+    generation: u64,
 }
 
 impl Global for SlackConnection {}
+
+static GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn next_generation() -> u64 {
+    GENERATION.fetch_add(1, Ordering::Relaxed)
+}
 
 struct InstalledCredentials(Arc<dyn CredentialsProvider>);
 
@@ -297,6 +319,7 @@ pub fn install(dir: PathBuf, cx: &mut App) {
         dir,
         connection,
         busy: false,
+        generation: next_generation(),
     });
 }
 
@@ -326,10 +349,43 @@ pub fn current(cx: &App) -> Option<Connection> {
         .and_then(|state| state.connection.clone())
 }
 
+/// Changes whenever the connection changes (a connect, a disconnect, a new install); 0 before
+/// [`install`].
+pub fn generation(cx: &App) -> u64 {
+    cx.try_global::<SlackConnection>()
+        .map_or(0, |state| state.generation)
+}
+
+/// Reads the stored token from the credential store; `None` when there is none. The error is
+/// redacted. Only the Slack service calls this, on the first request of a session.
+pub fn read_token(cx: &App) -> Task<Result<Option<SlackToken>, String>> {
+    let provider = credentials(cx);
+    cx.spawn(async move |cx| {
+        let stored = provider
+            .read_credentials(CREDENTIAL_URL, cx)
+            .await
+            .map_err(|error| redact(&format!("{error:#}")))?;
+        let Some((_, secret)) = stored else {
+            return Ok(None);
+        };
+        let Ok(text) = String::from_utf8(secret) else {
+            return Err("the stored Slack token is not text".to_string());
+        };
+        // A stored text that is no longer a usable token reads as missing.
+        Ok(SlackToken::parse(&text).ok())
+    })
+}
+
 /// Whether a connect or a disconnect is running.
 pub fn is_busy(cx: &App) -> bool {
     cx.try_global::<SlackConnection>()
         .is_some_and(|state| state.busy)
+}
+
+/// The Slack directory installed, or the default one before [`install`].
+pub fn installed_dir(cx: &App) -> PathBuf {
+    cx.try_global::<SlackConnection>()
+        .map_or_else(default_dir, |state| state.dir.clone())
 }
 
 /// The Slack directory in use.
@@ -380,24 +436,40 @@ pub fn connect(
                 .await
                 .map_err(|error| ConnectError::SecretStore(token.redact(&format!("{error:#}"))))?;
             let connection = Connection::new(&info, token.kind(), now);
+            // The allowed list names conversations of the previous workspace: it goes before
+            // the new `connection.toml` is written, and a failure stops the connect.
+            if previous_team.is_some_and(|team| team != connection.team_id) {
+                remove_if_present(&allowed_path(&dir)).map_err(|error| {
+                    ConnectError::ClearAllowed(token.redact(&error.to_string()))
+                })?;
+            }
             write_connection(&dir, &connection)
                 .map_err(|error| ConnectError::File(token.redact(&error.to_string())))?;
-            if previous_team.is_some_and(|team| team != connection.team_id)
-                && let Err(error) = remove_if_present(&allowed_path(&dir))
-            {
-                log::warn!(
-                    "could not clear the Slack allowed list of the previous workspace: {}",
-                    token.redact(&error.to_string())
-                );
-            }
             Ok(connection)
         }
         .await;
         cx.update(|cx| {
             let state = state_mut(cx);
             state.busy = false;
-            if let Ok(connection) = &result {
-                state.connection = Some(connection.clone());
+            match &result {
+                Ok(connection) => {
+                    state.connection = Some(connection.clone());
+                    state.generation = next_generation();
+                }
+                // The secret was replaced but the files do not describe it: a `connection.toml`
+                // left from before would name the old workspace with the new token, so it goes
+                // and the state is not connected.
+                Err(ConnectError::File(_) | ConnectError::ClearAllowed(_)) => {
+                    state.connection = None;
+                    state.generation = next_generation();
+                    if let Err(error) = remove_if_present(&connection_path(&state.dir)) {
+                        log::warn!(
+                            "could not remove the stale Slack connection file: {}",
+                            redact(&error.to_string())
+                        );
+                    }
+                }
+                Err(_) => {}
             }
         });
         result
@@ -409,6 +481,9 @@ pub fn connect(
 pub fn disconnect(cx: &mut App) -> Task<Result<(), DisconnectError>> {
     if state_mut(cx).busy {
         return Task::ready(Err(DisconnectError::AlreadyRunning));
+    }
+    if state_mut(cx).connection.is_none() {
+        return Task::ready(Err(DisconnectError::NotConnected));
     }
     let provider = credentials(cx);
     let state = state_mut(cx);
@@ -431,6 +506,7 @@ pub fn disconnect(cx: &mut App) -> Task<Result<(), DisconnectError>> {
             state.busy = false;
             if !matches!(result, Err(DisconnectError::SecretStore(_))) {
                 state.connection = None;
+                state.generation = next_generation();
             }
         });
         result
