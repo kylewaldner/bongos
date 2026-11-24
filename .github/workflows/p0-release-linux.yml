@@ -50,7 +50,7 @@ jobs:
           . p0/lib.sh
           . script/bongos/env.sh
           s=$(date +%s)
-          /usr/bin/time -v -o "$RUNNER_TEMP/time.txt" script/bongos/bundle-linux --out "$RUNNER_TEMP/dist" || echo "MEASURE bundle_failed=$?"
+          /usr/bin/time -v -o "$RUNNER_TEMP/time.txt" script/bongos/bundle-linux --out "$RUNNER_TEMP/dist" || { echo "MEASURE bundle_failed=$?"; head -30 "$RUNNER_TEMP/time.txt"; }
           echo "MEASURE step=bundle-linux seconds=$(( $(date +%s)-s )) attempt=${{ github.run_attempt }}"
           grep -E "Maximum resident|Elapsed" "$RUNNER_TEMP/time.txt" | sed 's/^/MEASURE time /'
           ls -la "$RUNNER_TEMP/dist" | sed 's/^/MEASURE dist /'
