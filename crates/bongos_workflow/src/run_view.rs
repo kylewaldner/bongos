@@ -85,6 +85,8 @@ pub struct RunData {
     pub session_limit: usize,
     /// The live status of each running key whose node has a status source.
     pub node_status: BTreeMap<NodeKey, NodeStatus>,
+    /// Whether a person's grant to run without the OS sandbox is live for the run.
+    pub unsandboxed: bool,
 }
 
 impl RunData {
@@ -111,6 +113,7 @@ impl RunData {
             attempt_dir: lifecycle.shown_attempt_dir(run),
             session_limit,
             node_status: BTreeMap::new(),
+            unsandboxed: lifecycle.consent_grant(run).is_some(),
         })
     }
 
@@ -193,7 +196,20 @@ pub struct Snapshot {
     pub detail: Option<Detail>,
     /// The box the detail pane is about.
     pub selected: Option<Selection>,
+    /// The pending ask to run without the OS sandbox.
+    pub consent: Option<String>,
+    /// The note while a grant to run without the OS sandbox is live.
+    pub unsandboxed: Option<&'static str>,
+    /// One row per answer to a sandbox ask: what, who and when.
+    pub consent_history: Vec<String>,
 }
+
+/// The status note while a grant to run without the OS sandbox is live.
+pub const UNSANDBOXED_NOTE: &str = "unsandboxed (approved)";
+/// The label of the button that lets the run go without the OS sandbox.
+pub const ALLOW_UNSANDBOXED_LABEL: &str = "Run this once without a sandbox";
+/// The label of the button that stops the run instead.
+pub const STOP_LABEL: &str = "Stop";
 
 impl Snapshot {
     /// Builds the snapshot of `data` with `selected` in the detail pane (the first row when it is
@@ -255,6 +271,20 @@ impl Snapshot {
             cap_reason: state.cap_reached.as_ref().map(CapReached::reason),
             detail,
             selected,
+            consent: crate::consent::question(state),
+            unsandboxed: data.unsandboxed.then_some(UNSANDBOXED_NOTE),
+            consent_history: state
+                .consent_history
+                .iter()
+                .map(|answer| {
+                    let what = if answer.allowed {
+                        "allowed to run without a sandbox"
+                    } else {
+                        "stopped"
+                    };
+                    format!("{what} by {} at {}", answer.by, answer.at)
+                })
+                .collect(),
         }
     }
 
@@ -295,6 +325,9 @@ impl Snapshot {
         if let Some(failure) = &self.failure {
             let _ = writeln!(out, "failure: {failure}");
         }
+        if let Some(note) = self.unsandboxed {
+            let _ = writeln!(out, "{note}");
+        }
         match mode {
             Mode::List => {
                 let _ = writeln!(out, "nodes (run order)");
@@ -328,6 +361,13 @@ impl Snapshot {
             if let Some(result) = &gate.result {
                 let _ = writeln!(out, "  result: {result}");
             }
+        }
+        if let Some(question) = &self.consent {
+            let _ = writeln!(out, "sandbox ask: {question}");
+            let _ = writeln!(out, "  [{ALLOW_UNSANDBOXED_LABEL}] [{STOP_LABEL}]");
+        }
+        for row in &self.consent_history {
+            let _ = writeln!(out, "sandbox answer: {row}");
         }
         if !self.outcomes.is_empty() {
             let _ = writeln!(out, "outcomes");
@@ -726,6 +766,70 @@ impl RunView {
         approved.map_err(|refusal| refusal.to_string())
     }
 
+    /// "Run this once without a sandbox": the same call `workflow: allow unsandboxed once` makes.
+    pub fn allow_unsandboxed(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        self.answer_unsandboxed(true, cx)
+    }
+
+    /// "Stop": the same call `workflow: refuse unsandboxed` makes.
+    pub fn refuse_unsandboxed(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        self.answer_unsandboxed(false, cx)
+    }
+
+    fn answer_unsandboxed(&mut self, allowed: bool, cx: &mut Context<Self>) -> Result<(), String> {
+        let answered =
+            self.engine
+                .answer_unsandboxed(&self.run, allowed, crate::lifecycle::BY_PERSON, cx);
+        self.refresh(cx);
+        answered.map_err(|refusal| refusal.to_string())
+    }
+
+    fn render_consent(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        v_flex()
+            .gap_2()
+            .px_2()
+            .children(snapshot.consent.as_ref().map(|question| {
+                v_flex()
+                    .gap_1()
+                    .p_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(cx.theme().status().warning_border)
+                    .bg(colors.surface_background)
+                    .child(Label::new(question.clone()))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("run-view-allow-unsandboxed", ALLOW_UNSANDBOXED_LABEL)
+                                    .style(ButtonStyle::Filled)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if let Err(message) = this.allow_unsandboxed(cx) {
+                                            log::warn!(
+                                                "workflows: allow unsandboxed from the run view: {message}"
+                                            );
+                                        }
+                                    })),
+                            )
+                            .child(Button::new("run-view-stop-unsandboxed", STOP_LABEL).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    if let Err(message) = this.refuse_unsandboxed(cx) {
+                                        log::warn!(
+                                            "workflows: stop from the run view: {message}"
+                                        );
+                                    }
+                                }),
+                            )),
+                    )
+            }))
+            .children(snapshot.consent_history.iter().map(|row| {
+                Label::new(row.clone())
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+            }))
+    }
+
     fn render_header(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         v_flex()
@@ -765,6 +869,11 @@ impl RunView {
                     .failure
                     .as_ref()
                     .map(|failure| Label::new(format!("failed: {failure}")).color(Color::Error)),
+            )
+            .children(
+                snapshot
+                    .unsandboxed
+                    .map(|note| Label::new(note).color(Color::Warning)),
             )
     }
 
@@ -1143,6 +1252,7 @@ impl Render for RunView {
             .child(self.render_header(&snapshot, cx))
             .child(nodes)
             .child(self.render_gates(&snapshot, cx))
+            .child(self.render_consent(&snapshot, cx))
             .children((!snapshot.outcomes.is_empty()).then(|| {
                 v_flex()
                     .p_2()

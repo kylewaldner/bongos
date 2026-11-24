@@ -218,6 +218,22 @@ fn register_run_commands(workspace: &mut Workspace) {
         let cancelled = engine.cancel(&run, cx);
         report(workspace, cancelled.map(|()| "Workflow run cancelled"), cx);
     });
+    on_run::<workflow::AllowUnsandboxedOnce>(workspace, |engine, run, workspace, _, cx| {
+        let answered = engine.answer_unsandboxed(&run, true, crate::lifecycle::BY_PERSON, cx);
+        report(
+            workspace,
+            answered.map(|()| "Allowed this run to go without a sandbox"),
+            cx,
+        );
+    });
+    on_run::<workflow::RefuseUnsandboxed>(workspace, |engine, run, workspace, _, cx| {
+        let answered = engine.answer_unsandboxed(&run, false, crate::lifecycle::BY_PERSON, cx);
+        report(
+            workspace,
+            answered.map(|()| "Stopped: nothing ran without a sandbox"),
+            cx,
+        );
+    });
     on_run::<workflow::Approve>(workspace, |engine, run, workspace, window, cx| {
         let Some(key) = engine.open_gates(&run).into_iter().next() else {
             show_toast(
@@ -394,6 +410,16 @@ fn remote_verb<A: Action>() -> Option<(WorkflowVerb, bool)> {
         (
             std::any::TypeId::of::<workflow::Revise>(),
             WorkflowVerb::Revise,
+            false,
+        ),
+        (
+            std::any::TypeId::of::<workflow::AllowUnsandboxedOnce>(),
+            WorkflowVerb::AllowUnsandboxedOnce,
+            false,
+        ),
+        (
+            std::any::TypeId::of::<workflow::RefuseUnsandboxed>(),
+            WorkflowVerb::RefuseUnsandboxed,
             false,
         ),
         (

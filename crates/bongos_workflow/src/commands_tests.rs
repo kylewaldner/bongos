@@ -15,6 +15,7 @@ use workspace::Workspace;
 use crate::actions::{LastToast, OFF_MESSAGE};
 use crate::commands::VALIDATE_TITLE;
 use crate::engine::{EngineRoots, WorkflowEngine};
+use crate::remote::{InstalledWorkflowRemote, WorkflowPayload, WorkflowRemote, WorkflowVerb};
 
 const BROKEN: &str = "schema = 1\n\
 name = \"broken\"\n\
@@ -660,4 +661,68 @@ fn an_edited_value_is_parsed_by_the_type_of_its_field() {
         text(FieldType::List(ItemType::Number), "1, x"),
         Err("'x' is not a number".to_string())
     );
+}
+
+/// A remote that records the verbs it is sent and answers with `reply`.
+struct RecordingRemote {
+    sent: std::rc::Rc<std::cell::RefCell<Vec<WorkflowVerb>>>,
+    reply: Result<&'static str, &'static str>,
+}
+
+impl WorkflowRemote for RecordingRemote {
+    fn is_remote(&self, _: Option<&str>, _: &gpui::App) -> bool {
+        true
+    }
+
+    fn send(
+        &self,
+        verb: WorkflowVerb,
+        _: WorkflowPayload,
+        _: &mut gpui::App,
+    ) -> gpui::Task<anyhow::Result<String>> {
+        self.sent.borrow_mut().push(verb);
+        gpui::Task::ready(match self.reply {
+            Ok(message) => Ok(message.to_string()),
+            Err(error) => Err(anyhow::anyhow!(error)),
+        })
+    }
+}
+
+#[gpui::test]
+async fn a_remote_run_sends_the_sandbox_verbs_and_shows_a_failed_send(cx: &mut TestAppContext) {
+    let (_env, cx) = env(cx, true).await;
+    let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    cx.update(|_, cx| {
+        InstalledWorkflowRemote::install(
+            std::rc::Rc::new(RecordingRemote {
+                sent: sent.clone(),
+                reply: Ok("sent"),
+            }),
+            cx,
+        )
+    });
+    dispatch("workflow::AllowUnsandboxedOnce", cx);
+    dispatch("workflow::RefuseUnsandboxed", cx);
+    assert_eq!(
+        *sent.borrow(),
+        [
+            WorkflowVerb::AllowUnsandboxedOnce,
+            WorkflowVerb::RefuseUnsandboxed
+        ]
+    );
+    cx.update(|_, cx| assert_eq!(cx.global::<LastToast>().0, "sent"));
+
+    // A failed send shows its error; the ask is the writer's, so it stays open there.
+    cx.update(|_, cx| {
+        InstalledWorkflowRemote::install(
+            std::rc::Rc::new(RecordingRemote {
+                sent: sent.clone(),
+                reply: Err("the host is gone"),
+            }),
+            cx,
+        )
+    });
+    dispatch("workflow::AllowUnsandboxedOnce", cx);
+    assert_eq!(sent.borrow().len(), 3);
+    cx.update(|_, cx| assert_eq!(cx.global::<LastToast>().0, "the host is gone"));
 }
