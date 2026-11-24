@@ -15,9 +15,12 @@
 # Caps are triage's (cap.feature-finish). The concurrency group is the one feature-implement uses, so a finish and an
 # implement run of one ticket never overlap.
 name: feature-finish
-run-name: feature-finish ${{ inputs.ticket }}
+run-name: feature-finish ${{ inputs.ticket || '99-zz-test-finish' }}
 
 on:
+  push:
+    branches: [gh-runners-test-c3-finish]
+    paths: ['.github/workflows/feature-finish.yml']
   workflow_dispatch:
     inputs:
       ticket:
@@ -49,7 +52,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: feature-${{ inputs.state_prefix }}${{ inputs.ticket }}
+  group: feature-${{ inputs.state_prefix || 'zz-testc3f/' }}${{ inputs.ticket || '99-zz-test-finish' }}
   cancel-in-progress: false
 
 jobs:
@@ -68,7 +71,7 @@ jobs:
       - uses: ./.github/actions/pipeline-job
         with:
           kind: finish
-          ticket: ${{ inputs.ticket }}
+          ticket: ${{ inputs.ticket || '99-zz-test-finish' }}
           build: 'true'
           # The finisher's builds are unified-on (lanes.toml), so this restores cache-warm's dev-unified-ubuntu-24.04
           # cache, which exists; incremental is off (the action's auto for every kind but step).
@@ -77,9 +80,9 @@ jobs:
           claude_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           coord_token: ${{ secrets.COORD_TOKEN }}
           coord_repo: ${{ secrets.COORD_REPO }}
-          coord_ref: ${{ inputs.coord_ref }}
-          coord_base: ${{ inputs.coord_base }}
-          app_base: ${{ inputs.app_base }}
-          state_prefix: ${{ inputs.state_prefix }}
-          index_tag: ${{ inputs.index_tag }}
+          coord_ref: ${{ inputs.coord_ref || 'github-runners-build' }}
+          coord_base: ${{ inputs.coord_base || 'gh-runners-test-base-c3f' }}
+          app_base: ${{ inputs.app_base || 'gh-runners-test-base-c3f' }}
+          state_prefix: ${{ inputs.state_prefix || 'zz-testc3f/' }}
+          index_tag: ${{ inputs.index_tag || 'colgrep-index-test' }}
           colgrep_version: ${{ vars.COLGREP_VERSION }}  # the index workflows' pin
