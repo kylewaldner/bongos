@@ -1236,17 +1236,7 @@ impl ProjectSearchView {
             entity.search(query, cx);
             entity
         });
-        let (tx, rx) = futures::channel::oneshot::channel();
-        let mut tx = Some(tx);
-        // Holds the sender, so the receiver is cancelled when the search is dropped.
-        let app: &mut App = cx;
-        app.observe(&entity, move |entity, cx| {
-            let ended = matches!(entity.read(cx).search_state, SearchState::Completed(_));
-            if ended && let Some(tx) = tx.take() {
-                tx.send(entity).ok();
-            }
-        })
-        .detach();
+        let ended = Self::search_ended(&entity, cx);
 
         let search = cx.new(|cx| ProjectSearchView::new(weak_workspace, entity, window, cx, None));
         let preferred = workspace.active_pane().clone();
@@ -1262,7 +1252,27 @@ impl ProjectSearchView {
             search.filters_enabled = !included.is_empty() || !excluded.is_empty();
             search.included_opened_only = opened_only;
         });
-        cx.spawn(async move |_, _| rx.await.ok())
+        ended
+    }
+
+    /// Resolves with `entity` once its search has ended, and with `None` when `entity` is
+    /// dropped before that.
+    fn search_ended(
+        entity: &Entity<ProjectSearch>,
+        cx: &mut App,
+    ) -> Task<Option<Entity<ProjectSearch>>> {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        let mut tx = Some(tx);
+        // The observer owns the sender and lives as long as `entity`, so the receiver is
+        // cancelled when `entity` is dropped.
+        cx.observe(entity, move |entity, cx| {
+            let ended = matches!(entity.read(cx).search_state, SearchState::Completed(_));
+            if ended && let Some(tx) = tx.take() {
+                tx.send(entity).ok();
+            }
+        })
+        .detach();
+        cx.spawn(async move |_| rx.await.ok())
     }
 
     /// Re-activate the most recently activated search in this pane or the most recent if it has been closed.
@@ -4150,17 +4160,21 @@ pub mod tests {
             assert!(!view.read(cx).opened_only());
         });
 
-        let task = workspace.update_in(cx, |workspace, window, cx| {
-            ProjectSearchView::open_with_query(workspace, query, window, cx)
+        // A search that is dropped before it ends resolves with nothing.
+        let (task, dropped) = cx.update(|_, cx| {
+            let project = workspace.read(cx).project().clone();
+            let search = cx.new(|cx| {
+                let mut search = ProjectSearch::new(project, cx);
+                search.search(query, cx);
+                search
+            });
+            (
+                ProjectSearchView::search_ended(&search, cx),
+                search.downgrade(),
+            )
         });
-        let second = active_view(cx).expect("a second search item is open");
-        assert_ne!(second, view);
-        let pane = cx.read(|cx| workspace.read(cx).active_pane().clone());
-        pane.update_in(cx, |pane, window, cx| {
-            pane.remove_item(second.entity_id(), false, false, window, cx)
-        });
-        drop(second);
-        assert!(task.await.is_none(), "the dropped item ends the task");
+        assert!(dropped.upgrade().is_none(), "nothing holds the search");
+        assert!(task.await.is_none(), "the dropped search ends the task");
     }
 
     #[perf]
