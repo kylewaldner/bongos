@@ -29,7 +29,7 @@ use workspace::Workspace;
 
 use crate::goto_file_open::{self, FileTarget};
 use crate::preview::{Preview, PreviewSession, PreviewTarget};
-use crate::target::{PaneChoice, resolve};
+use crate::target::{PaneChoice, add_pane_choices, resolve};
 
 /// The name the picker's session is routed by.
 pub const HOST: &str = "go_to_file";
@@ -223,11 +223,25 @@ pub fn open_current(_: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
 }
 
 /// Opens the picker; a chosen file opens in another pane.
-pub fn open_other_pane(_: &mut Workspace, _: &mut Window, _: &mut Context<Workspace>) {}
+pub fn open_other_pane(_: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    open_with(PaneChoice::OtherPane, window, cx);
+}
 /// Opens the picker; a chosen file opens in a split to the right.
-pub fn open_split_right(_: &mut Workspace, _: &mut Window, _: &mut Context<Workspace>) {}
+pub fn open_split_right(_: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    open_with(PaneChoice::SplitRight, window, cx);
+}
 /// Opens the picker; a chosen file opens in a split below.
-pub fn open_split_down(_: &mut Workspace, _: &mut Window, _: &mut Context<Workspace>) {}
+pub fn open_split_down(_: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    open_with(PaneChoice::SplitDown, window, cx);
+}
+
+fn open_with(choice: PaneChoice, window: &mut Window, cx: &mut Context<Workspace>) {
+    let workspace = cx.entity();
+    // See `open_current`: the preview session cannot be made while the workspace is updated.
+    window.defer(cx, move |window, cx| {
+        start(&workspace, choice, window, cx);
+    });
+}
 
 /// Starts the picker. `choice` says which pane the preview shows in and a chosen file opens in.
 pub(crate) fn start(
@@ -248,8 +262,13 @@ pub(crate) fn start(
     let weak_workspace = workspace.downgrade();
     let preview_workspace = weak_workspace.clone();
     let preview_choice = choice.clone();
+    let choice_workspace = weak_workspace.clone();
     let session = Session::completing_read(HOST, "Go to file: ")
         .key_context(KEY_CONTEXT)
+        // C-j answers the input as typed and creates the file when it does not exist; an empty
+        // input is refused.
+        .free_input(true)
+        .accept(|input| !input.trim().is_empty(), "Give the name of a file")
         .source(Source::Dynamic(Box::new(move |query, cancel, cx| {
             let (mut sender, receiver) = mpsc::channel(1);
             if let Some(abs_path) = typed_path(&query) {
@@ -313,19 +332,39 @@ pub(crate) fn start(
             };
             preview.update(cx, |preview, cx| preview.update(event, window, cx));
         })
-        .on_confirm(move |outcome, window, cx| {
-            let Outcome::Candidate(value) = outcome else {
-                return;
-            };
+        .on_confirm(move |outcome, window, cx| match outcome {
+            Outcome::Candidate(value) => {
+                let Some(target) = value.downcast_ref::<FileTarget>() else {
+                    return;
+                };
+                weak_workspace
+                    .update(cx, |workspace, cx| {
+                        goto_file_open::open(workspace, target, &choice, window, cx)
+                    })
+                    .ok();
+            }
+            Outcome::Input(input) => {
+                weak_workspace
+                    .update(cx, |workspace, cx| {
+                        goto_file_open::create_and_open(workspace, &input, &choice, window, cx)
+                    })
+                    .ok();
+            }
+        });
+    let session = add_pane_choices(
+        session,
+        choice_workspace.clone(),
+        move |value, pane, window, cx| {
             let Some(target) = value.downcast_ref::<FileTarget>() else {
                 return;
             };
-            weak_workspace
+            choice_workspace
                 .update(cx, |workspace, cx| {
-                    goto_file_open::open(workspace, target, &choice, window, cx)
+                    goto_file_open::open(workspace, target, &PaneChoice::Letter(pane), window, cx)
                 })
                 .ok();
-        });
+        },
+    );
     Some(workspace.update(cx, |workspace, cx| {
         bongos_minibuffer::open(workspace, session, window, cx)
     }))
