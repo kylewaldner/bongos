@@ -3000,15 +3000,28 @@ name = "bongos_slack"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bongos_minibuffer",
  "bongos_slack_model",
+ "chrono",
  "command_palette_hooks",
+ "credentials_provider",
+ "editor",
  "futures 0.3.32",
  "gpui",
  "http_client",
+ "language",
  "log",
+ "menu",
+ "paths",
+ "serde",
  "serde_json",
  "settings",
+ "tempfile",
+ "toml 0.8.23",
+ "ui",
  "url",
+ "workspace",
+ "zed_credentials_provider",
 ]
 
 [[package]]
