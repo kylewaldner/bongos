@@ -772,3 +772,59 @@ async fn m_o_on_a_recently_closed_row_opens_the_file_in_the_chosen_pane(cx: &mut
         "the source pane is as it was"
     );
 }
+
+/// Opens the switcher, with two files open when `with_files`, closes it first when
+/// `close_first`, then closes the window. Says whether the switcher's preview is gone, and whether
+/// the project of the window is.
+async fn released_after_window_closes(
+    with_files: bool,
+    close_first: bool,
+    cx: &mut TestAppContext,
+) -> (bool, bool) {
+    let (workspace, mut cx, _) = setup(cx).await;
+    let cx = &mut cx;
+    let project = cx.read(|cx| workspace.read(cx).project().downgrade());
+    let pane = active_pane(&workspace, cx);
+    if with_files {
+        open(&workspace, &pane, "a.txt", cx).await;
+        open(&workspace, &pane, "b.txt", cx).await;
+    }
+    let handle = open_switcher(&workspace, cx);
+    select_next(cx);
+    let preview = cx
+        .read(|cx| current(cx, workspace.entity_id()))
+        .expect("the switcher is registered")
+        .preview;
+    if close_first {
+        cx.update(|window, cx| handle.close(window, cx));
+        cx.run_until_parked();
+    }
+    drop((handle, pane, workspace));
+
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+    (preview.upgrade().is_none(), project.upgrade().is_none())
+}
+
+#[gpui::test]
+async fn closing_the_window_with_the_switcher_open_releases_its_project(cx: &mut TestAppContext) {
+    let (preview, project) = released_after_window_closes(false, false, cx).await;
+    assert!(preview, "the preview is released");
+    assert!(project, "the project is released");
+}
+
+#[gpui::test]
+async fn closing_the_window_releases_the_preview_of_a_switcher_that_previewed(
+    cx: &mut TestAppContext,
+) {
+    let (preview, _) = released_after_window_closes(true, false, cx).await;
+    assert!(preview, "the preview is released");
+}
+
+#[gpui::test]
+async fn closing_the_window_after_the_switcher_closed_releases_its_preview(
+    cx: &mut TestAppContext,
+) {
+    let (preview, _) = released_after_window_closes(true, true, cx).await;
+    assert!(preview, "the preview is released");
+}

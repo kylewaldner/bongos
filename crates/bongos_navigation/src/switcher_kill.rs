@@ -45,20 +45,30 @@ struct Switchers {
 
 impl Global for Switchers {}
 
-/// Records `handle` as the switcher of `workspace`, replacing any earlier one.
+/// Records `handle` as the switcher of `workspace`, replacing any earlier one. The entry goes when
+/// the workspace does: the session's preview handler holds the preview, which holds the project.
 pub(crate) fn register(
     cx: &mut App,
-    workspace: EntityId,
+    workspace: &Entity<Workspace>,
     handle: SessionHandle,
     preview: Entity<PreviewSession>,
 ) {
-    cx.default_global::<Switchers>().by_workspace.insert(
-        workspace,
+    let id = workspace.entity_id();
+    let earlier = cx.default_global::<Switchers>().by_workspace.insert(
+        id,
         Active {
             handle,
             preview: preview.downgrade(),
         },
     );
+    if earlier.is_none() {
+        cx.observe_release(workspace, move |_, cx| {
+            if cx.has_global::<Switchers>() {
+                cx.global_mut::<Switchers>().by_workspace.remove(&id);
+            }
+        })
+        .detach();
+    }
 }
 
 pub(crate) fn current(cx: &App, workspace: EntityId) -> Option<Active> {

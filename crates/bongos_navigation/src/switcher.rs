@@ -127,7 +127,7 @@ pub(crate) fn start_with(
     let handle = workspace.update(cx, |workspace, cx| {
         bongos_minibuffer::open(workspace, session, window, cx)
     });
-    switcher_kill::register(cx, workspace.entity_id(), handle.clone(), preview);
+    switcher_kill::register(cx, workspace, handle.clone(), preview);
     Some(handle)
 }
 
