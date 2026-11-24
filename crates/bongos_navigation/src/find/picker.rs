@@ -6,7 +6,7 @@ use std::{any::Any, cell::RefCell, ops::Range, rc::Rc};
 
 use bongos_emacs::mark;
 use bongos_minibuffer::{
-    Outcome, Preview as SessionPreview, Session, SessionHandle, Source, Value,
+    HistoryStore, Outcome, Preview as SessionPreview, Session, SessionHandle, Source, Value,
 };
 use bongos_navigation_model::flags::Flags;
 use editor::{Editor, SelectionEffects, scroll::Autoscroll};
@@ -18,14 +18,32 @@ use text::{Anchor, ToPoint as _};
 use workspace::{Pane, Workspace, searchable::SearchableItem as _};
 
 use crate::find::engine::{self, FindRequest, FindRow};
+use crate::find::flag_history;
 use crate::preview::{Preview, PreviewSession, PreviewTarget};
 use crate::registry;
 use crate::target::{self, PaneChoice};
 
 /// The name the session is routed by (`minibuffer.enabled_for`) and its history.
 pub const HOST: &str = "find_in_files";
-/// The prompt in front of the input.
-pub const PROMPT: &str = "Find: ";
+/// The name of the history of the input.
+pub const HISTORY: &str = "find-in-files";
+
+/// The prompt in front of the input: `Find ` and the lit flags, as `Find [.*][Aa][w][buf]: `.
+pub fn prompt(flags: &Flags) -> String {
+    format!("Find {}: ", flags.prompt_marks())
+}
+
+/// How a picker starts.
+#[derive(Default)]
+pub struct Start {
+    /// The input the picker opens with.
+    pub input: String,
+    /// Whether the input is selected, so that typing replaces it.
+    pub select_input: bool,
+    pub flags: Flags,
+    /// The directory every search stays in, as a project path.
+    pub base_dir: Option<String>,
+}
 
 /// One open find in files picker.
 pub struct FindPicker {
@@ -35,6 +53,11 @@ pub struct FindPicker {
     origin: Option<WeakEntity<Editor>>,
     seed: String,
     base_dir: Option<String>,
+    flags: RefCell<Flags>,
+    /// What the input holds.
+    input: RefCell<String>,
+    /// The buffers a search of the open buffers covers, collected when the flag is set.
+    buffers: RefCell<Vec<Entity<Buffer>>>,
     /// Made at the first preview: the workspace cannot be read while it opens the picker.
     preview: RefCell<Option<Entity<PreviewSession>>>,
     /// The open session; taken when it ends.
@@ -58,6 +81,34 @@ impl FindPicker {
         self.base_dir.as_deref()
     }
 
+    /// The flags the searches run with.
+    pub fn flags(&self) -> Flags {
+        self.flags.borrow().clone()
+    }
+
+    /// What the input holds.
+    pub fn input(&self) -> String {
+        self.input.borrow().clone()
+    }
+
+    /// Replaces the flags, shows them in the prompt and searches again. With the open buffers
+    /// flag set, `buffers` is the list the search covers.
+    pub fn set_flags(
+        &self,
+        flags: Flags,
+        buffers: Vec<Entity<Buffer>>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let prompt = prompt(&flags);
+        self.flags.replace(flags);
+        self.buffers.replace(buffers);
+        if let Some(handle) = self.handle() {
+            handle.set_prompt(prompt, window, cx);
+            handle.refresh(window, cx);
+        }
+    }
+
     /// The open session, until it ends.
     pub fn handle(&self) -> Option<SessionHandle> {
         self.handle.borrow().clone()
@@ -76,6 +127,25 @@ impl FindPicker {
         let preview = cx.new(|cx| PreviewSession::new(&workspace, cx));
         self.preview.replace(Some(preview.clone()));
         Some(preview)
+    }
+
+    /// Keeps the flags of the input that was confirmed, beside its history entry.
+    fn remember_flags(&self, cx: &mut App) {
+        let kvp = HistoryStore::global(cx).kvp().clone();
+        flag_history::write(&kvp, &self.input.borrow(), &self.flags.borrow(), cx);
+    }
+
+    /// Takes the flags `entry` was run with, when they were kept.
+    fn restore_flags(&self, entry: &str, window: &mut Window, cx: &mut App) {
+        let kvp = HistoryStore::global(cx).kvp().clone();
+        let Some(flags) = flag_history::read(&kvp, entry) else {
+            return;
+        };
+        let buffers = match self.workspace.upgrade() {
+            Some(workspace) if flags.open_buffers => open_buffers(workspace.read(cx), cx),
+            _ => Vec::new(),
+        };
+        self.set_flags(flags, buffers, window, cx);
     }
 
     fn set_status(&self, status: engine::FindStatus, cx: &mut App) {
@@ -200,6 +270,19 @@ fn point_range(buffer: &Entity<Buffer>, range: &Range<Anchor>, cx: &App) -> Rang
     range.start.to_point(&snapshot)..range.end.to_point(&snapshot)
 }
 
+/// The buffers of every editor open in the panes.
+pub fn open_buffers(workspace: &Workspace, cx: &App) -> Vec<Entity<Buffer>> {
+    let mut buffers: Vec<Entity<Buffer>> = Vec::new();
+    for editor in workspace.items_of_type::<Editor>(cx) {
+        for buffer in editor.read(cx).buffer().read(cx).all_buffers() {
+            if !buffers.contains(&buffer) {
+                buffers.push(buffer);
+            }
+        }
+    }
+    buffers
+}
+
 /// What the picker starts with: the active editor's region, else the word at its cursor, else
 /// nothing.
 fn seed(editor: Option<&Entity<Editor>>, window: &mut Window, cx: &mut App) -> String {
@@ -241,16 +324,48 @@ pub fn open(
     cx: &mut Context<Workspace>,
 ) -> Rc<FindPicker> {
     let editor = workspace.active_item_as::<Editor>(cx);
-    let seed = seed(editor.as_ref(), window, cx);
+    let input = seed(editor.as_ref(), window, cx);
     let base_dir = scoped
         .then(|| file_directory(editor.as_ref(), workspace, cx))
         .flatten();
+    let start = Start {
+        select_input: true,
+        input,
+        base_dir,
+        ..Start::default()
+    };
+    open_with(workspace, start, window, cx)
+}
+
+/// Opens the picker as `start` says.
+pub fn open_with(
+    workspace: &mut Workspace,
+    start: Start,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> Rc<FindPicker> {
+    let editor = workspace.active_item_as::<Editor>(cx);
+    let Start {
+        input: seed,
+        select_input,
+        flags,
+        base_dir,
+    } = start;
+    let buffers = if flags.open_buffers {
+        open_buffers(workspace, cx)
+    } else {
+        Vec::new()
+    };
+    let prompt = prompt(&flags);
     let this = cx.entity();
     let picker = Rc::new(FindPicker {
         workspace: this.downgrade(),
         origin: editor.as_ref().map(Entity::downgrade),
         seed: seed.clone(),
         base_dir: base_dir.clone(),
+        flags: RefCell::new(flags),
+        input: RefCell::new(seed.clone()),
+        buffers: RefCell::new(buffers),
         preview: RefCell::new(None),
         handle: RefCell::new(None),
     });
@@ -259,7 +374,10 @@ pub fn open(
     let source = {
         let picker = Rc::downgrade(&picker);
         move |query: String, cancel, cx: &mut App| {
-            let mut request = FindRequest::new(&query, Flags::default());
+            let (flags, buffers) = picker.upgrade().map_or_else(Default::default, |picker| {
+                (picker.flags(), picker.buffers.borrow().clone())
+            });
+            let mut request = FindRequest::new(&query, flags).buffers(buffers);
             if let Some(dir) = &base_dir {
                 request = request.base_dir(dir.clone());
             }
@@ -277,10 +395,30 @@ pub fn open(
             )
         }
     };
-    let session = Session::completing_read(HOST, PROMPT)
+    let mut session = Session::completing_read(HOST, prompt)
+        .history(HISTORY)
         .source(Source::Dynamic(Box::new(source)))
-        .initial_input(seed)
-        .select_initial_input()
+        .initial_input(seed);
+    if select_input {
+        session = session.select_initial_input();
+    }
+    let session = session
+        .on_input({
+            let picker = Rc::downgrade(&picker);
+            move |text, _, _, _| {
+                if let Some(picker) = picker.upgrade() {
+                    picker.input.replace(text.to_string());
+                }
+            }
+        })
+        .on_history_entry({
+            let picker = Rc::downgrade(&picker);
+            move |entry, _, window, cx| {
+                if let Some(picker) = picker.upgrade() {
+                    picker.restore_flags(entry, window, cx);
+                }
+            }
+        })
         .on_preview({
             let picker = picker.clone();
             move |event, window, cx| picker.on_preview(event, window, cx)
@@ -288,6 +426,7 @@ pub fn open(
         .on_confirm({
             let picker = picker.clone();
             move |outcome, window, cx| {
+                picker.remember_flags(cx);
                 if let Outcome::Candidate(value) = outcome {
                     picker.open_row(value, None, window, cx);
                 }
@@ -305,4 +444,4 @@ pub fn open(
 
 #[cfg(test)]
 #[path = "picker_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -15,14 +15,13 @@ use bongos_navigation_model::rows;
 use bongos_navigation_model::scope::{self, ScopeToken};
 use futures::channel::mpsc;
 use futures::{FutureExt as _, select_biased};
-use gpui::{App, AsyncApp, Context, Entity, SharedString, Window};
+use gpui::{App, AsyncApp, Entity, SharedString};
 use language::{Bias, Buffer, Point};
 use project::Project;
 use project::project_search::SearchResults;
 use project::search::{SearchQuery, SearchResult};
 use text::{Anchor, ToPoint as _};
 use util::paths::{PathMatcher, PathStyle};
-use workspace::Workspace;
 
 /// Rows sent at most for one query; the matches past it are counted in a last [`FindRow::More`].
 pub const MAX_ROWS: usize = 2_000;
@@ -30,15 +29,6 @@ pub const MAX_ROWS: usize = 2_000;
 pub const SNIPPET_CHARS: usize = 200;
 /// Batches the receiver may hold before the search waits for it.
 const BATCHES_IN_FLIGHT: usize = 16;
-
-/// Limits the search to the open buffers.
-pub fn scope_open_buffers(_: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
-    crate::registry::in_session(window, cx, |_, _, _| {})
-}
-/// Limits the search to a directory.
-pub fn scope_directory(_: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
-    crate::registry::in_session(window, cx, |_, _, _| {})
-}
 
 /// What to search for, and where.
 #[derive(Clone, Debug, Default)]
