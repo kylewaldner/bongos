@@ -1,10 +1,13 @@
 use gpui::{App, Pixels, SharedString, px};
 
 /// Corner radius shared by buttons, selected rows and inputs.
+/// The value is in pixels, not rems, so it does not scale with the rem size.
 pub const CORNER_RADIUS: Pixels = px(6.);
 
 /// Minimum height of a list row. Pixels, not rems, so it does not follow the
 /// UI font size.
+/// The value is in pixels, not rems, so it does not scale with the rem size.
+/// The shared ListItem component uses it as its minimum row height.
 pub const LIST_ROW_HEIGHT: Pixels = px(28.);
 
 /// The font family used by monospace labels (key hints, counts): the buffer
