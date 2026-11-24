@@ -2882,6 +2882,11 @@
     // (linear.enabled)".
     "enabled": true,
   },
+  "slack": {
+    // Whether the Slack integration is on. It is off by default; while it is off, bongos
+    // makes no request to Slack and every Slack command is hidden.
+    "enabled": false,
+  },
   "workflows": {
     // Whether workflows are on. It is on by default, and enabling starts nothing by
     // itself: no run starts, no process starts and nothing is written under `runs/` until

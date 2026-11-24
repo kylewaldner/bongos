@@ -5725,6 +5725,7 @@ mod tests {
                 "settings_editor",
                 "settings_profile_selector",
                 "skill_creator",
+                "slack",
                 "snippets",
                 "stash_picker",
                 "svg",

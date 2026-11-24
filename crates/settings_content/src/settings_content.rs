@@ -279,6 +279,10 @@ pub struct SettingsContent {
 
     /// Settings for the Linear sync of tasks.
     pub linear: Option<LinearSettingsContent>,
+
+    /// Settings for the Slack integration.
+    pub slack: Option<SlackSettingsContent>,
+
     /// Settings for workflows: runs of node graphs on a task.
     pub workflows: Option<WorkflowsSettingsContent>,
 
@@ -1653,6 +1657,17 @@ pub struct LinearSettingsContent {
     /// and every Linear command is hidden and only says "Linear sync is off (linear.enabled)".
     ///
     /// Default: true
+    pub enabled: Option<bool>,
+}
+
+/// Settings for the Slack integration.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct SlackSettingsContent {
+    /// Whether the Slack integration is on. It is off by default; while it is off, bongos makes
+    /// no request to Slack and every Slack command is hidden.
+    ///
+    /// Default: false
     pub enabled: Option<bool>,
 }
 
