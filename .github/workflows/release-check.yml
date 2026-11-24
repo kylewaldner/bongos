@@ -77,9 +77,16 @@ jobs:
       BONGOS_RUNNER_MODE: '1'
       AUTOPILOT_RUNNER_ACTOR: run ${{ github.run_id }}
     steps:
-      - name: Refuse an API key, check the image and export the settings
+      - name: Refuse a re-run and an API key, check the image and export the settings
+        env:
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
+          # as every pipeline job: a re-run reuses the run ID, which names this run's row (start a new run instead)
+          if [ "$RUN_ATTEMPT" != 1 ]; then
+            echo "::error::run attempt $RUN_ATTEMPT: re-runs are refused; start a new run instead"
+            exit 1
+          fi
           if [ -n "${ANTHROPIC_API_KEY+set}" ]; then
             echo "::error::ANTHROPIC_API_KEY is set; no pipeline job ever has it"
             exit 1
@@ -386,7 +393,7 @@ jobs:
           retention-days: 14
 
       - name: Final step
-        if: always()
+        if: always() && github.run_attempt == '1'
         env:
           GH_TOKEN: ${{ secrets.COORD_TOKEN }}
           COORD_REPO: ${{ secrets.COORD_REPO }}
