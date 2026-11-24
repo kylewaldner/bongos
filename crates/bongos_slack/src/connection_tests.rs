@@ -30,21 +30,31 @@ use crate::connection::{
     DisconnectError, StoredKind,
 };
 
-const TOKEN: &str = "xoxp-1111-2222-TESTSECRET";
+pub(crate) const TOKEN: &str = "xoxp-1111-2222-TESTSECRET";
 
 type Local<'a, T> = Pin<Box<dyn Future<Output = anyhow::Result<T>> + 'a>>;
 
 #[derive(Default)]
-struct FakeCredentials {
-    entries: Mutex<HashMap<String, (String, Vec<u8>)>>,
-    fail_write: AtomicBool,
-    fail_delete: AtomicBool,
-    reads: AtomicUsize,
+pub(crate) struct FakeCredentials {
+    pub(crate) entries: Mutex<HashMap<String, (String, Vec<u8>)>>,
+    pub(crate) fail_write: AtomicBool,
+    /// A failing write quotes the secret in its error, as a careless store might.
+    pub(crate) echo_secret: AtomicBool,
+    pub(crate) fail_delete: AtomicBool,
+    pub(crate) reads: AtomicUsize,
+    pub(crate) deletes: AtomicUsize,
 }
 
 impl FakeCredentials {
-    fn secret(&self) -> Option<(String, Vec<u8>)> {
+    pub(crate) fn secret(&self) -> Option<(String, Vec<u8>)> {
         self.entries.lock().unwrap().get(CREDENTIAL_URL).cloned()
+    }
+
+    pub(crate) fn store(&self, secret: &str) {
+        self.entries.lock().unwrap().insert(
+            CREDENTIAL_URL.to_string(),
+            (CREDENTIAL_USER.to_string(), secret.as_bytes().to_vec()),
+        );
     }
 }
 
@@ -67,6 +77,12 @@ impl CredentialsProvider for FakeCredentials {
     ) -> Local<'a, ()> {
         async move {
             if self.fail_write.load(Ordering::SeqCst) {
+                if self.echo_secret.load(Ordering::SeqCst) {
+                    return Err(anyhow!(
+                        "keychain locked for {}",
+                        String::from_utf8_lossy(password)
+                    ));
+                }
                 return Err(anyhow!("keychain locked"));
             }
             self.entries
@@ -79,6 +95,7 @@ impl CredentialsProvider for FakeCredentials {
     }
 
     fn delete_credentials<'a>(&'a self, url: &'a str, _: &'a AsyncApp) -> Local<'a, ()> {
+        self.deletes.fetch_add(1, Ordering::SeqCst);
         async move {
             if self.fail_delete.load(Ordering::SeqCst) {
                 return Err(anyhow!("keychain locked"));
@@ -159,7 +176,7 @@ fn now() -> DateTime<Utc> {
     DateTime::from_timestamp(1_000_000, 0).unwrap()
 }
 
-fn auth_info(team_id: &str, scopes: &[&str]) -> AuthInfo {
+pub(crate) fn auth_info(team_id: &str, scopes: &[&str]) -> AuthInfo {
     AuthInfo {
         team: "Acme".to_string(),
         team_id: team_id.to_string(),
@@ -453,4 +470,93 @@ async fn second_connect_while_checking_is_refused_and_stale_temporaries_removed(
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(names, vec![CONNECTION_FILE.to_string()]);
+}
+
+/// Whether `text` holds the token or anything like one.
+fn holds_token(text: &str) -> bool {
+    text.contains(TOKEN) || text.contains("TESTSECRET") || text.contains("xoxp-")
+}
+
+#[gpui::test]
+async fn replace_to_another_team_clears_allowed(cx: &mut TestAppContext) {
+    let fixture = setup(cx);
+    let allowed_text = "[projects.\"p1\"]\nconversations = [\"C1\"]\n";
+    fixture.fake.push_auth_test(Ok(auth_info("T1", SCOPES)));
+    connect(TOKEN, cx).await.unwrap();
+    fs::write(fixture.dir.join(ALLOWED_FILE), allowed_text).unwrap();
+
+    // The same team keeps the list.
+    fixture.fake.push_auth_test(Ok(auth_info("T1", SCOPES)));
+    connect(TOKEN, cx).await.unwrap();
+    assert!(allowed::load_in(&fixture.dir, "p1").contains(&ConversationId("C1".to_string())));
+
+    // Another team clears it.
+    fixture.fake.push_auth_test(Ok(auth_info("T2", SCOPES)));
+    let connection = connect("xoxp-5555-OTHERTEAM", cx).await.unwrap();
+    assert_eq!(connection.team_id, "T2");
+    assert!(!fixture.dir.join(ALLOWED_FILE).exists());
+    assert_eq!(
+        connection::read_connection(&fixture.dir).map(|connection| connection.team_id),
+        Some("T2".to_string())
+    );
+}
+
+#[gpui::test]
+async fn failed_clear_on_replace_is_not_connected_and_removes_stale_file(cx: &mut TestAppContext) {
+    let fixture = setup(cx);
+    fixture.fake.push_auth_test(Ok(auth_info("T1", SCOPES)));
+    connect(TOKEN, cx).await.unwrap();
+    // A directory in place of `allowed.toml` cannot be removed as a file.
+    fs::create_dir_all(fixture.dir.join(ALLOWED_FILE).join("blocker")).unwrap();
+
+    fixture.fake.push_auth_test(Ok(auth_info("T2", SCOPES)));
+    let error = connect("xoxp-5555-OTHERTEAM", cx).await.unwrap_err();
+
+    assert!(matches!(error, ConnectError::ClearAllowed(_)));
+    assert!(error.to_string().contains("not connected"));
+    assert!(cx.update(|cx| connection::current(cx)).is_none());
+    assert!(
+        !fixture.dir.join(CONNECTION_FILE).exists(),
+        "the stale connection.toml of the old workspace was kept"
+    );
+}
+
+#[gpui::test]
+async fn rejected_check_and_store_failure_omit_token(cx: &mut TestAppContext) {
+    let fixture = setup(cx);
+    fixture.fake.push_auth_test(Err(ApiError::Unauthorized {
+        reason: format!("invalid_auth for {TOKEN}"),
+    }));
+    let error = connect(TOKEN, cx).await.unwrap_err();
+    let shown = format!("{error} {error:?}");
+    assert!(matches!(error, ConnectError::Check(_)));
+    assert!(!holds_token(&shown), "a rejected check shows the token");
+
+    fixture.credentials.fail_write.store(true, Ordering::SeqCst);
+    fixture
+        .credentials
+        .echo_secret
+        .store(true, Ordering::SeqCst);
+    fixture.fake.push_auth_test(Ok(auth_info("T1", SCOPES)));
+    let error = connect(TOKEN, cx).await.unwrap_err();
+    let shown = format!("{error} {error:?}");
+    assert!(matches!(error, ConnectError::SecretStore(_)));
+    assert!(shown.contains("keychain locked"));
+    assert!(!holds_token(&shown), "a store failure shows the token");
+    assert_nothing_stored(&fixture, cx);
+}
+
+#[gpui::test]
+async fn disconnect_while_not_connected_skips_the_credential_store(cx: &mut TestAppContext) {
+    let fixture = setup(cx);
+
+    let error = disconnect(cx).await.unwrap_err();
+
+    assert_eq!(error, DisconnectError::NotConnected);
+    assert_eq!(error.to_string(), "Slack is not connected");
+    assert_eq!(fixture.credentials.deletes.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        DisconnectError::AlreadyRunning.to_string(),
+        "Slack: a connect or a disconnect is already running"
+    );
 }

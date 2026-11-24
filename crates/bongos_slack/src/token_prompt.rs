@@ -110,7 +110,7 @@ fn open_token_prompt(workspace: &mut Workspace, window: &mut Window, cx: &mut Co
 }
 
 /// Opens `text` in a read-only buffer titled `title`; nothing is written to disk.
-fn open_text_buffer(
+pub(crate) fn open_text_buffer(
     title: String,
     text: String,
     workspace: &mut Workspace,
