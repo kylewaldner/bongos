@@ -13,9 +13,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {name: inc-off-lto, incremental: '0', debug: line-tables-only, save: true}
+          - {name: inc-off-lto, incremental: '0', debug: line-tables-only, save: false}
           - {name: inc-on-lto, incremental: '1', debug: line-tables-only, save: false}
-          - {name: inc-off-nodebug, incremental: '0', debug: '0', save: false}
     name: step-${{ matrix.name }}
     runs-on: ubuntu-24.04
     timeout-minutes: 345
@@ -64,6 +63,8 @@ jobs:
           shared-key: p0-dev
           save-if: ${{ matrix.save }}
           cache-on-failure: true
+      - name: Force incremental (rust-cache sets it to 0)
+        run: echo "CARGO_INCREMENTAL=${{ matrix.incremental }}" >> "$GITHUB_ENV"
       - name: Cache result
         run: |
           echo "MEASURE cache_hit=${{ steps.cache.outputs.cache-hit }}"
