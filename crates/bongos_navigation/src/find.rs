@@ -2,6 +2,7 @@
 
 pub mod engine;
 pub mod export;
+pub mod flag_history;
 pub mod picker;
 pub mod replace;
 pub mod toggles;
