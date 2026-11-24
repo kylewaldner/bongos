@@ -18,7 +18,7 @@ impl ConversationId {
         match chars.next() {
             None => return Err(DestinationError::Empty),
             Some('C' | 'D' | 'G') => {}
-            Some(_) => return Err(DestinationError::BadConversation(text.to_string())),
+            Some(_) => return Err(DestinationError::BadConversation),
         }
         let rest = chars.as_str();
         if rest.is_empty()
@@ -26,7 +26,7 @@ impl ConversationId {
                 .chars()
                 .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
         {
-            return Err(DestinationError::BadConversation(text.to_string()));
+            return Err(DestinationError::BadConversation);
         }
         Ok(Self(text.to_string()))
     }
@@ -53,7 +53,8 @@ impl fmt::Display for UserId {
 }
 
 /// A message timestamp as Slack sends it (`"1730000000.000100"`), kept as text so it round-trips
-/// exactly. Timestamps order numerically: seconds first, then the fraction, each as an integer.
+/// exactly. Timestamps order numerically: seconds first, then the fraction as a decimal (so
+/// `1.1` is `1.100000`, after `1.000100`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Ts(String);
 
@@ -63,34 +64,32 @@ impl Ts {
         Self(text.into())
     }
 
-    /// Checks that `text` is digits, optionally followed by `.` and digits.
+    /// Checks that `text` is digits, `.`, then exactly six digits.
     pub fn parse(text: &str) -> Result<Self, DestinationError> {
-        if Self::key_of(text).is_none() {
-            return Err(DestinationError::BadTs(text.to_string()));
+        match text.split_once('.') {
+            Some((_, fraction)) if fraction.len() == 6 && Self::key_of(text).is_some() => {
+                Ok(Self(text.to_string()))
+            }
+            _ => Err(DestinationError::BadTs),
         }
-        Ok(Self(text.to_string()))
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    fn key_of(text: &str) -> Option<(u64, u64)> {
-        let (seconds, fraction) = match text.split_once('.') {
-            Some((seconds, fraction)) => (seconds, Some(fraction)),
-            None => (text, None),
-        };
-        let digits = |part: &str| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit());
-        if !digits(seconds) {
+    /// The seconds, and the fraction digits without trailing zeros, so that comparing the
+    /// digits as text compares the fractions as decimals.
+    fn key_of(text: &str) -> Option<(u64, &str)> {
+        let (seconds, fraction) = text.split_once('.').unwrap_or((text, ""));
+        let digits = |part: &str| part.chars().all(|c| c.is_ascii_digit());
+        if seconds.is_empty() || !digits(seconds) || !digits(fraction) {
             return None;
         }
-        let seconds = seconds.parse().ok()?;
-        let fraction = match fraction {
-            Some(fraction) if digits(fraction) => fraction.parse().ok()?,
-            Some(_) => return None,
-            None => 0,
-        };
-        Some((seconds, fraction))
+        if text.contains('.') && fraction.is_empty() {
+            return None;
+        }
+        Some((seconds.parse().ok()?, fraction.trim_end_matches('0')))
     }
 }
 
@@ -203,8 +202,9 @@ impl fmt::Display for Destination {
 pub enum DestinationError {
     #[error("no Slack destination given")]
     Empty,
-    #[error("not a Slack conversation id (C…, D… or G…): {0:?}")]
-    BadConversation(String),
-    #[error("not a Slack message timestamp (like 1730000000.000100): {0:?}")]
-    BadTs(String),
+    // The messages do not echo the input: it may be a pasted token.
+    #[error("not a Slack conversation id (C…, D… or G…)")]
+    BadConversation,
+    #[error("not a Slack message timestamp (like 1730000000.000100)")]
+    BadTs,
 }

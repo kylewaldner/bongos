@@ -1,0 +1,16 @@
+{
+    "ok": true,
+    "messages": [
+        {
+            "type": "message",
+            "user": "U123ABC456",
+            "text": "The first message",
+            "ts": "1512085861.000543"
+        }
+    ],
+    "has_more": false,
+    "pin_count": 0,
+    "response_metadata": {
+        "next_cursor": ""
+    }
+}
