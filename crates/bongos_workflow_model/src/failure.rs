@@ -51,10 +51,16 @@ pub enum FailureReason {
     /// A checks node gave no verdict and the definition has no route for that. The run is held
     /// on the node rather than failed, so a resume reruns just that node.
     CheckNoVerdict,
+    /// A service a built-in step talks to could not be reached or refused for now (a network
+    /// error, a server error, a rate limit past its wait). Retried like any task failure.
+    ServiceUnavailable,
+    /// A built-in step's outward post did not go through or may not have. Never retried: a post
+    /// that may have been sent is not sent again.
+    PostNotSent,
 }
 
 impl FailureReason {
-    pub const ALL: [FailureReason; 23] = [
+    pub const ALL: [FailureReason; 25] = [
         Self::NodeOutputInvalid,
         Self::AgentExitedNonzero,
         Self::ProgramExitedNonzero,
@@ -78,6 +84,8 @@ impl FailureReason {
         Self::InterruptedNotResumed,
         Self::FailureEndReached,
         Self::CheckNoVerdict,
+        Self::ServiceUnavailable,
+        Self::PostNotSent,
     ];
 
     /// The text the run view and the run record show.
@@ -106,6 +114,8 @@ impl FailureReason {
             Self::InterruptedNotResumed => "interrupted and not resumed",
             Self::FailureEndReached => "failure end reached",
             Self::CheckNoVerdict => "check had no verdict",
+            Self::ServiceUnavailable => "service unavailable",
+            Self::PostNotSent => "post not sent",
         }
     }
 
@@ -140,7 +150,9 @@ impl FailureReason {
             | Self::GateCancelled
             | Self::InterruptedNotResumed
             | Self::FailureEndReached
-            | Self::CheckNoVerdict => FailureClass::Task,
+            | Self::CheckNoVerdict
+            | Self::ServiceUnavailable
+            | Self::PostNotSent => FailureClass::Task,
         }
     }
 

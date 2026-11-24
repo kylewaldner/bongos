@@ -7,7 +7,7 @@ use FailureClass::{Definition, Task};
 use FailureReason::*;
 
 /// Every reason with its class when not every retry hit it, from the product's closed list.
-const EXPECTED: [(FailureReason, &str, FailureClass); 23] = [
+const EXPECTED: [(FailureReason, &str, FailureClass); 25] = [
     (NodeOutputInvalid, "node output invalid", Definition),
     (AgentExitedNonzero, "agent exited nonzero", Task),
     (ProgramExitedNonzero, "program exited nonzero", Task),
@@ -43,6 +43,8 @@ const EXPECTED: [(FailureReason, &str, FailureClass); 23] = [
     (InterruptedNotResumed, "interrupted and not resumed", Task),
     (FailureEndReached, "failure end reached", Task),
     (CheckNoVerdict, "check had no verdict", Task),
+    (ServiceUnavailable, "service unavailable", Task),
+    (PostNotSent, "post not sent", Task),
 ];
 
 #[test]
@@ -73,7 +75,7 @@ fn a_cap_is_a_definition_failure_only_when_every_retry_hit_it() {
 
 #[test]
 fn serde_names_are_stable_and_distinct() {
-    assert_eq!(FailureReason::ALL.len(), 23);
+    assert_eq!(FailureReason::ALL.len(), 25);
     let mut names = HashSet::new();
     for reason in FailureReason::ALL {
         let name = serde_json::to_value(reason).unwrap();
@@ -93,6 +95,8 @@ fn serde_names_are_stable_and_distinct() {
         ),
         (InterruptedNotResumed, "interrupted_not_resumed"),
         (CheckNoVerdict, "check_no_verdict"),
+        (ServiceUnavailable, "service_unavailable"),
+        (PostNotSent, "post_not_sent"),
     ] {
         assert_eq!(serde_json::to_value(reason).unwrap(), name);
     }
@@ -107,4 +111,10 @@ fn failure_records_round_trip() {
     let json = serde_json::to_string(&failure).unwrap();
     assert_eq!(serde_json::from_str::<Failure>(&json).unwrap(), failure);
     assert_eq!(Failure::new(TurnCapHit, None, "").class, Task);
+}
+
+#[test]
+fn a_post_not_sent_is_never_retried_and_a_service_unavailable_is() {
+    assert!(!crate::scheduler::is_retried(PostNotSent));
+    assert!(crate::scheduler::is_retried(ServiceUnavailable));
 }

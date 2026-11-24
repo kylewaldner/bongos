@@ -61,6 +61,7 @@ fn every_event() -> Vec<Event> {
         Event::GateOpened {
             key: plan.clone(),
             question: "Approve the plan?".to_string(),
+            person_only: false,
         },
         Event::GateClosed {
             key: plan.clone(),
@@ -418,6 +419,7 @@ fn replay_of_gates() {
         Event::GateOpened {
             key: plan.clone(),
             question: "Go?".to_string(),
+            person_only: false,
         },
     ]);
     assert_eq!(
@@ -429,6 +431,7 @@ fn replay_of_gates() {
         Event::GateOpened {
             key: plan.clone(),
             question: "Go?".to_string(),
+            person_only: false,
         },
         Event::GateClosed {
             key: plan,

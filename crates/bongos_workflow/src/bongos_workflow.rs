@@ -46,7 +46,7 @@ use ::settings::Settings as _;
 use gpui::App;
 
 pub use actions::{WorkflowToast, action_types, init_palette, register, workflow};
-pub use builtin_nodes::{BuiltinNode, BuiltinNodes, BuiltinStart};
+pub use builtin_nodes::{BuiltinNode, BuiltinNodes, BuiltinStart, RunFacts};
 pub use completion::{CompletionHook, CompletionHooks};
 pub use definitions::{ValidationHook, ValidationHooks};
 pub use engine::{EngineRoots, EngineRunner, SharedLifecycle, WorkflowEngine};
@@ -130,5 +130,7 @@ mod runtime_tests;
 mod settings_tests;
 #[cfg(test)]
 mod shipped_tests;
+#[cfg(test)]
+mod start_gate_tests;
 #[cfg(test)]
 mod worktree_tests;

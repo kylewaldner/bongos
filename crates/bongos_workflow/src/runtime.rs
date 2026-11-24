@@ -57,7 +57,8 @@ use futures::channel::oneshot;
 use serde_json::Value;
 
 use crate::WorkflowsSettings;
-use crate::builtin_nodes::{BuiltinNode, BuiltinNodes, BuiltinStart};
+use crate::builtin_nodes::{BuiltinNode, BuiltinNodes, BuiltinStart, RunFacts};
+use crate::lifecycle::BY_PERSON;
 use crate::process::{OrphanOutcome, ProcessRecord, kill_orphans};
 use crate::worktrees::{self, Git, RunWorktree, TaskCheckout, WorktreeError};
 
@@ -355,6 +356,8 @@ struct LiveRun {
     loop_bound: u32,
     /// Who started the run ([`Runtime::set_started_by`]); a person until told otherwise.
     started_by: StartedBy,
+    /// Whether the run runs unattended ([`Runtime::set_unattended`]); not until told otherwise.
+    unattended: bool,
 }
 
 impl LiveRun {
@@ -373,6 +376,14 @@ impl LiveRun {
             );
         }
         self.events.push(event);
+    }
+
+    /// What a built-in started for this run is told of it.
+    fn facts(&self) -> RunFacts {
+        RunFacts {
+            unattended: self.unattended,
+            started_by: self.started_by,
+        }
     }
 
     /// The number of the next try of `key`: one more than its `NodeStarted` events.
@@ -425,6 +436,11 @@ pub enum RuntimeError {
     Duplicate(String),
     #[error("{0}")]
     Io(String),
+    #[error("no gate is open at {0}")]
+    NoGate(NodeKey),
+    /// A built-in's start gate asks about an exact text: it is approved as is or cancelled.
+    #[error("{0}")]
+    StartGate(String),
     #[error("workflows are draining: no node starts until the drain is cancelled")]
     Draining,
     #[error(
@@ -438,6 +454,9 @@ impl RuntimeError {
         Self::Io(format!("{}: {error}", path.display()))
     }
 }
+
+/// Why a built-in's start gate takes no edit and no revision.
+pub const START_GATE_AS_IS: &str = "This step asks about an exact text: approve it as is, or cancel it and start a new run to change the text.";
 
 /// How the engine settles a run the scheduler would end succeeded ([`Runtime::hold_success`]).
 #[derive(Debug, Clone, PartialEq)]
@@ -500,6 +519,14 @@ impl<R: Runner> Runtime<R> {
     pub fn set_started_by(&mut self, id: &str, started_by: StartedBy) {
         if let Some(index) = self.find(id) {
             self.runs[index].started_by = started_by;
+        }
+    }
+
+    /// Records whether run `id` runs unattended, which its built-ins are told
+    /// ([`BuiltinStart::facts`]).
+    pub fn set_unattended(&mut self, id: &str, unattended: bool) {
+        if let Some(index) = self.find(id) {
+            self.runs[index].unattended = unattended;
         }
     }
 
@@ -692,7 +719,11 @@ impl<R: Runner> Runtime<R> {
                 state: record::EndState::Failed,
                 failure: Some(failure),
             }),
-            Settlement::Wait { key, question } => run.append(Event::GateOpened { key, question }),
+            Settlement::Wait { key, question } => run.append(Event::GateOpened {
+                key,
+                question,
+                person_only: false,
+            }),
         }
         self.hold(index);
         Ok(())
@@ -1015,7 +1046,9 @@ impl<R: Runner> Runtime<R> {
         Ok(())
     }
 
-    /// Closes the open gate of `key` (`GateClosed`); the run continues at its next tick.
+    /// Closes the open gate of `key` (`GateClosed`); the run continues at its next tick. Refused
+    /// when no gate is open there (a second approval finds none), and for a built-in's start
+    /// gate with an edit or a comment: its question is the exact text, so it is approved as is.
     pub fn close_gate(
         &mut self,
         id: &str,
@@ -1025,11 +1058,54 @@ impl<R: Runner> Runtime<R> {
         comment: Option<String>,
     ) -> Result<(), RuntimeError> {
         let index = self.live(id)?;
+        let state = self.runs[index].state();
+        if !state.open_gates.contains_key(&key) {
+            return Err(RuntimeError::NoGate(key));
+        }
+        if state.person_only_gates.contains(&key) && (edit.is_some() || comment.is_some()) {
+            return Err(RuntimeError::StartGate(START_GATE_AS_IS.to_string()));
+        }
         self.runs[index].append(Event::GateClosed {
             key,
             by: by.to_string(),
             edit,
             comment,
+        });
+        self.requeue(index);
+        Ok(())
+    }
+
+    /// Cancels the start gate of `key`: the key fails with `GateCancelled`, which is never
+    /// retried, as one try that never ran (`NodeStarted` with pid 0, then its `NodeFinished`).
+    /// The start spends the gate. Refused when no start gate is open at `key`.
+    pub fn cancel_gate(&mut self, id: &str, key: NodeKey) -> Result<(), RuntimeError> {
+        let index = self.live(id)?;
+        if !self.runs[index].state().person_only_gates.contains(&key) {
+            return Err(RuntimeError::NoGate(key));
+        }
+        let run = &mut self.runs[index];
+        let try_number = run.next_try(&key);
+        let failure = Failure::new(
+            FailureReason::GateCancelled,
+            Some(key.clone()),
+            "a person cancelled the step before it started",
+        );
+        run.append(Event::NodeStarted {
+            key: key.clone(),
+            try_number,
+            pid: 0,
+            pid_start_time: 0,
+        });
+        run.append(Event::NodeFinished {
+            key,
+            try_number,
+            result: None,
+            failure: Some(failure),
+            cost_usd: 0.0,
+            turns: None,
+            elapsed_ms: 0,
+            session_id: None,
+            confinement_refusals: Vec::new(),
         });
         self.requeue(index);
         Ok(())
@@ -1412,7 +1488,11 @@ impl<R: Runner> Runtime<R> {
                     .and_then(|node| node.gate.as_ref())
                     .map(|gate| gate.question.clone())
                     .unwrap_or_default();
-                self.runs[index].append(Event::GateOpened { key, question });
+                self.runs[index].append(Event::GateOpened {
+                    key,
+                    question,
+                    person_only: false,
+                });
             }
             Command::MergeBranch { join, branch, key } => {
                 let run = &mut self.runs[index];
@@ -1480,7 +1560,10 @@ impl<R: Runner> Runtime<R> {
     /// record written before the spawn (an intent line) and is not done in v1.
     ///
     /// A key of a registered built-in is started through it, with no process of its own: it is
-    /// recorded with pid 0.
+    /// recorded with pid 0. When the built-in asks a question first ([`BuiltinNode::start_gate`]),
+    /// the key starts only once a person approved exactly that question since its last start;
+    /// otherwise a `person_only` gate with the question is opened and the key waits on it. A
+    /// failed write of that gate still holds the key, so it never starts without the approval.
     fn start(&mut self, index: usize, key: NodeKey) {
         let run = &mut self.runs[index];
         let try_number = run.next_try(&key);
@@ -1488,19 +1571,31 @@ impl<R: Runner> Runtime<R> {
         let started = match &builtin {
             Some(builtin) => {
                 let state = run.state();
-                builtin
-                    .start(BuiltinStart {
-                        run: &run.id,
-                        definition: &run.definition,
-                        state: &state,
-                        key: &key,
-                        try_number,
-                        binding: run.binding.as_ref(),
-                    })
-                    .map(|()| ProcessRecord {
-                        pid: 0,
-                        start_time: 0,
-                    })
+                let start = BuiltinStart {
+                    run: &run.id,
+                    definition: &run.definition,
+                    state: &state,
+                    key: &key,
+                    try_number,
+                    binding: run.binding.as_ref(),
+                    facts: run.facts(),
+                };
+                if let Some(question) = builtin.start_gate(&start)
+                    && !record::start_gate_approved(&run.events, &key, &question, BY_PERSON)
+                {
+                    if !state.open_gates.contains_key(&key) {
+                        run.append(Event::GateOpened {
+                            key,
+                            question,
+                            person_only: true,
+                        });
+                    }
+                    return;
+                }
+                builtin.start(start).map(|()| ProcessRecord {
+                    pid: 0,
+                    start_time: 0,
+                })
             }
             None => {
                 let state = run.state();
@@ -1646,6 +1741,7 @@ fn open_run(spec: RunSpec) -> Result<LiveRun, RuntimeError> {
         binding: None,
         loop_bound: spec.loop_bound,
         started_by: StartedBy::Person,
+        unattended: false,
     })
 }
 

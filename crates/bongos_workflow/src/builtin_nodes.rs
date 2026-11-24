@@ -15,10 +15,28 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use bongos_workflow_model::definition::NodeKind;
+use bongos_workflow_model::record::StartedBy;
 use bongos_workflow_model::{Definition, Failure, NodeKey, RunState};
 use gpui::{App, Global};
 
 use crate::runtime::{Finish, RunBinding};
+
+/// What the runtime knows of a run that a built-in may decide by: whether it runs unattended and
+/// who started it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunFacts {
+    pub unattended: bool,
+    pub started_by: StartedBy,
+}
+
+impl Default for RunFacts {
+    fn default() -> Self {
+        Self {
+            unattended: false,
+            started_by: StartedBy::Person,
+        }
+    }
+}
 
 /// What a built-in is told when one of its keys starts.
 #[derive(Debug, Clone, Copy)]
@@ -31,11 +49,20 @@ pub struct BuiltinStart<'a> {
     pub try_number: u32,
     /// The run's binding, when the lifecycle bound it: its task worktree and branches.
     pub binding: Option<&'a RunBinding>,
+    pub facts: RunFacts,
 }
 
 /// A program node the app supplies in code. Its methods are called with the runtime locked, so
 /// none may wait or lock the workflow engine: each hands the work on and returns.
 pub trait BuiltinNode: Send + Sync + 'static {
+    /// The question a person must approve before this try of `start.key` starts, `None` to start
+    /// it at once. The runtime opens a start gate with exactly this text and starts the key only
+    /// once a person approved that text and the key has not started since; a changed text asks
+    /// again, and every new try asks again.
+    fn start_gate(&self, _start: &BuiltinStart<'_>) -> Option<String> {
+        None
+    }
+
     /// Starts a try of `start.key`, or says why it cannot start (the try then fails with it).
     fn start(&self, start: BuiltinStart<'_>) -> Result<(), Failure>;
 
