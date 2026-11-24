@@ -64,3 +64,4 @@ jobs:
           app_base: ${{ inputs.app_base }}
           state_prefix: ${{ inputs.state_prefix }}
           index_tag: ${{ inputs.index_tag }}
+          colgrep_version: ${{ vars.COLGREP_VERSION }}  # the index workflows' pin

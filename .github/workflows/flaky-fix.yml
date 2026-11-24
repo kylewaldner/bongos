@@ -107,6 +107,7 @@ jobs:
           app_base: ${{ inputs.app_base }}
           state_prefix: ${{ inputs.state_prefix }}
           index_tag: ${{ inputs.index_tag }}
+          colgrep_version: ${{ vars.COLGREP_VERSION }}  # the index workflows' pin
           # Builds on the dependency cache of the unified-features dev build (cache-warm's dev-unified-ubuntu-24.04),
           # read only; no incremental builds (the action's default for every kind but step).
           cache_variant: dev-unified
