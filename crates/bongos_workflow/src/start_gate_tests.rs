@@ -578,6 +578,83 @@ fn a_start_gate_retry_step_after_the_retries_ran_out_starts_the_key_once_approve
     rerun_approve_and_start(&mut runtime, &node);
 }
 
+/// How many tries a fresh run of the key starts before a service outage on every try ends it:
+/// the first try and the node's automatic retries.
+fn tries_in_a_full_budget() -> usize {
+    let temp = TempDir::new().unwrap();
+    let node = FakePost::asking(QUESTION);
+    let mut runtime = runtime(&node);
+    runtime.add(spec(temp.path())).unwrap();
+    runtime.tick();
+    fail_until_ended(&mut runtime, &node, FailureReason::ServiceUnavailable);
+    node.starts()
+}
+
+/// Reruns the key of a failed run and fails every new try with a service outage until the run
+/// ends again; the tries the rerun started.
+fn rerun_and_fail_until_ended(runtime: &mut Runtime<FakeRunner>, node: &FakePost) -> usize {
+    let starts = node.starts();
+    runtime.rerun(&run_id(), key()).unwrap();
+    runtime.tick();
+    fail_until_ended(runtime, node, FailureReason::ServiceUnavailable);
+    node.starts() - starts
+}
+
+#[test]
+fn a_start_gate_rerun_after_the_retries_ran_out_gets_the_full_retry_budget_again() {
+    let full = tries_in_a_full_budget();
+    assert!(full > 1, "a service outage is retried");
+
+    let temp = TempDir::new().unwrap();
+    let node = FakePost::asking(QUESTION);
+    let mut runtime = runtime(&node);
+    runtime.add(spec(temp.path())).unwrap();
+    runtime.tick();
+    fail_until_ended(&mut runtime, &node, FailureReason::ServiceUnavailable);
+    assert_eq!(node.starts(), full);
+
+    assert_eq!(
+        rerun_and_fail_until_ended(&mut runtime, &node),
+        full,
+        "the spent budget is not carried into the rerun"
+    );
+    // A second rerun starts from a full budget too.
+    assert_eq!(rerun_and_fail_until_ended(&mut runtime, &node), full);
+}
+
+#[test]
+fn a_start_gate_rerun_after_a_cancelled_gate_gets_the_full_retry_budget() {
+    let full = tries_in_a_full_budget();
+
+    let temp = TempDir::new().unwrap();
+    let node = FakePost::asking(QUESTION);
+    let mut runtime = runtime(&node);
+    runtime.add(spec(temp.path())).unwrap();
+    runtime.tick();
+    runtime.cancel_gate(&run_id(), key()).unwrap();
+    runtime.tick();
+    assert_eq!(
+        runtime.state(&run_id()).unwrap().ended.unwrap().0,
+        EndState::Failed
+    );
+
+    assert_eq!(
+        rerun_and_fail_until_ended(&mut runtime, &node),
+        full,
+        "the cancelled try is not counted against the rerun"
+    );
+
+    // The rerun's own start gate cancelled, then a rerun again: still the full budget.
+    runtime.rerun(&run_id(), key()).unwrap();
+    runtime.tick();
+    runtime.cancel_gate(&run_id(), key()).unwrap();
+    runtime.tick();
+    let (end, failure) = runtime.state(&run_id()).unwrap().ended.unwrap();
+    assert_eq!(end, EndState::Failed);
+    assert_eq!(failure.unwrap().reason, FailureReason::GateCancelled);
+    assert_eq!(rerun_and_fail_until_ended(&mut runtime, &node), full);
+}
+
 #[test]
 fn a_start_gate_closed_leaves_a_static_gate_on_the_same_key_unapproved() {
     let gated = POSTED.replace(

@@ -1011,9 +1011,10 @@ impl<R: Runner> Runtime<R> {
         Ok(keys)
     }
 
-    /// Starts a new try of `key` now (a retry step) and queues the run for a slot. On a failed
-    /// run the start reopens it and gives the key its retries again
-    /// ([`RunState::retry_floors`]).
+    /// Starts a new try of `key` now (a retry step) and queues the run for a slot; a built-in with
+    /// a start gate opens it instead and its approval starts the try. On a failed run the start,
+    /// or that gate, reopens it and gives the key its full retries again
+    /// ([`RunState::retry_floors`]), whatever the earlier tries spent or a cancelled gate failed.
     pub fn rerun(&mut self, id: &str, key: NodeKey) -> Result<(), RuntimeError> {
         let index = self.live(id)?;
         if self.draining {

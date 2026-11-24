@@ -756,7 +756,8 @@ pub struct RunState {
     /// The definition revision in use: `None` until a `DefinitionReloaded`, meaning revision 0.
     pub definition_rev: Option<u32>,
     /// How the attempt ended. A failed end is not final: retry step reruns the failed key in the
-    /// same attempt, so a later `NodeStarted` or `DefinitionReloaded` clears it.
+    /// same attempt, so a later `NodeStarted`, `DefinitionReloaded` or `person_only` `GateOpened`
+    /// (a built-in's start gate standing for the rerun's start) clears it.
     pub ended: Option<(EndState, Option<Failure>)>,
     pub cancelled: bool,
     /// For each key restarted by a retry step (the first `NodeStarted`, or `person_only`
@@ -810,7 +811,8 @@ impl RunState {
 
 /// Rebuilds the run state from its events. Pure: the same events always give the same state.
 ///
-/// After a failed `Ended` every event still applies, and a `NodeStarted` (retry step) or
+/// After a failed `Ended` every event still applies, and a `NodeStarted` (retry step), a
+/// `person_only` `GateOpened` (a retry step of a built-in that asks before it starts) or a
 /// `DefinitionReloaded` (retry step fresh) makes the run live again; a `Cancelled` closes it.
 /// Once the attempt is over ([`RunState::is_over`]) only `NodeFinished` still applies, so a
 /// try's cost is never lost; the lifecycle stays as it closed, and every other event is counted
