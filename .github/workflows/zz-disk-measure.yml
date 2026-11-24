@@ -1,0 +1,129 @@
+# Temporary test workflow: measures the disk a whole-suite gate build uses on a hosted runner, per build phase and per
+# kind of output, for three debug-info settings. No secrets, no writes outside the runner. Lives only on a test branch.
+name: zz-disk-measure
+
+on:
+  push:
+    branches: [gh-runners-test-c2-disk-1]
+    paths: ['.github/workflows/zz-disk-measure.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zz-disk-measure-c2
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: current, test_debug: '', dev_debug: ''}
+          - {name: test-debug-0, test_debug: '0', dev_debug: ''}
+          - {name: dev-debug-0, test_debug: '', dev_debug: '0'}
+    name: measure-${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      BONGOS_WORKSPACE: /mnt/bongos-workspace
+      BONGOS_UNIFIED_FEATURES: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Volumes
+        run: |
+          df -h
+          lsblk -o NAME,SIZE,TYPE,MOUNTPOINT || true
+      - name: Free disk space
+        run: |
+          set -u
+          start=$(date +%s)
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /usr/share/swift /usr/lib/jvm \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/share/miniconda /usr/lib/google-cloud-sdk \
+            /opt/az /opt/microsoft /usr/lib/firefox /opt/google /usr/local/share/chromium /home/linuxbrew \
+            /usr/local/aws-cli /usr/local/julia*
+          sudo docker system prune -af > /dev/null 2>&1 || true
+          echo "removal took $(( $(date +%s) - start )) s"
+          df -h /
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc g++ libasound2-dev libfontconfig-dev libgit2-dev libglib2.0-dev libssl-dev libva-dev \
+            libvulkan1 libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev make cmake clang lld \
+            llvm jq git curl gettext-base elfutils libsqlite3-dev musl-tools musl-dev build-essential \
+            pkg-config python3 mold > /dev/null
+      - name: Toolchain, environment and nextest
+        env:
+          DEV_DEBUG: ${{ matrix.dev_debug }}
+          TEST_DEBUG: ${{ matrix.test_debug }}
+        run: |
+          set -euo pipefail
+          sudo mkdir -p "$BONGOS_WORKSPACE"
+          sudo chown "$USER" "$BONGOS_WORKSPACE"
+          export RUSTUP_HOME="$BONGOS_WORKSPACE/rustup" CARGO_HOME="$BONGOS_WORKSPACE/cargo"
+          mkdir -p "$RUSTUP_HOME" "$CARGO_HOME/bin"
+          rustup toolchain install
+          if [ -n "$DEV_DEBUG" ]; then
+            sed -i "s/^export CARGO_PROFILE_DEV_DEBUG=line-tables-only$/export CARGO_PROFILE_DEV_DEBUG=$DEV_DEBUG/" script/bongos/env.sh
+            grep -n '^export CARGO_PROFILE_DEV_DEBUG=' script/bongos/env.sh
+            # the edit stays out of git status for the scripts that check it
+            git update-index --assume-unchanged script/bongos/env.sh
+          fi
+          if [ -n "$TEST_DEBUG" ]; then echo "CARGO_PROFILE_TEST_DEBUG=$TEST_DEBUG" >> "$GITHUB_ENV"; fi
+          . script/bongos/env.sh
+          mkdir -p "$BONGOS_SMOKE_SCRATCH" "$BONGOS_TMPDIR" "${BONGOS_LOG_DIR:-$BONGOS_WORKSPACE/scratch/logs}"
+          env | grep -E '^(CARGO_|RUSTUP_HOME=|RUSTC_BOOTSTRAP=|BONGOS_|CC=|CXX=)' | grep -v '^CARGO_BUILD_JOBS=' >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+          ver=$(sed -n 's/^nextest-version = { required = "\([0-9.]*\)" }.*/\1/p' .config/nextest.toml)
+          curl -fsSL "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$ver/cargo-nextest-$ver-x86_64-unknown-linux-gnu.tar.gz" | tar xz -C "$CARGO_HOME/bin"
+          cat > "$RUNNER_TEMP/measure.sh" <<'EOF'
+          t=$CARGO_TARGET_DIR
+          echo "== disk[$1] $(date -u +%H:%M:%S)"
+          df -h / | tail -n1
+          for d in "$t" "$t/debug" "$t/debug/deps" "$t/debug/build" "$t/debug/.fingerprint" "$t/debug/incremental" "$t/debug/examples" "$CARGO_HOME"; do
+            [ -d "$d" ] && timeout 120 du -xsh "$d"
+          done
+          if [ -d "$t/debug/deps" ]; then
+            find "$t/debug/deps" -maxdepth 1 -type f -printf '%s %f\n' | awk '{
+              n = $2
+              if (n ~ /\.rlib$/) k = "rlib"; else if (n ~ /\.rmeta$/) k = "rmeta"; else if (n ~ /\.so$/) k = "so";
+              else if (n ~ /\.d$/) k = "dep-info"; else if (n ~ /\.(o|dwo|dwp)$/) k = "obj"; else if (n !~ /\./) k = "exe"; else k = "other"
+              sz[k] += $1; c[k]++ } END { for (k in sz) printf "deps %-8s files=%d size=%.1fGiB\n", k, c[k], sz[k] / 2^30 }'
+            echo "largest in deps:"
+            find "$t/debug/deps" -maxdepth 1 -type f -printf '%s %f\n' | sort -n | tail -n 6 | awk '{printf "  %.2fGiB %s\n", $1 / 2^30, $2}'
+            echo "largest in debug:"
+            find "$t/debug" -maxdepth 1 -type f -printf '%s %f\n' | sort -n | tail -n 4 | awk '{printf "  %.2fGiB %s\n", $1 / 2^30, $2}'
+          fi
+          EOF
+          env | grep -E '^CARGO_(PROFILE|INCREMENTAL|UNSTABLE|RESOLVER)' | sort
+      - name: Phase 1, the gate's build (script/bongos/build)
+        run: |
+          set -euo pipefail
+          bash "$RUNNER_TEMP/measure.sh" before-build
+          start=$(date +%s)
+          script/bongos/build || echo "build exit $?"
+          echo "build took $(( $(date +%s) - start )) s"
+          bash "$RUNNER_TEMP/measure.sh" after-build
+      - name: Phase 2, the gate's whole-suite test compile
+        run: |
+          set -euo pipefail
+          . script/bongos/env.sh
+          . script/bongos/lib.sh
+          start=$(date +%s)
+          cargo nextest run --no-run --workspace --locked --lib --bins --tests --color never > "$RUNNER_TEMP/compile.log" 2>&1 || echo "compile exit $?"
+          tail -n 3 "$RUNNER_TEMP/compile.log"
+          echo "test compile took $(( $(date +%s) - start )) s"
+          bash "$RUNNER_TEMP/measure.sh" after-test-compile
+      - name: Phase 3, the build again (what smoke and a rerun of the build gate see)
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          script/bongos/build || echo "build exit $?"
+          echo "second build took $(( $(date +%s) - start )) s"
+          bash "$RUNNER_TEMP/measure.sh" after-second-build
