@@ -376,7 +376,7 @@ impl TryFrom<WireIn> for Report {
 /// Why a request line was refused. No variant holds any text from the line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ParseError {
-    #[error("the line is longer than {MAX_LINE_BYTES} bytes")]
+    #[error("the line is longer than its limit")]
     TooLarge,
     #[error("the line is not UTF-8")]
     NotUtf8,
@@ -455,14 +455,17 @@ pub enum ReplyError {
     BadToken,
     BadMessage,
     TooLarge,
+    /// A request line (see [`super::request`]) of a kind no handler serves.
+    UnknownRequest,
 }
 
 impl ReplyError {
-    pub const ALL: [ReplyError; 4] = [
+    pub const ALL: [ReplyError; 5] = [
         ReplyError::UnknownChat,
         ReplyError::BadToken,
         ReplyError::BadMessage,
         ReplyError::TooLarge,
+        ReplyError::UnknownRequest,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -471,6 +474,7 @@ impl ReplyError {
             ReplyError::BadToken => "bad token",
             ReplyError::BadMessage => "bad message",
             ReplyError::TooLarge => "too large",
+            ReplyError::UnknownRequest => "unknown request",
         }
     }
 

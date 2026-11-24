@@ -14,7 +14,15 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use bongos_chat_model::channel::report::{self, AgentName, ChatId, Event, Report, Token};
+use bongos_chat_model::channel::client::CHAT_ID_ENV;
+use bongos_chat_model::channel::report::{
+    self, AgentName, ChatId, Event, MAX_LINE_BYTES, ReplyError, Report, Token,
+};
+use bongos_chat_model::channel::request::{
+    self, Body, MAX_REQUEST_BYTES, Request, RequestKind, SendError, Value,
+};
+use bongos_chat_model::{CHANNEL_SOCKET_ENV, CHANNEL_TOKEN_ENV};
+use futures::StreamExt as _;
 use gpui::{AppContext as _, Entity, TestAppContext, UpdateGlobal as _};
 use settings::{Settings as _, SettingsStore};
 use tempfile::TempDir;
@@ -669,4 +677,288 @@ async fn an_unusable_dir_leaves_the_server_off_with_a_reason(cx: &mut TestAppCon
     });
     assert!(!registered);
     assert!(socket_files(&other).is_empty());
+}
+
+/// The request kind the request tests serve.
+const KIND: &str = "echo";
+
+/// The chat ids a test's request handler was called with, in call order.
+type Calls = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+fn calls(calls: &Calls) -> Vec<String> {
+    calls.lock().unwrap().clone()
+}
+
+/// Sets a handler for [`KIND`] that records the chat id and answers `{"chat":<id>}`.
+fn echo_handler(setup: &Setup, cx: &mut TestAppContext) -> Calls {
+    let recorded = Calls::default();
+    let calls = recorded.clone();
+    setup.server.update(cx, |server, _| {
+        server.set_request_handler(RequestKind::new(KIND).unwrap(), move |chat, _body| {
+            calls.lock().unwrap().push(chat.as_str().to_string());
+            Value::Object(Body::from_iter([(
+                "chat".to_string(),
+                Value::from(chat.as_str()),
+            )]))
+        })
+    });
+    recorded
+}
+
+/// What a held handler tells the test, and how the test lets it answer.
+struct Held {
+    started: futures::channel::mpsc::UnboundedReceiver<()>,
+    finished: futures::channel::mpsc::UnboundedReceiver<()>,
+    release: std::sync::mpsc::Sender<()>,
+}
+
+/// Sets a handler for [`KIND`] that says it started, waits until the test releases it, and then
+/// answers `"done"` and says it finished.
+fn held_handler(setup: &Setup, cx: &mut TestAppContext) -> Held {
+    let (started_sender, started) = futures::channel::mpsc::unbounded();
+    let (finished_sender, finished) = futures::channel::mpsc::unbounded();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let released = std::sync::Mutex::new(released);
+    setup.server.update(cx, |server, _| {
+        server.set_request_handler(RequestKind::new(KIND).unwrap(), move |_chat, _body| {
+            started_sender.unbounded_send(()).ok();
+            released.lock().unwrap().recv().ok();
+            finished_sender.unbounded_send(()).ok();
+            Value::from("done")
+        })
+    });
+    Held {
+        started,
+        finished,
+        release,
+    }
+}
+
+/// Starts sending a [`KIND`] request through [`request::send`] with an environment naming `path`,
+/// `chat` and `token`, waiting at most `reply_wait`, on a helper thread; the result arrives on the
+/// returned channel.
+fn spawn_request(
+    path: &Path,
+    chat: &str,
+    token: &Token,
+    reply_wait: Duration,
+) -> futures::channel::oneshot::Receiver<Result<Value, SendError>> {
+    let env: collections::HashMap<&str, String> = [
+        (CHANNEL_SOCKET_ENV, path.to_string_lossy().into_owned()),
+        (CHAT_ID_ENV, chat.to_string()),
+        (CHANNEL_TOKEN_ENV, token.as_str().to_string()),
+    ]
+    .into_iter()
+    .collect();
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    std::thread::spawn(move || {
+        let env = |name: &str| env.get(name).cloned();
+        sender
+            .send(request::send(&env, KIND, Body::new(), reply_wait))
+            .ok();
+    });
+    receiver
+}
+
+/// [`spawn_request`], awaiting its result.
+async fn send_request(
+    path: &Path,
+    chat: &str,
+    token: &Token,
+    reply_wait: Duration,
+) -> Result<Value, SendError> {
+    spawn_request(path, chat, token, reply_wait).await.unwrap()
+}
+
+/// Waits until the server serves no connection, so every handler that could run has.
+async fn wait_until_idle(setup: &Setup, cx: &mut TestAppContext) {
+    let server = setup.server.clone();
+    wait_until(cx, "every connection closed", |cx| {
+        server.read_with(cx, |server, _| server.open_connections()) == 0
+    })
+    .await;
+}
+
+/// A [`KIND`] request line for `chat` whose body pads it to exactly `bytes` long.
+fn padded_request_line(chat: &str, token: &Token, bytes: usize) -> Vec<u8> {
+    let render = |pad: usize| {
+        request::render(&Request {
+            chat: ChatId::new(chat).unwrap(),
+            token: token.clone(),
+            kind: RequestKind::new(KIND).unwrap(),
+            body: Body::from_iter([("pad".to_string(), Value::from("a".repeat(pad)))]),
+        })
+        .unwrap()
+    };
+    let empty = render(0).len();
+    let line = render(bytes.min(MAX_REQUEST_BYTES) - empty);
+    // `render` refuses a line over the limit, so a longer one grows its pad by hand.
+    let extra = "a".repeat(bytes - line.len());
+    let line = line.replacen("\"pad\":\"", &format!("\"pad\":\"{extra}"), 1);
+    assert_eq!(line.len(), bytes);
+    line.into_bytes()
+}
+
+#[gpui::test]
+async fn a_request_reaches_its_handler_with_the_chat_id(cx: &mut TestAppContext) {
+    let setup = running(cx, HOLD);
+    let path = setup.path(cx);
+    let calls_seen = echo_handler(&setup, cx);
+    let token_a = ChannelServer::new_token();
+    let token_b = ChannelServer::new_token();
+    setup.register(cx, "chat-a", &token_a);
+    setup.register(cx, "chat-b", &token_b);
+
+    let reply = send_request(&path, "chat-b", &token_b, HOLD).await;
+    assert_eq!(
+        reply,
+        Ok(Value::Object(Body::from_iter([(
+            "chat".to_string(),
+            Value::from("chat-b")
+        )])))
+    );
+    assert_eq!(calls(&calls_seen), ["chat-b"]);
+    assert!(setup.delivered(cx).is_empty(), "a request is not a report");
+}
+
+#[gpui::test]
+async fn a_request_with_a_bad_token_is_refused_before_its_handler(cx: &mut TestAppContext) {
+    let setup = running(cx, HOLD);
+    let path = setup.path(cx);
+    let calls_seen = echo_handler(&setup, cx);
+    setup.register(cx, "chat-a", &ChannelServer::new_token());
+
+    let reply = send_request(&path, "chat-a", &ChannelServer::new_token(), HOLD).await;
+    assert_eq!(reply, Err(SendError::Refused(ReplyError::BadToken)));
+    wait_until_idle(&setup, cx).await;
+    assert!(calls(&calls_seen).is_empty(), "the handler never ran");
+}
+
+#[gpui::test]
+async fn a_request_for_an_unknown_chat_is_refused_before_its_handler(cx: &mut TestAppContext) {
+    let setup = running(cx, HOLD);
+    let path = setup.path(cx);
+    let calls_seen = echo_handler(&setup, cx);
+    let token = ChannelServer::new_token();
+    setup.register(cx, "chat-a", &token);
+
+    let reply = send_request(&path, "chat-z", &token, HOLD).await;
+    assert_eq!(reply, Err(SendError::Refused(ReplyError::UnknownChat)));
+    wait_until_idle(&setup, cx).await;
+    assert!(calls(&calls_seen).is_empty(), "the handler never ran");
+}
+
+#[gpui::test]
+async fn a_request_from_another_uid_is_refused_before_its_handler(cx: &mut TestAppContext) {
+    let setup = setup(cx, HOLD);
+    setup.server.update(cx, |server, _| {
+        server.set_peer_uid(|_| Ok(nix::unistd::geteuid().as_raw().wrapping_add(1)))
+    });
+    set_chats(cx, true, true);
+    let path = setup.path(cx);
+    let calls_seen = echo_handler(&setup, cx);
+    let token = ChannelServer::new_token();
+    setup.register(cx, "chat-a", &token);
+
+    let reply = send_request(&path, "chat-a", &token, HOLD).await;
+    // The server closes without reading, so the client sees the close on its write or its read.
+    assert!(
+        matches!(reply, Err(SendError::Closed | SendError::Write)),
+        "{reply:?}"
+    );
+    wait_until_idle(&setup, cx).await;
+    assert!(calls(&calls_seen).is_empty(), "the handler never ran");
+}
+
+#[gpui::test]
+async fn a_report_over_4_kib_is_still_refused(cx: &mut TestAppContext) {
+    let setup = running(cx, HOLD);
+    let path = setup.path(cx);
+    let calls_seen = echo_handler(&setup, cx);
+    let token = ChannelServer::new_token();
+    setup.register(cx, "chat-a", &token);
+
+    let pad = "a".repeat(MAX_LINE_BYTES);
+    let report = String::from_utf8(report_line("chat-a", &token)).unwrap();
+    let padded_report = report.replacen('{', &format!("{{\"pad\":\"{pad}\","), 1);
+    // A `request` key only past the first 4 KiB does not make the line a request.
+    let late_request_key = format!(
+        "{{\"pad\":\"{pad}\",\"v\":1,\"chat\":\"chat-a\",\"token\":\"{}\",\"request\":\"{KIND}\",\"body\":{{}}}}\n",
+        token.as_str()
+    );
+    for (what, line) in [
+        ("a padded report", padded_report),
+        ("a late request key", late_request_key),
+    ] {
+        assert!(line.len() > MAX_LINE_BYTES, "{what}");
+        assert_eq!(
+            exchange(&path, line.into_bytes()).await,
+            refused("too large"),
+            "{what}"
+        );
+    }
+    wait_until_idle(&setup, cx).await;
+    assert!(setup.delivered(cx).is_empty());
+    assert!(calls(&calls_seen).is_empty());
+}
+
+#[gpui::test]
+async fn a_256_kib_request_passes_and_a_larger_one_is_refused(cx: &mut TestAppContext) {
+    let setup = running(cx, HOLD);
+    let path = setup.path(cx);
+    let calls_seen = echo_handler(&setup, cx);
+    let token = ChannelServer::new_token();
+    setup.register(cx, "chat-a", &token);
+
+    let largest = padded_request_line("chat-a", &token, MAX_REQUEST_BYTES);
+    assert_eq!(
+        exchange(&path, largest).await,
+        "{\"ok\":true,\"reply\":{\"chat\":\"chat-a\"}}\n"
+    );
+    assert_eq!(calls(&calls_seen), ["chat-a"]);
+
+    let too_large = padded_request_line("chat-a", &token, MAX_REQUEST_BYTES + 1);
+    assert_eq!(exchange(&path, too_large).await, refused("too large"));
+    wait_until_idle(&setup, cx).await;
+    assert_eq!(calls(&calls_seen), ["chat-a"], "no handler ran for it");
+}
+
+#[gpui::test]
+async fn a_reply_arrives_after_a_slow_handler(cx: &mut TestAppContext) {
+    let setup = running(cx, HOLD);
+    let path = setup.path(cx);
+    let mut held = held_handler(&setup, cx);
+    let token = ChannelServer::new_token();
+    setup.register(cx, "chat-a", &token);
+
+    // The client runs on its own thread; the test keeps driving the server meanwhile.
+    let reply = spawn_request(&path, "chat-a", &token, HOLD);
+    held.started.next().await.expect("the handler started");
+    // A held handler blocks neither the accept loop nor other connections.
+    assert_eq!(exchange(&path, report_line("chat-a", &token)).await, OK);
+    assert_eq!(setup.delivered(cx), ["chat-a"]);
+
+    held.release.send(()).unwrap();
+    assert_eq!(reply.await.unwrap(), Ok(Value::from("done")));
+    held.finished.next().await.expect("the handler finished");
+    wait_until_idle(&setup, cx).await;
+}
+
+#[gpui::test]
+async fn the_client_times_out_cleanly(cx: &mut TestAppContext) {
+    let setup = running(cx, HOLD);
+    let path = setup.path(cx);
+    let mut held = held_handler(&setup, cx);
+    let token = ChannelServer::new_token();
+    setup.register(cx, "chat-a", &token);
+
+    // The handler answers only once released, after the client gave up.
+    let reply = send_request(&path, "chat-a", &token, Duration::from_millis(50)).await;
+    assert_eq!(reply, Err(SendError::Timeout));
+    held.started.next().await.expect("the handler started");
+
+    // The client left: the handler still finishes, and its reply is dropped quietly.
+    held.release.send(()).unwrap();
+    held.finished.next().await.expect("the handler finished");
+    wait_until_idle(&setup, cx).await;
 }

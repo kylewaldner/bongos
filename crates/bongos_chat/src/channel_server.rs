@@ -14,6 +14,13 @@
 //! that chat's current launch. The reply is written right after those checks, before the report is
 //! handed to the main thread. The server runs only while `chats.enabled && chats.channels`; it
 //! stops (removing the file and dropping every token) when either turns false and on quit.
+//!
+//! A line whose top-level object has a `request` key within its first [`MAX_LINE_BYTES`] is a
+//! request ([`bongos_chat_model::channel::request`]) instead of a report: it may be up to
+//! [`MAX_REQUEST_BYTES`] long, passes the same uid, chat and token checks, and is answered by the
+//! handler set for its kind ([`ChannelServer::set_request_handler`]), which runs on its own thread.
+//! Every other line keeps the report limit. A request counts against [`MAX_CONNECTIONS`] until its
+//! handler returns; a client that left early loses the reply, and the handler is not cancelled.
 
 use std::fs::{self, DirBuilder, Permissions};
 use std::io;
@@ -30,6 +37,9 @@ use std::time::Duration;
 use bongos_chat_model::channel::report::{
     self, ChatId, MAX_CONNECTIONS, MAX_LINE_BYTES, ParseError, READ_TIMEOUT, ReplyError, Report,
     Token,
+};
+use bongos_chat_model::channel::request::{
+    self, Body, MAX_REQUEST_BYTES, Request, RequestKind, Value,
 };
 use collections::HashMap;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
@@ -231,6 +241,9 @@ pub(crate) fn peer_allowed(peer: Option<u32>, own: u32) -> bool {
     peer == Some(own)
 }
 
+/// Reads the uid of a connection's peer (replaced by tests that play another user).
+pub(crate) type PeerUid = fn(&UnixStream) -> nix::Result<u32>;
+
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn peer_uid(stream: &UnixStream) -> nix::Result<u32> {
     nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials)
@@ -281,6 +294,12 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Answers one request: called with the chat id and the body, on a thread of its own, so it may
+/// block.
+pub type RequestHandler = Arc<dyn Fn(ChatId, Body) -> Value + Send + Sync>;
+
+type RequestHandlers = Arc<Mutex<HashMap<RequestKind, RequestHandler>>>;
+
 /// What the accept loop and the connections share with the entity.
 #[derive(Default)]
 struct Shared {
@@ -288,18 +307,37 @@ struct Shared {
     tokens: Mutex<HashMap<ChatId, Token>>,
     /// The connections being served.
     open: AtomicUsize,
+    /// The request handlers, shared with the entity so later ones apply at once.
+    handlers: RequestHandlers,
 }
 
 impl Shared {
+    /// Whether `token` is the current token of registered chat `chat`.
+    fn authorize(&self, chat: &ChatId, token: &Token) -> Result<(), ReplyError> {
+        let tokens = lock(&self.tokens);
+        let expected = tokens.get(chat).ok_or(ReplyError::UnknownChat)?;
+        if !tokens_match(expected.as_str(), token.as_str()) {
+            return Err(ReplyError::BadToken);
+        }
+        Ok(())
+    }
+
     /// Parses `line` and checks its chat and token.
     fn check(&self, line: &[u8]) -> Result<Report, ReplyError> {
         let report = report::parse(line).map_err(ParseError::reply_error)?;
-        let tokens = lock(&self.tokens);
-        let expected = tokens.get(&report.chat).ok_or(ReplyError::UnknownChat)?;
-        if !tokens_match(expected.as_str(), report.token.as_str()) {
-            return Err(ReplyError::BadToken);
-        }
+        self.authorize(&report.chat, &report.token)?;
         Ok(report)
+    }
+
+    /// Parses request `line`, checks its chat and token like a report's, and finds its handler.
+    fn check_request(&self, line: &[u8]) -> Result<(Request, RequestHandler), ReplyError> {
+        let request = request::parse(line).map_err(ParseError::reply_error)?;
+        self.authorize(&request.chat, &request.token)?;
+        let handler = lock(&self.handlers)
+            .get(&request.kind)
+            .cloned()
+            .ok_or(ReplyError::UnknownRequest)?;
+        Ok((request, handler))
     }
 }
 
@@ -387,6 +425,8 @@ pub struct ChannelServer {
     inputs: SocketDirInputs,
     read_timeout: Duration,
     on_report: ReportHandler,
+    request_handlers: RequestHandlers,
+    peer_uid: PeerUid,
     running: Option<Running>,
     /// Why the last start found no usable socket.
     unavailable: Option<String>,
@@ -407,6 +447,8 @@ impl ChannelServer {
             inputs,
             read_timeout: READ_TIMEOUT,
             on_report: Rc::new(|_, _| {}),
+            request_handlers: RequestHandlers::default(),
+            peer_uid,
             running: None,
             unavailable: None,
             wanted: false,
@@ -454,13 +496,17 @@ impl ChannelServer {
             }
         };
         self.unavailable = None;
-        let shared = Arc::new(Shared::default());
+        let shared = Arc::new(Shared {
+            handlers: self.request_handlers.clone(),
+            ..Shared::default()
+        });
         let (reports, mut received) = unbounded();
         let executor = cx.background_executor().clone();
         let accept = cx.background_spawn(accept_loop(
             listener,
             shared.clone(),
             self.inputs.uid,
+            self.peer_uid,
             self.read_timeout,
             reports,
             executor,
@@ -567,6 +613,22 @@ impl ChannelServer {
         self.on_report = Rc::new(handler);
     }
 
+    /// Sets the handler that answers requests of `kind`, replacing an earlier one. A request of a
+    /// kind with no handler is answered `unknown request`.
+    pub fn set_request_handler(
+        &mut self,
+        kind: RequestKind,
+        handler: impl Fn(ChatId, Body) -> Value + Send + Sync + 'static,
+    ) {
+        lock(&self.request_handlers).insert(kind, Arc::new(handler));
+    }
+
+    /// Replaces how the peer's uid is read, for servers started from now on.
+    #[cfg(test)]
+    pub(crate) fn set_peer_uid(&mut self, peer_uid: PeerUid) {
+        self.peer_uid = peer_uid;
+    }
+
     /// Replaces [`READ_TIMEOUT`] for servers started from now on (tests hold connections open).
     pub fn set_read_timeout(&mut self, timeout: Duration) {
         self.read_timeout = timeout;
@@ -600,6 +662,7 @@ async fn accept_loop(
     listener: UnixListener,
     shared: Arc<Shared>,
     uid: u32,
+    peer_uid: PeerUid,
     read_timeout: Duration,
     reports: UnboundedSender<Report>,
     executor: BackgroundExecutor,
@@ -621,16 +684,25 @@ async fn accept_loop(
         let connection = OpenConnection(shared.clone());
         let timeout = executor.timer(read_timeout);
         executor
-            .spawn(serve(stream, connection, uid, timeout, reports.clone()))
+            .spawn(serve(
+                stream,
+                connection,
+                uid,
+                peer_uid,
+                timeout,
+                reports.clone(),
+            ))
             .detach();
     }
 }
 
-/// Serves one connection: peer check, one request line, one reply line, then the report goes on.
+/// Serves one connection: peer check, one line, one reply line, then the report goes on (or, for a
+/// request, its handler's answer is the reply).
 async fn serve(
     mut stream: UnixStream,
     connection: OpenConnection,
     uid: u32,
+    peer_uid: PeerUid,
     timeout: Task<()>,
     reports: UnboundedSender<Report>,
 ) {
@@ -641,9 +713,17 @@ async fn serve(
         line = read_line(&mut stream).fuse() => line,
         () = timeout.fuse() => return,
     };
-    let Some(line) = line else {
+    let Some(Line {
+        bytes: line,
+        request,
+    }) = line
+    else {
         return;
     };
+    if request {
+        serve_request(stream, connection, &line).await;
+        return;
+    }
     let checked = connection.0.check(&line);
     let reply = report::render_reply(match &checked {
         Ok(_) => Ok(()),
@@ -658,24 +738,87 @@ async fn serve(
     }
 }
 
-/// Reads up to and including the first newline, stopping once the line is longer than
-/// [`MAX_LINE_BYTES`] (the parse then refuses it as too large). `None` on a read error or an empty
+/// Answers one request line. The connection stays counted until the handler returned; a failed write
+/// (the client left) drops the reply quietly.
+async fn serve_request(mut stream: UnixStream, connection: OpenConnection, line: &[u8]) {
+    let reply = match connection.0.check_request(line) {
+        Ok((request, handler)) => {
+            let Some(reply) = run_handler(handler, request.chat, request.body).await else {
+                return;
+            };
+            request::render_reply(Ok(&reply))
+        }
+        Err(error) => request::render_reply(Err(error)),
+    };
+    if stream.write_all(reply.as_bytes()).await.is_ok() {
+        stream.flush().await.ok();
+    }
+    drop(connection);
+}
+
+/// Runs `handler` on a thread of its own, so a slow one blocks neither the accept loop nor the
+/// executor. `None` when the thread could not start or the handler panicked.
+async fn run_handler(handler: RequestHandler, chat: ChatId, body: Body) -> Option<Value> {
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    std::thread::Builder::new()
+        .name("chat-request".to_string())
+        .spawn(move || {
+            sender.send(handler(chat, body)).ok();
+        })
+        .ok()?;
+    receiver.await.ok()
+}
+
+/// One line read from a connection, and whether it is a request.
+struct Line {
+    bytes: Vec<u8>,
+    request: bool,
+}
+
+/// Reads up to and including the first newline. A report stops once it is longer than
+/// [`MAX_LINE_BYTES`] and a request once it is longer than [`MAX_REQUEST_BYTES`] (the parse then
+/// refuses it as too large). Whether the line is a request is decided from its first
+/// [`MAX_LINE_BYTES`] alone, before anything past them is read. `None` on a read error or an empty
 /// connection.
-async fn read_line(stream: &mut UnixStream) -> Option<Vec<u8>> {
+async fn read_line(stream: &mut UnixStream) -> Option<Line> {
     let mut line = Vec::new();
-    let mut chunk = [0u8; 1024];
+    let mut chunk = [0u8; 4096];
+    let mut request: Option<bool> = None;
     loop {
         let read = stream.read(&mut chunk).await.ok()?;
         if read == 0 {
-            return (!line.is_empty()).then_some(line);
+            if line.is_empty() {
+                return None;
+            }
+            let request = request.unwrap_or_else(|| request::is_request(&line));
+            return Some(Line {
+                bytes: line,
+                request,
+            });
         }
+        let start = line.len();
         line.extend_from_slice(&chunk[..read]);
-        if let Some(end) = line.iter().position(|byte| *byte == b'\n') {
-            line.truncate(end + 1);
-            return Some(line);
+        if let Some(end) = line[start..].iter().position(|byte| *byte == b'\n') {
+            line.truncate(start + end + 1);
+            let request = request.unwrap_or_else(|| request::is_request(&line));
+            return Some(Line {
+                bytes: line,
+                request,
+            });
         }
-        if line.len() > MAX_LINE_BYTES {
-            return Some(line);
+        if request.is_none() && line.len() > MAX_LINE_BYTES {
+            request = Some(request::is_request(&line));
+        }
+        let limit = if request == Some(true) {
+            MAX_REQUEST_BYTES
+        } else {
+            MAX_LINE_BYTES
+        };
+        if line.len() > limit {
+            return Some(Line {
+                bytes: line,
+                request: request.unwrap_or(false),
+            });
         }
     }
 }
