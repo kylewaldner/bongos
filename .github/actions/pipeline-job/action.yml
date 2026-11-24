@@ -99,6 +99,9 @@ inputs:
   run_timeout_minutes:
     description: "The agent step is stopped this many minutes after the job's start"
     default: '300'
+  colgrep_version:
+    description: "colgrep release tag for the index download; empty: the index script's pinned default"
+    default: ''
   claude_version:
     description: "Pinned Claude CLI version"
     default: 2.1.331
@@ -349,8 +352,9 @@ runs:
         TAG: ${{ inputs.index_tag }}
         REPO: ${{ github.repository }}
         GH_TOKEN: ${{ github.token }}
-        # The same pin as the index workflows: the repository variable, else the script's default (v1.8.5).
-        COLGREP_VERSION: ${{ vars.COLGREP_VERSION || 'v1.8.5' }}
+        # The same pin as the index workflows: the colgrep_version input (a workflow may pass its repository variable;
+        # a composite action cannot read `vars`), else the script's default (v1.8.5) when empty.
+        COLGREP_VERSION: ${{ inputs.colgrep_version }}
       run: |
         set -euo pipefail
         # Uses the index workflows' own install and restore. A job without an index carries on with grep.
