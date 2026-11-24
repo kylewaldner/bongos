@@ -15,6 +15,7 @@ doctest = false
 [dependencies]
 anyhow.workspace = true
 bongos_chat.workspace = true
+bongos_confine.workspace = true
 bongos_minibuffer.workspace = true
 bongos_project_repo.workspace = true
 bongos_project_repo_model.workspace = true
@@ -47,6 +48,7 @@ workspace.workspace = true
 bongos_builder_model.workspace = true
 bongos_work_model = { workspace = true, features = ["test-support"] }
 bongos_workflow_model = { workspace = true, features = ["test-support"] }
+ctor.workspace = true
 editor = { workspace = true, features = ["test-support"] }
 fs.workspace = true
 gpui = { workspace = true, features = ["test-support"] }

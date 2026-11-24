@@ -61,9 +61,9 @@ impl ProjectRepositorySettings {
 
     /// The folder project folders go in.
     pub fn projects_folder(&self) -> PathBuf {
-        self.projects_dir
-            .clone()
-            .unwrap_or_else(|| paths::data_dir().join("projects"))
+        self.projects_dir.clone().unwrap_or_else(|| {
+            paths::data_dir().join(bongos_project_repo_model::layout::PROJECTS_DIR)
+        })
     }
 }
 

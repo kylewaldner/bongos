@@ -447,6 +447,26 @@ definition. The keys are for the Emacs keymap; every command is also in the pale
   (3), `fan_out_width` (8), `retries` (2), `poll_interval_minutes` (5), `wait_give_up_days` (7) and
   `programs` with `python` (null, `python3` then `python` on `PATH`), `max_minutes` (10) and
   `max_output_mb` (10).
+- **Confinement.** Jobs (workflow programs, agent steps and task checks) can write only to their
+  job tree, their scratch directory and the directories they declare (agent steps may also write
+  the agent CLI's own state directories, `~/.claude` and `~/.codex` by default), and the
+  Confinement section of the Work page shows what that means on your machine. On Linux with Bubblewrap, jobs are
+  confined: they never get your repository's shared git data, bongos brings back their commits and
+  branches after each run and checks them, and git run by bongos and by the editor never uses
+  configuration or pointers a job wrote. On macOS jobs are confined by path through Seatbelt: reads
+  are not restricted, and a process a job leaves running may outlive it. With no sandbox available,
+  jobs are not confined; install Bubblewrap (Linux) to get it. Without a usable sandbox, program
+  and agent steps run unsandboxed (and the log says so), except in a main worktree, where they are
+  refused, and task checks refuse to start until Bubblewrap is installed or
+  `confinement.task_checks` is set to false. Two switches turn it on per kind of
+  job: `confinement.task_checks` (on by default) and `confinement.agent_steps` (off by
+  default until the confined Claude Code CLI is verified with a logged-in session and user-scoped
+  MCP servers; a confined Claude Code CLI runs with `CLAUDE_CONFIG_DIR` set to `~/.claude`). Each switch that is off adds a line to the section, for example `Agent steps are
+  not confined (confinement.agent_steps is off)`. `confinement.agent_state_paths` names the paths
+  each agent CLI must write to keep its session and login, `~` being the job's HOME; its defaults
+  are `claude` with `["~/.claude"]` and `codex` with `["~/.codex"]`. To add a
+  path, list it under the CLI's key with the whole list, for example `"agent_state_paths": {
+  "claude": ["~/.claude", "~/.config/claude"] }`.
 - **Privacy.** Workflows run only the local CLIs and scripts a definition names. bongos itself
   contacts no host for them; what leaves the machine is what those programs do themselves: the model
   provider of the `claude` or `codex` you run, and `gh` or the network hosts a program node declares
@@ -696,7 +716,9 @@ C-x C-s, C-x C-w and C-x s, and the command keys (M-x, C-x ...) work everywhere 
 | C-M-k | kill-whole-line |
 | C-M-w | append-next-kill: the next kill is added to the last entry |
 | C-o | open line: insert a newline after the cursor and stay before it |
-| C-/, C-_, C-x u | undo |
+| C-/, C-_ | undo |
+| C-?, M-_ | redo |
+| C-x u | undo tree: open the undo history of the buffer as a tree (see Undo tree) |
 | M-u, M-l, M-c | upcase, downcase, capitalize word |
 | C-t, M-t, C-x C-t | transpose characters, words, lines |
 | M-z, M-Z | zap to char, zap up to char (prompts for the character in the minibuffer) |
@@ -911,6 +933,25 @@ the minibuffer or other small editors. Three commands, each in the command palet
 Type the label characters to jump; the cursor moves there, and into another pane when the label is
 in one. **C-g** or **Escape** cancels the labels and leaves the cursor where it was, and nothing
 you typed is inserted.
+
+### Undo tree
+
+Undo never loses an edit: undoing and then typing starts a branch, and the old text stays reachable.
+**C-x u** (vundo) opens the buffer's undo history as a tree in a pane beside the buffer. **C-/** and
+**C-_** undo, **C-?** and **M-_** redo. With the Emacs keys, typing is grouped as in Emacs: a run of
+up to 20 characters is one undo step, and any command or cursor move ends the run (`undo_tree.grouping`
+is `emacs`; `zed` keeps the time-based grouping). `undo_tree.node_limit` (default 10000) caps the
+nodes the tree keeps.
+
+Keys in the tree:
+
+- **f** and **b** move to the child and the parent state, **n** and **p** to the next and previous
+  branch below the same parent. The buffer shows the state under the cursor as you move.
+- **m** marks a state and **u** removes the mark. **d** shows a diff between the marked state (or the
+  state the tree was opened at) and the state under the cursor.
+- **RET** commits the state under the cursor as the buffer's text and closes the tree; one undo
+  returns to the text from before. **q** or **C-g** closes the tree and leaves the buffer, and the
+  caret, as they were before **C-x u**.
 
 ## Keybinding profiles
 

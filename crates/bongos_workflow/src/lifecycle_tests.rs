@@ -285,6 +285,7 @@ impl RunWorktrees for DirWorktrees {
         let path = run_dir.join("run");
         fs::create_dir_all(&path).unwrap();
         Ok(RunWorktree {
+            git_dir: run_dir.join("git"),
             run_dir,
             path,
             branch: format!("{TASK_BRANCH}-run-{attempt}"),
@@ -297,6 +298,7 @@ impl RunWorktrees for DirWorktrees {
         run_id: &str,
         attempt: u32,
         path: &Path,
+        _common_dir: Option<&Path>,
         _settings: &WorkflowsSettings,
     ) -> Result<RunWorktree, WorktreeError> {
         if let Some(error) = self.error.lock().unwrap().clone() {
@@ -305,6 +307,7 @@ impl RunWorktrees for DirWorktrees {
         let run_dir = self.root.join(format!("{}-{run_id}-{attempt}", task.slug));
         fs::create_dir_all(&run_dir).unwrap();
         Ok(RunWorktree {
+            git_dir: run_dir.join("git"),
             run_dir,
             path: path.to_path_buf(),
             branch: format!("{TASK_BRANCH}-run-{attempt}"),
@@ -2332,6 +2335,7 @@ fn a_task_run_in_a_lane_tree_works_there_and_keeps_its_run_directory_across_a_re
         started_by: StartedBy::Lane,
         tree: RunTree::Lane {
             path: tree.clone(),
+            common_dir: None,
             base: None,
             start: None,
             merge_into: None,
@@ -2366,6 +2370,7 @@ fn a_lane_tree_with_no_lane_is_a_bad_request() {
     let request = StartRequest {
         tree: RunTree::Lane {
             path: world.root.join("lane"),
+            common_dir: None,
             base: None,
             start: None,
             merge_into: None,
@@ -2384,6 +2389,7 @@ fn a_lane_tree_with_a_start_or_a_task_run_on_a_snapshot_or_named_repository_is_r
     for tree in [
         RunTree::Lane {
             path: world.root.join("lane"),
+            common_dir: None,
             base: None,
             start: Some("main".to_string()),
             merge_into: None,

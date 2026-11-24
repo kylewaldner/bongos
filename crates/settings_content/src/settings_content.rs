@@ -258,6 +258,8 @@ pub struct SettingsContent {
 
     /// Settings for the navigation pickers: the buffer switcher, go to file and find in files.
     pub navigation: Option<NavigationSettingsContent>,
+    /// Settings for the undo tree: a view of a buffer's undo history as a tree.
+    pub undo_tree: Option<UndoTreeSettingsContent>,
 
     /// Settings for the Work view: projects and tasks kept as files under `~/.bongos`.
     pub work: Option<WorkSettingsContent>,
@@ -285,6 +287,9 @@ pub struct SettingsContent {
 
     /// Settings for task checks: scripts and commands that must pass before a task is done.
     pub task_checks: Option<TaskChecksSettingsContent>,
+
+    /// Settings for confining jobs (agent steps and task checks) to their job tree.
+    pub confinement: Option<ConfinementSettingsContent>,
 
     /// Settings related to Vim mode in bongos.
     pub vim: Option<VimSettingsContent>,
@@ -1452,6 +1457,33 @@ pub struct NavigationSettingsContent {
     pub preview_max_file_size: Option<u64>,
 }
 
+/// How edits are grouped into undo states.
+#[derive(
+    Clone, Copy, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq, Eq,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum UndoGroupingContent {
+    /// Group edits the way Emacs does.
+    Emacs,
+    /// Group edits the way the editor always has.
+    #[default]
+    Zed,
+}
+
+/// Settings for the undo tree.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct UndoTreeSettingsContent {
+    /// The most nodes the undo tree keeps. Values below 100 count as 100.
+    ///
+    /// Default: 10000
+    pub node_limit: Option<usize>,
+    /// How edits are grouped into undo states: "emacs" or "zed".
+    ///
+    /// Default: "zed"
+    pub grouping: Option<UndoGroupingContent>,
+}
+
 #[with_fallible_options]
 #[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
 pub struct WorkSettingsContent {
@@ -1953,6 +1985,41 @@ pub struct TaskChecksSettingsContent {
     ///
     /// Default: 1000
     pub live_write_ms: Option<u32>,
+}
+
+/// Settings for confining jobs to their job tree, scratch directory and declared directories.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct ConfinementSettingsContent {
+    /// Run agent steps inside the sandbox (writes only to the job tree, scratch, declared
+    /// directories and the agent CLI's own state paths). Off by default until the confined Claude
+    /// Code CLI is verified with a logged-in session and user-scoped MCP servers.
+    ///
+    /// Default: false
+    pub agent_steps: Option<bool>,
+    /// Run task checks inside the sandbox.
+    ///
+    /// Default: true
+    pub task_checks: Option<bool>,
+    /// Paths each agent CLI must write to keep its session and login; `~` is the job's HOME.
+    pub agent_state_paths: Option<ConfinementAgentStatePathsContent>,
+}
+
+/// Paths each agent CLI may write while confined.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct ConfinementAgentStatePathsContent {
+    /// Paths the Claude Code CLI writes.
+    ///
+    /// The CLI runs with `CLAUDE_CONFIG_DIR` set to `~/.claude`, so it keeps its login and
+    /// settings there.
+    ///
+    /// Default: ["~/.claude"]
+    pub claude: Option<Vec<String>>,
+    /// Paths the Codex CLI writes.
+    ///
+    /// Default: ["~/.codex"]
+    pub codex: Option<Vec<String>>,
 }
 
 /// Settings for chat sessions.

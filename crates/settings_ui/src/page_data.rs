@@ -79,14 +79,32 @@ pub(crate) fn settings_data(cx: &App) -> Vec<SettingsPage> {
         collaboration_page(),
         ai_page(cx),
         network_page(),
-        work_page(bongos_linear::sync::token_is_set(cx)),
+        work_page(
+            bongos_linear::sync::token_is_set(cx),
+            confinement_switches(cx),
+        ),
         project_repository_page(),
         chats_page(),
         developer_page(cx),
     ]
 }
 
-fn work_page(token_set: bool) -> SettingsPage {
+/// `(confinement.agent_steps, confinement.task_checks)` as the settings now stand. The notes of
+/// the Confinement section follow them, so the page is rebuilt when either changes.
+pub(crate) fn confinement_switches(cx: &App) -> (bool, bool) {
+    let confinement = cx
+        .global::<settings::SettingsStore>()
+        .merged_settings()
+        .confinement
+        .clone()
+        .unwrap_or_default();
+    (
+        confinement.agent_steps.unwrap_or(false),
+        confinement.task_checks.unwrap_or(true),
+    )
+}
+
+fn work_page(token_set: bool, (agent_steps, task_checks): (bool, bool)) -> SettingsPage {
     fn work_section() -> [SettingsPageItem; 5] {
         [
             SettingsPageItem::SectionHeader("Work"),
@@ -1077,17 +1095,81 @@ fn work_page(token_set: bool) -> SettingsPage {
         ]
     }
 
+    fn confinement_section(agent_steps: bool, task_checks: bool) -> Vec<SettingsPageItem> {
+        fn text(title: &'static str, description: Option<&'static str>) -> SettingsPageItem {
+            SettingsPageItem::ActionLink(ActionLink {
+                title: title.into(),
+                description: description.map(Into::into),
+                button_text: "".into(),
+                on_click: Arc::new(|_, _, _| {}),
+                files: USER,
+            })
+        }
+        let promise = bongos_confine::promise(
+            bongos_confine::Platform::current(),
+            bongos_confine::sandbox_availability(),
+        );
+        let mut items = vec![
+            SettingsPageItem::SectionHeader("Confinement"),
+            text(promise.title, Some(promise.body)),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Confine Agent Steps",
+                description: "Run agent steps inside the sandbox. Off by default until the confined Claude Code CLI is verified with a logged-in session and user-scoped MCP servers.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("confinement.agent_steps"),
+                    pick: |settings_content| {
+                        settings_content.confinement.as_ref()?.agent_steps.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .confinement
+                            .get_or_insert_default()
+                            .agent_steps = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Confine Task Checks",
+                description: "Run task checks inside the sandbox.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("confinement.task_checks"),
+                    pick: |settings_content| {
+                        settings_content.confinement.as_ref()?.task_checks.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .confinement
+                            .get_or_insert_default()
+                            .task_checks = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ];
+        for note in bongos_confine::switch_off_notes(agent_steps, task_checks) {
+            items.push(text(note, None));
+        }
+        items
+    }
+
     SettingsPage {
         title: "Work",
-        items: concat_sections![
+        items: concat_sections![@vec,
             work_section(),
             thresholds_and_repositories_section(),
             task_builder_section(),
             linear_section(token_set),
             workflows_section(),
             task_checks_section(),
+            confinement_section(agent_steps, task_checks),
             lanes_section()
-        ],
+        ]
+        .into_boxed_slice(),
     }
 }
 
@@ -12094,7 +12176,7 @@ mod tests {
         let (content, _) = settings::parse_json::<SettingsContent>(&settings::default_settings());
         let default = serde_json::to_value(content.expect("default.json parses")).unwrap();
         let keys: Vec<&String> = default["work"].as_object().unwrap().keys().collect();
-        let page = work_page(false);
+        let page = work_page(false, (false, true));
         let paths: Vec<&str> = page
             .items
             .iter()
@@ -12164,7 +12246,7 @@ mod tests {
 
     #[test]
     fn test_work_page_lists_the_workflows_settings() {
-        let page = work_page(false);
+        let page = work_page(false, (false, true));
         let paths: Vec<&str> = page
             .items
             .iter()
@@ -12198,7 +12280,7 @@ mod tests {
 
     #[test]
     fn test_work_page_lists_repositories_and_add_repository() {
-        let page = work_page(false);
+        let page = work_page(false, (false, true));
         assert_eq!(page.title, "Work");
         let titles: Vec<String> = page
             .items
@@ -12236,7 +12318,7 @@ mod tests {
 
     #[test]
     fn test_work_page_lists_the_task_builder_settings() {
-        let page = work_page(false);
+        let page = work_page(false, (false, true));
         let paths: Vec<&str> = page
             .items
             .iter()
@@ -12278,7 +12360,7 @@ mod tests {
                 .collect()
         };
         for (set, text) in [(false, "Token: not set"), (true, "Token: set")] {
-            let page = work_page(set);
+            let page = work_page(set, (false, true));
             let paths: Vec<&str> = page
                 .items
                 .iter()
@@ -12397,7 +12479,7 @@ mod task_checks_tests {
     fn work_page_lists_every_task_checks_setting_with_its_default() {
         let defaults =
             SettingsContent::parse_json_with_comments(&settings::default_settings()).unwrap();
-        let page = work_page(false);
+        let page = work_page(false, (false, true));
         let mut listed = Vec::new();
         for item in page.items.iter() {
             if let SettingsPageItem::SettingItem(item) = item {
@@ -12429,5 +12511,30 @@ mod task_checks_tests {
             .map(|(key, value)| (*key, value.to_string()))
             .collect();
         assert_eq!(listed, expected);
+    }
+
+    #[test]
+    fn work_page_confinement_notes_follow_the_switches() {
+        let notes = |switches: (bool, bool)| -> Vec<String> {
+            work_page(false, switches)
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    SettingsPageItem::ActionLink(link)
+                        if bongos_confine::switch_off_notes(false, false)
+                            .contains(&link.title.as_ref()) =>
+                    {
+                        Some(link.title.to_string())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            notes((false, true)),
+            ["Agent steps are not confined (confinement.agent_steps is off)"]
+        );
+        assert!(notes((true, true)).is_empty());
+        assert_eq!(notes((false, false)).len(), 2);
     }
 }

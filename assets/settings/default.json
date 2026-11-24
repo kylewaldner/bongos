@@ -2742,6 +2742,13 @@
     // The largest file, in bytes, that a picker preview shows (default 2 MiB).
     "preview_max_file_size": 2097152,
   },
+  // Settings for the undo tree: a view of a buffer's undo history as a tree.
+  "undo_tree": {
+    // The most nodes the undo tree keeps. Values below 100 count as 100.
+    "node_limit": 10000,
+    // How edits are grouped into undo states: "emacs" or "zed".
+    "grouping": "emacs",
+  },
   // Settings for the Work view: projects and tasks kept as files under ~/.bongos.
   "work": {
     // Whether the Work view is on. While it is off, bongos neither reads nor
@@ -3028,6 +3035,19 @@
     "tree_key_debounce_ms": 2000,
     // At most one live-state write per task per this many milliseconds.
     "live_write_ms": 1000,
+  },
+  "confinement": {
+    // Run agent steps inside the sandbox (writes only to the job tree, scratch, declared
+    // directories and the agent CLI's own state paths below). Off until the confined Claude Code
+    // CLI is verified with a logged-in session and user-scoped MCP servers.
+    "agent_steps": false,
+    // Run task checks inside the sandbox.
+    "task_checks": true,
+    // Paths each agent CLI must write to keep its session and login; ~ is the job's HOME.
+    "agent_state_paths": {
+      "claude": ["~/.claude"],
+      "codex": ["~/.codex"],
+    },
   },
   // The server to connect to. If the environment variable
   // ZED_SERVER_URL is set, it will override this setting.

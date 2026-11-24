@@ -101,7 +101,9 @@ actions!(
         /// Focuses and opens the next navigation entry without moving focus to content.
         FocusNextNavEntry,
         /// Focuses and opens the previous navigation entry without moving focus to content.
-        FocusPreviousNavEntry
+        FocusPreviousNavEntry,
+        /// Writes the Confinement section of the Work page as text to the logs directory.
+        DumpConfinement
     ]
 );
 
@@ -431,6 +433,7 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &OpenSettings, cx| {
         open_settings_editor(None, None, None, cx);
     });
+    cx.on_action(|_: &DumpConfinement, cx| dump_confinement(cx));
     cx.on_action(|_: &zed_actions::assistant::OpenSkillCreator, cx| {
         open_skill_creator(pages::SkillCreatorOpenMode::Form, None, cx);
     });
@@ -487,6 +490,60 @@ pub fn init(cx: &mut App) {
             );
     })
     .detach();
+}
+
+/// The file `settings_editor: dump confinement` writes, in the logs directory.
+const CONFINEMENT_DUMP_FILE: &str = "settings-confinement.txt";
+
+/// The text of the Confinement section of the open settings window's Work page: its lines as the
+/// page holds them now, one per line, and the two switches' current values. For the smoke scenario.
+fn confinement_dump_text(pages: &[SettingsPage], switches: (bool, bool)) -> String {
+    let mut text = String::from("confinement section\n");
+    let Some(page) = pages.iter().find(|page| page.title == "Work") else {
+        return text;
+    };
+    let mut inside = false;
+    for item in page.items.iter() {
+        match item {
+            SettingsPageItem::SectionHeader(header) => inside = *header == "Confinement",
+            SettingsPageItem::ActionLink(link) if inside => {
+                text.push_str(&format!("line: {}\n", link.title));
+                if let Some(description) = &link.description {
+                    text.push_str(&format!("body: {description}\n"));
+                }
+            }
+            SettingsPageItem::SettingItem(item) if inside => {
+                text.push_str(&format!("switch: {}\n", item.title));
+            }
+            _ => {}
+        }
+    }
+    text.push_str(&format!("confinement.agent_steps: {}\n", switches.0));
+    text.push_str(&format!("confinement.task_checks: {}\n", switches.1));
+    text
+}
+
+fn dump_confinement(cx: &mut App) {
+    let Some(window) = cx
+        .windows()
+        .into_iter()
+        .find_map(|window| window.downcast::<SettingsWindow>())
+    else {
+        log::warn!("settings: dump confinement: the settings window is not open");
+        return;
+    };
+    let switches = page_data::confinement_switches(cx);
+    let Ok(text) = window.read_with(cx, |settings_window, _| {
+        confinement_dump_text(&settings_window.pages, switches)
+    }) else {
+        return;
+    };
+    let dir = paths::logs_dir();
+    let written = std::fs::create_dir_all(dir)
+        .and_then(|()| std::fs::write(dir.join(CONFINEMENT_DUMP_FILE), text));
+    if let Err(error) = written {
+        log::error!("settings: cannot write {CONFINEMENT_DUMP_FILE}: {error}");
+    }
 }
 
 fn init_renderers(cx: &mut App) {
@@ -1285,26 +1342,28 @@ impl SettingsPageItem {
                                     },
                                 ),
                         )
-                        .child(
-                            Button::new(
-                                ("action-link".into(), action_link.title.clone()),
-                                action_link.button_text.clone(),
+                        .when(!action_link.button_text.is_empty(), |this| {
+                            this.child(
+                                Button::new(
+                                    ("action-link".into(), action_link.title.clone()),
+                                    action_link.button_text.clone(),
+                                )
+                                .tab_index(0_isize)
+                                .end_icon(
+                                    Icon::new(IconName::ArrowUpRight)
+                                        .size(IconSize::Small)
+                                        .color(Color::Muted),
+                                )
+                                .style(ButtonStyle::OutlinedGhost)
+                                .size(ButtonSize::Medium)
+                                .on_click({
+                                    let on_click = action_link.on_click.clone();
+                                    cx.listener(move |this, _, window, cx| {
+                                        on_click(this, window, cx);
+                                    })
+                                }),
                             )
-                            .tab_index(0_isize)
-                            .end_icon(
-                                Icon::new(IconName::ArrowUpRight)
-                                    .size(IconSize::Small)
-                                    .color(Color::Muted),
-                            )
-                            .style(ButtonStyle::OutlinedGhost)
-                            .size(ButtonSize::Medium)
-                            .on_click({
-                                let on_click = action_link.on_click.clone();
-                                cx.listener(move |this, _, window, cx| {
-                                    on_click(this, window, cx);
-                                })
-                            }),
-                        ),
+                        }),
                 )
                 .when(bottom_border, |this| this.child(Divider::horizontal()))
                 .into_any_element(),
@@ -1721,8 +1780,21 @@ impl SettingsWindow {
         .detach();
 
         let mut ui_font_size = ThemeSettings::get_global(cx).ui_font_size(cx);
+        let mut confinement_switches = page_data::confinement_switches(cx);
         cx.observe_global_in::<SettingsStore>(window, move |this, window, cx| {
             this.fetch_files(window, cx);
+
+            // The notes under the Confinement switches follow the switches.
+            let switches = page_data::confinement_switches(cx);
+            if switches != confinement_switches {
+                confinement_switches = switches;
+                // Keep the scroll position and any open sub page: only a note appears or goes.
+                let scroll_top = this.list_state.logical_scroll_top();
+                let sub_pages = std::mem::take(&mut this.sub_page_stack);
+                this.rebuild_pages(window, cx);
+                this.sub_page_stack = sub_pages;
+                this.list_state.scroll_to(scroll_top);
+            }
 
             // Whenever settings are changed, it's possible that the changed
             // settings affects the rendering of the `SettingsWindow`, like is

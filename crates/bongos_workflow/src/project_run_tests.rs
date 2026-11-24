@@ -262,8 +262,15 @@ fn a_project_merge_never_checks_out_its_target_so_a_retry_after_a_crash_finds_th
     git_out(&git, &clash_tree, &["commit", "-q", "-m", "clash"]);
     git_out(&git, &clash_tree, &["checkout", "-q", "--detach"]);
     let clash_head = git_out(&git, &repo, &["rev-parse", "clash"]);
+    // The run tree's git directory, as the run records it when it makes the tree.
+    let run_git_dir = PathBuf::from(git_out(
+        &git,
+        &tree,
+        &["rev-parse", "--path-format=absolute", "--git-dir"],
+    ));
     let request = |merge_into: &str| ProjectMergeRequest {
         run_tree: tree.clone(),
+        run_git_dir: run_git_dir.clone(),
         run_branch: "run-branch".to_string(),
         merge_into: merge_into.to_string(),
         run_id: "run-1".to_string(),
@@ -352,6 +359,7 @@ fn a_project_run_with_no_target_merges_nothing() {
     let end = ProjectEnd {
         merge: Some(ProjectMergeRequest {
             run_tree: PathBuf::from("/nowhere"),
+            run_git_dir: PathBuf::from("/nowhere/.git"),
             run_branch: "run".to_string(),
             merge_into: "main".to_string(),
             run_id: "run".to_string(),

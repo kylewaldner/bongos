@@ -682,9 +682,6 @@ const RESERVED: &[(&str, &[&str])] = &[
         "ctrl-r",
         &["isearch::Backward", "search::SelectPreviousMatch"],
     ),
-    ("ctrl-/", &["editor::Undo"]),
-    ("ctrl-_", &["editor::Undo"]),
-    ("ctrl-x u", &["editor::Undo"]),
 ];
 
 #[gpui::test]

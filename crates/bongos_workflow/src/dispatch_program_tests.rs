@@ -95,6 +95,7 @@ fn repository(root: &Path, origin: Option<&str>) -> PathBuf {
 fn bound(root: &Path, repo: &Path) -> RunBinding {
     let mut binding = binding(root, "flow");
     binding.checkout.worktree = Some(repo.to_path_buf());
+    binding.worktree.git_dir = repo.join(".git");
     fs::create_dir_all(&binding.worktree.path).unwrap();
     let definition = binding.attempt_dir.join("definition/0");
     fs::create_dir_all(&definition).unwrap();

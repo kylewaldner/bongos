@@ -131,6 +131,7 @@ fn finished(node: &str) -> Event {
         turns: None,
         elapsed_ms: 0,
         session_id: None,
+        confinement_refusals: Vec::new(),
     }
 }
 

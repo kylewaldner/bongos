@@ -14,9 +14,8 @@
 
 use std::path::{Path, PathBuf};
 
-use bongos_project_repo::Git;
-
 use crate::process::StopHandle;
+use crate::task_git::TaskGit;
 use crate::tree_key::private_index;
 use crate::work_tree::ensure_top_level;
 
@@ -26,7 +25,7 @@ const OWNER_SUFFIX: &str = ".owner";
 /// A temporary tree at a base commit, removed with `git worktree remove --force` by
 /// [`TempTree::remove`], or on a thread of its own when dropped without it.
 pub(crate) struct TempTree {
-    git: Git,
+    git: TaskGit,
     /// A working tree of the repository the temporary tree was added to.
     repository: PathBuf,
     /// The scratch folder, canonical.
@@ -41,7 +40,7 @@ impl TempTree {
     /// Adds a detached worktree of the repository of `repository` at `commit` as
     /// `<scratch>/<uuid>`. Refused when the new tree would not be apart from `protected`.
     pub(crate) async fn create(
-        git: &Git,
+        git: &TaskGit,
         repository: &Path,
         scratch: &Path,
         commit: &str,
@@ -66,10 +65,14 @@ impl TempTree {
             index_dir: index_dir.to_path_buf(),
             armed: true,
         };
-        if let Err(error) = git
+        let mut added = git
             .worktree_add_detached(repository, &tree.path, commit)
-            .await
-        {
+            .await;
+        // Git has just made the tree: its git directory is recorded now, before any check runs.
+        if added.is_ok() {
+            added = git.record_linked(&tree.path).await.map(|_| ());
+        }
+        if let Err(error) = added {
             tree.remove().await;
             return Err(format!("adding a temporary base tree: {error}"));
         }
@@ -82,7 +85,7 @@ impl TempTree {
     /// the repository's own index and files are not touched. The folder is not a git working
     /// tree; it is removed like a temporary base tree.
     pub(crate) async fn materialize(
-        git: &Git,
+        git: &TaskGit,
         repository: &Path,
         scratch: &Path,
         tree: &str,
@@ -125,15 +128,15 @@ impl TempTree {
             .ok_or_else(|| "the scratch folder's path is not UTF-8".to_string())?;
         let prefix = format!("--prefix={prefix}/");
         self.git
-            .run_on_index(&self.repository, &index, &["read-tree", tree], None)
+            .run_on_index(&self.repository, &index, &[], &["read-tree", tree])
             .await
             .map_err(|error| error.to_string())?;
         self.git
             .run_on_index(
                 &self.repository,
                 &index,
+                &[],
                 &["checkout-index", "--all", "--force", &prefix],
-                None,
             )
             .await
             .map_err(|error| error.to_string())?;
@@ -194,7 +197,7 @@ impl Drop for TempTree {
 /// UUID-named directory directly inside `scratch`, and never prunes the repository's other
 /// worktrees: a registration a failed removal leaves is only marked prunable.
 async fn remove_temp_tree(
-    git: &Git,
+    git: &TaskGit,
     repository: Option<&Path>,
     scratch: &Path,
     path: &Path,
@@ -209,14 +212,9 @@ async fn remove_temp_tree(
         return;
     }
     if !absent {
-        if path.join(".git").is_file()
-            && let Some(text) = path.to_str()
-        {
+        if path.join(".git").is_file() {
             let directory = repository.unwrap_or(path);
-            if let Err(error) = git
-                .run(directory, &["worktree", "remove", "--force", text])
-                .await
-            {
+            if let Err(error) = git.worktree_remove(directory, path).await {
                 log::warn!("checks: git removing {}: {error}", path.display());
             }
         }
@@ -226,6 +224,7 @@ async fn remove_temp_tree(
             log::error!("checks: removing {}: {error}", path.display());
         }
     }
+    TaskGit::forget(path);
     if let Some(owner) = owner_file(scratch, path) {
         std::fs::remove_file(owner).ok();
     }
@@ -297,7 +296,7 @@ fn owner_of(owner: &Path) -> Owner {
 /// Removes every temporary tree in `scratch` whose owner file names a process that is gone,
 /// with its owner file, and every owner file left without its tree. A tree without a readable
 /// owner file stays. Returns the trees removed.
-pub(crate) async fn sweep_scratch(git: &Git, scratch: &Path, index_dir: &Path) -> Vec<PathBuf> {
+pub(crate) async fn sweep_scratch(git: &TaskGit, scratch: &Path, index_dir: &Path) -> Vec<PathBuf> {
     let Ok(scratch) = scratch.canonicalize() else {
         return Vec::new();
     };
@@ -345,7 +344,7 @@ pub(crate) enum LentTreeError {
 /// apart from `protected` or not the top of a working tree. Once `stop` is stopped, no further
 /// git command runs in the tree.
 pub(crate) async fn check_out_lent_tree(
-    git: &Git,
+    git: &TaskGit,
     path: &Path,
     commit: &str,
     protected: &[&Path],
@@ -392,7 +391,7 @@ pub(crate) async fn check_out_lent_tree(
 /// arguments passed as they are; nothing outside the lent tree is written. Once `stop` is
 /// stopped, no further git command that writes runs in the tree.
 pub(crate) async fn check_out_tree_in_lent_tree(
-    git: &Git,
+    git: &TaskGit,
     path: &Path,
     tree: &str,
     protected: &[&Path],

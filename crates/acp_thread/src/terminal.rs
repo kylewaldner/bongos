@@ -175,7 +175,12 @@ impl SandboxWrap {
         } else {
             sandbox::GitSandboxPolicy::Denied { git_dirs }
         };
-        sandbox::SandboxPolicy { fs, network, git }
+        sandbox::SandboxPolicy {
+            fs,
+            network,
+            git,
+            read_only_masks: Vec::new(),
+        }
     }
 }
 

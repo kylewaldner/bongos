@@ -212,10 +212,10 @@ impl LanesHost for TreeHost {
                 .borrow_mut()
                 .extend(started.saved.iter().map(|(_, saved)| saved.left_on()));
         }
-        gpui::Task::ready(
-            started
-                .map(|started| JobSetup::in_lane_tree(started.trees, Vec::new(), BTreeMap::new())),
-        )
+        let common = self.fixture.app.join(".git");
+        gpui::Task::ready(started.map(|started| {
+            JobSetup::in_lane_tree(started.trees, common, Vec::new(), BTreeMap::new())
+        }))
     }
 
     fn left_work(&self, lane: &LaneId, job: &JobRecord, _cx: &App) -> gpui::Task<Vec<LeftWork>> {
