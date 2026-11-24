@@ -49,6 +49,7 @@ use bongos_work_model::store::Project;
 use bongos_workflow_model::inputs::Input;
 use bongos_workflow_model::record::{RunningNode, StartedBy};
 use bongos_workflow_model::scheduler::Branch;
+use bongos_workflow_model::unsandboxed::{Mode, Permit};
 use bongos_workflow_model::{
     Command, Definition, EnvEdit, Event, Failure, FailureReason, LaneRef, Limits, NodeKey,
     RunState, record, replay, scheduler,
@@ -166,6 +167,19 @@ pub struct RunSetup {
     /// For a project subject: the project, its files folder and the definitions its agents are
     /// pointed at.
     pub project: Option<ProjectSource>,
+    /// Who started the run and whether it runs unattended, which decide whether a program may
+    /// ever run without the OS sandbox.
+    pub facts: RunFacts,
+}
+
+/// What `run.toml` says about who is there to answer for a run: whether it runs unattended and
+/// who started it. The default knows neither, so a program of it never runs unsandboxed outside
+/// `fallback` (fail closed).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RunFacts {
+    pub unattended: bool,
+    /// `None` when the run's record was not read.
+    pub started_by: Option<StartedBy>,
 }
 
 /// Where the agents of a project-subject run take their context from.
@@ -1482,6 +1496,12 @@ impl<R: Runner> Runtime<R> {
         let started = match &builtin {
             Some(builtin) => {
                 let state = run.state();
+                // The runtime does not read the settings: the mode stays the default until a
+                // built-in needs the user's.
+                let mode = Mode::default();
+                let permit = run.binding.as_ref().map_or(Permit::Refuse, |binding| {
+                    crate::dispatch_program::program_permit(&binding.setup.facts, mode)
+                });
                 builtin
                     .start(BuiltinStart {
                         run: &run.id,
@@ -1490,6 +1510,8 @@ impl<R: Runner> Runtime<R> {
                         key: &key,
                         try_number,
                         binding: run.binding.as_ref(),
+                        permit,
+                        mode,
                     })
                     .map(|()| ProcessRecord {
                         pid: 0,

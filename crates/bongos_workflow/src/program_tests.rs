@@ -1,6 +1,7 @@
 //! Tests of the program runner: the state document, the permission checks of the shim (commands,
 //! writes, network), the output, time and result caps, polling, the MCP refusal, the interpreter
-//! check and the sandbox report. Each test skips when no Python 3.8+ is on `PATH`. The OS sandbox
+//! check, the sandbox report and the decision when no sandbox is available (those tests need no
+//! Python). Each other test skips when no Python 3.8+ is on `PATH`. The OS sandbox
 //! is replaced by a probe that says it is unavailable, so the shim's checks are what is tested and
 //! no test needs `bwrap`; one test uses the real probe and accepts either answer. Nothing touches
 //! the real `HOME` or the network.
@@ -13,14 +14,16 @@ use std::time::{Duration, Instant};
 use bongos_workflow_model::definition::Permissions;
 use bongos_workflow_model::record::TodoRef;
 use bongos_workflow_model::state_doc::{self, Paths, RunIdentity};
+use bongos_workflow_model::unsandboxed::{AllowedBy, Mode, Permit, REFUSED_TEXT};
 use bongos_workflow_model::{Definition, Event, Failure, FailureReason, NodeKey, parse, replay};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use crate::runner_program::{
     Clock, DENIALS_END, DENIALS_FILE, GitGuard, INTERPRETER_FIX, Interpreter, MCP_REFUSAL,
-    PollPlan, ProgramCaps, ProgramNode, ProgramRunner, ProgramSettings, SUMMARY_FILE, SandboxProbe,
-    add_git_config, git_metadata_needed, hide_in_bubblewrap, os_sandbox_probe, remove_symlinks,
+    PollPlan, ProgramCaps, ProgramNode, ProgramRunner, ProgramSettings, SNAPSHOT_NEEDS_SANDBOX,
+    SUMMARY_FILE, SandboxProbe, WORK_DIR_NEEDS_SANDBOX, add_git_config, git_metadata_needed,
+    hide_in_bubblewrap, os_sandbox_probe, remove_symlinks,
 };
 use crate::runtime::Finish;
 
@@ -197,6 +200,8 @@ impl Fixture {
             task_id: "task-1".to_string(),
             task_dir: self.path("task"),
             node_result: try_dir.join("node-result.json"),
+            permit: Default::default(),
+            mode: Default::default(),
         }
     }
 
@@ -1707,4 +1712,184 @@ fn git_metadata_is_checked_unless_bubblewrap_sandboxes_the_run() {
     assert!(git_metadata_needed(false, false));
     assert!(git_metadata_needed(true, false));
     assert!(!git_metadata_needed(true, true));
+}
+
+/// A fixture whose interpreter does not exist, so nothing it starts can run: a start that gets
+/// past the sandbox decision fails at the spawn with `program interpreter missing`, and one that
+/// does not never reaches it. Needs no Python.
+fn without_python(probe: SandboxProbe) -> Fixture {
+    let root = TempDir::new().unwrap();
+    let clock = FakeClock::new();
+    let interpreter = Interpreter {
+        program: root.path().join("no-such-python"),
+        version: (3, 12),
+    };
+    let runner = ProgramRunner::new(interpreter, base_env(root.path()))
+        .with_clock(clock.clone())
+        .with_sandbox_probe(probe);
+    Fixture {
+        root,
+        runner,
+        clock,
+    }
+}
+
+/// The names of the files in the try directory, sorted.
+fn written(fixture: &Fixture) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(fixture.path(TRY_DIR))
+        .map(|read| {
+            read.flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+fn start_with(fixture: &mut Fixture, permit: Permit, mode: Mode) -> Result<(), Failure> {
+    let mut node = fixture.node("raise SystemExit(0)\n");
+    node.permit = permit;
+    node.mode = mode;
+    fixture.runner.start("run-1", &key(), 1, node).map(|_| ())
+}
+
+#[test]
+fn a_failing_probe_runs_only_under_fallback_or_allow_and_otherwise_asks_or_refuses() {
+    // Fallback runs as before: past the decision to the spawn, with today's note.
+    let mut fixture = without_python(no_sandbox());
+    let failure = start_with(&mut fixture, Permit::Ask, Mode::Fallback).unwrap_err();
+    assert_eq!(failure.reason, FailureReason::ProgramInterpreterMissing);
+    assert_eq!(
+        fixture.summary(TRY_DIR)["sandbox"],
+        format!("not sandboxed: {NO_SANDBOX}")
+    );
+
+    // Allow runs too, saying who allowed it.
+    let mut fixture = without_python(no_sandbox());
+    let failure = start_with(&mut fixture, Permit::Ask, Mode::Allow).unwrap_err();
+    assert_eq!(failure.reason, FailureReason::ProgramInterpreterMissing);
+    assert_eq!(
+        fixture.summary(TRY_DIR)["sandbox"],
+        "unsandboxed (allowed by setting)"
+    );
+
+    // Ask needs an answer and refuse refuses: nothing is spawned and only the summary is written.
+    for (mode, reason, detail) in [
+        (
+            Mode::Ask,
+            FailureReason::SandboxRequired,
+            format!("no OS sandbox is available ({NO_SANDBOX})"),
+        ),
+        (
+            Mode::Refuse,
+            FailureReason::SandboxRefused,
+            format!("{REFUSED_TEXT} ({NO_SANDBOX})"),
+        ),
+    ] {
+        let mut fixture = without_python(no_sandbox());
+        let failure = start_with(&mut fixture, Permit::Ask, mode).unwrap_err();
+        assert_eq!(failure.reason, reason, "{mode:?}");
+        assert_eq!(failure.detail, detail, "{mode:?}");
+        assert_eq!(failure.node, Some(key()));
+        assert_eq!(written(&fixture), [SUMMARY_FILE], "{mode:?}");
+        assert_eq!(
+            fixture.summary(TRY_DIR),
+            json!({ "pass": 1, "sandbox": detail })
+        );
+        assert!(fixture.runner.in_flight().is_empty(), "{mode:?}");
+    }
+}
+
+#[test]
+fn the_hard_refusals_ignore_an_allowed_permit() {
+    let allowed = Permit::Allowed(AllowedBy::RunConsent {
+        at: "2026-01-02T03:04:05Z".to_string(),
+        by: "person".to_string(),
+    });
+    for snapshot in [true, false] {
+        for mode in [Mode::Allow, Mode::Ask, Mode::Fallback] {
+            let mut fixture = without_python(no_sandbox());
+            let mut node = fixture.node("raise SystemExit(0)\n");
+            node.read_only_worktree = snapshot;
+            node.needs_sandbox = !snapshot;
+            node.permit = allowed.clone();
+            node.mode = mode;
+            let failure = fixture.runner.start("run-1", &key(), 1, node).unwrap_err();
+            assert_eq!(failure.reason, FailureReason::PermissionDenied, "{mode:?}");
+            let expected = if snapshot {
+                SNAPSHOT_NEEDS_SANDBOX
+            } else {
+                WORK_DIR_NEEDS_SANDBOX
+            };
+            assert_eq!(failure.detail, format!("{expected}: {NO_SANDBOX}"));
+            assert!(written(&fixture).is_empty(), "{:?}", written(&fixture));
+        }
+    }
+}
+
+#[test]
+fn an_allowed_permit_runs_unsandboxed_and_says_who_allowed_it() {
+    for (by, note) in [
+        (
+            AllowedBy::RunConsent {
+                at: "2026-01-02T03:04:05Z".to_string(),
+                by: "person".to_string(),
+            },
+            "unsandboxed (approved 2026-01-02T03:04:05Z)",
+        ),
+        (AllowedBy::Setting, "unsandboxed (allowed by setting)"),
+    ] {
+        let mut fixture = without_python(no_sandbox());
+        let failure = start_with(&mut fixture, Permit::Allowed(by), Mode::Ask).unwrap_err();
+        assert_eq!(failure.reason, FailureReason::ProgramInterpreterMissing);
+        assert_eq!(
+            fixture.summary(TRY_DIR),
+            json!({ "pass": 1, "sandbox": note })
+        );
+    }
+}
+
+#[test]
+fn a_program_node_with_the_default_permit_refuses() {
+    for mode in [Mode::Ask, Mode::Allow, Mode::Refuse] {
+        let mut fixture = without_python(no_sandbox());
+        let mut node = fixture.node("raise SystemExit(0)\n");
+        assert_eq!(node.permit, Permit::Refuse);
+        node.mode = mode;
+        let failure = fixture.runner.start("run-1", &key(), 1, node).unwrap_err();
+        assert_eq!(failure.reason, FailureReason::SandboxRefused, "{mode:?}");
+        assert_eq!(written(&fixture), [SUMMARY_FILE]);
+    }
+}
+
+#[test]
+fn each_start_probes_for_itself() {
+    let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = probes.clone();
+    let probe: SandboxProbe = Arc::new(move |_, _| {
+        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(NO_SANDBOX.to_string())
+    });
+    let mut fixture = without_python(probe);
+    for (index, node_key) in [NodeKey::new("check", 1), NodeKey::new("check", 2)]
+        .into_iter()
+        .enumerate()
+    {
+        let mut node = fixture.node("raise SystemExit(0)\n");
+        node.try_dir = fixture.path(&format!("record/nodes/check/{}-1", index + 1));
+        node.permit = Permit::Ask;
+        node.mode = Mode::Ask;
+        let failure = fixture
+            .runner
+            .start("run-1", &node_key, 1, node)
+            .unwrap_err();
+        assert_eq!(failure.reason, FailureReason::SandboxRequired);
+        assert_eq!(failure.node, Some(node_key));
+        assert_eq!(
+            probes.load(std::sync::atomic::Ordering::SeqCst),
+            index + 1,
+            "no answer is remembered between starts"
+        );
+    }
 }

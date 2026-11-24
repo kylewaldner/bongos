@@ -360,7 +360,8 @@ impl Sandbox {
 
     /// Check whether the platform sandbox can be created for `policy` without
     /// actually building a command or spawning the proxy. On Linux this runs a
-    /// brief `bwrap` probe (call it off the main thread).
+    /// brief `bwrap` probe (call it off the main thread); on macOS it checks that Seatbelt's
+    /// launcher is an executable file.
     pub fn can_create(policy: &SandboxPolicy, cwd: Option<&Path>) -> Result<(), SandboxError> {
         #[cfg(target_os = "linux")]
         {
@@ -381,7 +382,13 @@ impl Sandbox {
             }
             Ok(())
         }
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        // Seatbelt's launcher is run by a fixed path, so the probe checks that it is there.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (policy, cwd);
+            macos_seatbelt::check_launcher().map_err(map_anyhow_error)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
         {
             let _ = (policy, cwd);
             Ok(())
