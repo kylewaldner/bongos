@@ -1,0 +1,13 @@
+name: actions-smoke-test
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  hello:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - run: echo "actions access works"
