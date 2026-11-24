@@ -16,7 +16,7 @@ use gpui::{BorrowAppContext as _, TestAppContext};
 use super::task_link_tests::{Linked, MemoryWrites, auto_runner, linked};
 use super::*;
 use crate::dispatch::RunnerSnapshot;
-use crate::engine::{AppReading, HealthReading, SnapshotBuilder, TICK_INTERVAL};
+use crate::engine::{AppReading, HealthReading, ProjectLookup, SnapshotBuilder, TICK_INTERVAL};
 use crate::process;
 use crate::task_link::{MERGE_GATE, TaskWrites, WriteCommand, gate_key};
 
@@ -321,4 +321,79 @@ fn the_runs_on_disk_load_once_at_the_first_work_tree(cx: &mut TestAppContext) {
         Err(crate::runtime::RuntimeError::Duplicate(id)) => assert_eq!(id, run),
         other => panic!("expected Duplicate, got {other:?}"),
     }
+}
+
+/// A project repository value over `folder`; nothing is read from it.
+fn project_repo(folder: &std::path::Path) -> bongos_project_repo::ProjectRepo {
+    let location = bongos_project_repo::Location {
+        id: "project-1".to_string(),
+        folder: folder.to_path_buf(),
+        repository: folder.join("repository"),
+        working_copies: folder.join("working-copies"),
+        state: folder.join("state"),
+        files: folder.join("files"),
+        remote: None,
+        converted_from: None,
+    };
+    let git = bongos_project_repo::Git::locate().expect("git is installed");
+    bongos_project_repo::ProjectRepo::new(location, git)
+}
+
+#[gpui::test]
+fn a_reloaded_run_of_a_refusing_project_refuses_unsandboxed_starts(cx: &mut TestAppContext) {
+    let world = World::new();
+    let run = seed(&world, "single", mid_node);
+    let linked = linked(&world, FakeRunner::new(), cx);
+    let repo = project_repo(&world.root.join("project"));
+    let engine = linked.engine.with_project_lookup(ProjectLookup {
+        repo_of: Arc::new(move |_, _| Some(repo.clone())),
+        switch_of: Arc::new(|_| Some(toml::Value::from("refuse"))),
+    });
+    cx.update(|cx| engine.attach(cx));
+    cx.run_until_parked();
+
+    advance(cx, 1);
+    assert_eq!(engine.lifecycle().all_runs(), vec![run.clone()]);
+    let snapshot = RunnerSnapshot {
+        programs: crate::runner_program::ProgramSettings {
+            unsandboxed: bongos_workflow_model::unsandboxed::Mode::Allow,
+            ..crate::runner_program::ProgramSettings::default()
+        },
+        ..engine.runner_inputs().snapshot()
+    };
+    // The user allows unsandboxed starts; the project of the reloaded run refuses them.
+    assert_eq!(
+        snapshot.unsandboxed_mode(&run),
+        bongos_workflow_model::unsandboxed::Mode::Refuse
+    );
+}
+
+/// The placed path (the run found its project, which has no switch) stays Allow, so the
+/// Refuse above comes from the switch and not from the unplaced fail-closed path.
+#[gpui::test]
+fn a_reloaded_run_of_a_project_without_the_switch_keeps_the_allow_mode(cx: &mut TestAppContext) {
+    let world = World::new();
+    let run = seed(&world, "single", mid_node);
+    let linked = linked(&world, FakeRunner::new(), cx);
+    let repo = project_repo(&world.root.join("project"));
+    let engine = linked.engine.with_project_lookup(ProjectLookup {
+        repo_of: Arc::new(move |_, _| Some(repo.clone())),
+        switch_of: Arc::new(|_| None),
+    });
+    cx.update(|cx| engine.attach(cx));
+    cx.run_until_parked();
+
+    advance(cx, 1);
+    assert_eq!(engine.lifecycle().all_runs(), vec![run.clone()]);
+    let snapshot = RunnerSnapshot {
+        programs: crate::runner_program::ProgramSettings {
+            unsandboxed: bongos_workflow_model::unsandboxed::Mode::Allow,
+            ..crate::runner_program::ProgramSettings::default()
+        },
+        ..engine.runner_inputs().snapshot()
+    };
+    assert_eq!(
+        snapshot.unsandboxed_mode(&run),
+        bongos_workflow_model::unsandboxed::Mode::Allow
+    );
 }

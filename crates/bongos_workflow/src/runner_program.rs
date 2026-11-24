@@ -12,20 +12,25 @@
 //!   its writable roots (the node's worktree unless it is [`TreeAccess::ReadOnly`], its scratch
 //!   directory, its declared directories and the sandbox's own `/tmp`), with the read-only masks
 //!   of the confinement inside them (the worktree's `.git`), and blocks the network unless
-//!   declared and then restricts it to the declared hosts. When the sandbox cannot be created
-//!   the script runs with the second layer alone and the try's `summary.json` says "not
-//!   sandboxed: <reason>". A write the sandbox refused outside the roots that the output reports
-//!   fails the node with the rule ([`bongos_confine::RULE`]).
+//!   declared and then restricts it to the declared hosts. Each start probes for the sandbox
+//!   itself, and a probe that fails for any reason means no sandbox. Then a snapshot or a work
+//!   directory never starts; otherwise the node's permit and the effective
+//!   `workflows.programs.unsandboxed` mode decide ([`unsandboxed::decide`]): a run allowed to
+//!   runs the script with the second layer alone and the try's `summary.json` says "unsandboxed
+//!   (approved <at>)" or "unsandboxed (allowed by setting)"; otherwise the start needs an answer
+//!   or is refused ("refused: no OS sandbox"), and nothing of the try is written but its
+//!   `summary.json`. A write the sandbox refused outside the roots that the output reports fails
+//!   the node with the rule ([`bongos_confine::RULE`]).
 //! - Permissions (`permissions = { commands, network, mcp }`) are enforced a second time by the
 //!   embedded shim's audit hook (`shim.py`), which denies unlisted programs, writes outside the
 //!   same roots or to a mask, and undeclared connections. A denial reaches bongos through a pipe
 //!   (file descriptor 3, kept in `denials.jsonl`), so it fails the node even when the script
 //!   caught the `PermissionError`; the shim ends the log with a marker, and a clean exit without
 //!   it fails the node too. MCP is refused in v1.
-//! - The shim is a guardrail, not a security boundary: code in the same Python process can always
-//!   get around an audit hook. The OS sandbox is the boundary, so a run that is "not sandboxed"
-//!   is not hard-confined. Known gaps of the shim, accepted because the sandbox holds: a walk
-//!   through closures (`__closure__`, `cell_contents`) reaches its state; `os.link` checks only
+//! - The shim is not a security boundary: its audit checks are defense in depth, and code in the
+//!   same Python process can always get around an audit hook. The OS sandbox is the boundary, so
+//!   a program that runs without it is not confined at all. Known gaps of the shim, accepted
+//!   because the sandbox holds: a walk through closures (`__closure__`, `cell_contents`) reaches its state; `os.link` checks only
 //!   the destination; binding a unix socket creates a file anywhere; the arguments and
 //!   environment of a listed command are not checked (`git -c core.fsmonitor=...` runs).
 //! - Git (D2, D7): a run or branch worktree gets private git ([`TreeGit::Private`]): before the
@@ -70,6 +75,7 @@ use bongos_confine::{
     Confinement, HostGit, JobDeclaration, JobKind, JobTree, TreeAccess, TreeGit, annotate,
 };
 use bongos_workflow_model::definition::{Node, OutputField, Permissions, Polls};
+use bongos_workflow_model::unsandboxed::{self, Mode, Permit};
 use bongos_workflow_model::{Failure, FailureReason, NodeKey, StateDoc, TypedResult, schema};
 use sandbox::{CommandAndArgs, Sandbox, SandboxNetPolicy, SandboxPolicy};
 use serde_json::{Value, json};
@@ -143,6 +149,9 @@ pub struct ProgramSettings {
     pub wait_give_up_days: u32,
     /// `workflows.programs.allow_network`.
     pub allow_network: bool,
+    /// `workflows.programs.unsandboxed`: what a start does with no OS sandbox, before the
+    /// project's key tightens it ([`ProgramNode::mode`]).
+    pub unsandboxed: bongos_workflow_model::unsandboxed::Mode,
 }
 
 impl Default for ProgramSettings {
@@ -154,6 +163,7 @@ impl Default for ProgramSettings {
             max_output_mb: 10,
             poll_interval_minutes: 5,
             wait_give_up_days: 7,
+            unsandboxed: bongos_workflow_model::unsandboxed::Mode::Ask,
         }
     }
 }
@@ -290,6 +300,8 @@ pub struct ProgramNode {
     /// The script, resolved to a file.
     pub script: PathBuf,
     pub output: Vec<OutputField>,
+    /// The node's compiled schema; the result is checked against it.
+    pub schema: std::sync::Arc<bongos_workflow_model::OutputSchema>,
     pub permissions: Permissions,
     pub caps: ProgramCaps,
     pub polls: Option<PollPlan>,
@@ -321,6 +333,11 @@ pub struct ProgramNode {
     pub task_dir: PathBuf,
     /// `BONGOS_NODE_RESULT`.
     pub node_result: PathBuf,
+    /// The run's word on starting without the OS sandbox, built by the caller that knows the
+    /// run; anything else leaves it `Refuse` (its default), so a forgotten caller fails closed.
+    pub permit: Permit,
+    /// The effective `workflows.programs.unsandboxed` mode.
+    pub mode: Mode,
 }
 
 impl ProgramNode {
@@ -382,6 +399,54 @@ pub fn add_git_config(env: &mut BTreeMap<String, String>, key: &str, value: &str
     env.insert(format!("GIT_CONFIG_KEY_{count}"), key.to_string());
     env.insert(format!("GIT_CONFIG_VALUE_{count}"), value.to_string());
     env.insert("GIT_CONFIG_COUNT".to_string(), (count + 1).to_string());
+}
+
+/// The start of a node whose writable set reaches its own try directory `dir`, `policy.json` or
+/// `state.json` refuses: the script could rewrite the policy the shim enforces. The writable set
+/// is the one [`Confinement::build`] works out from [`ProgramNode::declaration`] (its scratch,
+/// its writable trees and its declared directories). Paths are compared canonical, so a
+/// symlinked writable directory pointing at the try directory, or one that is an ancestor of it,
+/// counts. A path that cannot be resolved refuses too, named in the error. `dir` must exist.
+pub fn check_policy_outside_writable(node: &ProgramNode, dir: &Path) -> Result<(), String> {
+    let canonical = |path: &Path| {
+        fs::canonicalize(path).map_err(|error| {
+            format!(
+                "could not resolve a path of this node, so its policy file cannot be shown \
+                 outside its writable directories: {}: {error}",
+                path.display()
+            )
+        })
+    };
+    let dir_canonical = canonical(dir)?;
+    let protected = [
+        dir_canonical.join(POLICY_FILE),
+        dir_canonical.join(STATE_FILE),
+        dir_canonical.clone(),
+    ];
+    let declaration = node.declaration();
+    let roots = std::iter::once(&declaration.scratch)
+        .chain(
+            declaration
+                .trees
+                .iter()
+                .filter(|tree| tree.access == TreeAccess::Writable)
+                .map(|tree| &tree.path),
+        )
+        .chain(&declaration.declared_dirs)
+        .chain(&declaration.extra_writable);
+    for root in roots {
+        let root_canonical = canonical(root)?;
+        if protected
+            .iter()
+            .any(|path| path.starts_with(&root_canonical))
+        {
+            return Err(format!(
+                "a writable directory of this node contains its own policy file: {}",
+                root.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The environment of a program: the agent runners' names, `BONGOS_STATE`, `BONGOS_RESULT` and
@@ -596,7 +661,7 @@ pub fn classify(
             );
         }
     };
-    schema::check(&node.output, &value)
+    schema::check(&node.schema, &value)
         .or_else(|problems| fail(FailureReason::ProgramResultInvalid, problems))
 }
 
@@ -689,6 +754,12 @@ struct Launch {
     env: BTreeMap<String, String>,
     sandbox: Option<Sandbox>,
     sandbox_note: String,
+}
+
+/// Why a pass does not start, from [`ProgramRunner`]'s wrap.
+struct WrapRefusal {
+    reason: FailureReason,
+    detail: String,
 }
 
 /// A spawned pass's process and what goes with it.
@@ -830,6 +901,10 @@ impl ProgramRunner {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(io(&result_path, error)),
         }
+        // Every writable root bongos makes exists now, and nothing of the try is written yet: no
+        // shim, state, policy or summary.
+        check_policy_outside_writable(&node, &dir)
+            .map_err(|detail| refuse(FailureReason::PermissionDenied, detail))?;
         let confinement = Confinement::build(&node.declaration(), &node.host_git)
             .map_err(|error| refuse(FailureReason::PermissionDenied, error.to_string()))?;
         let spawned = match self.spawn(run, key, &node, &dir, number, &confinement) {
@@ -891,12 +966,48 @@ impl ProgramRunner {
             TreeGit::ReadOnly | TreeGit::None => None,
         };
         let shim = dir.join(SHIM_FILE);
-        fs::write(&shim, SHIM).map_err(|error| io(&shim, error))?;
         let state_file = dir.join(STATE_FILE);
+        let policy_file = dir.join(POLICY_FILE);
+        let path = |path: &Path| path.to_string_lossy().into_owned();
+        let args = vec![
+            "-I".to_string(),
+            "-B".to_string(),
+            path(&shim),
+            path(&policy_file),
+            path(&node.script),
+        ];
+        let env = launch_env(&self.base_env, run, key, node, &state_file);
+        // How it starts is decided before anything of the try is written but its summary, and
+        // before anything is spawned: a refused start leaves only `summary.json`, and a hard
+        // refusal nothing.
+        let Launch {
+            program,
+            args,
+            env,
+            sandbox,
+            sandbox_note,
+        } = match self.wrap(
+            node,
+            confinement,
+            path(&self.interpreter.program),
+            args,
+            env,
+        ) {
+            Ok(launch) => launch,
+            Err(WrapRefusal { reason, detail }) => {
+                if matches!(
+                    reason,
+                    FailureReason::SandboxRequired | FailureReason::SandboxRefused
+                ) {
+                    write_summary(dir, &json!({ "pass": number, "sandbox": detail }));
+                }
+                return Err(refuse(reason, detail));
+            }
+        };
+        fs::write(&shim, SHIM).map_err(|error| io(&shim, error))?;
         node.state
             .write_readonly(&state_file)
             .map_err(|error| io(&state_file, error))?;
-        let policy_file = dir.join(POLICY_FILE);
         // The shim refuses writes outside the writable roots and to the read-only masks; the OS
         // sandbox enforces both.
         let policy = json!({
@@ -911,55 +1022,6 @@ impl ProgramRunner {
             serde_json::to_string_pretty(&policy).unwrap_or_default(),
         )
         .map_err(|error| io(&policy_file, error))?;
-
-        let path = |path: &Path| path.to_string_lossy().into_owned();
-        let args = vec![
-            "-I".to_string(),
-            "-B".to_string(),
-            path(&shim),
-            path(&policy_file),
-            path(&node.script),
-        ];
-        let env = launch_env(&self.base_env, run, key, node, &state_file);
-        let Launch {
-            program,
-            args,
-            env,
-            sandbox,
-            sandbox_note,
-        } = self.wrap(
-            node,
-            confinement,
-            path(&self.interpreter.program),
-            args,
-            env,
-        );
-        if sandbox.is_none() && confinement.requires_sandbox() {
-            return Err(refuse(
-                FailureReason::PermissionDenied,
-                format!(
-                    "a job in a main worktree runs only in the OS sandbox ({sandbox_note}): {}",
-                    node.worktree.display()
-                ),
-            ));
-        }
-        if sandbox.is_none() && node.needs_sandbox {
-            let reason = sandbox_note
-                .strip_prefix("not sandboxed: ")
-                .unwrap_or(&sandbox_note);
-            // Only the OS sandbox keeps a snapshot read-only (the shim alone lets listed commands
-            // write it) and a work directory's project records untouched, so such a program
-            // never runs without the sandbox.
-            let why = if node.tree_access == TreeAccess::ReadOnly {
-                SNAPSHOT_NEEDS_SANDBOX
-            } else {
-                WORK_DIR_NEEDS_SANDBOX
-            };
-            return Err(refuse(
-                FailureReason::PermissionDenied,
-                format!("{why}: {reason}"),
-            ));
-        }
         write_summary(dir, &json!({ "pass": number, "sandbox": sandbox_note }));
 
         let (stdout_read, stdout_write) = std::io::pipe().map_err(|error| io(dir, error))?;
@@ -1046,8 +1108,12 @@ impl ProgramRunner {
         })
     }
 
-    /// The command to spawn: inside the OS sandbox enforcing `confinement` when it can be
-    /// created, else as it is with the reason it is not sandboxed.
+    /// The command to spawn: inside the OS sandbox enforcing `confinement` when the probe (run
+    /// for this start, never remembered) says it can be created. With no sandbox, a job in a main
+    /// worktree, a snapshot and a work directory refuse the start whatever the permit. Otherwise
+    /// [`unsandboxed::decide`] over the node's permit and mode: run as it is with the note, need
+    /// an answer (`SandboxRequired`) or refuse (`SandboxRefused`). A probe that fails for any
+    /// reason counts as no sandbox.
     fn wrap(
         &self,
         node: &ProgramNode,
@@ -1055,7 +1121,7 @@ impl ProgramRunner {
         program: String,
         args: Vec<String>,
         env: BTreeMap<String, String>,
-    ) -> Launch {
+    ) -> Result<Launch, WrapRefusal> {
         let policy = confinement.sandbox_policy();
         let wrapped = (self.probe)(&policy, &node.worktree).and_then(|()| {
             let mut sandbox = Sandbox::new(policy).map_err(|error| error.to_string())?;
@@ -1069,24 +1135,66 @@ impl ProgramRunner {
                 .map_err(|error| error.to_string())?;
             Ok((wrapped, sandbox))
         });
-        match wrapped {
-            Ok((wrapped, sandbox)) => Launch {
-                program: wrapped.program,
-                args: wrapped.args,
-                env: wrapped.env.into_iter().collect(),
-                sandbox: Some(sandbox),
-                sandbox_note: "sandboxed".to_string(),
-            },
-            Err(reason) => {
+        let reason = match wrapped {
+            Ok((wrapped, sandbox)) => {
+                return Ok(Launch {
+                    program: wrapped.program,
+                    args: wrapped.args,
+                    env: wrapped.env.into_iter().collect(),
+                    sandbox: Some(sandbox),
+                    sandbox_note: "sandboxed".to_string(),
+                });
+            }
+            Err(reason) => reason,
+        };
+        let denied = |detail: String| {
+            Err(WrapRefusal {
+                reason: FailureReason::PermissionDenied,
+                detail,
+            })
+        };
+        // The hard refusals come first and no permit lifts them: they protect the user's
+        // repository and bongos's own records, not the user's choice. A main worktree's masks
+        // hold only under an enforcing sandbox; only the OS sandbox keeps a snapshot read-only
+        // (the shim alone lets listed commands write it), and only it keeps a project's records
+        // read-only around a work directory.
+        if confinement.requires_sandbox() {
+            return denied(format!(
+                "a job in a main worktree runs only in the OS sandbox (not sandboxed: {reason}): {}",
+                node.worktree.display()
+            ));
+        }
+        if node.needs_sandbox {
+            let why = if node.tree_access == TreeAccess::ReadOnly {
+                SNAPSHOT_NEEDS_SANDBOX
+            } else {
+                WORK_DIR_NEEDS_SANDBOX
+            };
+            return denied(format!("{why}: {reason}"));
+        }
+        let refusal = |reason, detail| Err(WrapRefusal { reason, detail });
+        match unsandboxed::decide(&Err(reason.clone()), &node.permit, node.mode) {
+            unsandboxed::Launch::Unsandboxed { note } => {
                 log::warn!("workflows: a program runs without the OS sandbox: {reason}");
-                Launch {
+                Ok(Launch {
                     program,
                     args,
                     env,
                     sandbox: None,
-                    sandbox_note: format!("not sandboxed: {reason}"),
-                }
+                    sandbox_note: note,
+                })
             }
+            unsandboxed::Launch::Ask { message } => {
+                refusal(FailureReason::SandboxRequired, message)
+            }
+            unsandboxed::Launch::Refuse { message } => {
+                refusal(FailureReason::SandboxRefused, message)
+            }
+            // A failed probe never decides `Sandboxed`; were it to, nothing runs.
+            unsandboxed::Launch::Sandboxed => refusal(
+                FailureReason::SandboxRefused,
+                format!("{} ({reason})", unsandboxed::REFUSED_TEXT),
+            ),
         }
     }
 

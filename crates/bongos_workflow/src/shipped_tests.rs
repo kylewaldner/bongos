@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use bongos_workflow_model::definition::{Definition, Target, parse};
+use bongos_workflow_model::definition::{Definition, NodeKind, Target, parse};
 use bongos_workflow_model::fake::{FakeRunner, Scripted};
 use bongos_workflow_model::layers::DEFINITION_FILE;
 use bongos_workflow_model::record::{EndState, RunState};
@@ -683,4 +683,33 @@ fn the_shipped_lanes_dispatcher_validates_and_is_no_template() {
     let report = validate_definitions(&dirs, Some("lanes")).unwrap();
     assert_eq!(report.error_count(), 0, "{}", report.render());
     assert_eq!(report.warning_count(), 0, "{}", report.render());
+}
+
+#[test]
+fn only_three_shipped_workflows_run_programs_or_waits() {
+    let mut running = BTreeSet::new();
+    for file in FILES
+        .iter()
+        .filter(|file| file.path.ends_with(&format!("/{DEFINITION_FILE}")))
+    {
+        let dir = file.path.trim_end_matches(&format!("/{DEFINITION_FILE}"));
+        let definition = parse(file.contents).unwrap();
+        let runs_a_process = definition.nodes.iter().any(|node| {
+            node.kind.value == NodeKind::Program
+                || node
+                    .use_node
+                    .as_ref()
+                    .is_some_and(|use_node| use_node.value == "wait")
+        });
+        if runs_a_process {
+            running.insert(dir.to_string());
+        }
+    }
+    assert_eq!(
+        running,
+        ["babysit-pr", "implement-pr", "ship-pr"]
+            .map(String::from)
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    );
 }

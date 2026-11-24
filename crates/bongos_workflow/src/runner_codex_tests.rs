@@ -134,6 +134,8 @@ fn node(definition: &Definition, root: &Path) -> CodexNode {
         caps: NodeCaps::resolve(definition, declared, &AgentDefaults::default()),
         model: own_model(definition, declared),
         output: declared.output.clone(),
+        schema: declared.schema.clone(),
+        schema_text: declared.schema.document().to_string(),
         mcp_exclude: Vec::new(),
         mcp_installed: ["broken", "github", "linear"]
             .iter()
@@ -300,15 +302,15 @@ fn an_excluded_server_is_disabled_even_when_the_node_names_it() {
 #[test]
 fn the_schema_file_requires_every_property_for_strict_mode() {
     let (finish, root) = run_one("success", |node| {
-        node.output = parse(&TRIAGE.replace(
+        let edited = parse(&TRIAGE.replace(
             r#"why = { type = "text" }"#,
             r#"why = { type = "text", optional = true }"#,
         ))
-        .unwrap()
-        .node("triage")
-        .unwrap()
-        .output
-        .clone();
+        .unwrap();
+        let edited = edited.node("triage").unwrap();
+        node.output = edited.output.clone();
+        node.schema = edited.schema.clone();
+        node.schema_text = edited.schema.document().to_string();
     });
     assert!(finish.outcome.is_ok());
     let written: Value = serde_json::from_str(
@@ -343,7 +345,7 @@ fn the_schema_file_holds_the_declared_output() {
     let declared = definition();
     assert_eq!(
         written,
-        json_schema_strict(&declared.node("triage").unwrap().output)
+        json_schema_strict(declared.node("triage").unwrap().schema.document())
     );
     assert_eq!(written["additionalProperties"], json!(false));
     assert_eq!(
