@@ -52,6 +52,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Free disk space (preinstalled software the build does not use)
+        run: |
+          set -u
+          df -h / /mnt
+          start=$(date +%s)
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /usr/share/swift /usr/lib/jvm \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/share/miniconda /usr/lib/google-cloud-sdk \
+            /opt/az /opt/microsoft /usr/lib/firefox /opt/google /usr/local/share/chromium /home/linuxbrew \
+            /usr/local/aws-cli /usr/local/julia*
+          sudo docker system prune -af > /dev/null 2>&1 || true
+          echo "removal took $(( $(date +%s) - start )) s"
+          df -h / /mnt
       - name: Add a swap file (release only)
         if: matrix.release == '1'
         run: |
