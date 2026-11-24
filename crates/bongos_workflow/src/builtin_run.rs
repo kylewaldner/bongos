@@ -12,21 +12,57 @@
 //! [`WaitOutcome::Waiting`] sleeps `with.interval_minutes` (default 5) on the [`WaitClock`] and
 //! passes again, until the condition is satisfied, fails, or `with.give_up_minutes` (default 7
 //! days) pass, which ends the try with "wait timed out". Its other `with` keys are `condition`,
-//! `pr`, `command` (an argv list) and `merge_is_ship`.
+//! `pr`, `command` (an argv list), `merge_is_ship` and `env`: the names of the writer's variables
+//! the wait's process gets besides its own (a name that is not set is skipped).
+//!
+//! Outside the `fallback` mode, how the passes start is decided once, in `start` before the poll
+//! thread: the wait's sandbox policy (see [`builtin_wait`]) and the sandbox probe for it, then
+//! [`unsandboxed::decide`] over the run's permit, as a program node decides. A start that needs
+//! a person's answer returns `SandboxRequired` and one that is refused `SandboxRefused`, so the
+//! runtime asks or refuses before anything runs, and one answer covers the run's program nodes
+//! and waits alike.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use bongos_workflow_model::unsandboxed::{self, Mode};
 use bongos_workflow_model::{Failure, FailureReason, NodeKey};
+use sandbox::{GitSandboxPolicy, Sandbox, SandboxFsPolicy, SandboxNetPolicy, SandboxPolicy};
 use serde_json::{Value, json};
 
 use crate::builtin_merge::{self, MergeRefusal, MergeRequest, MergeStyle, Merged};
 use crate::builtin_nodes::{BuiltinNode, BuiltinNodes, BuiltinStart};
-use crate::builtin_wait::{self, WaitCondition, WaitOutcome, WaitRequest};
+use crate::builtin_wait::{self, WaitCondition, WaitLaunch, WaitOutcome, WaitRequest};
+use crate::dispatch_program::{
+    NO_ORIGIN, REMOTE_ENTRY, expand_remote, remote_hosts, scratch_dir, task_remote_url,
+};
+use crate::runner_program::{SandboxProbe, os_sandbox_probe};
 use crate::runtime::{Finish, RunBinding};
 use crate::worktrees::Git;
+
+/// Every confined wait gets these of the writer's variables, when set.
+const BASE_VARS: &[&str] = &["PATH", "HOME", "LANG"];
+
+/// A `gh` condition also gets `gh`'s own variables for its account, host and configuration
+/// directory. The installed `gh` was checked under the sandbox: it reads its keyring token with
+/// none of the D-Bus variables.
+const GH_VARS: &[&str] = &[
+    "GH_CONFIG_DIR",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_HOST",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+];
+
+/// The refusal when a `gh` condition has no host to reach.
+pub const NO_GH_HOST: &str =
+    "cannot tell which host gh needs; declare permissions.network on the wait node";
+
+/// The refusal when a `gh` condition cannot name its repository.
+pub const NO_GH_REPO: &str = "cannot tell which repository gh needs";
 
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const DEFAULT_GIVE_UP: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -50,6 +86,9 @@ struct TryState {
     running: HashSet<TryId>,
     stopped: HashSet<TryId>,
     finished: Vec<Finish>,
+    /// How many tries ended, polled or not.
+    #[cfg(test)]
+    ended: usize,
 }
 
 /// The tries a built-in runs on threads, and the ones that ended.
@@ -73,6 +112,10 @@ impl Tries {
     fn end(&self, id: &TryId, finish: Finish) {
         let mut state = self.lock();
         state.running.remove(id);
+        #[cfg(test)]
+        {
+            state.ended += 1;
+        }
         if !state.stopped.remove(id) {
             state.finished.push(finish);
         }
@@ -142,6 +185,24 @@ impl Tries {
             state = self.0.1.wait(state).unwrap_or_else(PoisonError::into_inner);
         }
         std::mem::take(&mut state.finished)
+    }
+
+    /// Blocks until `count` tries ended in all, polled or not; panics after a minute, so a try
+    /// that never started fails its test instead of hanging it.
+    #[cfg(test)]
+    fn wait_ended(&self, count: usize) {
+        let (state, timeout) = self
+            .0
+            .1
+            .wait_timeout_while(self.lock(), Duration::from_secs(60), |state| {
+                state.ended < count
+            })
+            .unwrap_or_else(PoisonError::into_inner);
+        assert!(
+            !timeout.timed_out(),
+            "{} of {count} tries ended",
+            state.ended
+        );
     }
 }
 
@@ -359,11 +420,20 @@ impl WaitClock for SystemClock {
     }
 }
 
+/// Reads one of the writer's environment variables.
+pub type EnvLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 /// The `wait` built-in.
 pub struct WaitNode {
     clock: Arc<dyn WaitClock>,
     gh: PathBuf,
     tries: Tries,
+    /// The sandbox probe, [`os_sandbox_probe`] unless a test says otherwise.
+    probe: SandboxProbe,
+    /// Git, for the task remote and the worktree's git directories.
+    git: Git,
+    /// The writer's environment, the process's own unless a test says otherwise.
+    vars: EnvLookup,
 }
 
 impl WaitNode {
@@ -372,13 +442,37 @@ impl WaitNode {
             clock,
             gh: gh.into(),
             tries: Tries::default(),
+            probe: os_sandbox_probe(),
+            git: Git::new("git"),
+            vars: Arc::new(|name| std::env::var(name).ok()),
         }
+    }
+
+    pub fn with_probe(mut self, probe: SandboxProbe) -> Self {
+        self.probe = probe;
+        self
+    }
+
+    pub fn with_git(mut self, git: Git) -> Self {
+        self.git = git;
+        self
+    }
+
+    pub fn with_vars(mut self, vars: EnvLookup) -> Self {
+        self.vars = vars;
+        self
     }
 
     /// Waits for `count` tries to end and returns them.
     #[cfg(test)]
     pub(crate) fn wait_finished(&self, count: usize) -> Vec<Finish> {
         self.tries.wait_for(count)
+    }
+
+    /// Waits until `count` tries ended in all, leaving them for [`BuiltinNode::poll`].
+    #[cfg(test)]
+    pub(crate) fn wait_ended(&self, count: usize) {
+        self.tries.wait_ended(count);
     }
 
     /// The first pass's request, and the poll interval.
@@ -418,6 +512,35 @@ impl WaitNode {
                     .ok_or_else(|| invalid(key, format!("`with.{name}` must be whole minutes"))),
             }
         };
+        let names = match with.get("env") {
+            None => Vec::new(),
+            Some(value) => value
+                .as_array()
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .map(|item| {
+                            item.as_str()
+                                .filter(|name| is_variable_name(name))
+                                .map(str::to_string)
+                        })
+                        .collect::<Option<Vec<_>>>()
+                })
+                .ok_or_else(|| invalid(key, "`with.env` must be a list of variable names"))?,
+        };
+        let mut env = BTreeMap::new();
+        let gh_vars = if condition.uses_gh() { GH_VARS } else { &[] };
+        for name in BASE_VARS
+            .iter()
+            .chain(gh_vars)
+            .copied()
+            .chain(names.iter().map(String::as_str))
+        {
+            // A name that is not set is skipped, never passed empty.
+            if let Some(value) = (self.vars)(name) {
+                env.insert(name.to_string(), value);
+            }
+        }
         let interval = minutes("interval_minutes", DEFAULT_INTERVAL)?.max(Duration::from_secs(60));
         let give_up = minutes("give_up_minutes", DEFAULT_GIVE_UP)?;
         let worktree = binding.checkout.worktree.clone().ok_or_else(|| {
@@ -440,14 +563,139 @@ impl WaitNode {
                     .get("merge_is_ship")
                     .and_then(toml::Value::as_bool)
                     .unwrap_or(false),
+                scratch: scratch_dir(binding, key, start.try_number),
                 worktree,
                 gh: self.gh.clone(),
                 elapsed: Duration::ZERO,
                 give_up: Some(give_up),
+                launch: WaitLaunch::AsUser,
+                env,
+                repo: None,
             },
             interval,
         ))
     }
+
+    /// Decides how the passes start, once, before the poll thread. Under `fallback` (and for a
+    /// wait that runs nothing) they run as the user, as before. Otherwise this builds the wait's
+    /// sandbox policy, probes it, and [`unsandboxed::decide`]s over the probe's answer, the run's
+    /// permit and the mode: sandboxed, unsandboxed by a person's or the setting's word,
+    /// `SandboxRequired` (the runtime asks) or `SandboxRefused`.
+    fn confine(&self, start: &BuiltinStart<'_>, request: &mut WaitRequest) -> Result<(), Failure> {
+        if start.mode == Mode::Fallback || !request.runs_a_process() {
+            return Ok(());
+        }
+        let policy = self.policy(start, request)?;
+        let availability = (self.probe)(&policy, &request.worktree).and_then(|()| {
+            Sandbox::new(policy.clone())
+                .map(drop)
+                .map_err(|error| error.to_string())
+        });
+        let refusal = |reason, detail| Err(failure(reason, start.key, detail));
+        request.launch = match unsandboxed::decide(&availability, &start.permit, start.mode) {
+            unsandboxed::Launch::Sandboxed => WaitLaunch::Sandboxed(policy),
+            unsandboxed::Launch::Unsandboxed { note } => {
+                log::warn!(
+                    "workflows: wait {} of run {} runs without the OS sandbox: {note}",
+                    start.key,
+                    start.run
+                );
+                WaitLaunch::Unsandboxed
+            }
+            unsandboxed::Launch::Ask { message } => {
+                return refusal(FailureReason::SandboxRequired, message);
+            }
+            unsandboxed::Launch::Refuse { message } => {
+                return refusal(FailureReason::SandboxRefused, message);
+            }
+        };
+        Ok(())
+    }
+
+    /// The wait's sandbox policy: the scratch directory writable, the rest read-only, the
+    /// worktree's git directories protected, and the network per condition. A `gh` condition
+    /// reaches the task remote's hosts, a URL `pr`'s host and any declared ones, and is told its
+    /// repository (`--repo`, set here); `command` and `deploy` reach the declared hosts only.
+    fn policy(
+        &self,
+        start: &BuiltinStart<'_>,
+        request: &mut WaitRequest,
+    ) -> Result<SandboxPolicy, Failure> {
+        let key = start.key;
+        let binding = binding(start)?;
+        let denied = |detail: &str| failure(FailureReason::PermissionDenied, key, detail);
+        let declared = start
+            .definition
+            .node(&key.node)
+            .and_then(|node| node.permissions.as_ref())
+            .map(|permissions| permissions.network.clone())
+            .unwrap_or_default();
+        let wants_remote = declared.iter().any(|entry| entry == REMOTE_ENTRY);
+        let gh = request.condition.uses_gh();
+        let remote = (wants_remote || gh)
+            .then(|| task_remote_url(&self.git, binding))
+            .flatten();
+        let mut hosts = if wants_remote {
+            let remote = remote
+                .as_deref()
+                .and_then(remote_hosts)
+                .ok_or_else(|| denied(NO_ORIGIN))?;
+            expand_remote(&declared, &remote)
+        } else {
+            declared
+        };
+        if gh {
+            let from_pr = builtin_wait::pr_url(&request.pr);
+            let github = remote.as_deref().and_then(builtin_wait::github_repo);
+            if github.is_some() {
+                hosts.extend(["github.com".to_string(), "*.github.com".to_string()]);
+            } else if let Some(remote) = remote.as_deref().and_then(remote_hosts) {
+                hosts.extend(remote);
+            }
+            if let Some((host, _)) = &from_pr {
+                hosts.extend([host.clone(), format!("*.{host}")]);
+            }
+            if hosts.is_empty() {
+                return Err(denied(NO_GH_HOST));
+            }
+            let repo = from_pr.map(|(_, repo)| repo).or(github);
+            request.repo = Some(repo.ok_or_else(|| denied(NO_GH_REPO))?);
+        }
+        let mut seen = HashSet::new();
+        hosts.retain(|host| seen.insert(host.clone()));
+        let mut git_dirs: Vec<PathBuf> = futures::executor::block_on(self.git.run(
+            &request.worktree,
+            &[
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-dir",
+                "--git-common-dir",
+            ],
+        ))
+        .map(|output| output.lines().map(PathBuf::from).collect())
+        .unwrap_or_default();
+        git_dirs.dedup();
+        Ok(SandboxPolicy {
+            fs: SandboxFsPolicy::Restricted {
+                writable_paths: vec![request.scratch.clone()],
+            },
+            network: if hosts.is_empty() {
+                SandboxNetPolicy::Blocked
+            } else {
+                SandboxNetPolicy::Restricted {
+                    allowed_domains: hosts,
+                }
+            },
+            git: GitSandboxPolicy::Denied { git_dirs },
+        })
+    }
+}
+
+/// A shell-style variable name: letters, digits and `_`, not starting with a digit.
+fn is_variable_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Passes until the condition is satisfied, fails or gives up; `None` when stopped meanwhile.
@@ -494,7 +742,8 @@ fn poll_wait(
 
 impl BuiltinNode for WaitNode {
     fn start(&self, start: BuiltinStart<'_>) -> Result<(), Failure> {
-        let (request, interval) = self.request(&start)?;
+        let (mut request, interval) = self.request(&start)?;
+        self.confine(&start, &mut request)?;
         let clock = self.clock.clone();
         let id = (start.run.to_string(), start.key.clone(), start.try_number);
         self.tries.spawn(id, move |tries, id| {

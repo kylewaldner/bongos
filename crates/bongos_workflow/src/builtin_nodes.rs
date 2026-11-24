@@ -35,7 +35,7 @@ pub struct BuiltinStart<'a> {
     /// The run's word on running a program without the OS sandbox, as a program node gets it
     /// ([`crate::runner_program::ProgramNode::permit`]); `Refuse` for a run with no binding.
     pub permit: Permit,
-    /// The effective `workflows.programs.unsandboxed` mode. No built-in reads either yet.
+    /// The effective `workflows.programs.unsandboxed` mode. The `wait` built-in decides with both.
     pub mode: Mode,
 }
 

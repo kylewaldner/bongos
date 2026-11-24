@@ -52,6 +52,8 @@ pub struct FakeRunner {
     pub no_sandbox: BTreeSet<String>,
     /// The permit of every start of a `no_sandbox` node, in order.
     pub permits: Vec<(NodeKey, Permit)>,
+    /// The mode the run's built-ins start under ([`Runner::unsandboxed_mode`]).
+    pub unsandboxed_mode: Mode,
     results: BTreeMap<String, Value>,
     /// The cost each node's tries report.
     costs: BTreeMap<String, f64>,
@@ -163,6 +165,10 @@ impl Runner for FakeRunner {
         });
         self.max_in_flight = self.max_in_flight.max(self.running.len());
         Ok(record)
+    }
+
+    fn unsandboxed_mode(&self, _run: &str) -> Mode {
+        self.unsandboxed_mode
     }
 
     fn start_node(&mut self, node: NodeStart<'_>) -> Result<ProcessRecord, Failure> {
