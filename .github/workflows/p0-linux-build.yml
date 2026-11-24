@@ -3,6 +3,7 @@ name: p0-linux-build
 on:
   push:
     branches: [gh-runners-phase0]
+    paths: ['.github/workflows/p0-linux-build.yml', 'p0/**']
   workflow_dispatch:
 permissions:
   contents: read

@@ -3,6 +3,7 @@ name: p0-disk-token
 on:
   push:
     branches: [gh-runners-phase0]
+    paths: ['.github/workflows/p0-disk-token.yml']
   workflow_dispatch:
 permissions:
   contents: read
