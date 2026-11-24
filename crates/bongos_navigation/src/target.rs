@@ -6,8 +6,8 @@
 
 use std::rc::Rc;
 
-use bongos_minibuffer::{Session, Value};
-use gpui::{Action as _, App, Context, Entity, Keystroke, WeakEntity, Window};
+use bongos_minibuffer::{Session, SessionView, Value};
+use gpui::{App, Context, Entity, WeakEntity, Window};
 use workspace::{
     MinibufferMessageKind, MinibufferRouting, OpenTarget, Pane, SplitDirection, Workspace,
 };
@@ -103,7 +103,10 @@ pub fn realize(
     }
 }
 
-type OnChoice = Rc<dyn Fn(Value, Entity<Pane>, &mut Window, &mut App)>;
+/// The label of the M-o entry that asks for the pane by letter.
+const PANE_BY_LETTER: &str = "Pane by letter";
+
+type OnChoice =Rc<dyn Fn(Value, Entity<Pane>, &mut Window, &mut App)>;
 
 /// Adds the pane entries of the M-o menu to `session`: Other pane (o), Split right (r), Split
 /// down (d) and Pane by letter (p). Each realizes its choice at the active pane and calls
@@ -151,7 +154,7 @@ pub fn add_pane_choices_where(
     let session = entry(session, "Other pane", 'o', PaneChoice::OtherPane);
     let session = entry(session, "Split right", 'r', PaneChoice::SplitRight);
     let session = entry(session, "Split down", 'd', PaneChoice::SplitDown);
-    session.action("Pane by letter", 'p', move |value, window, cx| {
+    session.action(PANE_BY_LETTER, 'p', move |value, window, cx| {
         let on_choice = on_choice.clone();
         workspace
             .update(cx, |workspace, cx| {
@@ -164,22 +167,24 @@ pub fn add_pane_choices_where(
     })
 }
 
-/// Opens the highlighted row in a chosen pane: opens the M-o menu of the open picker and picks its
-/// Pane by letter entry (p). Every picker that has the M-o menu answers it.
-pub fn open_in_pane(_: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
-    let menu = zed_actions::minibuffer::Actions;
-    if !window.is_action_available(&menu, cx) {
+/// Opens the highlighted row in a chosen pane: runs the Pane by letter entry of the open picker's
+/// M-o menu, as M-o then p does. Only the navigation pickers have that entry, through
+/// [`add_pane_choices_where`]; with none open, says so.
+pub fn open_in_pane(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let ran = workspace
+        .active_modal::<SessionView>(cx)
+        .is_some_and(|view| {
+            view.update(cx, |view, cx| {
+                view.run_action_labeled(PANE_BY_LETTER, window, cx)
+            })
+        });
+    if !ran {
         MinibufferRouting::message(
             window,
             cx,
             crate::registry::NO_PICKER,
             MinibufferMessageKind::Message,
         );
-        return;
-    }
-    window.dispatch_action(menu.boxed_clone(), cx);
-    if let Ok(key) = Keystroke::parse("p") {
-        window.dispatch_keystroke(key, cx);
     }
 }
 

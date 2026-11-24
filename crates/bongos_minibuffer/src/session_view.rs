@@ -135,6 +135,27 @@ impl SessionView {
                 .finish(Finish::Action(handler, value), true, window, cx);
         }
     }
+
+    /// Runs the M-o entry labeled `label` with the selected candidate, as picking it in the menu
+    /// does, whether or not the menu is open. Returns whether the session has such an entry; with
+    /// no selected candidate it does nothing, as the menu does.
+    pub fn run_action_labeled(
+        &mut self,
+        label: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(ix) = self
+            .core
+            .actions
+            .iter()
+            .position(|entry| &*entry.label == label)
+        else {
+            return false;
+        };
+        self.run_action(&RunSessionAction { ix }, window, cx);
+        true
+    }
 }
 
 impl EventEmitter<DismissEvent> for SessionView {}

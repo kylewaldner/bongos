@@ -3,7 +3,7 @@
 
 use std::{cell::RefCell, path::Path, rc::Rc, sync::Arc};
 
-use bongos_minibuffer::{Candidate, ReadKeyView, SessionHandle};
+use bongos_minibuffer::{Candidate, ReadKeyView, Session, SessionHandle, Source};
 use bongos_window::test_support::split_center;
 use editor::Editor;
 use fs::FakeFs;
@@ -23,6 +23,7 @@ use zed_actions::minibuffer;
 
 use crate::actions::KillBuffer;
 use crate::goto_file_open::FileTarget;
+use crate::registry::NO_PICKER;
 use crate::switcher::{HOST, SwitchTarget, candidates, start};
 use crate::switcher_kill::current;
 
@@ -758,6 +759,7 @@ async fn the_open_in_pane_action_asks_for_a_pane_letter_like_m_o_p(cx: &mut Test
     set_input(&handle, "moved", cx);
     cx.dispatch_action(crate::actions::OpenInPane);
     cx.run_until_parked();
+    assert!(!handle.is_open(), "the switcher ends as the menu entry does");
     assert!(
         items(&panes[2], cx).len() == 1,
         "nothing moves before a letter"
@@ -767,6 +769,56 @@ async fn the_open_in_pane_action_asks_for_a_pane_letter_like_m_o_p(cx: &mut Test
     assert_eq!(items(&panes[0], cx), kept);
     assert!(items(&panes[2], cx).contains(&moved));
     assert_eq!(pane_count(&workspace, cx), 3);
+}
+
+#[gpui::test]
+async fn the_open_in_pane_action_with_the_m_o_menu_open_still_asks_for_a_pane_letter(
+    cx: &mut TestAppContext,
+) {
+    let (workspace, mut cx, _) = setup(cx).await;
+    let cx = &mut cx;
+    let panes = cx.update(|window, cx| split_center(&workspace, 3, window, cx));
+    open(&workspace, &panes[2], "c.txt", cx).await;
+    open(&workspace, &panes[0], "keep1.txt", cx).await;
+    let moved = open(&workspace, &panes[0], "moved.txt", cx)
+        .await
+        .entity_id();
+    focus(&panes[0], cx);
+
+    let handle = open_switcher(&workspace, cx);
+    set_input(&handle, "moved", cx);
+    cx.dispatch_action(minibuffer::Actions);
+    cx.run_until_parked();
+    cx.dispatch_action(crate::actions::OpenInPane);
+    cx.run_until_parked();
+    assert!(!handle.is_open());
+    answer("d", cx);
+
+    assert!(items(&panes[2], cx).contains(&moved));
+    assert_eq!(pane_count(&workspace, cx), 3);
+}
+
+#[gpui::test]
+async fn the_open_in_pane_action_in_a_picker_without_pane_entries_echoes_and_keeps_it(
+    cx: &mut TestAppContext,
+) {
+    let (workspace, mut cx, _) = setup(cx).await;
+    let cx = &mut cx;
+    let session = Session::completing_read(HOST, "Other: ")
+        .source(Source::Fixed(vec![Candidate::text("one")]));
+    let handle = cx.update(|window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            bongos_minibuffer::open(workspace, session, window, cx)
+        })
+    });
+    cx.run_until_parked();
+    let messages = capture_messages(cx);
+
+    cx.dispatch_action(crate::actions::OpenInPane);
+    cx.run_until_parked();
+
+    assert_eq!(*messages.borrow(), [NO_PICKER]);
+    assert!(handle.is_open(), "a picker without pane entries stays open");
 }
 
 #[gpui::test]
