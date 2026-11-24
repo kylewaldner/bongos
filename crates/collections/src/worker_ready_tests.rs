@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -16,16 +17,20 @@ fn test_worker_is_ready_after_ten_milliseconds() {
     let ready = Arc::new(AtomicBool::new(false));
     let worker_ready = ready.clone();
     let delay = startup_delay();
+    let (ready_tx, ready_rx) = mpsc::channel();
     let worker = thread::spawn(move || {
         thread::sleep(delay);
         worker_ready.store(true, Ordering::SeqCst);
+        ready_tx.send(()).expect("the test is still listening");
     });
 
-    // Hopes that the worker is up after ten milliseconds.
-    thread::sleep(Duration::from_millis(10));
+    // The timeout is only a hang guard; readiness is signalled by the event.
+    ready_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the worker signals that it is ready");
     assert!(
         ready.load(Ordering::SeqCst),
-        "the worker was not ready after 10 ms"
+        "the worker signalled ready before setting the flag"
     );
     worker.join().expect("the worker thread ends");
 }
