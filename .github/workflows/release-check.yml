@@ -365,6 +365,16 @@ jobs:
           COORD_REPO: ${{ secrets.COORD_REPO }}
         run: python3 "$AUTOPILOT_PRIVATE/autopilot/runner/release_job.py" step test-suite
 
+      # The whole suite's build (about 89 GB in target/debug on a runner, run 45444987929) is not used again: the perf step
+      # builds the perf set in its own optimized profile and needs about 30 GiB the runner no longer has.
+      - name: Free the test build before the perf build
+        if: steps.notes.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          du -xsh "${CARGO_TARGET_DIR:?}/debug" "${CARGO_TARGET_DIR}-flakebase" 2>/dev/null || true
+          rm -rf "${CARGO_TARGET_DIR:?}/debug" "${CARGO_TARGET_DIR}-flakebase"
+          df -h /
+
       - name: Run the perf tests
         if: steps.notes.outputs.run == 'true'
         timeout-minutes: 75
