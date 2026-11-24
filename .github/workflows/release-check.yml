@@ -95,12 +95,19 @@ jobs:
           if [ "${#IN_SHA}" != 40 ]; then echo "::error::sha must be a full commit sha"; exit 1; fi
           # The pipeline tools need Python 3.11 or later; the image's own python3 is 3.10. The tool cache keeps several
           # (the disk removal leaves /opt/hostedtoolcache/Python alone).
-          py=$(ls -d /opt/hostedtoolcache/Python/3.1[1-9]*/x64 2>/dev/null | sort -V | tail -n1 || true)
+          # 3.12 when the cache has it (the ubuntu-24.04 jobs' python3), else the newest 3.11 or later
+          py=$(ls -d /opt/hostedtoolcache/Python/3.12*/x64 2>/dev/null | sort -V | tail -n1 || true)
+          if [ -z "$py" ]; then
+            py=$(ls -d /opt/hostedtoolcache/Python/3.1[1-9]*/x64 2>/dev/null | sort -V | tail -n1 || true)
+          fi
           if [ -z "$py" ] || [ ! -x "$py/bin/python3" ]; then
             echo "::error::no Python 3.11 or later in /opt/hostedtoolcache/Python"
             exit 1
           fi
           echo "$py/bin" >> "$GITHUB_PATH"
+          # the build workspace on the root disk (cache-warm's path), made now: the setup puts the steps' scratch there
+          sudo mkdir -p /mnt/bongos-workspace
+          sudo chown "$USER" /mnt/bongos-workspace
           put() {
             case "$2" in
               *[!A-Za-z0-9._/@\ -]*) echo "::error::$1 has a character that is not allowed"; exit 1 ;;
