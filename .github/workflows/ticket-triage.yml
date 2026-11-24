@@ -17,7 +17,7 @@
 # job refuses. A test run dispatches only with `--ref` its own test ref (a branch named gh-runners-test-*); a
 # production run refuses to start from any ref but main and always dispatches on main.
 name: ticket-triage
-run-name: ticket-triage ${{ github.event_name }}
+run-name: ticket-triage
 
 on:
   workflow_dispatch:
