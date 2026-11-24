@@ -27,16 +27,21 @@
 //! directory (emptied before each pass) that is also `TMPDIR`, the network reaches only the
 //! wait's hosts, and the environment is cleared down to [`WaitRequest::env`], `TMPDIR` and the
 //! sandbox's own proxy variables. `gh` is told the repository with `--repo`, since it cannot ask
-//! git. With no sandbox and a person's (or the setting's) word, the same cleared environment and
-//! scratch directory are used without the sandbox. A pass whose sandbox cannot be set up fails;
-//! it never runs outside the sandbox.
+//! git. `gh`'s GitHub Enterprise tokens reach it only for the task remote's host or `GH_HOST`
+//! ([`gh_env`]). The sandbox leaves the D-Bus session bus reachable, so a pass can read the user's
+//! keyring (that is how `gh` finds its login), and a program that uses the bus can get around
+//! the filesystem and network limits above. With no sandbox and a person's (or the setting's)
+//! word, the same cleared environment and scratch directory are used without the sandbox. A pass whose
+//! sandbox cannot be set up fails; it never runs outside the sandbox.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::time::Duration;
 
-use sandbox::{CommandAndArgs, Sandbox, SandboxPolicy};
+use futures::FutureExt as _;
+use futures::future::LocalBoxFuture;
+use sandbox::{CommandAndArgs, Sandbox, SandboxError, SandboxPolicy, WrappedCommand};
 
 /// What the wait waits for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,6 +109,30 @@ pub struct WaitRequest {
     pub scratch: PathBuf,
     /// The repository `gh` is told with `--repo`, as `owner/name`; set for a confined pass.
     pub repo: Option<String>,
+    /// Sets up a sandboxed pass's sandbox and wraps its command: [`wrap_in_sandbox`] unless a
+    /// test makes it fail.
+    pub sandbox_wrap: SandboxWrap,
+}
+
+/// Builds the sandbox for `policy` and wraps `command` in it, returning both: the sandbox owns
+/// the network proxy, so it must live until the wrapped process has ended.
+pub type SandboxWrap =
+    fn(
+        SandboxPolicy,
+        CommandAndArgs,
+    ) -> LocalBoxFuture<'static, Result<(Sandbox, WrappedCommand), SandboxError>>;
+
+/// The real [`SandboxWrap`]: [`Sandbox::new`], then [`Sandbox::wrap`].
+pub fn wrap_in_sandbox(
+    policy: SandboxPolicy,
+    command: CommandAndArgs,
+) -> LocalBoxFuture<'static, Result<(Sandbox, WrappedCommand), SandboxError>> {
+    async move {
+        let mut sandbox = Sandbox::new(policy)?;
+        let wrapped = sandbox.wrap(&command).await?;
+        Ok((sandbox, wrapped))
+    }
+    .boxed_local()
 }
 
 impl WaitRequest {
@@ -200,14 +229,15 @@ async fn run(request: &WaitRequest, binary: &Path, args: &[String]) -> Result<Ou
                     binary.display()
                 )
             };
-            let mut sandbox = Sandbox::new(policy.clone()).map_err(unavailable)?;
             let command = CommandAndArgs {
                 program: binary.to_string_lossy().into_owned(),
                 args: args.to_vec(),
                 env: env.into_iter().collect(),
                 cwd: Some(request.worktree.clone()),
             };
-            let wrapped = sandbox.wrap(&command).await.map_err(unavailable)?;
+            let (sandbox, wrapped) = (request.sandbox_wrap)(policy.clone(), command)
+                .await
+                .map_err(unavailable)?;
             // The sandbox owns the network proxy, so it lives until the process has ended. Its
             // environment is what the pass gets: the one passed in plus the proxy's variables.
             let output = run_cleared(
@@ -267,6 +297,47 @@ fn gh_args(request: &WaitRequest, args: &[&str]) -> Vec<String> {
         args.extend(["--repo".to_string(), repo.clone()]);
     }
     args
+}
+
+/// `gh`'s tokens for GitHub Enterprise Server hosts: `gh` sends them to whatever host it is asked
+/// about that is not github.com, so [`gh_env`] passes them only to a host the task already trusts.
+pub const ENTERPRISE_TOKENS: &[&str] = &["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"];
+
+/// The environment a confined `gh` pass gets: `env` (the writer's variables picked for the wait)
+/// without [`ENTERPRISE_TOKENS`] unless the host `gh` will talk to is the task remote's host or
+/// `GH_HOST`. That host is a URL `pr`'s host; for a number or branch it is `GH_HOST`, else
+/// github.com. A URL `pr` whose host cannot be read never gets the tokens.
+pub fn gh_env(
+    mut env: BTreeMap<String, String>,
+    pr: &str,
+    remote: Option<&str>,
+) -> BTreeMap<String, String> {
+    let gh_host_var = env
+        .get("GH_HOST")
+        .map(|host| host.trim().to_ascii_lowercase())
+        .filter(|host| !host.is_empty());
+    let pr = pr.trim();
+    let target = if pr.contains("://") {
+        crate::dispatch_program::remote_hosts(pr).and_then(|hosts| hosts.into_iter().next())
+    } else {
+        Some(
+            gh_host_var
+                .clone()
+                .unwrap_or_else(|| "github.com".to_string()),
+        )
+    };
+    let remote_host = remote
+        .and_then(crate::dispatch_program::remote_hosts)
+        .and_then(|hosts| hosts.into_iter().next());
+    let trusted = target.is_some_and(|target| {
+        Some(&target) == remote_host.as_ref() || Some(&target) == gh_host_var.as_ref()
+    });
+    if !trusted {
+        for name in ENTERPRISE_TOKENS {
+            env.remove(*name);
+        }
+    }
+    env
 }
 
 /// The host and `owner/name` of a pull request URL such as `https://github.com/o/r/pull/42`.

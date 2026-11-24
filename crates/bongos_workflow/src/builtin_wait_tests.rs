@@ -17,14 +17,22 @@ use bongos_workflow_model::layers::DEFINITION_FILE;
 use bongos_workflow_model::unsandboxed::{AllowedBy, Mode, Permit, REFUSED_TEXT};
 use bongos_workflow_model::{Event, Failure, FailureReason, LayerDirs, NodeKey, RunState};
 use chrono::{TimeZone as _, Utc};
+use futures::FutureExt as _;
+use futures::future::LocalBoxFuture;
 use gpui::TestAppContext;
-use sandbox::{SandboxFsPolicy, SandboxNetPolicy, SandboxPolicy};
+use sandbox::{
+    CommandAndArgs, GitSandboxPolicy, Sandbox, SandboxError, SandboxFsPolicy, SandboxNetPolicy,
+    SandboxPolicy, WrappedCommand,
+};
 use tempfile::TempDir;
 
 use crate::WorkflowsSettings;
 use crate::builtin_nodes::{BuiltinNode, BuiltinNodes, BuiltinStart};
 use crate::builtin_run::{EnvLookup, NO_GH_HOST, NO_GH_REPO, WaitClock, WaitNode};
-use crate::builtin_wait::{WaitCondition, WaitLaunch, WaitOutcome, WaitRequest, wait};
+use crate::builtin_wait::{
+    ENTERPRISE_TOKENS, WaitCondition, WaitLaunch, WaitOutcome, WaitRequest, gh_env, wait,
+    wrap_in_sandbox,
+};
 use crate::dispatch_program::scratch_dir;
 use crate::lifecycle::{
     BY_PERSON, Lifecycle, RunStatus, RunWorktrees, StartChecks, StartContext, StartRequest,
@@ -80,6 +88,7 @@ fn request(condition: WaitCondition, gh: PathBuf) -> WaitRequest {
         env: BTreeMap::new(),
         scratch: PathBuf::new(),
         repo: None,
+        sandbox_wrap: wrap_in_sandbox,
     }
 }
 
@@ -674,6 +683,191 @@ fn gh_pr_checks_gets_the_repo() {
         args.trim(),
         format!("pr checks {url} --json bucket --repo other/thing")
     );
+}
+
+#[test]
+fn enterprise_tokens_reach_gh_only_for_the_remote_or_gh_host() {
+    let env = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect()
+    };
+    let base = env(&[
+        ("PATH", "/usr/bin"),
+        ("GH_TOKEN", "github"),
+        ("GH_ENTERPRISE_TOKEN", "enterprise"),
+        ("GITHUB_ENTERPRISE_TOKEN", "enterprise too"),
+    ]);
+    let mut with_gh_host = base.clone();
+    with_gh_host.insert("GH_HOST".to_string(), "ghe.other.com".to_string());
+    let has_tokens = |env: &BTreeMap<String, String>| {
+        ENTERPRISE_TOKENS.iter().all(|name| env.contains_key(*name))
+    };
+    let no_tokens = |env: &BTreeMap<String, String>| {
+        ENTERPRISE_TOKENS
+            .iter()
+            .all(|name| !env.contains_key(*name))
+    };
+    let enterprise_remote = "git@ghe.acme.com:acme/widgets.git";
+    let github_remote = "git@github.com:acme/widgets.git";
+
+    // The remote's host, in either remote shape and any case.
+    let pr = "https://ghe.acme.com/acme/widgets/pull/7";
+    assert!(has_tokens(&gh_env(
+        base.clone(),
+        pr,
+        Some(enterprise_remote)
+    )));
+    let https_remote = "https://ghe.acme.com/acme/widgets.git";
+    let upper = "https://GHE.acme.com/acme/widgets/pull/7";
+    assert!(has_tokens(&gh_env(base.clone(), upper, Some(https_remote))));
+
+    // A query or fragment after the path leaves the host the remote's.
+    for pr in [
+        "https://ghe.acme.com/acme/widgets/pull/7?x=1",
+        "https://ghe.acme.com/acme/widgets/pull/7#frag",
+        // Userinfo is not the host: the host after the last `@` is the remote's.
+        "https://user@ghe.acme.com/acme/widgets/pull/7",
+    ] {
+        assert!(
+            has_tokens(&gh_env(base.clone(), pr, Some(enterprise_remote))),
+            "{pr}"
+        );
+    }
+
+    // `GH_HOST`: a number goes to it, and so does a URL on it.
+    assert!(has_tokens(&gh_env(with_gh_host.clone(), "42", None)));
+    let on_gh_host = "https://ghe.other.com/other/thing/pull/1";
+    assert!(has_tokens(&gh_env(
+        with_gh_host.clone(),
+        on_gh_host,
+        Some(github_remote)
+    )));
+
+    // Another host named by a URL `pr` never gets them; everything else is kept.
+    let elsewhere = "https://evil.example/acme/widgets/pull/7";
+    let out = gh_env(with_gh_host.clone(), elsewhere, Some(enterprise_remote));
+    assert!(no_tokens(&out), "{out:?}");
+    assert_eq!(out["GH_TOKEN"], "github");
+    assert_eq!(out["PATH"], "/usr/bin");
+    assert_eq!(out["GH_HOST"], "ghe.other.com");
+    // Shapes `gh` reads as that other host too, though the wait's own URL parser does not.
+    for pr in [
+        "HTTPS://evil.example/acme/widgets/pull/7",
+        "https://ghe.acme.com@evil.example/acme/widgets/pull/7",
+        "https://evil.example:8443/acme/widgets/pull/7",
+        "https://evil.example/not-a-pull-request",
+        // A `?` or `#` ends the authority, so what follows it is not the host.
+        "https://evil.example?@ghe.acme.com/acme/widgets/pull/1",
+        "https://evil.example#@ghe.acme.com/acme/widgets/pull/1",
+    ] {
+        let out = gh_env(with_gh_host.clone(), pr, Some(enterprise_remote));
+        assert!(no_tokens(&out), "{pr}: {out:?}");
+    }
+    // A URL whose host cannot be read is not trusted.
+    assert!(no_tokens(&gh_env(
+        base,
+        "https:///acme/widgets/pull/7",
+        Some(enterprise_remote)
+    )));
+}
+
+/// A fake `gh` in a directory of its own under `root`: it records its arguments in `$TMPDIR`,
+/// fails if it can write `escape` (a place the sandbox keeps read-only), and prints `stdout`.
+fn confined_gh(root: &Path, escape: &Path, stdout: &str) -> PathBuf {
+    let bin = root.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let script = bin.join("gh");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$TMPDIR/args\"\nif (echo x > '{escape}') 2>/dev/null; then exit 3; fi\ncat <<'EOF'\n{stdout}\nEOF\n",
+            escape = escape.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+#[test]
+fn a_gh_condition_is_evaluated_inside_the_real_sandbox() {
+    let place = place(None);
+    if !sandbox_ready(&place) {
+        return;
+    }
+    let escape = place.outside.join("escaped");
+    let root = place.outside.parent().unwrap();
+    let gh = confined_gh(
+        root,
+        &escape,
+        r#"[{"bucket":"pass"},{"bucket":"skipping"}]"#,
+    );
+    let scratch = place.run_dir.join("scratch");
+    let mut request = request(WaitCondition::CiGreen, gh);
+    request.worktree = place.worktree.clone();
+    request.scratch = scratch.clone();
+    request.repo = Some("acme/widgets".to_string());
+    request.env = BTreeMap::from([("PATH".to_string(), path_var())]);
+    // The network is blocked so the pass needs no proxy bridge; the fake `gh` needs none.
+    request.launch = WaitLaunch::Sandboxed(SandboxPolicy {
+        fs: SandboxFsPolicy::Restricted {
+            writable_paths: vec![scratch.clone()],
+        },
+        network: SandboxNetPolicy::Blocked,
+        git: GitSandboxPolicy::Denied {
+            git_dirs: vec![place.worktree.join(".git")],
+        },
+    });
+    assert_eq!(
+        futures::executor::block_on(wait(&request)),
+        WaitOutcome::Satisfied
+    );
+    // `gh` ran: its arguments are in the scratch directory, its `TMPDIR`. It ran confined: the
+    // place outside was read-only to it.
+    let args = fs::read_to_string(scratch.join("args")).unwrap();
+    assert_eq!(
+        args.trim(),
+        "pr checks 42 --json bucket --repo acme/widgets"
+    );
+    assert!(!escape.exists(), "gh wrote outside the sandbox");
+}
+
+/// A sandbox that cannot be set up, as when `bwrap` went away after the wait started.
+fn failing_wrap(
+    _policy: SandboxPolicy,
+    _command: CommandAndArgs,
+) -> LocalBoxFuture<'static, Result<(Sandbox, WrappedCommand), SandboxError>> {
+    async { Err(SandboxError::BwrapNotFound) }.boxed_local()
+}
+
+#[test]
+fn a_failed_wrap_after_a_sandboxed_start_fails_the_pass() {
+    let place = place(None);
+    if !sandbox_ready(&place) {
+        return;
+    }
+    // Run as the user, this would leave the marker.
+    let marker = place.outside.join("ran");
+    let with = format!(
+        r#"{{ condition = "command", command = ["touch", {}], give_up_minutes = 5 }}"#,
+        toml_text(&marker.to_string_lossy())
+    );
+    let path = path_var();
+    let node = wait_node(&place, "gh", os_sandbox_probe(), vars(&[("PATH", &path)]))
+        .with_sandbox_wrap(failing_wrap);
+    // Under `ask` with no answer yet, only a sandbox the probe found lets the start through: the
+    // start decided `Sandboxed`.
+    start_wait(&node, &place, &with, "", Permit::Ask, Mode::Ask).unwrap();
+    let finished = node.wait_finished(1);
+    let failure = finished[0].outcome.as_ref().unwrap_err();
+    assert_eq!(failure.reason, FailureReason::ProgramResultInvalid);
+    assert!(
+        failure.detail.contains("could not set up the sandbox"),
+        "{failure:?}"
+    );
+    assert!(!marker.exists(), "the pass ran without the sandbox");
 }
 
 // Through the engine: the runtime asks for a wait as for a program node, and one answer covers

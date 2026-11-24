@@ -34,7 +34,7 @@ use serde_json::{Value, json};
 
 use crate::builtin_merge::{self, MergeRefusal, MergeRequest, MergeStyle, Merged};
 use crate::builtin_nodes::{BuiltinNode, BuiltinNodes, BuiltinStart};
-use crate::builtin_wait::{self, WaitCondition, WaitLaunch, WaitOutcome, WaitRequest};
+use crate::builtin_wait::{self, SandboxWrap, WaitCondition, WaitLaunch, WaitOutcome, WaitRequest};
 use crate::dispatch_program::{
     NO_ORIGIN, REMOTE_ENTRY, expand_remote, remote_hosts, scratch_dir, task_remote_url,
 };
@@ -47,7 +47,9 @@ const BASE_VARS: &[&str] = &["PATH", "HOME", "LANG"];
 
 /// A `gh` condition also gets `gh`'s own variables for its account, host and configuration
 /// directory. The installed `gh` was checked under the sandbox: it reads its keyring token with
-/// none of the D-Bus variables.
+/// none of the D-Bus variables, through the session bus the sandbox leaves reachable (see the
+/// `sandbox` crate's docs). The enterprise tokens are dropped again in [`WaitNode::policy`] unless
+/// `gh`'s host is the remote's or `GH_HOST` ([`builtin_wait::gh_env`]).
 const GH_VARS: &[&str] = &[
     "GH_CONFIG_DIR",
     "GH_TOKEN",
@@ -434,6 +436,9 @@ pub struct WaitNode {
     git: Git,
     /// The writer's environment, the process's own unless a test says otherwise.
     vars: EnvLookup,
+    /// How a sandboxed pass sets up its sandbox, [`builtin_wait::wrap_in_sandbox`] unless a test
+    /// says otherwise.
+    sandbox_wrap: SandboxWrap,
 }
 
 impl WaitNode {
@@ -445,7 +450,14 @@ impl WaitNode {
             probe: os_sandbox_probe(),
             git: Git::new("git"),
             vars: Arc::new(|name| std::env::var(name).ok()),
+            sandbox_wrap: builtin_wait::wrap_in_sandbox,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_sandbox_wrap(mut self, sandbox_wrap: SandboxWrap) -> Self {
+        self.sandbox_wrap = sandbox_wrap;
+        self
     }
 
     pub fn with_probe(mut self, probe: SandboxProbe) -> Self {
@@ -571,6 +583,7 @@ impl WaitNode {
                 launch: WaitLaunch::AsUser,
                 env,
                 repo: None,
+                sandbox_wrap: self.sandbox_wrap,
             },
             interval,
         ))
@@ -660,6 +673,11 @@ impl WaitNode {
             }
             let repo = from_pr.map(|(_, repo)| repo).or(github);
             request.repo = Some(repo.ok_or_else(|| denied(NO_GH_REPO))?);
+            request.env = builtin_wait::gh_env(
+                std::mem::take(&mut request.env),
+                &request.pr,
+                remote.as_deref(),
+            );
         }
         let mut seen = HashSet::new();
         hosts.retain(|host| seen.insert(host.clone()));
