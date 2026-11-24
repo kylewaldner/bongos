@@ -60,6 +60,13 @@ cmd_install() {
   curl -fsSL -o "$RUNNER_TEMP/colgrep-dl/$name" "$base/$name"
   curl -fsSL -o "$RUNNER_TEMP/colgrep-dl/$name.sha256" "$base/$name.sha256"
   (cd "$RUNNER_TEMP/colgrep-dl" && sha256sum -c "$name.sha256")
+  # The default version also has its digest pinned here, so a replaced release asset is caught.
+  if [ "$COLGREP_VERSION" = v1.8.5 ] && [ -z "${COLGREP_SHA256:-}" ]; then
+    COLGREP_SHA256=532e1da739f6b5d489cdaefd20c5918fa1bb0ff9f456c89098eb49a6379ae205
+  fi
+  if [ -n "${COLGREP_SHA256:-}" ]; then
+    echo "$COLGREP_SHA256  $RUNNER_TEMP/colgrep-dl/$name" | sha256sum -c -
+  fi
   tar xJ -C "$RUNNER_TEMP" -f "$RUNNER_TEMP/colgrep-dl/$name"
   d="$RUNNER_TEMP/colgrep-x86_64-unknown-linux-gnu"
   test -x "$d/colgrep"

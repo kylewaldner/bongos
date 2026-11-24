@@ -114,7 +114,7 @@ jobs:
         if: matrix.release == '1'
         run: |
           set -euo pipefail
-          . script/bongos/env.sh
+          # The variables are already in GITHUB_ENV; bundle-linux sources env.sh itself, which needs these directories.
           mkdir -p "$BONGOS_SMOKE_SCRATCH" "$BONGOS_TMPDIR"
           script/bongos/bundle-linux --out "$RUNNER_TEMP/dist"
       - name: Sizes
