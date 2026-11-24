@@ -127,4 +127,4 @@ pub fn question(state: &RunState) -> Option<String> {
 
 #[cfg(test)]
 #[path = "consent_tests.rs"]
-mod tests;
+pub(crate) mod tests;

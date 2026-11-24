@@ -38,7 +38,7 @@ use crate::runtime::fake::{FakeRunner, NO_SANDBOX_REASON};
 use crate::worktrees::{RunWorktree, TaskCheckout, WorktreeError};
 
 /// One program node.
-const ONE: &str = r#"
+pub(crate) const ONE: &str = r#"
 schema = 1
 name = "one"
 start = "lint"
@@ -89,7 +89,7 @@ kind = "success"
 "#;
 
 /// The fixed time every answer is recorded at.
-const AT: &str = "2026-01-02T03:04:05Z";
+pub(crate) const AT: &str = "2026-01-02T03:04:05Z";
 
 struct Checks;
 
@@ -154,15 +154,15 @@ fn leaf_id(n: usize) -> String {
 
 /// A project with two leaves `leaf-1` and `leaf-2`, each with a worktree and an open todo, and a
 /// profile layer with `one` and `fan`.
-struct World {
+pub(crate) struct World {
     _temp: TempDir,
     root: PathBuf,
     dirs: LayerDirs,
-    tree: WorkTree,
+    pub(crate) tree: WorkTree,
 }
 
 impl World {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let temp = TempDir::new().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let profile = root.join("workflows");
@@ -221,7 +221,7 @@ impl World {
 
     /// A lifecycle whose runner finds no sandbox for the `no_sandbox` nodes, with answers timed
     /// at [`AT`].
-    fn lifecycle(&self, no_sandbox: &[&str]) -> Lifecycle<FakeRunner> {
+    pub(crate) fn lifecycle(&self, no_sandbox: &[&str]) -> Lifecycle<FakeRunner> {
         let settings = WorkflowsSettings {
             enabled: true,
             min_free_disk_mb: 0,
@@ -239,7 +239,11 @@ impl World {
         lifecycle
     }
 
-    fn start(&self, lifecycle: &mut Lifecycle<FakeRunner>, request: StartRequest) -> String {
+    pub(crate) fn start(
+        &self,
+        lifecycle: &mut Lifecycle<FakeRunner>,
+        request: StartRequest,
+    ) -> String {
         let context = StartContext {
             tree: &self.tree,
             active_run: None,
@@ -251,7 +255,7 @@ impl World {
     }
 }
 
-fn request(n: usize, workflow: &str) -> StartRequest {
+pub(crate) fn request(n: usize, workflow: &str) -> StartRequest {
     StartRequest {
         workflow: Some(workflow.to_string()),
         ..StartRequest::new(leaf_id(n))
@@ -259,7 +263,7 @@ fn request(n: usize, workflow: &str) -> StartRequest {
 }
 
 /// Ticks until nothing changes.
-fn settle(lifecycle: &mut Lifecycle<FakeRunner>) {
+pub(crate) fn settle(lifecycle: &mut Lifecycle<FakeRunner>) {
     for _ in 0..50 {
         if !lifecycle.tick() {
             return;
@@ -268,7 +272,7 @@ fn settle(lifecycle: &mut Lifecycle<FakeRunner>) {
 }
 
 /// Lets every try in flight finish, then settles.
-fn finish_all(lifecycle: &mut Lifecycle<FakeRunner>) {
+pub(crate) fn finish_all(lifecycle: &mut Lifecycle<FakeRunner>) {
     for _ in 0..50 {
         lifecycle.runtime_mut().runner_mut().release_all();
         if !lifecycle.tick() && lifecycle.runtime().runner().in_flight().is_empty() {
@@ -277,29 +281,29 @@ fn finish_all(lifecycle: &mut Lifecycle<FakeRunner>) {
     }
 }
 
-fn events(lifecycle: &Lifecycle<FakeRunner>, run: &str) -> Vec<Event> {
+pub(crate) fn events(lifecycle: &Lifecycle<FakeRunner>, run: &str) -> Vec<Event> {
     lifecycle.runtime().events(run).unwrap().to_vec()
 }
 
-fn asks(lifecycle: &Lifecycle<FakeRunner>, run: &str) -> usize {
+pub(crate) fn asks(lifecycle: &Lifecycle<FakeRunner>, run: &str) -> usize {
     events(lifecycle, run)
         .iter()
         .filter(|event| matches!(event, Event::ConsentAsked { .. }))
         .count()
 }
 
-fn answers(lifecycle: &Lifecycle<FakeRunner>, run: &str) -> usize {
+pub(crate) fn answers(lifecycle: &Lifecycle<FakeRunner>, run: &str) -> usize {
     events(lifecycle, run)
         .iter()
         .filter(|event| matches!(event, Event::ConsentAnswered { .. }))
         .count()
 }
 
-fn state(lifecycle: &Lifecycle<FakeRunner>, run: &str) -> RunState {
+pub(crate) fn state(lifecycle: &Lifecycle<FakeRunner>, run: &str) -> RunState {
     lifecycle.state(run).unwrap()
 }
 
-fn pending_keys(lifecycle: &Lifecycle<FakeRunner>, run: &str) -> Option<Vec<String>> {
+pub(crate) fn pending_keys(lifecycle: &Lifecycle<FakeRunner>, run: &str) -> Option<Vec<String>> {
     state(lifecycle, run).consent_pending.map(|pending| {
         pending
             .keys
@@ -310,7 +314,7 @@ fn pending_keys(lifecycle: &Lifecycle<FakeRunner>, run: &str) -> Option<Vec<Stri
 }
 
 /// The nodes the runner started for `run`, in order.
-fn started(lifecycle: &Lifecycle<FakeRunner>, run: &str) -> Vec<String> {
+pub(crate) fn started(lifecycle: &Lifecycle<FakeRunner>, run: &str) -> Vec<String> {
     lifecycle
         .runtime()
         .runner()
@@ -321,7 +325,7 @@ fn started(lifecycle: &Lifecycle<FakeRunner>, run: &str) -> Vec<String> {
         .collect()
 }
 
-fn person_grant() -> Permit {
+pub(crate) fn person_grant() -> Permit {
     Permit::Allowed(AllowedBy::RunConsent {
         at: AT.to_string(),
         by: BY_PERSON.to_string(),
@@ -329,7 +333,10 @@ fn person_grant() -> Permit {
 }
 
 /// The run's finished failures, as `(node, reason, detail)`.
-fn failures(lifecycle: &Lifecycle<FakeRunner>, run: &str) -> Vec<(String, FailureReason, String)> {
+pub(crate) fn failures(
+    lifecycle: &Lifecycle<FakeRunner>,
+    run: &str,
+) -> Vec<(String, FailureReason, String)> {
     state(lifecycle, run)
         .finished
         .iter()

@@ -34,7 +34,7 @@ fn defaults_are_the_documented_values(cx: &mut TestAppContext) {
     assert_eq!(settings.agents.max_minutes, 30);
     assert_eq!(settings.agents.model, "sonnet");
     assert!(settings.programs.allow_network);
-    assert_eq!(settings.programs.unsandboxed, Mode::Fallback);
+    assert_eq!(settings.programs.unsandboxed, Mode::Ask);
     assert_eq!(settings.ceilings, Ceilings::default());
     assert_eq!(settings, WorkflowsSettings::default());
 }
@@ -139,7 +139,7 @@ fn an_unknown_unsandboxed_value_reads_as_ask_and_the_rest_still_loads(cx: &mut T
     assert_eq!(settings.limits.loop_bound, 9);
 
     for (value, mode) in [
-        ("fallback", Mode::Fallback),
+        ("fallback", Mode::Ask),
         ("ask", Mode::Ask),
         ("refuse", Mode::Refuse),
         ("allow", Mode::Allow),

@@ -1,6 +1,6 @@
 use crate::unsandboxed::*;
 
-const MODES: [Mode; 4] = [Mode::Fallback, Mode::Ask, Mode::Refuse, Mode::Allow];
+const MODES: [Mode; 3] = [Mode::Ask, Mode::Refuse, Mode::Allow];
 
 fn consent() -> AllowedBy {
     AllowedBy::RunConsent {
@@ -46,12 +46,11 @@ fn a_working_sandbox_never_asks() {
         }
     }
     assert_eq!(Permit::default(), Permit::Refuse);
-    assert_eq!(Mode::default(), Mode::Fallback);
+    assert_eq!(Mode::default(), Mode::Ask);
 }
 
 #[test]
 fn without_a_sandbox_the_mode_and_permit_decide() {
-    let fallback = unsandboxed("not sandboxed: bwrap not found");
     let approved = unsandboxed("unsandboxed (approved 2026-01-02T03:04:05Z)");
     let by_setting = unsandboxed("unsandboxed (allowed by setting)");
     let ask = Launch::Ask {
@@ -59,11 +58,6 @@ fn without_a_sandbox_the_mode_and_permit_decide() {
     };
     let [refuse, ask_permit, consented, setting] = permits();
     let table = [
-        // Fallback is today's behavior whatever the permit.
-        (Mode::Fallback, refuse.clone(), fallback.clone()),
-        (Mode::Fallback, ask_permit.clone(), fallback.clone()),
-        (Mode::Fallback, consented.clone(), fallback.clone()),
-        (Mode::Fallback, setting.clone(), fallback),
         (Mode::Ask, refuse.clone(), refused()),
         (Mode::Ask, ask_permit.clone(), ask),
         (Mode::Ask, consented.clone(), approved.clone()),

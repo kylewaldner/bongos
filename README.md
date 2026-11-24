@@ -410,18 +410,45 @@ definition. The keys are for the Emacs keymap; every command is also in the pale
   hit`, `time cap hit`, `output cap hit`, `permission denied: <tool>`, `node output invalid`).
 - **Permissions and the sandbox.** A program node declares `permissions = { commands, network, mcp }`
   and gets nothing else: it may run only the listed commands and reach only the listed hosts, and MCP
-  is refused. This is enforced twice: by an operating-system sandbox (Bubblewrap on Linux) that
-  allows writes only in the node's worktree and scratch directory, the shared git directory's
-  `objects/`, `refs/` and `logs/` and the worktree's own git directory, with the network blocked
-  unless declared; and by an audit hook inside the Python process, which is a guardrail and not a
-  boundary. Known caveat: those shared git paths are writable by design, so a program can write
-  objects and refs to the repository's git directory that every worktree uses, and a git run by
-  you or by another run can then read them. bongos keeps the dangerous parts read-only (`config`,
-  `hooks/`, `packed-refs`, replace refs and alternates, other worktrees' directories), removes
-  planted symlinks after each pass and fails the node if git metadata changed, but it cannot protect
-  the integrity of loose objects and packs while `objects/` is writable; a stricter allowlist for
-  these paths is a later feature. Without Bubblewrap the script runs under the audit hook alone, and
-  the try's summary says `not sandboxed` and why. Treat a definition from another source as code.
+  is refused. The boundary is an operating-system sandbox (Bubblewrap on Linux) that allows writes
+  only in the node's worktree and scratch directory, the shared git directory's `objects/`, `refs/`
+  and `logs/` and the worktree's own git directory, with the network blocked unless declared. An
+  audit hook inside the Python process (the shim) adds a second check, but it is defense in depth and
+  not a security boundary: code in the same process can always get around an audit hook, so a program
+  that runs without the OS sandbox is not confined at all. The sandbox does not hide the D-Bus session
+  bus (`/run/user/<uid>/bus`), so a sandboxed program such as `gh` can read credentials through the
+  desktop keyring over it, and a program that talks to the bus can get around the filesystem and
+  network limits; the sandbox does not isolate every credential. Known caveat: the shared git paths
+  are writable by design, so a program can write objects and refs to the repository's git directory
+  that every worktree uses, and a git run by you or by another run can then read them. bongos keeps
+  the dangerous parts read-only (`config`, `hooks/`, `packed-refs`, replace refs and alternates, other
+  worktrees' directories), removes planted symlinks after each pass and fails the node if git metadata
+  changed, but it cannot protect the integrity of loose objects and packs while `objects/` is
+  writable; a stricter allowlist for these paths is a later feature. Treat a definition from another
+  source as code.
+- **No working sandbox.** Without a working OS sandbox a program node (and a `wait`) never runs
+  silently: it asks or it refuses. By default it asks you, once per run: the answer covers that run
+  only and is kept in memory, so a later run, or the same run after a restart of bongos, asks again,
+  and no grant is written to the run record. A run nobody is there to answer (an unattended run, or
+  one started by a healer) is refused and fails with "refused: no OS sandbox"; it is not retried. A
+  program that runs after your answer runs with the cleared environment and scratch directory it
+  would have in the sandbox, and the try's summary says `unsandboxed (approved <time>)`, or that the setting allowed it, not who. Two
+  settings decide: the user setting `workflows.programs.unsandboxed` is `ask` (the default),
+  `refuse` (never run without the sandbox) or `allow` (run without asking; set it by hand, since an
+  unattended run is refused even then), and the project key `[runs] unsandboxed = "refuse"` in the
+  project file, which can only tighten the user setting. A change to that key, or to the `with.env` of
+  a `wait` node (the writer's variables the wait receives; it gets no others), is held for you to
+  approve, whoever wrote it. An unknown value of the setting, a leftover `fallback` included, reads as
+  `ask` and logs a warning.
+- **Result validation.** Every node's result is checked against its declared output, and a bad one
+  fails the node with one message that lists each problem by path, the same for an agent's
+  structured output and for a script's result file. A node declares `output` fields, or an
+  `output_schema` file in the definition directory: a JSON Schema (draft 2020-12) of an object with
+  the keywords `type` (`string`, `number`, `integer`, `boolean`, `array`, `object`, `null`),
+  `properties`, `required`, `items`, `enum`, `additionalProperties`, `title`, `description` and
+  `$schema`. `additionalProperties` may only be `false`, and `$schema` must be the JSON Schema
+  2020-12 URL (`https://json-schema.org/draft/2020-12/schema`). A schema that uses any other keyword
+  is refused when the definition loads.
 - **Worktrees and merge.** A run works in its own worktree on its own branch, made from the head of
   the task's branch, and each fan-out branch gets one from the run's branch. They live under
   `<repository>/.bongos-worktrees/.runs/` unless `workflows.worktrees_dir` says otherwise. Nothing
@@ -445,8 +472,8 @@ definition. The keys are for the Emacs keymap; every command is also in the pale
   `enabled` (true), `worktrees_dir` (null), `min_free_disk_mb` (2048), `keep_finished_days` (14),
   `max_concurrent_runs` (3), `max_concurrent_sessions` (null, twice the runs), `max_parallel_branches`
   (3), `fan_out_width` (8), `retries` (2), `poll_interval_minutes` (5), `wait_give_up_days` (7) and
-  `programs` with `python` (null, `python3` then `python` on `PATH`), `max_minutes` (10) and
-  `max_output_mb` (10).
+  `programs` with `python` (null, `python3` then `python` on `PATH`), `max_minutes` (10),
+  `max_output_mb` (10) and `unsandboxed` (`ask`; `refuse` or `allow` by hand).
 - **Privacy.** Workflows run only the local CLIs and scripts a definition names. bongos itself
   contacts no host for them; what leaves the machine is what those programs do themselves: the model
   provider of the `claude` or `codex` you run, and `gh` or the network hosts a program node declares

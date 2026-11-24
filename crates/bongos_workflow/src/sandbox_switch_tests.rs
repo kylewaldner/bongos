@@ -11,8 +11,8 @@ use super::{SandboxSwitch, refusing_runs};
 use crate::dispatch::RunnerSnapshot;
 use crate::runner_program::ProgramSettings;
 
-const PROJECT: &str = "title = \"Shop\"\n";
-const REFUSING: &str = "title = \"Shop\"\n\n[runs]\nunsandboxed = \"refuse\"\n";
+pub(crate) const PROJECT: &str = "title = \"Shop\"\n";
+pub(crate) const REFUSING: &str = "title = \"Shop\"\n\n[runs]\nunsandboxed = \"refuse\"\n";
 const WORKFLOW: &str = "workflows/ship/workflow.toml";
 
 /// A `wait` node, with `with.env` when `env` is not empty, waiting on `command`.
@@ -38,7 +38,7 @@ fn write(definitions: &Path, files: &[(&str, &str)]) {
 
 /// What the hook says of a healer's change from `master` to `change`, both relative to the
 /// definitions folder.
-fn judge(master: &[(&str, &str)], change: &[(&str, &str)]) -> ApprovalOpinion {
+pub(crate) fn judge(master: &[(&str, &str)], change: &[(&str, &str)]) -> ApprovalOpinion {
     let folder = TempDir::new().unwrap();
     let master_root = folder.path().join("master");
     let change_root = folder.path().join("change");
@@ -63,7 +63,7 @@ fn judge_roots(master_root: &Path, change_root: &Path) -> ApprovalOpinion {
     })
 }
 
-fn needs(reason: &str) -> ApprovalOpinion {
+pub(crate) fn needs(reason: &str) -> ApprovalOpinion {
     ApprovalOpinion::NeedsPerson(reason.to_string())
 }
 

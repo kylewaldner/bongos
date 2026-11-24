@@ -78,7 +78,7 @@ kind = "success"
 
 const SESSION: &str = "00000000-0000-4000-8000-0000000000aa";
 
-fn definition() -> Definition {
+pub(crate) fn definition() -> Definition {
     parse(TRIAGE).unwrap()
 }
 
@@ -158,12 +158,12 @@ fn node(definition: &Definition, name: &str, root: &Path, try_number: u32) -> Cl
     }
 }
 
-fn key(name: &str) -> NodeKey {
+pub(crate) fn key(name: &str) -> NodeKey {
     NodeKey::new(name, 1)
 }
 
 /// Runs one try of `triage` with the fake in `scenario` and returns how it finished.
-fn run_one(scenario: &str, tweak: impl FnOnce(&mut ClaudeNode)) -> (Finish, TempDir) {
+pub(crate) fn run_one(scenario: &str, tweak: impl FnOnce(&mut ClaudeNode)) -> (Finish, TempDir) {
     let root = TempDir::new().unwrap();
     let log = root.path().join("log");
     let log_arg = log.to_string_lossy().into_owned();
@@ -189,7 +189,7 @@ fn run_one(scenario: &str, tweak: impl FnOnce(&mut ClaudeNode)) -> (Finish, Temp
     }
 }
 
-fn failure(finish: &Finish) -> &Failure {
+pub(crate) fn failure(finish: &Finish) -> &Failure {
     finish.outcome.as_ref().unwrap_err()
 }
 

@@ -214,7 +214,7 @@ fn the_summary_dump_lists_permissions_sandbox_caps_and_inputs() {
     has("commands: cargo");
     has("network: github.com");
     has("mcp: github");
-    has("sandbox: not sandboxed: no bwrap");
+    has("sandbox: none: no bwrap (programs ask or refuse)");
     has("caps: 10 min");
     has("pr: https://example.com/pr/9 [from override]");
     has("note: be kind [from literal:be kind]");

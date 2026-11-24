@@ -102,6 +102,11 @@ fn bound(root: &Path, repo: &Path) -> RunBinding {
     let mut binding = binding(root, "flow");
     binding.checkout.worktree = Some(repo.to_path_buf());
     fs::create_dir_all(&binding.worktree.path).unwrap();
+    // A person's run, with the setting allowing a start without the sandbox (see `snapshot`).
+    binding.setup.facts = RunFacts {
+        unattended: false,
+        started_by: Some(StartedBy::Person),
+    };
     let definition = binding.attempt_dir.join("definition/0");
     fs::create_dir_all(&definition).unwrap();
     fs::write(definition.join("check.py"), SCRIPT).unwrap();
@@ -150,6 +155,10 @@ fn snapshot(root: &Path) -> Option<RunnerSnapshot> {
         Ok(interpreter) => Some(RunnerSnapshot {
             interpreter: Some(Ok(interpreter)),
             base_env: env,
+            programs: ProgramSettings {
+                unsandboxed: Mode::Allow,
+                ..ProgramSettings::default()
+            },
             ..RunnerSnapshot::default()
         }),
         Err(failure) => {
@@ -407,6 +416,11 @@ fn a_program_of_a_lane_run_gets_its_variables_and_may_write_its_named_directorie
             name: "CARGO_TARGET_DIR".to_string(),
             value: target.to_string_lossy().into_owned(),
         }],
+        // The lane's run is a person's, and the setting allows it without the sandbox.
+        facts: RunFacts {
+            unattended: false,
+            started_by: Some(StartedBy::Person),
+        },
         ..RunSetup::default()
     };
 
@@ -466,7 +480,7 @@ fn unattended_and_heal_runs_refuse_whatever_the_mode() {
         RunFacts::default(),
     ];
     for facts in never {
-        for mode in [Mode::Fallback, Mode::Ask, Mode::Refuse, Mode::Allow] {
+        for mode in [Mode::Ask, Mode::Refuse, Mode::Allow] {
             for grant in [None, Some(&grant)] {
                 assert_eq!(
                     program_permit(&facts, mode, grant),
@@ -524,7 +538,7 @@ fn a_project_sandbox_switch_refuse_wins_over_the_allow_setting() {
 }
 
 #[test]
-fn an_attended_run_asks_and_under_fallback_runs_as_before() {
+fn an_attended_run_asks() {
     let person = RunFacts {
         unattended: false,
         started_by: Some(StartedBy::Person),
@@ -532,10 +546,4 @@ fn an_attended_run_asks_and_under_fallback_runs_as_before() {
     let failure = start_with_facts(person, Mode::Ask).unwrap_err();
     assert_eq!(failure.reason, FailureReason::SandboxRequired);
     assert_eq!(failure.node, Some(NodeKey::new("check", 1)));
-    // Fallback (the default) gets past the decision to the spawn, as before; so does a run whose
-    // facts refuse, since fallback never consults the permit.
-    for facts in [person, RunFacts::default()] {
-        let failure = start_with_facts(facts, Mode::Fallback).unwrap_err();
-        assert_eq!(failure.reason, FailureReason::ProgramInterpreterMissing);
-    }
 }
