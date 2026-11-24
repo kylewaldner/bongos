@@ -31,9 +31,8 @@ pub enum AllowedBy {
 /// The effective mode: the user setting `workflows.programs.unsandboxed`, tightened by the project.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum Mode {
-    /// Today's behavior: run without the sandbox and say so.
+    /// Ask a person to approve the run once.
     #[default]
-    Fallback,
     Ask,
     Refuse,
     Allow,
@@ -67,9 +66,6 @@ pub fn decide(availability: &Availability, permit: &Permit, mode: Mode) -> Launc
         message: format!("{REFUSED_TEXT} ({reason})"),
     };
     match (mode, permit) {
-        (Mode::Fallback, _) => Launch::Unsandboxed {
-            note: format!("not sandboxed: {reason}"),
-        },
         (Mode::Refuse, _) => refuse(),
         // A `Refuse` permit means a caller that must never run unsandboxed (an unattended or heal
         // run, or one that did not build a permit). It refuses even under `allow`: fail closed.

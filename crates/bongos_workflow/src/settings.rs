@@ -184,7 +184,6 @@ impl Settings for WorkflowsSettings {
 /// The model's mode for the `workflows.programs.unsandboxed` setting.
 pub fn unsandboxed_mode(setting: WorkflowUnsandboxed) -> Mode {
     match setting {
-        WorkflowUnsandboxed::Fallback => Mode::Fallback,
         WorkflowUnsandboxed::Ask => Mode::Ask,
         WorkflowUnsandboxed::Refuse => Mode::Refuse,
         WorkflowUnsandboxed::Allow => Mode::Allow,

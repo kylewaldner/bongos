@@ -14,10 +14,9 @@
 //!   blocked unless declared and then restricted to the declared hosts. Each start probes for the
 //!   sandbox itself, and a probe that fails for any reason means no sandbox. Then a snapshot or a
 //!   work directory never starts; otherwise the node's permit and the effective
-//!   `workflows.programs.unsandboxed` mode decide ([`unsandboxed::decide`]): under `fallback` the
-//!   script runs with the second layer alone and the try's `summary.json` says "not sandboxed:
-//!   <reason>"; a run allowed to runs the same way with "unsandboxed (approved <at>)" or
-//!   "unsandboxed (allowed by setting)"; otherwise the start needs an answer or is refused
+//!   `workflows.programs.unsandboxed` mode decide ([`unsandboxed::decide`]): a run allowed to
+//!   runs the script with the second layer alone and the try's `summary.json` says "unsandboxed
+//!   (approved <at>)" or "unsandboxed (allowed by setting)"; otherwise the start needs an answer or is refused
 //!   ("refused: no OS sandbox"), and nothing of the try is written but its `summary.json`.
 //!   Second by the embedded shim's audit hook (`shim.py`), which denies
 //!   unlisted programs, writes outside the same allowlist and undeclared connections. A denial
@@ -196,7 +195,7 @@ impl Default for ProgramSettings {
             max_output_mb: 10,
             poll_interval_minutes: 5,
             wait_give_up_days: 7,
-            unsandboxed: bongos_workflow_model::unsandboxed::Mode::Fallback,
+            unsandboxed: bongos_workflow_model::unsandboxed::Mode::Ask,
         }
     }
 }
@@ -365,8 +364,7 @@ pub struct ProgramNode {
     /// The run's word on starting without the OS sandbox, built by the caller that knows the
     /// run; anything else leaves it `Refuse` (its default), so a forgotten caller fails closed.
     pub permit: Permit,
-    /// The effective `workflows.programs.unsandboxed` mode; `Fallback` runs as before, under the
-    /// shim alone with "not sandboxed: <reason>".
+    /// The effective `workflows.programs.unsandboxed` mode.
     pub mode: Mode,
 }
 

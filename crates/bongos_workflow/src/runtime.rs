@@ -174,8 +174,8 @@ pub struct RunSetup {
 }
 
 /// What `run.toml` says about who is there to answer for a run: whether it runs unattended and
-/// who started it. The default knows neither, so a program of it never runs unsandboxed outside
-/// `fallback` (fail closed).
+/// who started it. The default knows neither, so a program of it never runs unsandboxed (fail
+/// closed).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RunFacts {
     pub unattended: bool,

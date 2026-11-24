@@ -15,8 +15,8 @@
 //! `pr`, `command` (an argv list), `merge_is_ship` and `env`: the names of the writer's variables
 //! the wait's process gets besides its own (a name that is not set is skipped).
 //!
-//! Outside the `fallback` mode, how the passes start is decided once, in `start` before the poll
-//! thread: the wait's sandbox policy (see [`builtin_wait`]) and the sandbox probe for it, then
+//! How the passes start is decided once, in `start` before the poll thread (a wait that runs no
+//! process needs no decision): the wait's sandbox policy (see [`builtin_wait`]) and the sandbox probe for it, then
 //! [`unsandboxed::decide`] over the run's permit, as a program node decides. A start that needs
 //! a person's answer returns `SandboxRequired` and one that is refused `SandboxRefused`, so the
 //! runtime asks or refuses before anything runs, and one answer covers the run's program nodes
@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use bongos_workflow_model::unsandboxed::{self, Mode};
+use bongos_workflow_model::unsandboxed;
 use bongos_workflow_model::{Failure, FailureReason, NodeKey};
 use sandbox::{GitSandboxPolicy, Sandbox, SandboxFsPolicy, SandboxNetPolicy, SandboxPolicy};
 use serde_json::{Value, json};
@@ -590,13 +590,13 @@ impl WaitNode {
         ))
     }
 
-    /// Decides how the passes start, once, before the poll thread. Under `fallback` (and for a
-    /// wait that runs nothing) they run as the user, as before. Otherwise this builds the wait's
+    /// Decides how the passes start, once, before the poll thread. A wait that runs
+    /// nothing needs no decision. Otherwise this builds the wait's
     /// sandbox policy, probes it, and [`unsandboxed::decide`]s over the probe's answer, the run's
     /// permit and the mode: sandboxed, unsandboxed by a person's or the setting's word,
     /// `SandboxRequired` (the runtime asks) or `SandboxRefused`.
     fn confine(&self, start: &BuiltinStart<'_>, request: &mut WaitRequest) -> Result<(), Failure> {
-        if start.mode == Mode::Fallback || !request.runs_a_process() {
+        if !request.runs_a_process() {
             return Ok(());
         }
         let policy = self.policy(start, request)?;

@@ -202,8 +202,10 @@ impl Fixture {
             task_id: "task-1".to_string(),
             task_dir: self.path("task"),
             node_result: try_dir.join("node-result.json"),
-            permit: Default::default(),
-            mode: Default::default(),
+            // These tests run the script, with the sandbox probe saying there is none: the
+            // setting allows that. The decision itself is tested apart, from `start_with` on.
+            permit: Permit::Allowed(AllowedBy::Setting),
+            mode: Mode::Allow,
         }
     }
 
@@ -572,7 +574,7 @@ fn an_unavailable_sandbox_is_reported_in_the_summary() {
     let finish = fixture.run(&script("", "'done'"));
     assert!(finish.outcome.is_ok());
     let summary = fixture.summary(TRY_DIR);
-    assert_eq!(summary["sandbox"], format!("not sandboxed: {NO_SANDBOX}"));
+    assert_eq!(summary["sandbox"], "unsandboxed (allowed by setting)");
     assert_eq!(summary["exit"], 0);
 }
 
@@ -598,7 +600,7 @@ fn the_real_sandbox_probe_runs_either_way() {
     let summary = fixture.summary(TRY_DIR);
     let note = summary["sandbox"].as_str().unwrap().to_string();
     assert!(
-        note == "sandboxed" || note.starts_with("not sandboxed: "),
+        note == "sandboxed" || note.starts_with("unsandboxed"),
         "{note}"
     );
     // The denial reaches bongos from inside the sandbox too.
@@ -1757,17 +1759,8 @@ fn start_with(fixture: &mut Fixture, permit: Permit, mode: Mode) -> Result<(), F
 }
 
 #[test]
-fn a_failing_probe_runs_only_under_fallback_or_allow_and_otherwise_asks_or_refuses() {
-    // Fallback runs as before: past the decision to the spawn, with today's note.
-    let mut fixture = without_python(no_sandbox());
-    let failure = start_with(&mut fixture, Permit::Ask, Mode::Fallback).unwrap_err();
-    assert_eq!(failure.reason, FailureReason::ProgramInterpreterMissing);
-    assert_eq!(
-        fixture.summary(TRY_DIR)["sandbox"],
-        format!("not sandboxed: {NO_SANDBOX}")
-    );
-
-    // Allow runs too, saying who allowed it.
+fn a_failing_probe_runs_only_under_allow_and_otherwise_asks_or_refuses() {
+    // Allow runs past the decision to the spawn, saying who allowed it.
     let mut fixture = without_python(no_sandbox());
     let failure = start_with(&mut fixture, Permit::Ask, Mode::Allow).unwrap_err();
     assert_eq!(failure.reason, FailureReason::ProgramInterpreterMissing);
@@ -1810,7 +1803,7 @@ fn the_hard_refusals_ignore_an_allowed_permit() {
         by: "person".to_string(),
     });
     for snapshot in [true, false] {
-        for mode in [Mode::Allow, Mode::Ask, Mode::Fallback] {
+        for mode in [Mode::Allow, Mode::Ask] {
             let mut fixture = without_python(no_sandbox());
             let mut node = fixture.node("raise SystemExit(0)\n");
             node.read_only_worktree = snapshot;
@@ -1857,7 +1850,8 @@ fn a_program_node_with_the_default_permit_refuses() {
     for mode in [Mode::Ask, Mode::Allow, Mode::Refuse] {
         let mut fixture = without_python(no_sandbox());
         let mut node = fixture.node("raise SystemExit(0)\n");
-        assert_eq!(node.permit, Permit::Refuse);
+        assert_eq!(Permit::default(), Permit::Refuse);
+        node.permit = Permit::default();
         node.mode = mode;
         let failure = fixture.runner.start("run-1", &key(), 1, node).unwrap_err();
         assert_eq!(failure.reason, FailureReason::SandboxRefused, "{mode:?}");

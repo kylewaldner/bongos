@@ -1874,7 +1874,7 @@ pub struct WorkflowProgramsSettingsContent {
     /// the run once, "refuse" never runs it, "allow" runs it unsandboxed without asking. A project
     /// can only tighten this. The script's own audit checks are not a security boundary.
     ///
-    /// Default: "fallback"
+    /// Default: "ask"
     pub unsandboxed: Option<WorkflowUnsandboxed>,
 }
 
@@ -1882,10 +1882,8 @@ pub struct WorkflowProgramsSettingsContent {
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, JsonSchema, MergeFrom)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowUnsandboxed {
-    /// Run without the sandbox and say "not sandboxed" (the behavior before the setting).
-    #[default]
-    Fallback,
     /// Ask a person to approve the run once.
+    #[default]
     Ask,
     /// Never run a program without a sandbox.
     Refuse,
@@ -1894,11 +1892,10 @@ pub enum WorkflowUnsandboxed {
 }
 
 impl WorkflowUnsandboxed {
-    /// The value a setting string names; an unknown one is `Ask`, the safe answer that still lets
-    /// a person decide.
+    /// The value a setting string names; an unknown one (a leftover "fallback" included) is `Ask`,
+    /// the safe answer that still lets a person decide.
     pub fn from_setting(value: &str) -> Self {
         match value {
-            "fallback" => Self::Fallback,
             "ask" => Self::Ask,
             "refuse" => Self::Refuse,
             "allow" => Self::Allow,

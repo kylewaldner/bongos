@@ -2949,8 +2949,8 @@
       "max_output_mb": 10,
       // What a program node does when no OS sandbox is available: "ask" asks a person to
       // approve the run once, "refuse" never runs it, "allow" runs it unsandboxed without
-      // asking. A project can only tighten this.
-      "unsandboxed": "fallback",
+      // asking. The default is "ask". A project can only tighten this.
+      "unsandboxed": "ask",
     },
   },
   "lanes": {

@@ -611,30 +611,6 @@ fn a_with_env_name_that_is_not_set_is_skipped() {
 }
 
 #[test]
-fn fallback_keeps_todays_path() {
-    let place = place(None);
-    let calls = Arc::new(AtomicUsize::new(0));
-    let (_gh_dir, gh) = recording_gh(&place.outside, r#"[{"bucket":"pass"}]"#);
-    let node = wait_node(&place, gh, counting_probe(calls.clone()), vars(&[]));
-    // No host, no repository and a `Refuse` permit: under `fallback` none of it is looked at.
-    let with = r#"{ condition = "ci_green", pr = "42", env = ["MISSING"] }"#;
-    start_wait(&node, &place, with, "", Permit::Refuse, Mode::Fallback).unwrap();
-    assert_satisfied(&node);
-    assert_eq!(calls.load(Ordering::SeqCst), 0, "no probe");
-    let args = fs::read_to_string(place.outside.join("args")).unwrap();
-    assert_eq!(args.trim(), "pr checks 42 --json bucket");
-    // As the user: the writer's whole environment, not a cleared one.
-    let env = read_env(&place.outside.join("env"));
-    for (name, _) in std::env::vars_os() {
-        let name = name.to_string_lossy();
-        if !matches!(name.as_ref(), "PWD" | "OLDPWD" | "SHLVL" | "_") {
-            assert!(env.contains_key(name.as_ref()), "{name} was not passed");
-        }
-    }
-    assert!(!scratch(&place).exists(), "no scratch directory");
-}
-
-#[test]
 fn a_refuse_permit_refuses() {
     let place = place(None);
     let marker = place.outside.join("ran");
