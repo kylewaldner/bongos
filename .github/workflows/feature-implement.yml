@@ -71,9 +71,10 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+    # A decision that fails or cannot read its inputs is one lane (the decide step may fail without failing the job)
     outputs:
-      lanes: ${{ steps.plan.outputs.lanes }}
-      pipeline_depth: ${{ steps.plan.outputs.pipeline_depth }}
+      lanes: ${{ steps.plan.outputs.lanes || '1' }}
+      pipeline_depth: ${{ steps.plan.outputs.pipeline_depth || '0' }}
     steps:
       - name: Check the dispatch inputs
         shell: bash
@@ -87,6 +88,7 @@ jobs:
 
       - name: Decide the lanes
         id: plan
+        continue-on-error: true
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.COORD_TOKEN }}
@@ -117,12 +119,24 @@ jobs:
     # The job name must contain lane-a: the runner mode's liveness check reads it from the Actions API.
     name: step lane-a
     needs: plan
+    # Lane a runs even when the plan job failed (then with one lane), never after a cancel of the run.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     # run.py stops at 300 minutes; the final step ends by about 329 (see job.sh's time line).
     timeout-minutes: 345
     permissions:
       contents: read
     steps:
+      - name: Check the dispatch inputs
+        shell: bash
+        env:
+          IN_LANES: ${{ inputs.lanes }}
+          IN_DEPTH: ${{ inputs.pipeline_depth }}
+        run: |
+          set -euo pipefail
+          case "$IN_LANES" in 1|2) ;; *) echo "::error::lanes must be 1 or 2; nothing is claimed"; exit 1 ;; esac
+          case "$IN_DEPTH" in 0|1) ;; *) echo "::error::pipeline_depth must be 0 or 1; nothing is claimed"; exit 1 ;; esac
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -133,8 +147,8 @@ jobs:
           ticket: ${{ inputs.ticket }}
           lane: a
           # the plan's lanes go into the claim: triage counts a live two-lane run as 2 jobs
-          lanes: ${{ needs.plan.outputs.lanes }}
-          pipeline_depth: ${{ needs.plan.outputs.pipeline_depth }}
+          lanes: ${{ needs.plan.outputs.lanes || '1' }}
+          pipeline_depth: ${{ needs.plan.outputs.pipeline_depth || '0' }}
           build: 'true'
           # cache-warm's dev-unified-ubuntu-24.04 cache (lanes.toml has unified_features on); incremental is on for step
           # jobs (the action's auto)
@@ -154,7 +168,7 @@ jobs:
     # (signal refs under refs/signals/<state_prefix><ticket>/<run id>/). The name must contain lane-b (liveness).
     name: step lane-b
     needs: plan
-    if: needs.plan.outputs.lanes == '2'
+    if: ${{ needs.plan.result == 'success' && needs.plan.outputs.lanes == '2' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 345
     permissions:
