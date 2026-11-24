@@ -1102,6 +1102,50 @@ fn replay_of_consent_ask_then_answer_releases_the_held_keys() {
 }
 
 #[test]
+fn a_resume_or_a_new_start_of_the_held_keys_clears_the_pending_ask() {
+    let lint = key("lint");
+    let format = key("format");
+    // Ask, then resume: the resume releases the held key, so nothing is pending and a later
+    // answer (which the writer refuses) releases and fails nothing.
+    let mut events = vec![Event::Created, consent_asked(&lint), Event::Resumed];
+    let state = replay(&events);
+    assert_eq!(
+        state.consent_pending, None,
+        "a resume leaves no ask pending"
+    );
+    assert!(state.held.is_empty());
+    events.push(consent_answered(false));
+    let state = replay(&events);
+    assert_eq!(state.consent_pending, None);
+    assert!(state.finished.is_empty(), "a stale answer fails nothing");
+    assert_eq!(state.consent_history.len(), 1);
+
+    // After the resume a new ask is a new one, never joined to the stale one.
+    events.push(consent_asked(&format));
+    let state = replay(&events);
+    assert_eq!(
+        state.consent_pending.map(|pending| pending.keys),
+        Some(vec![format.clone()])
+    );
+
+    // A new start of one held key drops it from the ask; once no held key is left, the ask goes.
+    let events = vec![
+        Event::Created,
+        consent_asked(&lint),
+        consent_asked(&format),
+        started(&lint, 1),
+    ];
+    let state = replay(&events);
+    assert_eq!(
+        state.consent_pending.as_ref().map(|pending| &pending.keys),
+        Some(&vec![format.clone()])
+    );
+    let mut events = events;
+    events.push(started(&format, 1));
+    assert_eq!(replay(&events).consent_pending, None);
+}
+
+#[test]
 fn replay_never_yields_a_grant() {
     let lint = key("lint");
     let events = vec![Event::Created, consent_asked(&lint), consent_answered(true)];

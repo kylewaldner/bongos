@@ -781,8 +781,9 @@ pub struct RunState {
     /// can only be damage; the count lets the caller flag them. A `NodeFinished` after the close
     /// is still applied (a try cancelled mid-run reports its cost) and not counted here.
     pub ignored_after_end: usize,
-    /// Set by `ConsentAsked`, cleared by `ConsentAnswered`. Never a grant: no field of the run
-    /// state says a run may go unsandboxed.
+    /// Set by `ConsentAsked`, cleared by `ConsentAnswered`, and by a `Resumed` or new start that
+    /// leaves no key held on it. Never a grant: no field of the run state says a run may go
+    /// unsandboxed.
     pub consent_pending: Option<ConsentPending>,
     /// Every `ConsentAnswered` in log order.
     pub consent_history: Vec<ConsentAnswer>,
@@ -872,6 +873,22 @@ fn bump_pass(state: &mut RunState, node: &str, pass: u32) {
     *entry = (*entry).max(pass);
 }
 
+/// Drops from the pending ask every key no longer held on it (a resume or a new start moved it
+/// on), and the ask itself once no key is left: an ask with nothing held is not pending, so a
+/// later ask starts a new one and an answer finds nothing to answer.
+fn prune_consent(state: &mut RunState) {
+    let held = &state.held;
+    if let Some(pending) = state.consent_pending.as_mut() {
+        pending.keys.retain(|key| {
+            held.get(key)
+                .is_some_and(|failure| failure.reason == FailureReason::SandboxRequired)
+        });
+        if pending.keys.is_empty() {
+            state.consent_pending = None;
+        }
+    }
+}
+
 fn apply(state: &mut RunState, event: &Event) {
     match event {
         Event::Created => state.created = true,
@@ -893,6 +910,7 @@ fn apply(state: &mut RunState, event: &Event) {
                     pid_start_time: *pid_start_time,
                 },
             );
+            prune_consent(state);
         }
         Event::NodeFinished {
             key,
@@ -973,9 +991,11 @@ fn apply(state: &mut RunState, event: &Event) {
             state.halted = false;
             state.cap_reached = None;
             state.held.clear();
+            prune_consent(state);
         }
         Event::Held { key, failure } => {
             state.held.insert(key.clone(), failure.clone());
+            prune_consent(state);
         }
         Event::Interrupted { keys } => {
             for key in keys {
