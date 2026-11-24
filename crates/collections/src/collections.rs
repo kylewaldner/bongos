@@ -13,3 +13,5 @@ pub use std::collections::*;
 pub mod vecmap;
 #[cfg(test)]
 mod vecmap_tests;
+#[cfg(test)]
+mod worker_ready_tests;
