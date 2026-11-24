@@ -232,6 +232,7 @@ impl VsCodeSettings {
             task_builder: None,
             project_repository: None,
             linear: None,
+            slack: None,
             workflows: None,
             lanes: None,
             task_checks: None,

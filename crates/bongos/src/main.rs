@@ -613,6 +613,7 @@ fn main() {
         bongos_extensions::init(cx);
         bongos_linear::init(cx);
         bongos_linear::init_client(cx);
+        bongos_slack::init(cx);
         bongos_workflow::init(cx);
         bongos_checks::init(cx);
         bongos_lanes::init(cx);
@@ -715,6 +716,7 @@ fn main() {
         bongos_extensions::init_palette(cx);
         bongos_extensions::init_reconcile(cx);
         bongos_linear::init_palette(cx);
+        bongos_slack::init_palette(cx);
         bongos_workflow::init_palette(cx);
         bongos_checks::init_palette(cx);
         bongos_lanes::init_palette(cx);

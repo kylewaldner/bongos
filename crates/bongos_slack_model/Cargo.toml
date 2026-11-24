@@ -1,0 +1,21 @@
+[package]
+name = "bongos_slack_model"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/bongos_slack_model.rs"
+doctest = false
+
+[features]
+test-support = []
+
+[dependencies]
+futures.workspace = true
+sha2.workspace = true
+thiserror.workspace = true

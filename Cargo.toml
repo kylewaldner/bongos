@@ -230,6 +230,8 @@ members = [
     "crates/bongos_minibuffer_model",
     "crates/bongos_navigation",
     "crates/bongos_navigation_model",
+    "crates/bongos_slack",
+    "crates/bongos_slack_model",
     "crates/bongos_window",
     "crates/bongos_net",
     "crates/bongos_engine_host",
@@ -515,6 +517,8 @@ bongos_minibuffer = { path = "crates/bongos_minibuffer" }
 bongos_minibuffer_model = { path = "crates/bongos_minibuffer_model" }
 bongos_navigation = { path = "crates/bongos_navigation" }
 bongos_navigation_model = { path = "crates/bongos_navigation_model" }
+bongos_slack = { path = "crates/bongos_slack" }
+bongos_slack_model = { path = "crates/bongos_slack_model" }
 bongos_window = { path = "crates/bongos_window" }
 bongos_net = { path = "crates/bongos_net" }
 bongos_project_repo = { path = "crates/bongos_project_repo" }
