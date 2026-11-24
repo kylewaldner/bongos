@@ -1,0 +1,45 @@
+# Phase 0 measurement (scratch branch only, never merged): can a job write to the coordination repository.
+name: p0-coord
+on:
+  push:
+    branches: [gh-runners-phase0]
+    paths: ['.github/workflows/p0-coord.yml']
+permissions:
+  contents: read
+jobs:
+  coord:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ secrets.COORD_TOKEN }}
+      COORD_REPO: ${{ secrets.COORD_REPO }}
+    steps:
+      - name: Permissions the token has
+        run: |
+          gh api "repos/$COORD_REPO" --jq '"MEASURE coord private=\(.private) perms=\(.permissions|tostring) squash=\(.allow_squash_merge) merge_commit=\(.allow_merge_commit)"' || echo "MEASURE coord repo_read=FAILED"
+          gh api "repos/$GITHUB_REPOSITORY" --jq '"MEASURE app perms=\(.permissions|tostring)"' || echo "MEASURE app repo_read=FAILED"
+      - name: Clone, push a scratch branch, open and close a PR, delete the branch (never merges)
+        run: |
+          set -u
+          b="gh-runners-token-test-$GITHUB_RUN_ID"
+          s=$(date +%s)
+          git clone -q --depth 1 "https://x-access-token:$GH_TOKEN@github.com/$COORD_REPO.git" coord >/dev/null 2>&1 && echo "MEASURE coord clone=ok seconds=$(( $(date +%s)-s ))" || { echo "MEASURE coord clone=FAILED"; exit 0; }
+          cd coord
+          git config user.name "bongos-runner"; git config user.email "runner@users.noreply.github.com"
+          git checkout -q -b "$b"; mkdir -p plans/claims; echo "token test $GITHUB_RUN_ID" > plans/claims/.token-test
+          git add plans/claims/.token-test; git commit -qm "token test (never merged)"
+          git push -q origin "$b" >/dev/null 2>&1 && echo "MEASURE coord push_branch=ok" || { echo "MEASURE coord push_branch=FAILED"; exit 0; }
+          n=$(gh pr create --repo "$COORD_REPO" --head "$b" --base main --draft --title "Token test, do not merge" --body "Phase 0 token check. Closed by the same job." 2>/dev/null | grep -oE '[0-9]+$') && echo "MEASURE coord pr_create=ok" || echo "MEASURE coord pr_create=FAILED"
+          if [ -n "${n:-}" ]; then
+            gh pr view "$n" --repo "$COORD_REPO" --json mergeable,mergeStateStatus --jq '"MEASURE coord pr mergeable=\(.mergeable) state=\(.mergeStateStatus)"' || true
+            gh pr close "$n" --repo "$COORD_REPO" >/dev/null 2>&1 && echo "MEASURE coord pr_close=ok" || echo "MEASURE coord pr_close=FAILED"
+          fi
+          git push -q origin --delete "$b" >/dev/null 2>&1 && echo "MEASURE coord delete_branch=ok" || echo "MEASURE coord delete_branch=FAILED"
+      - name: Same for the app repository (signal ref, never merges)
+        run: |
+          ref="refs/signals/p0-test/$GITHUB_RUN_ID"
+          git init -q t && cd t
+          git remote add origin "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git"
+          git fetch -q --depth 1 origin gh-runners-phase0 >/dev/null 2>&1 && echo "MEASURE app fetch=ok" || echo "MEASURE app fetch=FAILED"
+          git push -q origin "FETCH_HEAD:$ref" >/dev/null 2>&1 && echo "MEASURE app push_signal_ref=ok" || echo "MEASURE app push_signal_ref=FAILED"
+          s=$(date +%s.%N); git ls-remote origin "$ref" | grep -q . && echo "MEASURE app read_signal_ref=ok seconds=$(echo "$(date +%s.%N) - $s" | bc)"
+          git push -q origin --delete "$ref" >/dev/null 2>&1 && echo "MEASURE app delete_signal_ref=ok" || echo "MEASURE app delete_signal_ref=FAILED"
