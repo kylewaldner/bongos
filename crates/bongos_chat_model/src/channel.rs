@@ -18,6 +18,9 @@ mod client_tests;
 mod report_tests;
 
 #[cfg(test)]
+mod request_tests;
+
+#[cfg(test)]
 mod state_tests;
 
 #[cfg(test)]
