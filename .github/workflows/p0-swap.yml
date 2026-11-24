@@ -1,0 +1,34 @@
+# Phase 0 measurement (scratch branch only, never merged): can a job add a large swap file.
+name: p0-swap
+on:
+  push:
+    branches: [gh-runners-phase0]
+    paths: ['.github/workflows/p0-swap.yml']
+permissions:
+  contents: read
+jobs:
+  swap:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [ubuntu-24.04, ubuntu-22.04]
+    runs-on: ${{ matrix.image }}
+    steps:
+      - name: Add a 16 GB swap file and use it
+        run: |
+          swapon --show; free -m; df -T / | tail -1
+          s=$(date +%s.%N)
+          sudo fallocate -l 16G /swap-extra || sudo dd if=/dev/zero of=/swap-extra bs=1M count=16384 status=none
+          sudo chmod 600 /swap-extra; sudo mkswap /swap-extra >/dev/null; sudo swapon /swap-extra
+          echo "MEASURE swap ${{ matrix.image }} setup_seconds=$(echo "$(date +%s.%N) - $s" | bc) swap_total_mb=$(free -m | awk '/^Swap:/{print $2}')"
+          swapon --show
+          # allocate 20 GB (more than the 16 GB of RAM) and touch every page, to prove the swap is really usable
+          s=$(date +%s)
+          python3 -c "
+          import time
+          b=[bytearray(1<<30) for _ in range(20)]
+          for x in b:
+              for i in range(0,len(x),4096): x[i]=1
+          print('MEASURE swap allocated_gb=20 ok')
+          " && echo "MEASURE swap ${{ matrix.image }} alloc_seconds=$(( $(date +%s)-s )) swap_used_mb=$(free -m | awk '/^Swap:/{print $3}')"
+          free -m
