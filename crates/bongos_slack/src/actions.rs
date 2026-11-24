@@ -1,13 +1,16 @@
 //! The `slack` actions, hidden from the command palette while `slack.enabled` is false and shown
-//! while it is true. They are unbound in every keymap and have no handlers yet.
+//! while it is true. They are unbound in every keymap. `slack: connect` and `slack: disconnect`
+//! have handlers (see `token_prompt`); while `slack.enabled` is false they only say Slack is off.
 
 use std::any::TypeId;
 
 use command_palette_hooks::CommandPaletteFilter;
-use gpui::App;
+use gpui::{Action, App, Context, Window};
 use settings::{Settings as _, SettingsStore};
+use workspace::Workspace;
 
 use crate::SlackSettings;
+use crate::token_prompt::{self, show_toast};
 
 /// Actions in the `slack` namespace.
 pub mod slack {
@@ -76,4 +79,28 @@ fn sync_palette(cx: &mut App) {
             filter.hide_action_types(&types);
         }
     });
+}
+
+/// The toast a command shows while `slack.enabled` is false.
+pub(crate) const OFF_MESSAGE: &str = "Slack is off (slack.enabled)";
+
+/// Registers the handler of `A` that runs `handler` while `slack.enabled` is true and shows the
+/// off toast while it is false.
+fn register_direct<A: Action>(
+    workspace: &mut Workspace,
+    handler: fn(&mut Workspace, &mut Window, &mut Context<Workspace>),
+) {
+    workspace.register_action(move |workspace, _: &A, window: &mut Window, cx| {
+        if !SlackSettings::get_global(cx).enabled {
+            show_toast(workspace, OFF_MESSAGE.to_string(), cx);
+            return;
+        }
+        handler(workspace, window, cx);
+    });
+}
+
+/// Registers the handlers of the `slack` actions on `workspace`.
+pub fn register(workspace: &mut Workspace) {
+    register_direct::<slack::Connect>(workspace, token_prompt::connect);
+    register_direct::<slack::Disconnect>(workspace, token_prompt::disconnect);
 }
