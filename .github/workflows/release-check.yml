@@ -26,27 +26,8 @@ name: release-check
 
 on:
   push:
-    branches: [main]
-  workflow_dispatch:
-    inputs:
-      sha:
-        description: "Commit to check (default: the tip of the chosen branch)"
-        default: ''
-      coord_ref:
-        description: "Branch of the coordination repository the job checks out for pipeline code"
-        default: main
-      coord_base:
-        description: "Branch of the coordination repository that queue pull requests target"
-        default: main
-      app_base:
-        description: "Branch of this repository that merges target"
-        default: main
-      state_prefix:
-        description: "Prefix of the state branches (empty in production)"
-        default: ''
-      index_tag:
-        description: "Release tag of the code search index (not used by this job; checked with the others)"
-        default: colgrep-index
+    branches: [gh-runners-test-c6-release]
+    paths: ['.github/workflows/release-check.yml']
 
 run-name: release check ${{ inputs.sha || github.sha }}
 
@@ -60,12 +41,12 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IN_SHA: ${{ inputs.sha || github.sha }}
-  IN_COORD_REF: ${{ inputs.coord_ref || 'main' }}
-  IN_COORD_BASE: ${{ inputs.coord_base || 'main' }}
-  IN_APP_BASE: ${{ inputs.app_base || 'main' }}
-  IN_STATE_PREFIX: ${{ inputs.state_prefix || '' }}
-  IN_INDEX_TAG: ${{ inputs.index_tag || 'colgrep-index' }}
+  IN_SHA: ${{ github.sha }}
+  IN_COORD_REF: c6-release-code
+  IN_COORD_BASE: gh-runners-test-base
+  IN_APP_BASE: gh-runners-test-base
+  IN_STATE_PREFIX: zz-testc6r/
+  IN_INDEX_TAG: colgrep-index-test
 
 jobs:
   release:
@@ -163,6 +144,14 @@ jobs:
           git clone --quiet --branch "$AUTOPILOT_COORD_REF" "https://github.com/$COORD_REPO.git" "$AUTOPILOT_PRIVATE"
           test -f "$AUTOPILOT_PRIVATE/autopilot/runner/release_job.py"
           git -C "$AUTOPILOT_PRIVATE" log -1 --format='pipeline code at %h'
+
+      # Test run (c6): the test state branch has its protocol.conf; the exclusion list names the codex capture test and
+      # the minibuffer 100k keystroke perf test.
+      - name: TEST ONLY switch release_is_authority on for this run
+        run: |
+          set -euo pipefail
+          printf 'release_is_authority = true\n' > "$RUNNER_TEMP/runner-test.toml"
+          echo "AUTOPILOT_RUNNER_TOML=$RUNNER_TEMP/runner-test.toml" >> "$GITHUB_ENV"
 
       - name: Set up the check
         id: setup
@@ -422,3 +411,20 @@ jobs:
           swapon --show || true
           df -h /
           exit "$rc"
+
+      # Test run (c6) diagnostic, after the verdict: the timings of the excluded minibuffer perf test on this runner,
+      # in the perf step's optimized build (it never counts toward the check).
+      - name: TEST ONLY measure the excluded minibuffer perf test
+        if: always() && steps.notes.outputs.run == 'true'
+        continue-on-error: true
+        timeout-minutes: 25
+        run: |
+          set -o pipefail
+          nproc
+          grep -m1 'model name' /proc/cpuinfo || true
+          . script/bongos/env.sh
+          for n in 1 2 3; do
+            echo "measurement $n, load: $(cut -d' ' -f1-3 /proc/loadavg)"
+            cargo test --locked --profile perf-test -p bongos_minibuffer_model --lib perf_tests:: -- --nocapture 2>&1 \
+              | grep -E '^"|^backspace|worst pass|test result|panicked' || true
+          done
