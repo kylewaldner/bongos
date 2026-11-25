@@ -1,4 +1,4 @@
-# TEMPORARY test copy (c3b4): push trigger on the test branch only, every redirect at a test value.
+# TEMPORARY test copy (c3b4, second start after a nextest download failure): push trigger on the test branch only, every redirect at a test value.
 # Fixes one entry of a bug queue. One workflow, two queues chosen by the `queue` input:
 #   fixes    plans/FIXES.md          job kind `fix`          prompt fix.md
 #   release  plans/RELEASE-FIXES.md  job kind `release_fix`  prompt release_fix.md
