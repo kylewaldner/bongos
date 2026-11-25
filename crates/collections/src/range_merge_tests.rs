@@ -27,7 +27,10 @@ fn test_contained_range_is_absorbed() {
 
 #[test]
 fn test_range_ending_at_usize_max_absorbs_later_ranges() {
-    assert_eq!(merge_ranges(vec![0..=usize::MAX, 5..=7]), vec![0..=usize::MAX]);
+    assert_eq!(
+        merge_ranges(vec![0..=usize::MAX, 5..=7]),
+        vec![0..=usize::MAX]
+    );
 }
 
 #[test]
