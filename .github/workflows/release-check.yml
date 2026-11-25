@@ -1,0 +1,429 @@
+# The release check of every merge into main, on one hosted runner: the optimized Linux tarball, smoke on that binary,
+# the whole test suite in one build and the perf tests. Not to be confused with release.yml, which builds and
+# publishes the release files of a v* tag.
+#
+# One job on ubuntu-22.04 (the release binary must run on systems with an older glibc), in this order so a broken build
+# fails first:
+#   1. the release note of the commit's pull request: `- N/A` ends the run (release-fix merges always go on)
+#   2. preinstalled software removed, a 16 GB swap file
+#   3. the release tarball (script/bongos/bundle-linux, CARGO_BUILD_JOBS=2), uploaded as an artifact
+#   4. smoke on that binary
+#   5. the whole suite in one build, incremental off, with the software Vulkan driver
+#   6. the perf tests
+# The decisions and the records are the coordination repository's autopilot/runner/release_job.py (cloned to
+# $RUNNER_TEMP/coord, outside the workspace). With the runner switch release_is_authority off (its default) the job
+# only writes one outcome row: it files nothing and writes no shared record.
+#
+# The two dependency caches are cache-warm's (release-ubuntu-22.04 for the tarball, dev-ubuntu-22.04 for the tests),
+# restored read only. rust-cache hashes every non-empty CARGO_*, CC*, CXX*, CMAKE*, RUST* variable into the key, so
+# the environment of each restore is cache-warm's, set by the same commands: the release one first, then the test one
+# (which blanks CARGO_BUILD_JOBS: an empty value is not hashed).
+#
+# Every place the job writes is a setting; a test run sets all of them (the coordination repository's test base,
+# this repository's test base and a state prefix). The values are the workflow-level env below, so a temporary test
+# trigger changes only those lines. Inputs reach the scripts only through environment variables.
+name: release-check
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit to check (default: the tip of the chosen branch)"
+        default: ''
+      coord_ref:
+        description: "Branch of the coordination repository the job checks out for pipeline code"
+        default: main
+      coord_base:
+        description: "Branch of the coordination repository that queue pull requests target"
+        default: main
+      app_base:
+        description: "Branch of this repository that merges target"
+        default: main
+      state_prefix:
+        description: "Prefix of the state branches (empty in production)"
+        default: ''
+      index_tag:
+        description: "Release tag of the code search index (not used by this job; checked with the others)"
+        default: colgrep-index
+
+run-name: release check ${{ inputs.sha || github.sha }}
+
+permissions:
+  contents: read
+
+# One run at a time, never cancelled; without queue: max a newer pending run replaces an older pending one, so the
+# check moves to the newest main (the release-note rule then looks at every commit since the last verdict).
+concurrency:
+  group: release-check-${{ github.ref }}-${{ inputs.state_prefix || 'production' }}
+  cancel-in-progress: false
+
+env:
+  IN_SHA: ${{ inputs.sha || github.sha }}
+  IN_COORD_REF: ${{ inputs.coord_ref || 'main' }}
+  IN_COORD_BASE: ${{ inputs.coord_base || 'main' }}
+  IN_APP_BASE: ${{ inputs.app_base || 'main' }}
+  IN_STATE_PREFIX: ${{ inputs.state_prefix || '' }}
+  IN_INDEX_TAG: ${{ inputs.index_tag || 'colgrep-index' }}
+
+jobs:
+  release:
+    name: release check
+    runs-on: ubuntu-22.04
+    timeout-minutes: 345
+    env:
+      # the pipeline tools act as this run (never as the runner's host)
+      BONGOS_RUNNER_MODE: '1'
+      AUTOPILOT_RUNNER_ACTOR: run ${{ github.run_id }}
+    steps:
+      - name: Refuse a re-run and an API key, check the image and export the settings
+        env:
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          # as every pipeline job: a re-run reuses the run ID, which names this run's row (start a new run instead)
+          if [ "$RUN_ATTEMPT" != 1 ]; then
+            echo "::error::run attempt $RUN_ATTEMPT: re-runs are refused; start a new run instead"
+            exit 1
+          fi
+          if [ -n "${ANTHROPIC_API_KEY+set}" ]; then
+            echo "::error::ANTHROPIC_API_KEY is set; no pipeline job ever has it"
+            exit 1
+          fi
+          . /etc/os-release
+          if [ "$VERSION_ID" != 22.04 ]; then
+            echo "::error::this job runs on ubuntu-22.04, not ubuntu-$VERSION_ID"
+            exit 1
+          fi
+          case "$IN_SHA" in
+            *[!0-9a-f]*|'') echo "::error::sha must be a full lowercase commit sha"; exit 1 ;;
+          esac
+          if [ "${#IN_SHA}" != 40 ]; then echo "::error::sha must be a full commit sha"; exit 1; fi
+          # The pipeline tools need Python 3.11 or later; the image's own python3 is 3.10. The tool cache keeps several
+          # (the disk removal leaves /opt/hostedtoolcache/Python alone).
+          # 3.12 when the cache has it (the ubuntu-24.04 jobs' python3), else the newest 3.11 or later
+          py=$(ls -d /opt/hostedtoolcache/Python/3.12*/x64 2>/dev/null | sort -V | tail -n1 || true)
+          if [ -z "$py" ]; then
+            py=$(ls -d /opt/hostedtoolcache/Python/3.1[1-9]*/x64 2>/dev/null | sort -V | tail -n1 || true)
+          fi
+          if [ -z "$py" ] || [ ! -x "$py/bin/python3" ]; then
+            echo "::error::no Python 3.11 or later in /opt/hostedtoolcache/Python"
+            exit 1
+          fi
+          echo "$py/bin" >> "$GITHUB_PATH"
+          # the build workspace on the root disk (cache-warm's path), made now: the setup puts the steps' scratch there
+          sudo mkdir -p /mnt/bongos-workspace
+          sudo chown "$USER" /mnt/bongos-workspace
+          put() {
+            case "$2" in
+              *[!A-Za-z0-9._/@\ -]*) echo "::error::$1 has a character that is not allowed"; exit 1 ;;
+            esac
+            printf '%s=%s\n' "$1" "$2" >> "$GITHUB_ENV"
+          }
+          put AUTOPILOT_COORD_REF "$IN_COORD_REF"
+          put AUTOPILOT_COORD_BASE "$IN_COORD_BASE"
+          put AUTOPILOT_APP_BASE "$IN_APP_BASE"
+          put AUTOPILOT_STATE_PREFIX "$IN_STATE_PREFIX"
+          put AUTOPILOT_INDEX_TAG "$IN_INDEX_TAG"
+          put AUTOPILOT_PRIVATE "$RUNNER_TEMP/coord"
+          put AUTOPILOT_BONGOS "$GITHUB_WORKSPACE"
+          put AUTOPILOT_WORKTREES "$RUNNER_TEMP/worktrees"
+          # not under $HOME: smoke runs the app in a sandbox that hides $HOME (RUNNER_TEMP is under it), and the release
+          # directory with the unpacked binary and the smoke logs lives in the logs directory
+          put AUTOPILOT_LOGS /mnt/bongos-workspace/ci-logs
+          put RELEASE_STATE "$RUNNER_TEMP/release-state"
+          put RELEASE_SHA "$IN_SHA"
+          put RELEASE_STARTED "$(date +%s)"
+          echo "release check of $IN_SHA; coord_ref $IN_COORD_REF, coord_base $IN_COORD_BASE, app_base $IN_APP_BASE, state_prefix '${IN_STATE_PREFIX}'"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.IN_SHA }}
+          # the release-note rule walks the first-parent history since the last checked commit
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check Python
+        run: python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version; print("python", sys.version.split()[0])'
+
+      # The same commands as the pipeline-job action's step of the same name.
+      - name: Clone the coordination repository
+        env:
+          GH_TOKEN: ${{ secrets.COORD_TOKEN }}
+          COORD_REPO: ${{ secrets.COORD_REPO }}
+        run: |
+          set -euo pipefail
+          # git asks gh for credentials, and gh reads GH_TOKEN from each step's environment: no token is written to disk.
+          git config --global credential.https://github.com.helper ''
+          git config --global --add credential.https://github.com.helper '!gh auth git-credential'
+          git config --global user.name 'bongos runner'
+          git config --global user.email 'runner@users.noreply.github.com'
+          rm -rf "$AUTOPILOT_PRIVATE"
+          git clone --quiet --branch "$AUTOPILOT_COORD_REF" "https://github.com/$COORD_REPO.git" "$AUTOPILOT_PRIVATE"
+          test -f "$AUTOPILOT_PRIVATE/autopilot/runner/release_job.py"
+          git -C "$AUTOPILOT_PRIVATE" log -1 --format='pipeline code at %h'
+
+      - name: Set up the check
+        id: setup
+        env:
+          GH_TOKEN: ${{ secrets.COORD_TOKEN }}
+          COORD_REPO: ${{ secrets.COORD_REPO }}
+        run: python3 "$AUTOPILOT_PRIVATE/autopilot/runner/release_job.py" setup
+
+      - name: Read the release note
+        id: notes
+        if: steps.setup.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.COORD_TOKEN }}
+          COORD_REPO: ${{ secrets.COORD_REPO }}
+        run: python3 "$AUTOPILOT_PRIVATE/autopilot/runner/release_job.py" notes
+
+      - name: Start removing preinstalled software
+        if: steps.notes.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          df -h /
+          cat > "$RUNNER_TEMP/remove-software.sh" <<'EOF'
+          set -u
+          start=$(date +%s)
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /usr/share/swift /usr/lib/jvm \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/share/miniconda /usr/lib/google-cloud-sdk \
+            /opt/az /opt/microsoft /usr/lib/firefox /opt/google /usr/local/share/chromium /home/linuxbrew \
+            /usr/local/aws-cli /usr/local/julia*
+          sudo docker system prune -af > /dev/null 2>&1 || true
+          echo "removal took $(( $(date +%s) - start )) s"
+          touch "$RUNNER_TEMP/disk-removal.done"
+          EOF
+          nohup bash "$RUNNER_TEMP/remove-software.sh" > "$RUNNER_TEMP/disk-removal.log" 2>&1 &
+
+      - name: Add a swap file and start the memory sampler
+        if: steps.notes.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          # One process of the release build alone needs 9 to 10 GB of the 16; the swap file is the protection.
+          sudo fallocate -l 16G /swap-extra
+          sudo chmod 600 /swap-extra
+          sudo mkswap /swap-extra > /dev/null
+          sudo swapon /swap-extra
+          free -m
+          # used memory and swap every 10 s, for the per-step peaks and the 8 GiB swap limit of the final step
+          nohup python3 "$AUTOPILOT_PRIVATE/autopilot/runner/release_job.py" sample > /dev/null 2>&1 &
+
+      - name: Install packages
+        if: steps.notes.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          # cache-warm's list, plus mold (the test build's linker, as cache-warm's dev row), the software Vulkan driver
+          # (the GPU tests), zstd, and what smoke runs: Xvfb, xdotool, ImageMagick, bubblewrap, strace, pipewire and the
+          # desktop portal. The release environment never uses mold (env.sh skips it for a release build).
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc g++ libasound2-dev libfontconfig-dev libgit2-dev libglib2.0-dev libssl-dev libva-dev \
+            libvulkan1 libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev make cmake clang lld \
+            llvm jq git curl gettext-base elfutils libsqlite3-dev musl-tools musl-dev build-essential \
+            pkg-config python3 mold mesa-vulkan-drivers zstd xvfb xdotool imagemagick bubblewrap strace \
+            pipewire xdg-desktop-portal > /dev/null
+          # Ubuntu ships llvm-objcopy only with a version suffix; the release bundle calls it unversioned.
+          if ! command -v llvm-objcopy > /dev/null; then
+            sudo ln -s "$(ls /usr/bin/llvm-objcopy-* | sort -V | tail -n1)" /usr/local/bin/llvm-objcopy
+          fi
+
+      # cache-warm's step of the same name, row release: the same commands and values, so the cache key matches.
+      - name: Install the Rust toolchain and set the build environment
+        id: target
+        if: steps.notes.outputs.run == 'true'
+        env:
+          BONGOS_WORKSPACE: /mnt/bongos-workspace
+          BONGOS_UNIFIED_FEATURES: ''
+          BONGOS_RELEASE_BUILD: '1'
+        run: |
+          set -euo pipefail
+          sudo mkdir -p "$BONGOS_WORKSPACE"
+          sudo chown "$USER" "$BONGOS_WORKSPACE"
+          export RUSTUP_HOME="$BONGOS_WORKSPACE/rustup" CARGO_HOME="$BONGOS_WORKSPACE/cargo"
+          mkdir -p "$RUSTUP_HOME" "$CARGO_HOME"
+          rustup toolchain install
+          if [ -n "$BONGOS_RELEASE_BUILD" ]; then echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"; fi
+          # shellcheck disable=SC1091
+          . script/bongos/env.sh
+          env | grep -E '^(CARGO_|RUSTUP_HOME=|RUSTC_BOOTSTRAP=|BONGOS_|CC=|CXX=)' | grep -v '^CARGO_BUILD_JOBS=' >> "$GITHUB_ENV"
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+          echo "rel=$(realpath -m --relative-to="$GITHUB_WORKSPACE" "$CARGO_TARGET_DIR")" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the release dependency cache (read only)
+        if: steps.notes.outputs.run == 'true'
+        uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        with:
+          workspaces: ". -> ${{ steps.target.outputs.rel }}"
+          shared-key: release-ubuntu-22.04
+          add-job-id-key: false
+          # Only cache-warm on main writes a cache.
+          save-if: 'false'
+
+      - name: Wait for the removal of preinstalled software
+        if: steps.notes.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 120); do
+            if [ -e "$RUNNER_TEMP/disk-removal.done" ]; then break; fi
+            sleep 10
+          done
+          cat "$RUNNER_TEMP/disk-removal.log" || true
+          if [ ! -e "$RUNNER_TEMP/disk-removal.done" ]; then
+            echo "::warning::the removal of preinstalled software has not finished after 20 minutes"
+          fi
+          df -h /
+
+      # The steps below record their verdict (pass, FAIL or no verdict) and exit 0; only a failure of the job itself
+      # stops the later steps. The final step gives the verdict and fails the job on a FAIL.
+      - name: Build the release tarball
+        id: build
+        if: steps.notes.outputs.run == 'true'
+        timeout-minutes: 160
+        run: python3 "$AUTOPILOT_PRIVATE/autopilot/runner/release_job.py" step release-build
+
+      - name: Upload the tarball
+        if: steps.notes.outputs.run == 'true' && steps.build.outputs.tarball != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bongos-linux-x86_64-${{ env.IN_SHA }}
+          path: ${{ steps.build.outputs.tarball }}
+          if-no-files-found: error
+          retention-days: 14
+
+      # cache-warm's dev row: env.sh again without the release switch, so the test build links with mold and the
+      # restore below sees cache-warm's values. The release build's CARGO_BUILD_JOBS is blanked (rust-cache hashes only
+      # non-empty values, and the steps drop an empty CARGO_* variable before cargo sees it).
+      - name: Set the build environment of the test build
+        if: steps.notes.outputs.run == 'true'
+        env:
+          BONGOS_WORKSPACE: /mnt/bongos-workspace
+          BONGOS_UNIFIED_FEATURES: ''
+          BONGOS_RELEASE_BUILD: ''
+          # no debug info in the test build, as cache-warm's dev row: about half the disk of line tables
+          BONGOS_NO_DEBUGINFO: '1'
+        run: |
+          set -euo pipefail
+          export RUSTUP_HOME="$BONGOS_WORKSPACE/rustup" CARGO_HOME="$BONGOS_WORKSPACE/cargo"
+          unset CARGO_BUILD_JOBS
+          echo "CARGO_BUILD_JOBS=" >> "$GITHUB_ENV"
+          # the swap file protected the release build (one process needs 9 to 10 GB); the test build peaks near 6 GB and
+          # needs the 16 GB of disk more
+          sudo swapoff /swap-extra
+          sudo rm -f /swap-extra
+          # the tarball is built and uploaded (smoke unpacks it): its 11 GB release profile is not used again, and the
+          # whole-suite build needs about 52 GiB more
+          df -h /
+          rm -rf "${CARGO_TARGET_DIR:?}/release"
+          df -h /
+          # set by the release environment; env.sh refuses a configured directory that does not exist
+          mkdir -p "${BONGOS_TMPDIR:-$BONGOS_WORKSPACE/scratch/tmp}" "${BONGOS_SMOKE_SCRATCH:-$BONGOS_WORKSPACE/scratch/smoke}"
+          # shellcheck disable=SC1091
+          . script/bongos/env.sh
+          env | grep -E '^(CARGO_|RUSTUP_HOME=|RUSTC_BOOTSTRAP=|BONGOS_|CC=|CXX=)' | grep -v '^CARGO_BUILD_JOBS=' >> "$GITHUB_ENV"
+          echo "test build linker: ${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER:-default}"
+
+      - name: Restore the test dependency cache (read only)
+        if: steps.notes.outputs.run == 'true'
+        uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        with:
+          workspaces: ". -> ${{ steps.target.outputs.rel }}"
+          shared-key: dev-ubuntu-22.04
+          add-job-id-key: false
+          save-if: 'false'
+
+      # The same commands as the pipeline-job action's nextest install.
+      - name: Install nextest
+        if: steps.notes.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          ver=$(sed -n 's/^nextest-version = { required = "\([0-9.]*\)" }.*/\1/p' .config/nextest.toml)
+          if [ -z "$ver" ]; then
+            echo "::error::no required nextest version in .config/nextest.toml"
+            exit 1
+          fi
+          # rustup itself is the image's (not in CARGO_HOME), so CARGO_HOME/bin may not exist yet
+          mkdir -p "$RUNNER_TEMP/nextest" "$CARGO_HOME/bin"
+          curl -fsSL -o "$RUNNER_TEMP/nextest/nextest.tar.gz" \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$ver/cargo-nextest-$ver-x86_64-unknown-linux-gnu.tar.gz"
+          tar xzf "$RUNNER_TEMP/nextest/nextest.tar.gz" -C "$CARGO_HOME/bin"
+          rm -rf "$RUNNER_TEMP/nextest"
+          cargo nextest --version
+          vulkaninfo --summary 2>/dev/null | grep -m1 -i devicename || echo "vulkaninfo not installed; mesa-vulkan-drivers is"
+
+      - name: Smoke on the release binary
+        if: steps.notes.outputs.run == 'true'
+        timeout-minutes: 70
+        run: python3 "$AUTOPILOT_PRIVATE/autopilot/runner/release_job.py" step smoke
+
+      - name: Run the whole suite
+        if: steps.notes.outputs.run == 'true'
+        timeout-minutes: 240
+        env:
+          # only the job's own landing of a first-time flake uses it (release_is_authority on); the build and the tests
+          # never see a token (release_job.py removes it from their environment)
+          GH_TOKEN: ${{ secrets.COORD_TOKEN }}
+          COORD_REPO: ${{ secrets.COORD_REPO }}
+        run: python3 "$AUTOPILOT_PRIVATE/autopilot/runner/release_job.py" step test-suite
+
+      # The whole suite's build (about 89 GB in target/debug on a runner, run 45444987929) is not used again: the perf step
+      # builds the perf set in its own optimized profile and needs about 30 GiB the runner no longer has.
+      - name: Free the test build before the perf build
+        if: steps.notes.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          du -xsh "${CARGO_TARGET_DIR:?}/debug" "${CARGO_TARGET_DIR}-flakebase" 2>/dev/null || true
+          rm -rf "${CARGO_TARGET_DIR:?}/debug" "${CARGO_TARGET_DIR}-flakebase"
+          df -h /
+
+      - name: Run the perf tests
+        if: steps.notes.outputs.run == 'true'
+        timeout-minutes: 75
+        env:
+          # only the job's own fetch and push of the perf history on the state branch uses it; the perf build and tests
+          # never see a token (release_job.py removes it from their environment)
+          GH_TOKEN: ${{ secrets.COORD_TOKEN }}
+          COORD_REPO: ${{ secrets.COORD_REPO }}
+        run: python3 "$AUTOPILOT_PRIVATE/autopilot/runner/release_job.py" step perf
+
+      - name: Disk use
+        if: always() && steps.notes.outputs.run == 'true'
+        run: |
+          df -h /
+          sudo du -xsh /mnt/bongos-workspace/* 2>/dev/null || true
+          du -xsh /mnt/bongos-workspace/target/* /mnt/bongos-workspace/target/debug/* 2>/dev/null | sort -h | tail -12 || true
+
+      - name: Collect the step logs
+        if: always() && steps.notes.outputs.run == 'true'
+        env:
+          COORD_REPO: ${{ secrets.COORD_REPO }}
+        run: python3 "$AUTOPILOT_PRIVATE/autopilot/runner/release_job.py" logs --out "$RUNNER_TEMP/release-logs"
+
+      - name: Upload the step logs
+        if: always() && steps.notes.outputs.run == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-check-logs-${{ env.IN_SHA }}
+          path: ${{ runner.temp }}/release-logs
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Final step
+        if: always() && github.run_attempt == '1'
+        env:
+          GH_TOKEN: ${{ secrets.COORD_TOKEN }}
+          COORD_REPO: ${{ secrets.COORD_REPO }}
+        run: |
+          set -uo pipefail
+          if [ -n "${RELEASE_STATE:-}" ] && [ -f "${AUTOPILOT_PRIVATE:-}/autopilot/runner/release_job.py" ]; then
+            python3 "$AUTOPILOT_PRIVATE/autopilot/runner/release_job.py" final
+            rc=$?
+          else
+            echo "::warning::the job stopped before the coordination repository was cloned: no row"
+            rc=1
+          fi
+          free -m
+          swapon --show || true
+          df -h /
+          exit "$rc"

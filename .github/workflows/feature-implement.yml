@@ -1,0 +1,200 @@
+# One run implements steps of one feature. Started by ticket-triage with `gh workflow run feature-implement.yml -f
+# ticket=<feature dir> -f lanes=<n> -f pipeline_depth=<n>` (plus the redirect inputs only when they are not their
+# production default). The run name ends with the ticket as its last word: triage ties a run to its ticket by it.
+#
+# A small `plan` job decides whether lane `b` runs (autopilot/runner/plan.py in the coordination repository): only with
+# the `two_lanes` switch on, two lanes dispatched, and a remaining step graph with two steps that can run at the same
+# time, or (with `stacking` also on) a child that may be stacked. The two lanes relay through signal refs and the shared
+# state branch; lane b never claims, it confirms lane a's claim of this run.
+#
+# Lane job `a` runs consecutive steps of the feature on one runner with incremental builds on, so the compiled target
+# stays warm: each step is the local step job (implement, gate.py light and full with --scope affected, review where
+# the prompt requires it, at most 2 fix rounds, merge into topic/<dir> through merge_step.py, docs pull request). The
+# runner mode (run.py --runner --kind step) picks only steps of this feature and starts no new step after 3.5 hours;
+# the job then ends and triage starts the next run. The frame (claim, setup, snapshots, final step) is the
+# pipeline-job action.
+#
+# Caps are triage's (cap.feature-implement, counted in jobs; a two-lane run counts 2). Triage never dispatches a ticket
+# that has a live run; the concurrency group below is only a guard against a dispatch by hand overlapping a run of
+# the same ticket (it waits for that run to end; a newer pending one replaces an older pending one).
+name: feature-implement
+run-name: feature-implement ${{ inputs.ticket }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      ticket:
+        description: "The feature directory, for example 17-navigation-pickers"
+        required: true
+        type: string
+      lanes:
+        description: "Lane jobs of this run, after triage narrowed lanes_per_feature (1 or 2; the plan job may lower it)"
+        default: '1'
+        type: string
+      pipeline_depth:
+        description: "Stacking depth after triage narrowed it (0 or 1; it matters only with two lanes)"
+        default: '0'
+        type: string
+      coord_ref:
+        description: "Branch of the coordination repository with the pipeline code (main in production)"
+        default: main
+        type: string
+      coord_base:
+        description: "Branch of the coordination repository that claim and docs pull requests target (main in production)"
+        default: main
+        type: string
+      app_base:
+        description: "Branch of this repository that is checked out and merged into (main in production)"
+        default: main
+        type: string
+      state_prefix:
+        description: "Prefix of state branches, lock, signal and wip refs (empty in production)"
+        default: ''
+        type: string
+      index_tag:
+        description: "Release tag of the code search index"
+        default: colgrep-index
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: feature-${{ inputs.state_prefix }}${{ inputs.ticket }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    # Reads the step graph and runner.toml in the coordination repository; prints the decision, starts no agent.
+    name: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    # A decision that fails or cannot read its inputs is one lane (the decide step may fail without failing the job)
+    outputs:
+      lanes: ${{ steps.plan.outputs.lanes || '1' }}
+      pipeline_depth: ${{ steps.plan.outputs.pipeline_depth || '0' }}
+    steps:
+      - name: Check the dispatch inputs
+        shell: bash
+        env:
+          IN_LANES: ${{ inputs.lanes }}
+          IN_DEPTH: ${{ inputs.pipeline_depth }}
+        run: |
+          set -euo pipefail
+          case "$IN_LANES" in 1|2) ;; *) echo "::error::lanes must be 1 or 2"; exit 1 ;; esac
+          case "$IN_DEPTH" in 0|1) ;; *) echo "::error::pipeline_depth must be 0 or 1"; exit 1 ;; esac
+
+      - name: Decide the lanes
+        id: plan
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.COORD_TOKEN }}
+          COORD_REPO: ${{ secrets.COORD_REPO }}
+          IN_TICKET: ${{ inputs.ticket }}
+          IN_LANES: ${{ inputs.lanes }}
+          IN_DEPTH: ${{ inputs.pipeline_depth }}
+          IN_COORD_REF: ${{ inputs.coord_ref }}
+          IN_COORD_BASE: ${{ inputs.coord_base }}
+          AUTOPILOT_STATE_PREFIX: ${{ inputs.state_prefix }}
+        run: |
+          set -euo pipefail
+          if [ "$IN_LANES" = 1 ]; then
+            # one lane dispatched: nothing to read
+            { echo "lanes=1"; echo "pipeline_depth=0"; } >> "$GITHUB_OUTPUT"
+            echo "one lane dispatched"
+            exit 0
+          fi
+          # git asks gh for credentials, and gh reads GH_TOKEN from this step's environment: no token is written to disk.
+          git config --global credential.https://github.com.helper ''
+          git config --global --add credential.https://github.com.helper '!gh auth git-credential'
+          coord="$RUNNER_TEMP/coord"
+          git clone --quiet --branch "$IN_COORD_REF" "https://github.com/$COORD_REPO.git" "$coord"
+          python3 "$coord/autopilot/runner/plan.py" --ticket "$IN_TICKET" --lanes "$IN_LANES" \
+            --pipeline-depth "$IN_DEPTH" --coord-repo "$coord" --coord-base "$IN_COORD_BASE"
+
+  lane-a:
+    # The job name must contain lane-a: the runner mode's liveness check reads it from the Actions API.
+    name: step lane-a
+    needs: plan
+    # Lane a runs even when the plan job failed (then with one lane), never after a cancel of the run.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    # run.py stops at 300 minutes; the final step ends by about 329 (see job.sh's time line).
+    timeout-minutes: 345
+    permissions:
+      contents: read
+    steps:
+      - name: Check the dispatch inputs
+        shell: bash
+        env:
+          IN_LANES: ${{ inputs.lanes }}
+          IN_DEPTH: ${{ inputs.pipeline_depth }}
+        run: |
+          set -euo pipefail
+          case "$IN_LANES" in 1|2) ;; *) echo "::error::lanes must be 1 or 2; nothing is claimed"; exit 1 ;; esac
+          case "$IN_DEPTH" in 0|1) ;; *) echo "::error::pipeline_depth must be 0 or 1; nothing is claimed"; exit 1 ;; esac
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/pipeline-job
+        with:
+          kind: step
+          ticket: ${{ inputs.ticket }}
+          lane: a
+          # the plan's lanes go into the claim: triage counts a live two-lane run as 2 jobs
+          lanes: ${{ needs.plan.outputs.lanes || '1' }}
+          pipeline_depth: ${{ needs.plan.outputs.pipeline_depth || '0' }}
+          build: 'true'
+          # cache-warm's dev-unified-ubuntu-24.04 cache (lanes.toml has unified_features on); incremental is on for step
+          # jobs (the action's auto)
+          cache_variant: dev-unified
+          runner_image: ubuntu-24.04
+          claude_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          coord_token: ${{ secrets.COORD_TOKEN }}
+          coord_repo: ${{ secrets.COORD_REPO }}
+          coord_ref: ${{ inputs.coord_ref }}
+          coord_base: ${{ inputs.coord_base }}
+          app_base: ${{ inputs.app_base }}
+          state_prefix: ${{ inputs.state_prefix }}
+          index_tag: ${{ inputs.index_tag }}
+          colgrep_version: ${{ vars.COLGREP_VERSION }}  # the index workflows' pin
+
+  lane-b:
+    # Only when the plan says two lanes. It never claims: it confirms lane a's claim of this run, then relays with lane a
+    # (signal refs under refs/signals/<state_prefix><ticket>/<run id>/). The name must contain lane-b (liveness).
+    name: step lane-b
+    needs: plan
+    if: ${{ needs.plan.result == 'success' && needs.plan.outputs.lanes == '2' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 345
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/pipeline-job
+        with:
+          kind: step
+          ticket: ${{ inputs.ticket }}
+          lane: b
+          lanes: ${{ needs.plan.outputs.lanes }}
+          pipeline_depth: ${{ needs.plan.outputs.pipeline_depth }}
+          build: 'true'
+          cache_variant: dev-unified
+          runner_image: ubuntu-24.04
+          claude_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          coord_token: ${{ secrets.COORD_TOKEN }}
+          coord_repo: ${{ secrets.COORD_REPO }}
+          coord_ref: ${{ inputs.coord_ref }}
+          coord_base: ${{ inputs.coord_base }}
+          app_base: ${{ inputs.app_base }}
+          state_prefix: ${{ inputs.state_prefix }}
+          index_tag: ${{ inputs.index_tag }}
+          colgrep_version: ${{ vars.COLGREP_VERSION }}  # the index workflows' pin

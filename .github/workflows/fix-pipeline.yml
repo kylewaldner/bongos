@@ -1,0 +1,185 @@
+# Works the coordination repository's pipeline-fix queue, one entry per run, one run at a time. select reads the queue
+# (and stops while pipeline_fixes_enabled is off in runner.toml or no entry is open); fix claims the entry like any queue
+# entry and runs one pipeline_fix job (sonnet, every change reviewed by opus before it merges, at most three attempts per
+# entry); next records an attempt the job could not record, starts this workflow again for the next entry, and fails
+# when the entry is exhausted, which is the escalation to the owner. Started by track-pipeline-issue (with the entry),
+# by itself, and by ticket-triage when entries are open and no run is live (without one).
+name: fix-pipeline
+run-name: fix-pipeline ${{ inputs.ticket }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      ticket:
+        description: "pipeline-<entry id> to work first (any case); empty: the oldest open entry"
+        default: ''
+      coord_ref:
+        description: "Branch of the coordination repository holding the pipeline code"
+        default: main
+      coord_base:
+        description: "Branch of the coordination repository that claim, queue and fix pull requests target"
+        default: main
+      app_base:
+        description: "Branch of this repository the job checks out"
+        default: main
+      state_prefix:
+        description: "Prefix of the state branches, lock refs and wip snapshots (empty in production)"
+        default: ''
+      index_tag:
+        description: "Release tag that holds the code search index (the job runs without it)"
+        default: colgrep-index
+
+concurrency:
+  group: fix-pipeline
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  select:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      ticket: ${{ steps.select.outputs.ticket }}
+      attempts: ${{ steps.select.outputs.attempts }}
+      test: ${{ steps.select.outputs.test }}
+    steps:
+      - name: Refuse a re-run and an API key
+        env:
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          if [ "$RUN_ATTEMPT" != 1 ]; then
+            echo "::error::run attempt $RUN_ATTEMPT: re-runs are refused; start a new run instead"
+            exit 1
+          fi
+          if [ -n "${ANTHROPIC_API_KEY+set}" ]; then
+            echo "::error::ANTHROPIC_API_KEY is set; jobs authenticate only with CLAUDE_CODE_OAUTH_TOKEN"
+            exit 1
+          fi
+
+      - name: Clone the coordination repository
+        env:
+          GH_TOKEN: ${{ secrets.COORD_TOKEN }}
+          COORD_REPO: ${{ secrets.COORD_REPO }}
+          COORD_REF: ${{ inputs.coord_ref }}
+        run: |
+          set -euo pipefail
+          case "$COORD_REF" in *[!A-Za-z0-9._/-]*|'') echo "::error::coord_ref has a character that is not allowed"; exit 1 ;; esac
+          git config --global credential.https://github.com.helper ''
+          git config --global --add credential.https://github.com.helper '!gh auth git-credential'
+          git clone --quiet --branch "$COORD_REF" "https://github.com/$COORD_REPO.git" "$RUNNER_TEMP/coord"
+          test -f "$RUNNER_TEMP/coord/autopilot/runner/track_issue.py"
+
+      # First step of the design: stop while pipeline_fixes_enabled is off, or when no entry is open.
+      - name: Pick the entry
+        id: select
+        env:
+          GH_TOKEN: ${{ secrets.COORD_TOKEN }}
+          FIX_TICKET: ${{ inputs.ticket }}
+          AUTOPILOT_COORD_REF: ${{ inputs.coord_ref }}
+          AUTOPILOT_COORD_BASE: ${{ inputs.coord_base }}
+          AUTOPILOT_APP_BASE: ${{ inputs.app_base }}
+          AUTOPILOT_STATE_PREFIX: ${{ inputs.state_prefix }}
+        run: |
+          set -euo pipefail
+          export AUTOPILOT_PRIVATE="$RUNNER_TEMP/coord"
+          python3 "$AUTOPILOT_PRIVATE/autopilot/runner/track_issue.py" select
+
+  fix:
+    needs: select
+    if: needs.select.outputs.ticket != ''
+    name: pipeline_fix lane-a
+    runs-on: ubuntu-24.04
+    timeout-minutes: 345
+    permissions:
+      contents: read
+    outputs:
+      claimed: ${{ steps.job.outputs.claimed }}
+      outcome: ${{ steps.job.outputs.outcome }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: job
+        uses: ./.github/actions/pipeline-job
+        with:
+          kind: pipeline_fix
+          ticket: ${{ needs.select.outputs.ticket }}
+          claude_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          coord_token: ${{ secrets.COORD_TOKEN }}
+          coord_repo: ${{ secrets.COORD_REPO }}
+          coord_ref: ${{ inputs.coord_ref }}
+          coord_base: ${{ inputs.coord_base }}
+          app_base: ${{ inputs.app_base }}
+          state_prefix: ${{ inputs.state_prefix }}
+          index_tag: ${{ inputs.index_tag }}
+          colgrep_version: ${{ vars.COLGREP_VERSION }}  # the index workflows' pin
+          # a pipeline fix changes Python and prompts in the coordination repository: no build, no app index
+          build: 'false'
+          index: 'false'
+          model: sonnet
+
+  next:
+    needs: [select, fix]
+    if: always() && needs.select.outputs.ticket != '' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the coordination repository
+        env:
+          GH_TOKEN: ${{ secrets.COORD_TOKEN }}
+          COORD_REPO: ${{ secrets.COORD_REPO }}
+          COORD_REF: ${{ inputs.coord_ref }}
+        run: |
+          set -euo pipefail
+          case "$COORD_REF" in *[!A-Za-z0-9._/-]*|'') echo "::error::coord_ref has a character that is not allowed"; exit 1 ;; esac
+          git config --global credential.https://github.com.helper ''
+          git config --global --add credential.https://github.com.helper '!gh auth git-credential'
+          git config --global user.name 'bongos runner'
+          git config --global user.email 'runner@users.noreply.github.com'
+          git clone --quiet --branch "$COORD_REF" "https://github.com/$COORD_REPO.git" "$RUNNER_TEMP/coord"
+
+      - name: Record an attempt the job could not record
+        id: after
+        env:
+          GH_TOKEN: ${{ secrets.COORD_TOKEN }}
+          FIX_TICKET: ${{ needs.select.outputs.ticket }}
+          FIX_ATTEMPTS: ${{ needs.select.outputs.attempts }}
+          FIX_CLAIMED: ${{ needs.fix.outputs.claimed }}
+          FIX_OUTCOME: ${{ needs.fix.outputs.outcome }}
+          AUTOPILOT_COORD_REF: ${{ inputs.coord_ref }}
+          AUTOPILOT_COORD_BASE: ${{ inputs.coord_base }}
+          AUTOPILOT_APP_BASE: ${{ inputs.app_base }}
+          AUTOPILOT_STATE_PREFIX: ${{ inputs.state_prefix }}
+        run: |
+          set -euo pipefail
+          export AUTOPILOT_PRIVATE="$RUNNER_TEMP/coord" AUTOPILOT_WORKTREES="$RUNNER_TEMP/worktrees"
+          mkdir -p "$AUTOPILOT_WORKTREES"
+          python3 "$AUTOPILOT_PRIVATE/autopilot/runner/track_issue.py" after --ticket "$FIX_TICKET" \
+            --attempts "$FIX_ATTEMPTS" --claimed "$FIX_CLAIMED" --outcome "$FIX_OUTCOME"
+
+      - name: Start this workflow again for the next entry
+        # only after a held claim and not after a usage limit: a job that failed before its claim, a lost or refused
+        # claim and a usage limit leave the restart to ticket-triage (which pauses for the limit), so nothing loops;
+        # a test run starts no workflow
+        if: always() && needs.select.outputs.test != '1' && needs.fix.outputs.claimed == 'true' && needs.fix.outputs.outcome != 'usage_limit'
+        env:
+          GH_TOKEN: ${{ secrets.COORD_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh workflow run fix-pipeline.yml --repo "$REPO" --ref main
+
+      - name: Escalate an exhausted entry
+        if: always() && steps.after.outputs.exhausted == 'true'
+        env:
+          FIX_TICKET: ${{ needs.select.outputs.ticket }}
+        run: |
+          echo "::error::$FIX_TICKET is exhausted: no fix after its attempts, or only the owner can fix it. Read its brief and history in the pipeline-fix queue, fix or decide, then release it (ticket.py release --queue pipeline)."
+          exit 1

@@ -1,0 +1,103 @@
+# Files a failed pipeline job in the coordination repository's pipeline-fix queue, then starts fix-pipeline. Started by
+# the final step of a failing pipeline job (input run_id only) and by ticket-triage for a run that died or a ticket it
+# halted after three attempts (run_id empty: the ticket's newest finished run is filed). No Claude usage: the script
+# autopilot/runner/track_issue.py in the coordination repository does the work, and does nothing while
+# pipeline_fixes_enabled is off in its runner.toml. No concurrency cap.
+name: track-pipeline-issue
+run-name: track-pipeline-issue ${{ inputs.ticket || inputs.run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "The failed run's id (empty for a ticket halted after three attempts)"
+        default: ''
+      ticket:
+        description: "The ticket the run worked on (a feature directory or <queue>-<entry id>)"
+        default: ''
+      reason:
+        description: "Why the run is filed (triage's text)"
+        default: ''
+      coord_ref:
+        description: "Branch of the coordination repository holding the pipeline code"
+        default: main
+      coord_base:
+        description: "Branch of the coordination repository the queue pull request targets"
+        default: main
+      app_base:
+        description: "Branch of this repository (only checked: a test run redirects every write target)"
+        default: main
+      state_prefix:
+        description: "Prefix of the state branches (empty in production)"
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  track:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read   # the failed run's jobs and log, with this job's own token
+      contents: read
+    steps:
+      - name: Refuse a re-run and an API key
+        env:
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          if [ "$RUN_ATTEMPT" != 1 ]; then
+            echo "::error::run attempt $RUN_ATTEMPT: re-runs are refused; start a new run instead"
+            exit 1
+          fi
+          if [ -n "${ANTHROPIC_API_KEY+set}" ]; then
+            echo "::error::ANTHROPIC_API_KEY is set; pipeline jobs never use it"
+            exit 1
+          fi
+
+      - name: Clone the coordination repository
+        env:
+          GH_TOKEN: ${{ secrets.COORD_TOKEN }}
+          COORD_REPO: ${{ secrets.COORD_REPO }}
+          COORD_REF: ${{ inputs.coord_ref }}
+        run: |
+          set -euo pipefail
+          case "$COORD_REF" in *[!A-Za-z0-9._/-]*|'') echo "::error::coord_ref has a character that is not allowed"; exit 1 ;; esac
+          # git asks gh for credentials, and gh reads GH_TOKEN from each step's environment: no token is written to disk.
+          git config --global credential.https://github.com.helper ''
+          git config --global --add credential.https://github.com.helper '!gh auth git-credential'
+          git config --global user.name 'bongos runner'
+          git config --global user.email 'runner@users.noreply.github.com'
+          git clone --quiet --branch "$COORD_REF" "https://github.com/$COORD_REPO.git" "$RUNNER_TEMP/coord"
+          test -f "$RUNNER_TEMP/coord/autopilot/runner/track_issue.py"
+          git -C "$RUNNER_TEMP/coord" log -1 --format='pipeline code at %h'
+
+      - name: File the failed run
+        id: file
+        env:
+          GH_TOKEN: ${{ secrets.COORD_TOKEN }}
+          APP_GH_TOKEN: ${{ github.token }}
+          TRACK_RUN_ID: ${{ inputs.run_id }}
+          TRACK_TICKET: ${{ inputs.ticket }}
+          TRACK_REASON: ${{ inputs.reason }}
+          AUTOPILOT_COORD_REF: ${{ inputs.coord_ref }}
+          AUTOPILOT_COORD_BASE: ${{ inputs.coord_base }}
+          AUTOPILOT_APP_BASE: ${{ inputs.app_base }}
+          AUTOPILOT_STATE_PREFIX: ${{ inputs.state_prefix }}
+        run: |
+          set -euo pipefail
+          export AUTOPILOT_PRIVATE="$RUNNER_TEMP/coord" AUTOPILOT_WORKTREES="$RUNNER_TEMP/worktrees"
+          mkdir -p "$AUTOPILOT_WORKTREES"
+          python3 "$AUTOPILOT_PRIVATE/autopilot/runner/track_issue.py" file
+
+      - name: Start fix-pipeline
+        if: steps.file.outputs.start == 'true' && steps.file.outputs.test != '1'
+        env:
+          GH_TOKEN: ${{ secrets.COORD_TOKEN }}
+          FIX_TICKET: ${{ steps.file.outputs.ticket }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # production only (a test run starts no workflow); fix-pipeline runs one at a time and a pending run waits
+          gh workflow run fix-pipeline.yml --repo "$REPO" --ref main -f "ticket=$FIX_TICKET"

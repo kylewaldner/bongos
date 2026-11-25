@@ -9,6 +9,8 @@
 #   BONGOS_TEST_PARTITION=K/N  run only slice K of N of the tests (nextest --partition hash:K/N)
 #   BONGOS_NEXTEST_PROFILE=p   nextest profile (default gate: everything except the timing tests; perf runs only them)
 #   BONGOS_CARGO_PROFILE=p     cargo profile to build the tests with (nextest --cargo-profile; default unset: the dev profile); perf-test is optimized with debug assertions off
+#   BONGOS_TEST_EXCLUDE=f      a nextest filterset of tests not to run; set only by CI jobs on hosted runners, from their
+#                              list of tests that cannot pass there
 # Unless BONGOS_UNIFIED_FEATURES=1, every distinct set of -p flags makes cargo unify features
 # differently and build another full set of dependency artifacts, so the -p set is always the
 # branch's changed crates (sorted), and named crates only select tests through a nextest filterset
@@ -87,6 +89,15 @@ if [ "${#named[@]}" -gt 0 ]; then
     expression="${expression:+$expression | }package(=$c)"
   done < <(printf '%s\n' "${named[@]}" | sort -u)
   selection=(-E "$expression")
+fi
+# BONGOS_TEST_EXCLUDE=f (set only by CI jobs on hosted runners) leaves out the tests the filterset f matches. Two -E options would
+# be a union, so the exclusion is joined into the one expression. Unset, the command line is unchanged.
+if [ -n "${BONGOS_TEST_EXCLUDE:-}" ]; then
+  if [ "${#selection[@]}" -gt 0 ]; then
+    selection=(-E "($expression) & not ($BONGOS_TEST_EXCLUDE)")
+  else
+    selection=(-E "not ($BONGOS_TEST_EXCLUDE)")
+  fi
 fi
 
 require_space

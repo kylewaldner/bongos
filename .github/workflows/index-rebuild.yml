@@ -1,0 +1,52 @@
+# Builds the code search index from nothing (about 72 minutes), for a model change or a broken index, and publishes
+# it under the same guards as index-update.yml (see there and in .github/scripts/colgrep-index.sh). Started by
+# hand only. The replace input skips guard 3 only (a deliberate replacement); guard 4 still applies. It shares index-update's concurrency group, so the two never run at the same time. No secret is used,
+# only the job's own token.
+name: index-rebuild
+
+on:
+  workflow_dispatch:
+    inputs:
+      index_tag:
+        description: Release tag that holds the index. Empty means the repository variable INDEX_TAG, else colgrep-index
+        type: string
+        default: ''
+      replace:
+        description: Upload even when the published index is newer or from another line of history (skips guard 3; guard 4 still applies)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: colgrep-index-${{ inputs.index_tag || vars.INDEX_TAG || 'colgrep-index' }}
+  cancel-in-progress: false
+
+jobs:
+  index:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ inputs.index_tag || vars.INDEX_TAG || 'colgrep-index' }}
+      REPO: ${{ github.repository }}
+      COLGREP_VERSION: ${{ vars.COLGREP_VERSION || 'v1.8.5' }}
+      REPLACE: ${{ inputs.replace }}
+      TRIGGER_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install colgrep and ONNX Runtime
+        run: .github/scripts/colgrep-index.sh install
+      - name: Index the current main
+        run: .github/scripts/colgrep-index.sh checkout
+      - name: Build the index from nothing
+        run: .github/scripts/colgrep-index.sh build
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/colgrep-index.sh publish
