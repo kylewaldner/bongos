@@ -1,0 +1,108 @@
+# TEMPORARY test of the release check's perf-history path (restore from and save to the state branch) without the
+# perf build: the same clone and credential setup as release-check.yml, then release_job.run_step("perf") with the perf
+# tests replaced by one appended history row. Test redirects only. Never merged.
+name: zz-test-c8-perf
+
+on:
+  push:
+    branches: [gh-runners-test-c8-perf]
+    paths: [.github/workflows/zz-test-c8-perf.yml]
+
+permissions:
+  contents: read
+
+env:
+  IN_SHA: ${{ github.sha }}
+  IN_COORD_REF: c8p-perf-code
+  IN_COORD_BASE: gh-runners-test-base-c8p
+  IN_APP_BASE: gh-runners-test-base-c8p
+  IN_STATE_PREFIX: zz-testc8p/
+  IN_INDEX_TAG: colgrep-index-test
+
+jobs:
+  probe:
+    name: perf history probe
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      BONGOS_RUNNER_MODE: '1'
+      AUTOPILOT_RUNNER_ACTOR: run ${{ github.run_id }}
+    steps:
+      - name: Refuse an API key and a production prefix, export the settings
+        run: |
+          set -euo pipefail
+          if [ -n "${ANTHROPIC_API_KEY+set}" ]; then echo "::error::ANTHROPIC_API_KEY is set"; exit 1; fi
+          case "$IN_STATE_PREFIX" in zz-test*/) ;; *) echo "::error::test runs need a zz-test state prefix"; exit 1 ;; esac
+          [ "$IN_COORD_BASE" != main ] || { echo "::error::coord_base must be a test base"; exit 1; }
+          py=$(ls -d /opt/hostedtoolcache/Python/3.12*/x64 2>/dev/null | sort -V | tail -n1 || true)
+          [ -n "$py" ] || py=$(ls -d /opt/hostedtoolcache/Python/3.1[1-9]*/x64 2>/dev/null | sort -V | tail -n1 || true)
+          echo "$py/bin" >> "$GITHUB_PATH"
+          sudo mkdir -p /mnt/bongos-workspace
+          sudo chown "$USER" /mnt/bongos-workspace
+          {
+            echo "AUTOPILOT_COORD_REF=$IN_COORD_REF"
+            echo "AUTOPILOT_COORD_BASE=$IN_COORD_BASE"
+            echo "AUTOPILOT_APP_BASE=$IN_APP_BASE"
+            echo "AUTOPILOT_STATE_PREFIX=$IN_STATE_PREFIX"
+            echo "AUTOPILOT_INDEX_TAG=$IN_INDEX_TAG"
+            echo "AUTOPILOT_PRIVATE=$RUNNER_TEMP/coord"
+            echo "AUTOPILOT_BONGOS=$GITHUB_WORKSPACE"
+            echo "AUTOPILOT_LOGS=/mnt/bongos-workspace/ci-logs"
+          } >> "$GITHUB_ENV"
+
+      - name: Clone the coordination repository
+        env:
+          GH_TOKEN: ${{ secrets.COORD_TOKEN }}
+          COORD_REPO: ${{ secrets.COORD_REPO }}
+        run: |
+          set -euo pipefail
+          git config --global credential.https://github.com.helper ''
+          git config --global --add credential.https://github.com.helper '!gh auth git-credential'
+          git config --global user.name 'bongos runner'
+          git config --global user.email 'runner@users.noreply.github.com'
+          rm -rf "$AUTOPILOT_PRIVATE"
+          git clone --quiet --branch "$AUTOPILOT_COORD_REF" "https://github.com/$COORD_REPO.git" "$AUTOPILOT_PRIVATE"
+          git -C "$AUTOPILOT_PRIVATE" log -1 --format='pipeline code at %h'
+
+      - name: Write the probe
+        run: |
+          mkdir -p "$RUNNER_TEMP/probe"
+          cat > "$RUNNER_TEMP/probe/perf_history_probe.py" <<'EOF'
+          import json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, os.environ["AUTOPILOT_PRIVATE"] + "/autopilot/runner")
+          import release_job as rj
+          rc = rj.rc
+          logs = Path(os.environ["AUTOPILOT_LOGS"])
+          logs.mkdir(parents=True, exist_ok=True)
+          def fake_perf(ap, d, wt, rdir, env, logs_, target, commit):
+              hist = Path(logs_) / "release" / rc.PERF_HISTORY
+              before = len(hist.read_text().splitlines()) if hist.is_file() else 0
+              hist.parent.mkdir(parents=True, exist_ok=True)
+              with hist.open("a") as f:
+                  f.write(json.dumps({"id": "zz-test/perf_probe", "secs": 1.0, "run": os.environ["GITHUB_RUN_ID"],
+                                      "step": sys.argv[1]}) + "\n")
+              return {"result": "pass", "reason": f"probe: {before} rows read, one appended (no perf tests run)"}
+          rc.step_perf = fake_perf
+          res = rj.run_step("perf", None, None, {"rdir": str(logs), "commit": os.environ["IN_SHA"]}, {"perf": {}},
+                            logs, "/mnt/bongos-workspace/target", {}, Path(os.environ["AUTOPILOT_BONGOS"]), os.environ)
+          rj.say(f"{sys.argv[1]}: {res['reason']}")
+          rj.say(f"{sys.argv[1]}: {res['perf_history']}")
+          EOF
+
+      - name: Perf history without the token (the step before the fix)
+        run: python3 "$RUNNER_TEMP/probe/perf_history_probe.py" no-token
+
+      - name: Perf history with the token (first save)
+        env:
+          GH_TOKEN: ${{ secrets.COORD_TOKEN }}
+          COORD_REPO: ${{ secrets.COORD_REPO }}
+        run: python3 "$RUNNER_TEMP/probe/perf_history_probe.py" first
+
+      - name: Perf history with the token (read back and save again)
+        env:
+          GH_TOKEN: ${{ secrets.COORD_TOKEN }}
+          COORD_REPO: ${{ secrets.COORD_REPO }}
+        run: |
+          rm -rf "$AUTOPILOT_LOGS"
+          python3 "$RUNNER_TEMP/probe/perf_history_probe.py" second
