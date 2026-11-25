@@ -7,7 +7,7 @@
 # Started by: workflow_dispatch (the final step of every other workflow runs `gh workflow run ticket-triage.yml --ref
 # main`, no inputs); repository_dispatch of type `triage`, sent only by the trigger workflow of the coordination
 # repository on a push that changes a claim or a queue file; a 10-minute schedule.
-# `schedule` and `repository_dispatch` run only from the default branch, so until this file reaches main nothing starts it: that is intended (no workflow file reaches main before the owner switches the pipeline on).
+# `schedule` and `repository_dispatch` run only from the default branch, so until this file reaches main nothing starts it: that is intended (the workflow files reach main with every switch off: nothing dispatches or writes until the owner turns the switches on).
 #
 # Concurrency: one run at a time, a waiting run is replaced by the newest one, and a running one is never cancelled.
 # No `queue: max`: a polling ping needs only the latest request.
