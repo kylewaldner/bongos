@@ -1,0 +1,45 @@
+# Designs one feature: the design-lane job (design_ahead.md) of the pipeline for the ticket triage dispatched. It reads
+# code and never builds: no removal of preinstalled software, no dependency cache, no Rust toolchain; it downloads the
+# code search index. The frame (claim, run, final step) is the pipeline-job action. Started only by workflow_dispatch
+# (ticket-triage); the cap of concurrent design jobs is triage's (cap.feature-design), and the ticket's claim keeps two
+# runs off one ticket, so there is no concurrency group.
+# TEMPORARY test copy (c5): push trigger on the test branch only, every redirect at a test value.
+name: feature-design
+# Triage ties a run to its ticket by the last word of the run's title.
+run-name: feature-design zz-test-c5-design
+
+on:
+  push:
+    branches: [gh-runners-test-c5-design]
+    paths: ['.github/workflows/zz-design-c5.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  design:
+    name: design lane-a
+    runs-on: ubuntu-24.04
+    timeout-minutes: 345
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/pipeline-job
+        with:
+          kind: design
+          ticket: zz-test-c5-design
+          build: 'false'
+          index: 'true'
+          runner_image: ubuntu-24.04
+          claude_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          coord_token: ${{ secrets.COORD_TOKEN }}
+          coord_repo: ${{ secrets.COORD_REPO }}
+          coord_ref: c5-design-code
+          coord_base: gh-runners-test-base-c5
+          app_base: gh-runners-test-base-c5
+          state_prefix: zz-testc5/
+          index_tag: colgrep-index-test
+          colgrep_version: ${{ vars.COLGREP_VERSION }}  # the index workflows' pin
