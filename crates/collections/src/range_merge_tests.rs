@@ -24,3 +24,16 @@ fn test_adjacent_ranges_merge() {
 fn test_contained_range_is_absorbed() {
     assert_eq!(merge_ranges(vec![1..=9, 2..=3]), vec![1..=9]);
 }
+
+#[test]
+fn test_range_ending_at_usize_max_absorbs_later_ranges() {
+    assert_eq!(merge_ranges(vec![0..=usize::MAX, 5..=7]), vec![0..=usize::MAX]);
+}
+
+#[test]
+fn test_ranges_touching_usize_max_merge() {
+    assert_eq!(
+        merge_ranges(vec![usize::MAX..=usize::MAX, 0..=usize::MAX - 1]),
+        vec![0..=usize::MAX]
+    );
+}
