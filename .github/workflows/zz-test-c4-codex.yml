@@ -106,7 +106,30 @@ jobs:
             fi
           done
           echo "alone: pass=$pass fail=$fail of 20"
+      - name: The test alone, 20 times under CPU and fork load
+        run: |
+          set +e
+          for c in 1 2 3 4 5 6 7 8; do (while :; do :; done) & done
+          for c in 1 2 3 4; do (while :; do /bin/true; done) & done
+          pass=0; fail=0; shown=0
+          for i in $(seq 1 20); do
+            out="$RUNNER_TEMP/load-$i.log"
+            NEXTEST_RETRIES=0 cargo nextest run -p bongos_chat --profile gate --tests --locked --no-fail-fast --color never \
+              --status-level all --final-status-level all -E "test(=$TEST_NAME)" > "$out" 2>&1
+            rc=$?
+            if [ "$rc" = 0 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); fi
+            echo "load run $i: exit $rc $(grep -E '^ *(PASS|FAIL|TIMEOUT|SIGSEGV|SIGABRT) ' "$out" | head -n1)"
+            if [ "$rc" != 0 ] && [ "$shown" -lt 3 ]; then
+              shown=$((shown + 1))
+              echo "----- output of failing load run $i -----"; grep -v -E '^ *(Compiling|Finished|Blocking)' "$out" | tail -n 80; echo "-----"
+            fi
+          done
+          echo "under load: pass=$pass fail=$fail of 20"
+          kill $(jobs -p) 2>/dev/null
+          wait 2>/dev/null
+          true
       - name: The whole bongos_chat crate, 10 times
+        if: false
         run: |
           set +e
           shown=0
