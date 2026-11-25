@@ -1,5 +1,5 @@
 # TEMPORARY test workflow: runs one bongos_chat test alone 20 times on a hosted runner (the release check's runner
-# image and the cache-warm dev environment), then the whole bongos_chat crate 3 times, to learn whether the test
+# image and the cache-warm dev environment), then the whole bongos_chat crate 10 times, to learn whether the test
 # can pass on a runner. Not for main.
 name: zz-test-c4-codex
 
@@ -92,7 +92,7 @@ jobs:
         run: cargo nextest run -p bongos_chat --profile gate --tests --locked --no-run --color never
       - name: The test alone, 20 times
         run: |
-          set -u
+          set +e
           pass=0; fail=0
           for i in $(seq 1 20); do
             out="$RUNNER_TEMP/alone-$i.log"
@@ -106,15 +106,19 @@ jobs:
             fi
           done
           echo "alone: pass=$pass fail=$fail of 20"
-      - name: The whole bongos_chat crate, 3 times
+      - name: The whole bongos_chat crate, 10 times
         run: |
-          set -u
-          for i in 1 2 3; do
+          set +e
+          shown=0
+          for i in $(seq 1 10); do
             out="$RUNNER_TEMP/crate-$i.log"
             NEXTEST_RETRIES=0 cargo nextest run -p bongos_chat --profile gate --tests --locked --no-fail-fast --color never > "$out" 2>&1
             echo "crate run $i: exit $? $(grep -E '^ *Summary' "$out" | tail -n1)"
-            grep -E '^ *(FAIL|TIMEOUT) ' "$out" | head -n 20 || true
-            if grep -qE "^ *(FAIL|TIMEOUT) .*$TEST_NAME" "$out"; then
-              grep -n -A40 "STDERR:.*$TEST_NAME" "$out" | head -n 60 || true
+            grep -E '^ *(FAIL|TIMEOUT) ' "$out" | head -n 20
+            if grep -qE '^ *(FAIL|TIMEOUT) ' "$out" && [ "$shown" -lt 3 ]; then
+              shown=$((shown + 1))
+              echo "----- failure output of crate run $i -----"
+              grep -n -E -A60 '^ *(STDOUT|STDERR): ' "$out" | grep -v -E 'PASS \[' | head -n 200
+              echo "-----"
             fi
           done
