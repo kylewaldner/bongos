@@ -16,16 +16,20 @@ fn test_worker_is_ready_after_ten_milliseconds() {
     let ready = Arc::new(AtomicBool::new(false));
     let worker_ready = ready.clone();
     let delay = startup_delay();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let worker = thread::spawn(move || {
         thread::sleep(delay);
         worker_ready.store(true, Ordering::SeqCst);
+        ready_tx.send(()).ok();
     });
 
-    // Hopes that the worker is up after ten milliseconds.
-    thread::sleep(Duration::from_millis(10));
+    // Waits for the worker's ready event; the 30 s timeout is only a hang guard.
+    ready_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the worker signals that it is ready");
     assert!(
         ready.load(Ordering::SeqCst),
-        "the worker was not ready after 10 ms"
+        "the worker was not ready after it signaled"
     );
     worker.join().expect("the worker thread ends");
 }
