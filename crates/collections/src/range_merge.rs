@@ -6,7 +6,7 @@ pub fn merge_ranges(mut ranges: Vec<RangeInclusive<usize>>) -> Vec<RangeInclusiv
     let mut merged: Vec<RangeInclusive<usize>> = Vec::new();
     for range in ranges {
         match merged.last_mut() {
-            Some(last) if *range.start() < *last.end() => {
+            Some(last) if *range.start() <= last.end().saturating_add(1) => {
                 if range.end() > last.end() {
                     *last = *last.start()..=*range.end();
                 }
