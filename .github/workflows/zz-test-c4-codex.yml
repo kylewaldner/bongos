@@ -121,7 +121,7 @@ jobs:
             echo "load run $i: exit $rc $(grep -E '^ *(PASS|FAIL|TIMEOUT|SIGSEGV|SIGABRT) ' "$out" | head -n1)"
             if [ "$rc" != 0 ] && [ "$shown" -lt 3 ]; then
               shown=$((shown + 1))
-              echo "----- output of failing load run $i -----"; grep -v -E '^ *(Compiling|Finished|Blocking)' "$out" | tail -n 80; echo "-----"
+              echo "----- output of failing load run $i -----"; grep -v -E '^ *(SKIP|Compiling|Finished|Blocking)' "$out" | grep -v '^\s*$' | head -n 120; echo "-----"
             fi
           done
           echo "under load: pass=$pass fail=$fail of 20"
