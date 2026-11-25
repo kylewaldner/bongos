@@ -332,7 +332,7 @@ runs:
         rm -rf "$AUTOPILOT_PRIVATE"
         git clone --quiet --branch "$AUTOPILOT_COORD_REF" "https://github.com/$COORD_REPO.git" "$AUTOPILOT_PRIVATE"
         test -f "$AUTOPILOT_PRIVATE/autopilot/runner/job.sh"
-        git -C "$AUTOPILOT_PRIVATE" log -1 --format='pipeline code at %h %s'
+        git -C "$AUTOPILOT_PRIVATE" log -1 --format='pipeline code at %h'
 
     - name: Check the job before it claims anything
       shell: bash

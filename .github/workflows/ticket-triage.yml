@@ -106,7 +106,7 @@ jobs:
           git config --global user.email 'runner@users.noreply.github.com'
           git clone --quiet --branch "$IN_COORD_REF" "https://github.com/$COORD_REPO.git" "$RUNNER_TEMP/coord"
           test -f "$RUNNER_TEMP/coord/autopilot/runner/triage.py"
-          git -C "$RUNNER_TEMP/coord" log -1 --format='pipeline code at %h %s'
+          git -C "$RUNNER_TEMP/coord" log -1 --format='pipeline code at %h'
 
       - name: Decide production or test
         id: mode
