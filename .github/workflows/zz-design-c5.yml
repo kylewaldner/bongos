@@ -3,7 +3,7 @@
 # code search index. The frame (claim, run, final step) is the pipeline-job action. Started only by workflow_dispatch
 # (ticket-triage); the cap of concurrent design jobs is triage's (cap.feature-design), and the ticket's claim keeps two
 # runs off one ticket, so there is no concurrency group.
-# TEMPORARY test copy (c5): push trigger on the test branch only, every redirect at a test value.
+# TEMPORARY test copy (c5, attempt 2): push trigger on the test branch only, every redirect at a test value.
 name: feature-design
 # Triage ties a run to its ticket by the last word of the run's title.
 run-name: feature-design zz-test-c5-design
