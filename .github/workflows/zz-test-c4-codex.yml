@@ -1,0 +1,120 @@
+# TEMPORARY test workflow: runs one bongos_chat test alone 20 times on a hosted runner (the release check's runner
+# image and the cache-warm dev environment), then the whole bongos_chat crate 3 times, to learn whether the test
+# can pass on a runner. Not for main.
+name: zz-test-c4-codex
+
+on:
+  push:
+    branches: [gh-runners-test-c4-codex]
+    paths: ['.github/workflows/zz-test-c4-codex.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  alone:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      BONGOS_WORKSPACE: /mnt/bongos-workspace
+      BONGOS_UNIFIED_FEATURES: ''
+      BONGOS_RELEASE_BUILD: ''
+      BONGOS_NO_DEBUGINFO: '1'
+      TEST_NAME: runtime_tests::test_codex_launches_in_one_directory_wait_for_the_capture
+    steps:
+      - name: Refuse an API key
+        run: |
+          if [ -n "${ANTHROPIC_API_KEY+set}" ]; then echo "::error::ANTHROPIC_API_KEY is set"; exit 1; fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Free disk space
+        run: |
+          set -u
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /usr/share/swift /usr/lib/jvm \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/share/miniconda /usr/lib/google-cloud-sdk \
+            /opt/az /opt/microsoft /usr/lib/firefox /opt/google /usr/local/share/chromium /home/linuxbrew \
+            /usr/local/aws-cli /usr/local/julia*
+          df -h / /mnt
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc g++ libasound2-dev libfontconfig-dev libgit2-dev libglib2.0-dev libssl-dev libva-dev \
+            libvulkan1 libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev make cmake clang lld \
+            llvm jq git curl gettext-base elfutils libsqlite3-dev musl-tools musl-dev build-essential \
+            pkg-config python3 mold mesa-vulkan-drivers > /dev/null
+      - name: Install the Rust toolchain and set the build environment
+        run: |
+          set -euo pipefail
+          sudo mkdir -p "$BONGOS_WORKSPACE"
+          sudo chown "$USER" "$BONGOS_WORKSPACE"
+          export RUSTUP_HOME="$BONGOS_WORKSPACE/rustup" CARGO_HOME="$BONGOS_WORKSPACE/cargo"
+          mkdir -p "$RUSTUP_HOME" "$CARGO_HOME"
+          rustup toolchain install
+          # shellcheck disable=SC1091
+          . script/bongos/env.sh
+          env | grep -E '^(CARGO_|RUSTUP_HOME=|RUSTC_BOOTSTRAP=|BONGOS_|CC=|CXX=)' | grep -v '^CARGO_BUILD_JOBS=' >> "$GITHUB_ENV"
+          echo "TMPDIR=$TMPDIR" >> "$GITHUB_ENV"
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+          echo "rel=$(realpath -m --relative-to="$GITHUB_WORKSPACE" "$CARGO_TARGET_DIR")" >> "$RUNNER_TEMP/rel"
+      - name: Find the target directory relative to the checkout
+        id: target
+        run: cat "$RUNNER_TEMP/rel" >> "$GITHUB_OUTPUT"
+      - name: Restore the dev dependency cache (read only)
+        uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        with:
+          workspaces: ". -> ${{ steps.target.outputs.rel }}"
+          shared-key: dev-ubuntu-22.04
+          add-job-id-key: false
+          save-if: 'false'
+      - name: Install nextest
+        run: |
+          set -euo pipefail
+          ver=$(sed -n 's/^nextest-version = { required = "\([0-9.]*\)" }.*/\1/p' .config/nextest.toml)
+          mkdir -p "$RUNNER_TEMP/nextest" "$CARGO_HOME/bin"
+          curl -fsSL -o "$RUNNER_TEMP/nextest/nextest.tar.gz" \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$ver/cargo-nextest-$ver-x86_64-unknown-linux-gnu.tar.gz"
+          tar xzf "$RUNNER_TEMP/nextest/nextest.tar.gz" -C "$CARGO_HOME/bin"
+          cargo nextest --version
+      - name: Diagnostics
+        run: |
+          set -u
+          nproc; uname -r; readlink -f /bin/sh; echo "TMPDIR=$TMPDIR"; df -T "$TMPDIR" /tmp
+          d=$(mktemp -d); before=$(date +%s.%N)
+          FAKE_CLI_LOG="$d/log" FAKE_CLI_HOME="$d/home" timeout 5 crates/bongos_chat/test-fixtures/fake-codex x < /dev/null > /dev/null 2>&1 || true
+          after=$(date +%s.%N)
+          echo "before=$before after=$after"; cat "$d/log"
+          for f in "$d"/home/.codex/sessions/*/*/*/*; do stat -c 'btime=%.9W mtime=%.9Y %n' "$f"; done
+          rm -rf "$d"
+      - name: Build the bongos_chat tests
+        run: cargo nextest run -p bongos_chat --profile gate --tests --locked --no-run --color never
+      - name: The test alone, 20 times
+        run: |
+          set -u
+          pass=0; fail=0
+          for i in $(seq 1 20); do
+            out="$RUNNER_TEMP/alone-$i.log"
+            NEXTEST_RETRIES=0 cargo nextest run -p bongos_chat --profile gate --tests --locked --no-fail-fast --color never \
+              --status-level all --final-status-level all -E "test(=$TEST_NAME)" > "$out" 2>&1
+            rc=$?
+            if [ "$rc" = 0 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); fi
+            echo "run $i: exit $rc $(grep -E '^ *(PASS|FAIL|TIMEOUT|SIGSEGV|SIGABRT) ' "$out" | head -n1)"
+            if [ "$rc" != 0 ] && [ "$fail" -le 3 ]; then
+              echo "----- output of failing run $i -----"; tail -n 120 "$out"; echo "-----"
+            fi
+          done
+          echo "alone: pass=$pass fail=$fail of 20"
+      - name: The whole bongos_chat crate, 3 times
+        run: |
+          set -u
+          for i in 1 2 3; do
+            out="$RUNNER_TEMP/crate-$i.log"
+            NEXTEST_RETRIES=0 cargo nextest run -p bongos_chat --profile gate --tests --locked --no-fail-fast --color never > "$out" 2>&1
+            echo "crate run $i: exit $? $(grep -E '^ *Summary' "$out" | tail -n1)"
+            grep -E '^ *(FAIL|TIMEOUT) ' "$out" | head -n 20 || true
+            if grep -qE "^ *(FAIL|TIMEOUT) .*$TEST_NAME" "$out"; then
+              grep -n -A40 "STDERR:.*$TEST_NAME" "$out" | head -n 60 || true
+            fi
+          done
