@@ -380,6 +380,11 @@ jobs:
       - name: Run the perf tests
         if: steps.notes.outputs.run == 'true'
         timeout-minutes: 75
+        env:
+          # only the job's own fetch and push of the perf history on the state branch uses it; the perf build and tests
+          # never see a token (release_job.py removes it from their environment)
+          GH_TOKEN: ${{ secrets.COORD_TOKEN }}
+          COORD_REPO: ${{ secrets.COORD_REPO }}
         run: python3 "$AUTOPILOT_PRIVATE/autopilot/runner/release_job.py" step perf
 
       - name: Disk use
