@@ -1,0 +1,82 @@
+# TEMPORARY test copy (c3a3): push trigger on the test branch only, every redirect at a test value.
+# Fixes one entry of the flaky-fix queue (queue `flaky`, job kind `flaky_fix`): the local flaky-fix job with the
+# flaky_fix.md prompt (reproduce, fix, the gates with the whole suite in this job, opus review, merge into
+# the base branch through merge_main.py), followed by the 20-run judgment, which runs inside the job (run.py's runner
+# mode: the fix's merge commit is checked out in the warm workspace and its test runs alone 20 times; 20 of 20 closes
+# the entry, anything less is a failed attempt). Releases do not run on a flaky-fix merge, so nothing else judges it.
+#
+# Started by ticket-triage (`workflow_dispatch` with the queue entry); never by a push. Everything the job does is the
+# pipeline-job frame: claim (`flaky-<entry id>`), run, final step. The queue is read from the coordination
+# repository, which the frame clones from the COORD_REPO secret, so nothing here names it.
+#
+# Concurrency: one run at a time (runner.toml cap.flaky-fix = 1, enforced by triage), never cancelled in progress.
+# Caps and switches live in runner.toml; with dispatch_enabled off triage starts nothing.
+name: flaky-fix
+
+# A run's display title ends with its ticket as the last word (triage matches runs to tickets by it); a queue ticket
+# is `<queue>-<entry id lowercased>`.
+run-name: flaky-fix flaky-zz-test-ff-20261125t022500z
+
+on:
+  push:
+    branches: [gh-runners-test-c3a3-flaky]
+    paths: ['.github/workflows/zz-flaky-fix-c3a3.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zz-flaky-fix-c3a3
+  cancel-in-progress: false
+
+jobs:
+  job:
+    name: flaky-fix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 345
+    permissions:
+      contents: read
+    steps:
+      # Only loads the action; the action checks the workspace out again at app_base with full history.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the inputs
+        env:
+          IN_TICKET: flaky-zz-test-ff-20261125t022500z
+          IN_QUEUE: flaky
+          IN_ENTRY: zz-test-FF-20261125T022500Z
+        run: |
+          set -euo pipefail
+          if [ "$IN_QUEUE" != flaky ]; then
+            echo "::error::flaky-fix takes the flaky queue; got '$IN_QUEUE'"
+            exit 1
+          fi
+          case "$IN_ENTRY" in
+            ''|*[!A-Za-z0-9-]*) echo "::error::entry is not a queue entry id"; exit 1 ;;
+          esac
+          want=$(printf 'flaky-%s' "$IN_ENTRY" | tr '[:upper:]' '[:lower:]')
+          if [ "$IN_TICKET" != "$want" ]; then
+            echo "::error::ticket '$IN_TICKET' is not the lowercase form of flaky-$IN_ENTRY"
+            exit 1
+          fi
+
+      - uses: ./.github/actions/pipeline-job
+        with:
+          kind: flaky_fix
+          # the entry id keeps its own case: the claim and the state branch match it exactly
+          ticket: flaky-zz-test-FF-20261125T022500Z
+          claude_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          coord_token: ${{ secrets.COORD_TOKEN }}
+          coord_repo: ${{ secrets.COORD_REPO }}
+          coord_ref: s28-c3a3-code
+          coord_base: gh-runners-test-base-c3a3
+          app_base: gh-runners-test-base-c3a3
+          state_prefix: zz-testc3a3/
+          index_tag: colgrep-index-test
+          colgrep_version: ${{ vars.COLGREP_VERSION }}  # the index workflows' pin
+          # Builds on the dependency cache of the unified-features dev build (cache-warm's dev-unified-ubuntu-24.04),
+          # read only; no incremental builds (the action's default for every kind but step).
+          cache_variant: dev-unified
+          runner_image: ubuntu-24.04
