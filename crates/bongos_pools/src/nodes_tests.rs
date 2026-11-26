@@ -324,7 +324,10 @@ fn a_node_waiting_on_a_held_mutex_starts_only_when_the_holder_ends(cx: &mut Test
     bench.add(1, SINGLE);
     bench.settle(cx);
     assert_eq!(bench.started(1, "work"), 0, "no NodeStarted while it waits");
-    assert!(bench.runner().started.is_empty(), "its time cap has not started");
+    assert!(
+        bench.runner().started.is_empty(),
+        "its time cap has not started"
+    );
     assert_eq!(bench.runtime.sessions_in_flight(), 0);
     assert_eq!(bench.waiters("m"), [run_id(1)]);
     let status = bench.nodes.waiting_node(&run_id(1), &key("work")).unwrap();
@@ -358,9 +361,7 @@ fn a_node_waiting_on_a_held_mutex_starts_only_when_the_holder_ends(cx: &mut Test
 }
 
 #[gpui::test]
-fn halting_or_interrupting_releases_the_node_pool_and_resuming_asks_again(
-    cx: &mut TestAppContext,
-) {
+fn halting_or_interrupting_releases_the_node_pool_and_resuming_asks_again(cx: &mut TestAppContext) {
     for interrupt in [false, true] {
         let mut bench = Bench::new(cx, vec![pool("m", PoolKind::Mutex, 1)]);
         bench.add(1, SINGLE);
@@ -390,9 +391,7 @@ fn halting_or_interrupting_releases_the_node_pool_and_resuming_asks_again(
 }
 
 #[gpui::test]
-fn stopping_a_run_drops_its_waiting_keys_so_the_next_waiter_is_granted(
-    cx: &mut TestAppContext,
-) {
+fn stopping_a_run_drops_its_waiting_keys_so_the_next_waiter_is_granted(cx: &mut TestAppContext) {
     for stop in ["halt", "cancel", "interrupt"] {
         let mut bench = Bench::new(cx, vec![pool("m", PoolKind::Mutex, 1)]);
         let holder = watch(cx, bench.project.broker.acquire(ask("x", &[need("m")])));
@@ -415,7 +414,11 @@ fn stopping_a_run_drops_its_waiting_keys_so_the_next_waiter_is_granted(
         drop(holder);
         cx.run_until_parked();
         let _next = lease(&next);
-        assert_eq!(bench.holders("m"), [("z".to_string(), Level::Job)], "{stop}");
+        assert_eq!(
+            bench.holders("m"),
+            [("z".to_string(), Level::Job)],
+            "{stop}"
+        );
         assert_eq!(bench.started(1, "work"), 0, "{stop}");
     }
 }
@@ -438,7 +441,11 @@ fn a_gate_in_one_branch_leaves_another_branchs_running_node_holding_its_pool(
     assert_eq!(bench.holders("m"), [(run_id(1), b.clone())]);
     bench.world.advance(cx, Duration::from_secs(5));
     bench.settle(cx);
-    assert_eq!(bench.holders("m"), [(run_id(1), b)], "the gate released nothing");
+    assert_eq!(
+        bench.holders("m"),
+        [(run_id(1), b)],
+        "the gate released nothing"
+    );
 }
 
 #[gpui::test]
@@ -544,7 +551,11 @@ fn a_deadlocking_request_fails_the_node_with_pool_refused(cx: &mut TestAppContex
     assert_eq!(failure.reason, FailureReason::PoolRefused);
     assert_eq!(failure.node, Some(key("third")));
     assert!(failure.detail.starts_with("would deadlock"), "{failure:?}");
-    assert_eq!(bench.started(1, "third"), 1, "recorded like a start failure");
+    assert_eq!(
+        bench.started(1, "third"),
+        1,
+        "recorded like a start failure"
+    );
     assert!(bench.runtime.state(&run_id(1)).unwrap().ended.is_some());
     // The run ended: its kept hold went, and y's step is granted.
     cx.run_until_parked();
@@ -590,8 +601,20 @@ fn an_undeclared_pool_fails_the_node(cx: &mut TestAppContext) {
 #[gpui::test]
 fn several_runs_ask_their_own_projects_brokers(cx: &mut TestAppContext) {
     let world = World::new();
-    let p = world.project(cx, "p", host(1), vec![pool("m", PoolKind::Mutex, 1)], vec![]);
-    let r = world.project(cx, "r", host(1), vec![pool("m", PoolKind::Mutex, 1)], vec![]);
+    let p = world.project(
+        cx,
+        "p",
+        host(1),
+        vec![pool("m", PoolKind::Mutex, 1)],
+        vec![],
+    );
+    let r = world.project(
+        cx,
+        "r",
+        host(1),
+        vec![pool("m", PoolKind::Mutex, 1)],
+        vec![],
+    );
     let brokers = PoolsForChecks::new();
     brokers.insert(p.broker.clone());
     brokers.insert(r.broker.clone());
@@ -644,7 +667,10 @@ fn several_runs_ask_their_own_projects_brokers(cx: &mut TestAppContext) {
             .count(),
         2
     );
-    assert_eq!(runtime.in_flight(&run_id(1)).len() + runtime.in_flight(&run_id(3)).len(), 1);
+    assert_eq!(
+        runtime.in_flight(&run_id(1)).len() + runtime.in_flight(&run_id(3)).len(),
+        1
+    );
 }
 
 #[test]
@@ -656,7 +682,12 @@ fn the_needs_validator_refuses_needs_while_pools_are_off() {
     let off = validate_node_needs(node);
     assert_eq!(off.len(), 1);
     assert_eq!(off[0].message, NEEDS_NOT_AVAILABLE);
-    assert_eq!(off, NodeNeeds::not_available(node).into_iter().collect::<Vec<_>>());
+    assert_eq!(
+        off,
+        NodeNeeds::not_available(node)
+            .into_iter()
+            .collect::<Vec<_>>()
+    );
 
     crate::ENABLED.store(true, std::sync::atomic::Ordering::SeqCst);
     let on = validate_node_needs(node);

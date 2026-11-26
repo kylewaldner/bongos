@@ -591,11 +591,7 @@ impl PoolBroker {
 
     /// Whether pool `pool` was declared with `hold_while_waiting`.
     pub fn holds_while_waiting(&self, pool: &str) -> bool {
-        self.shared
-            .state
-            .borrow()
-            .hold_while_waiting
-            .contains(pool)
+        self.shared.state.borrow().hold_while_waiting.contains(pool)
     }
 
     /// Queues the request; the wait resolves to the lease or to why it is never granted.
@@ -1651,7 +1647,9 @@ impl Shared {
         let pools: BTreeSet<&str> = holds.iter().map(|hold| hold.pool.as_str()).collect();
         let mut request = request.clone();
         request.id = id;
-        request.needs.retain(|need| pools.contains(need.pool.as_str()));
+        request
+            .needs
+            .retain(|need| pools.contains(need.pool.as_str()));
         request.holder.process = None;
         if let Some((level, label)) = &change {
             request.holder.path.level = level.clone();

@@ -1669,7 +1669,8 @@ impl<R: Runner> Runtime<R> {
         let ready: BTreeSet<NodeKey> = if self.draining || state.paused {
             BTreeSet::new()
         } else {
-            let plan = scheduler::plan(&self.runs[index].definition, state, &self.limits_for(index));
+            let plan =
+                scheduler::plan(&self.runs[index].definition, state, &self.limits_for(index));
             if plan.failure().is_some() {
                 BTreeSet::new()
             } else {

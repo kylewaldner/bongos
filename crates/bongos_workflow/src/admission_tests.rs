@@ -203,8 +203,15 @@ fn a_waiting_key_appends_nothing_and_starts_once_admitted() {
     let (mut runtime, scripted) = runtime(&temp, SINGLE, Limits::default());
     scripted.wait("work");
     runtime.tick();
-    assert_eq!(started(&runtime, "work"), 0, "no NodeStarted while it waits");
-    assert!(runtime.runner().started.is_empty(), "the runner was never asked");
+    assert_eq!(
+        started(&runtime, "work"),
+        0,
+        "no NodeStarted while it waits"
+    );
+    assert!(
+        runtime.runner().started.is_empty(),
+        "the runner was never asked"
+    );
     assert_eq!(runtime.sessions_in_flight(), 0);
     assert_eq!(waiting(&runtime), ["work"]);
     assert!(!runtime.is_queued(RUN), "parked: it holds no run slot");
@@ -299,7 +306,11 @@ fn halting_releases_and_resuming_asks_again() {
 
     scripted.go("work");
     runtime.tick();
-    assert_eq!(started(&runtime, "work"), 2, "the resume's try starts once admitted");
+    assert_eq!(
+        started(&runtime, "work"),
+        2,
+        "the resume's try starts once admitted"
+    );
     assert_eq!(runtime.in_flight(RUN), [key("work")]);
     assert_eq!(scripted.told(), ["started work"]);
 }
@@ -310,7 +321,10 @@ fn resuming_an_interrupted_run_waits_for_the_pool_then_starts() {
     let (mut runtime, scripted) = runtime(&temp, SINGLE, Limits::default());
     runtime.tick();
     assert!(runtime.interrupt_all());
-    assert_eq!(scripted.told(), ["started work", "finished work", "waiting"]);
+    assert_eq!(
+        scripted.told(),
+        ["started work", "finished work", "waiting"]
+    );
     scripted.wait("work");
     runtime.resume(RUN).unwrap();
     runtime.tick();
@@ -386,7 +400,9 @@ fn a_gate_in_one_branch_releases_nothing_of_another_branchs_running_node() {
     assert_eq!(runtime.in_flight(RUN), [item("b", 1)]);
     let told = scripted.told();
     assert!(
-        !told.iter().any(|call| call == "finished b" || call == "waiting"),
+        !told
+            .iter()
+            .any(|call| call == "finished b" || call == "waiting"),
         "{told:?}"
     );
 }
