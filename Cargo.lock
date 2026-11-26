@@ -2056,6 +2056,7 @@ dependencies = [
  "bongos_engine_host",
  "bongos_extensions",
  "bongos_inbox",
+ "bongos_inbox_model",
  "bongos_isearch",
  "bongos_java",
  "bongos_kotlin",

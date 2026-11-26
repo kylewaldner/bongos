@@ -283,6 +283,7 @@ workspace = { workspace = true, features = ["test-support"] }
 image.workspace = true
 agent_ui = { workspace = true, features = ["test-support"] }
 search = { workspace = true, features = ["test-support"] }
+bongos_inbox_model.workspace = true
 repl = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 

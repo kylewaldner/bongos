@@ -37,6 +37,12 @@ Each cell reads `Linux / macOS`. Every command is also in the command palette an
 | `chat::TogglePanel` (`c shift-p`) | `ctrl-c c shift-p` / `ctrl-c c shift-p` | `ctrl-k b c shift-p`, `space c shift-p` / `cmd-k b c shift-p`, `space c shift-p` | `ctrl-k b c shift-p` / `cmd-k b c shift-p` |
 | `chat::TogglePromptEditor` (`c p`) | `ctrl-c c p` / `ctrl-c c p` | `ctrl-k b c p`, `space c p` / `cmd-k b c p`, `space c p` | `ctrl-k b c p` / `cmd-k b c p` |
 
+## inbox
+
+| Command | Emacs | Vim | VS Code |
+| --- | --- | --- | --- |
+| `inbox::Open` (`i`) | `ctrl-c i` / `ctrl-c i` | `ctrl-k b i`, `space i` / `cmd-k b i`, `space i` | `ctrl-k b i` / `cmd-k b i` |
+
 ## lanes
 
 | Command | Emacs | Vim | VS Code |

@@ -237,9 +237,28 @@ async fn open_task_focuses_the_task_of_the_target(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn open_run_says_it_cannot_show_a_run_by_id_and_keeps_the_item_unread(
-    cx: &mut TestAppContext,
-) {
+async fn open_run_shows_the_run_by_its_id_and_marks_the_item_read(cx: &mut TestAppContext) {
+    let (env, mut win, _) = setup(cx).await;
+    let focused = Rc::new(RefCell::new(Vec::<String>::new()));
+    cx.update(|cx| {
+        let focused = focused.clone();
+        InboxActions::set_run_focus(
+            move |id, _, _, _| focused.borrow_mut().push(id.to_string()),
+            cx,
+        );
+    });
+    deliver_with(&env, "look", &["open-run"], Some("run:abc"), None, 5);
+    wait_unread(cx, &env, 1).await;
+    open_view(&mut win);
+
+    win.cx.dispatch_action(Accept);
+    win.cx.run_until_parked();
+    assert_eq!(*focused.borrow(), ["abc"]);
+    wait_unread(cx, &env, 0).await;
+}
+
+#[gpui::test]
+async fn open_run_without_a_hook_says_so_and_keeps_the_item_unread(cx: &mut TestAppContext) {
     let (env, mut win, _) = setup(cx).await;
     deliver_with(&env, "look", &["open-run"], Some("run:abc"), None, 5);
     wait_unread(cx, &env, 1).await;
@@ -248,10 +267,6 @@ async fn open_run_says_it_cannot_show_a_run_by_id_and_keeps_the_item_unread(
     win.cx.dispatch_action(Accept);
     win.cx.run_until_parked();
     assert_eq!(messages(&mut win), [actions::RUN_BY_ID_UNAVAILABLE]);
-    let unread = env
-        .inbox
-        .read_with(cx, |inbox, _| inbox.snapshot().unwrap().len());
-    assert_eq!(unread, 1, "the item stays");
     env.wait_unread(cx, 1).await;
 }
 
