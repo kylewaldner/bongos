@@ -24,6 +24,8 @@ perf-timing = { max-threads = 1 }
 #     best of three runs.
 #   bongos_navigation perf_tests: the first batch of find in files must arrive within 100 ms on a
 #     20,000-file project, best of three runs.
+#   bongos_inbox_model perf_tests: scanning 2,000 items in an inbox directory stays within a
+#     generous budget.
 #   bongos_workflow: stopping a process group that ignores SIGTERM must take at least the 2 s grace
 #     and less than 5 s; the gate test asserts a 1 s budget.
 # Wall-clock budgets flake on a loaded machine; the retry waits 1 s first (an immediate retry would
@@ -35,6 +37,7 @@ filter = '''
 | (package(=bongos_navigation) & test(perf_tests::))
 | (package(=bongos_isearch) & test(perf_tests::))
 | (package(=bongos_query_replace) & test(perf_tests::))
+| (package(=bongos_inbox_model) & test(perf_tests::))
 | (package(=bongos_workflow) & (test(=runtime_tests::halt_ends_a_child_that_ignores_sigterm_within_five_seconds) | test(=runtime_tests::cancel_stops_processes_and_closes_the_run) | test(=runtime_tests::stop_kills_a_child_left_in_the_group_when_the_leader_exits_on_sigterm) | test(=runtime_tests::an_orphan_group_is_killed_even_when_its_leader_exits_on_sigterm) | test(=lifecycle_tests::gates_tests::a_gate_shows_needs_you_on_the_leaf_and_every_ancestor_while_another_branch_runs)))
 '''
 test-group = "perf-timing"
@@ -80,6 +83,7 @@ not (
 | (package(=bongos_navigation) & test(perf_tests::))
 | (package(=bongos_isearch) & test(perf_tests::))
 | (package(=bongos_query_replace) & test(perf_tests::))
+| (package(=bongos_inbox_model) & test(perf_tests::))
 | (package(=bongos_workflow) & (test(=runtime_tests::halt_ends_a_child_that_ignores_sigterm_within_five_seconds) | test(=runtime_tests::cancel_stops_processes_and_closes_the_run) | test(=runtime_tests::stop_kills_a_child_left_in_the_group_when_the_leader_exits_on_sigterm) | test(=runtime_tests::an_orphan_group_is_killed_even_when_its_leader_exits_on_sigterm) | test(=lifecycle_tests::gates_tests::a_gate_shows_needs_you_on_the_leaf_and_every_ancestor_while_another_branch_runs)))
 )
 '''
@@ -100,6 +104,7 @@ default-filter = '''
 | (package(=bongos_navigation) & test(perf_tests::))
 | (package(=bongos_isearch) & test(perf_tests::))
 | (package(=bongos_query_replace) & test(perf_tests::))
+| (package(=bongos_inbox_model) & test(perf_tests::))
 | (package(=bongos_workflow) & (test(=runtime_tests::halt_ends_a_child_that_ignores_sigterm_within_five_seconds) | test(=runtime_tests::cancel_stops_processes_and_closes_the_run) | test(=runtime_tests::stop_kills_a_child_left_in_the_group_when_the_leader_exits_on_sigterm) | test(=runtime_tests::an_orphan_group_is_killed_even_when_its_leader_exits_on_sigterm) | test(=lifecycle_tests::gates_tests::a_gate_shows_needs_you_on_the_leaf_and_every_ancestor_while_another_branch_runs)))
 '''
 test-threads = 1
