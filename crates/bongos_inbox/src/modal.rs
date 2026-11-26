@@ -2,11 +2,13 @@
 //! than the window less 40 px), a 2 px accent line along its top edge, the elevated surface with
 //! the border outline, rounded corners and a shadow, over a dim scrim. `inbox: next` and
 //! `inbox: previous` (`n` and `p`) show the next or previous item, which is then read, passing
-//! over group rows; `inbox: dismiss` archives the item shown; Esc, or a click outside, closes it.
+//! over group rows; `inbox: dismiss` archives the item shown, `inbox: accept` (`a`) runs its first registered
+//! action and `inbox: open target` (`o`) opens its target; Esc, or a click outside, closes it.
 
+use crate::actions::ActionOutcome;
 use crate::item::{self, ItemDetail};
 use crate::view::InboxView;
-use crate::{Dismiss, Next, OpenFile, Previous};
+use crate::{Accept, Dismiss, Next, OpenFile, OpenTarget, Previous};
 use gpui::{
     App, BoxShadow, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
     IntoElement, MouseButton, Render, ScrollHandle, Subscription, Window, black, div, point, px,
@@ -98,8 +100,29 @@ impl Render for ItemModal {
             .on_action(cx.listener(|this, _: &Next, _, cx| this.step(1, cx)))
             .on_action(cx.listener(|this, _: &Previous, _, cx| this.step(-1, cx)))
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
+                // The next item shows from its top, as it does for `n` and `p`.
+                this.scroll.set_offset(point(px(0.), px(0.)));
                 this.view
                     .update(cx, |view, cx| view.dismiss_in_modal(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &Accept, window, cx| {
+                let outcome = this
+                    .view
+                    .update(cx, |view, cx| view.accept(true, window, cx));
+                match outcome {
+                    ActionOutcome::Archive => this.scroll.set_offset(point(px(0.), px(0.))),
+                    ActionOutcome::MarkRead => this.close(window, cx),
+                    ActionOutcome::Keep => {}
+                }
+            }))
+            .on_action(cx.listener(|this, _: &OpenTarget, window, cx| {
+                let outcome = this
+                    .view
+                    .update(cx, |view, cx| view.open_target(true, window, cx));
+                // The target opened under the modal: leave the view to it.
+                if outcome == ActionOutcome::MarkRead {
+                    this.close(window, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| {
                 this.view.update(cx, |view, cx| view.open_file(window, cx));
