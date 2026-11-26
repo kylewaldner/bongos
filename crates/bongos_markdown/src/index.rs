@@ -130,6 +130,49 @@ impl IndexState {
         self.mapped = Some((snapshot.version().clone(), mapped.clone()));
         mapped
     }
+
+    /// As [`Self::fresh`], but when the held index has to be mapped, only its elements that
+    /// intersect `ranges` (offsets of `snapshot`) are, so a keystroke in a large buffer costs what
+    /// the ranges hold. The result may hold more elements than the ranges touch, never fewer.
+    pub fn fresh_in(
+        &mut self,
+        snapshot: &text::BufferSnapshot,
+        ranges: &[Range<usize>],
+    ) -> Arc<MarkdownIndex> {
+        let Some(version) = &self.version else {
+            return self.parsed.clone();
+        };
+        if snapshot.version() == version {
+            return self.parsed.clone();
+        }
+        if let Some((mapped_version, mapped)) = &self.mapped
+            && mapped_version == snapshot.version()
+        {
+            return mapped.clone();
+        }
+        let edits: Vec<Edit<usize>> = snapshot.edits_since::<usize>(version).collect();
+        let back: Vec<Edit<usize>> = edits
+            .iter()
+            .map(|edit| Edit {
+                old: edit.new.clone(),
+                new: edit.old.clone(),
+            })
+            .collect();
+        // Each range in the parsed text's offsets, one byte wider on each side so an element
+        // that only touches it is kept.
+        let old: Vec<Range<usize>> = ranges
+            .iter()
+            .map(|range| {
+                map_offset(&back, range.start, false).saturating_sub(1)
+                    ..map_offset(&back, range.end, true) + 1
+            })
+            .collect();
+        Arc::new(self.parsed.map_offsets_in(
+            &old,
+            |offset| map_offset(&edits, offset, true),
+            |offset| map_offset(&edits, offset, false),
+        ))
+    }
 }
 
 /// Moves an offset of the old text through `edits` (sorted, as `edits_since` gives them). An

@@ -5,7 +5,9 @@
 //! while the newest selection's head is on a table row. In the live mode it sets the live
 //! typography (UI font, 16 px scaled by the buffer font zoom, line height 1.5, a bar cursor, no
 //! gutter) and refreshes the live layers; in source mode and on detach the editor gets back what
-//! it had and every layer is cleared.
+//! it had and every layer is cleared. A buffer over `markdown.live_view_max_file_size` starts in
+//! source mode, and the editor's window echoes [`LARGE_FILE`] when the setting asked for the live
+//! view.
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
@@ -15,10 +17,10 @@ use std::sync::Arc;
 use bongos_markdown_model::ElementKind;
 use bongos_markdown_model::MarkdownIndex;
 use collections::HashMap;
-use editor::{Addon, Editor, EditorEvent, ToOffset as _};
+use editor::{Addon, Editor, EditorEvent, MultiBufferOffset, ToOffset as _};
 use gpui::{
-    App, BorrowAppContext as _, Context, Entity, EntityId, Global, KeyContext, Pixels,
-    SharedString, TextStyleRefinement, px, relative,
+    AnyWindowHandle, App, BorrowAppContext as _, Context, Entity, EntityId, Global, KeyContext,
+    Pixels, SharedString, TextStyleRefinement, px, relative,
 };
 use language::Buffer;
 use settings::{Settings as _, SettingsStore};
@@ -42,6 +44,11 @@ pub const LIVE_FONT_SIZE: f32 = 16.0;
 
 /// The live line height, relative to the font size.
 pub const LIVE_LINE_HEIGHT: f32 = 1.5;
+
+/// What a markdown buffer over the size limit says when it opens in source mode although the
+/// setting asks for the live view.
+pub const LARGE_FILE: &str =
+    "Large markdown file: live view off (markdown: toggle live view turns it on)";
 
 /// How a markdown buffer is shown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,15 +111,20 @@ fn watch_release(buffer: &Entity<Buffer>, cx: &mut App) {
 }
 
 /// The mode a buffer starts in: live when the setting says so and the buffer is not over the
-/// size limit.
-fn initial_mode(buffer: &Entity<Buffer>, cx: &App) -> Mode {
+/// size limit. The flag is set when the size limit alone kept it in source.
+fn initial_mode(buffer: &Entity<Buffer>, cx: &App) -> (Mode, bool) {
     let settings = MarkdownSettings::get_global(cx);
-    let limit = settings.live_view_max_file_size;
-    let too_large = limit != 0 && buffer.read(cx).len() as u64 > limit;
-    if settings.live_view && !too_large {
-        Mode::Live
+    if !settings.live_view {
+        return (Mode::Source, false);
+    }
+    let too_large = bongos_markdown_model::over_live_view_limit(
+        buffer.read(cx).len(),
+        settings.live_view_max_file_size,
+    );
+    if too_large {
+        (Mode::Source, true)
     } else {
-        Mode::Source
+        (Mode::Live, false)
     }
 }
 
@@ -206,20 +218,32 @@ pub(crate) fn init(cx: &mut App) {
             return;
         }
         let this = cx.entity();
-        cx.subscribe(&this, |editor, _, event: &EditorEvent, cx| match event {
-            // Also emitted on a language change; the language is checked again.
-            EditorEvent::Reparsed(_) => refresh(editor, cx),
-            EditorEvent::BufferEdited => {
-                request_parse(editor, cx);
-                refresh_table_context(editor, cx);
-            }
-            EditorEvent::ScrollPositionChanged { .. } => refresh_layers(editor, false, cx),
-            EditorEvent::SelectionsChanged { .. } => {
-                refresh_layers(editor, false, cx);
-                refresh_table_context(editor, cx);
-            }
-            _ => {}
-        })
+        let handle = window.as_ref().map(|window| window.window_handle());
+        let refresh = move |editor: &mut Editor, cx: &mut Context<Editor>| {
+            refresh(editor, handle, cx);
+        };
+        cx.subscribe(
+            &this,
+            move |editor, _, event: &EditorEvent, cx| match event {
+                // Also emitted on a language change, and after every edit's syntax parse: only a
+                // change of whether the addon belongs here needs a refresh, which is a forced one.
+                EditorEvent::Reparsed(_) => {
+                    if wants_addon(editor, cx) != is_attached(editor) {
+                        refresh(editor, cx);
+                    }
+                }
+                EditorEvent::BufferEdited => {
+                    request_parse(editor, cx);
+                    refresh_table_context(editor, cx);
+                }
+                EditorEvent::ScrollPositionChanged { .. } => refresh_layers(editor, false, cx),
+                EditorEvent::SelectionsChanged { .. } => {
+                    refresh_layers(editor, false, cx);
+                    refresh_table_context(editor, cx);
+                }
+                _ => {}
+            },
+        )
         .detach();
         if let Some(window) = window {
             // A resize changes the screen height, which the editor learns at its next layout.
@@ -249,23 +273,37 @@ fn wants_addon(editor: &Editor, cx: &App) -> bool {
 }
 
 /// Attaches or detaches the addon to match the buffer's language, then brings the typography in
-/// line with the buffer's mode.
-fn refresh(editor: &mut Editor, cx: &mut Context<Editor>) {
+/// line with the buffer's mode. `window` is the editor's window, where the size limit echoes.
+pub(crate) fn refresh(
+    editor: &mut Editor,
+    window: Option<AnyWindowHandle>,
+    cx: &mut Context<Editor>,
+) {
     match (wants_addon(editor, cx), is_attached(editor)) {
-        (true, false) => attach(editor, cx),
+        (true, false) => attach(editor, window, cx),
         (false, true) => detach(editor, cx),
         _ => {}
     }
     apply(editor, cx);
 }
 
-fn attach(editor: &mut Editor, cx: &mut Context<Editor>) {
+fn attach(editor: &mut Editor, window: Option<AnyWindowHandle>, cx: &mut Context<Editor>) {
     let Some(buffer) = editor.buffer().read(cx).as_singleton() else {
         return;
     };
     if mode_for_buffer(&buffer, cx).is_none() {
-        let mode = initial_mode(&buffer, cx);
+        let (mode, too_large) = initial_mode(&buffer, cx);
         set_mode(&buffer, mode, cx);
+        if too_large && let Some(window) = window {
+            // The editor is being updated inside its window, which cannot be updated again here.
+            cx.defer(move |cx| {
+                window
+                    .update(cx, |_, window, cx| {
+                        bongos_minibuffer::message(window, cx, LARGE_FILE)
+                    })
+                    .ok();
+            });
+        }
     }
     editor.register_addon(MarkdownAddon::default());
     cx.notify();
@@ -334,7 +372,8 @@ fn parsed(
 
 /// Whether the newest selection's head of `editor` is on a row of a table, by the fresh index.
 fn head_on_table_row(editor: &Editor, cx: &App) -> bool {
-    let Some(index) = fresh_index(editor, cx) else {
+    let (Some(live), Some(buffer)) = (live_of(editor), editor.buffer().read(cx).as_singleton())
+    else {
         return false;
     };
     let snapshot = editor.buffer().read(cx).snapshot(cx);
@@ -344,12 +383,16 @@ fn head_on_table_row(editor: &Editor, cx: &App) -> bool {
         .head()
         .to_offset(&snapshot)
         .0;
-    index.elements().iter().any(|element| match &element.kind {
-        ElementKind::Table { rows } => rows
-            .iter()
-            .any(|row| row.range.start <= head && head <= row.range.end),
-        _ => false,
-    })
+    let text = buffer.read(cx).text_snapshot();
+    let index = live.borrow_mut().index.fresh_in(&text, &[head..head]);
+    index
+        .elements_in(head..head)
+        .any(|element| match &element.kind {
+            ElementKind::Table { rows } => rows
+                .iter()
+                .any(|row| row.range.start <= head && head <= row.range.end),
+            _ => false,
+        })
 }
 
 /// Brings the table key context in line with where the newest selection's head is.
@@ -378,9 +421,21 @@ pub(crate) fn refresh_layers(editor: &mut Editor, force: bool, cx: &mut Context<
     };
     let snapshot = buffer.read(cx).snapshot();
     let window = layers::window(editor, cx);
+    // The layers read the index over the window and the selections only.
+    let mut near = vec![window.clone()];
+    {
+        let display = editor.display_snapshot(cx);
+        near.extend(
+            editor
+                .selections
+                .all::<MultiBufferOffset>(&display)
+                .iter()
+                .map(|selection| selection.start.0..selection.end.0),
+        );
+    }
     let (index, generation, mut list) = {
         let mut live = live.borrow_mut();
-        let index = live.index.fresh(&snapshot);
+        let index = live.index.fresh_in(&snapshot, &near);
         (
             index,
             live.index.generation(),

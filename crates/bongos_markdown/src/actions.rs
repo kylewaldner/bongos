@@ -1,6 +1,6 @@
 //! The `markdown` actions, hidden from the command palette for now ([`COMMANDS_VISIBLE`]), their
 //! prefix argument meanings and their workspace handlers. The block actions act on the active
-//! markdown editor (see `commands`); the live view toggle only says it is not available yet. No
+//! markdown editor (see `commands`), and the live view toggle on its buffer (see `toggle`). No
 //! key is bound to any of them.
 
 use std::any::TypeId;
@@ -37,9 +37,6 @@ pub mod markdown {
 
 /// Whether the markdown commands show in the command palette.
 pub const COMMANDS_VISIBLE: bool = false;
-
-/// What the live view toggle says while it does nothing yet.
-const NOT_AVAILABLE: &str = "Not available yet";
 
 /// Every `markdown` action of this crate, for hiding them from the command palette.
 pub fn action_types() -> Vec<TypeId> {
@@ -90,8 +87,6 @@ pub(crate) fn init(cx: &mut App) {
 
 /// Registers the handlers of the `markdown` actions on `workspace`.
 pub fn register(workspace: &mut Workspace) {
-    workspace.register_action(|_, _: &markdown::ToggleLiveView, window, cx| {
-        bongos_minibuffer::message(window, cx, NOT_AVAILABLE);
-    });
+    crate::toggle::register(workspace);
     crate::commands::register(workspace);
 }

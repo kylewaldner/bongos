@@ -585,8 +585,6 @@ impl Builder<'_> {
                 .cmp(&b.range.start)
                 .then(b.range.end.cmp(&a.range.end))
         });
-        MarkdownIndex {
-            elements: self.elements,
-        }
+        MarkdownIndex::from_sorted(self.elements)
     }
 }

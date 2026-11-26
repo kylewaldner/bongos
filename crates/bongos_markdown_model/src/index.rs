@@ -69,26 +69,50 @@ pub struct Element {
 /// Elements sorted by range start (outer before inner on ties).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MarkdownIndex {
-    pub(crate) elements: Vec<Element>,
+    elements: Vec<Element>,
+    /// The largest range end among the elements up to each one, so a lookup skips every element
+    /// that ends before it with a binary search instead of a walk from the start.
+    max_end: Vec<usize>,
 }
 
 impl MarkdownIndex {
+    /// An index of `elements`, which must be sorted by range start.
+    pub(crate) fn from_sorted(elements: Vec<Element>) -> Self {
+        let mut max_end = Vec::with_capacity(elements.len());
+        let mut largest = 0;
+        for element in &elements {
+            largest = largest.max(element.range.end);
+            max_end.push(largest);
+        }
+        Self { elements, max_end }
+    }
+
     pub fn elements(&self) -> &[Element] {
         &self.elements
     }
 
+    /// The position of the first element that may end at or after `offset`; every element before
+    /// it ends before `offset`.
+    fn first_ending_at_or_after(&self, offset: usize) -> usize {
+        self.max_end.partition_point(|end| *end < offset)
+    }
+
     /// Elements whose range intersects `range`.
     pub fn elements_in(&self, range: Range<usize>) -> impl Iterator<Item = &Element> {
-        self.elements
+        let first = self.first_ending_at_or_after(range.start);
+        self.elements[first..]
             .iter()
             .take_while(move |element| element.range.start <= range.end)
-            .filter(move |element| {
-                if range.is_empty() {
-                    element.range.start <= range.start && range.start <= element.range.end
-                } else {
-                    element.range.start < range.end && element.range.end > range.start
-                }
-            })
+            .filter(move |element| intersects(element, &range))
+    }
+
+    /// Elements whose range, ends included, meets `range`, ends included.
+    pub fn elements_touching(&self, range: Range<usize>) -> impl Iterator<Item = &Element> {
+        let first = self.first_ending_at_or_after(range.start);
+        self.elements[first..]
+            .iter()
+            .take_while(move |element| element.range.start <= range.end)
+            .filter(move |element| element.range.end >= range.start)
     }
 
     /// The same index with every offset moved: each range's start through `start` and its end
@@ -99,48 +123,34 @@ impl MarkdownIndex {
         start: impl Fn(usize) -> usize,
         end: impl Fn(usize) -> usize,
     ) -> MarkdownIndex {
-        let range = |range: &Range<usize>| {
-            let new_start = start(range.start);
-            new_start..end(range.end).max(new_start)
-        };
-        let elements = self
-            .elements
-            .iter()
-            .map(|element| {
-                let kind = match &element.kind {
-                    ElementKind::ListItem { marker, task } => ElementKind::ListItem {
-                        marker: range(marker),
-                        task: *task,
-                    },
-                    ElementKind::CodeBlock { fences, lang } => ElementKind::CodeBlock {
-                        fences: CodeFences {
-                            open: range(&fences.open),
-                            close: fences.close.as_ref().map(&range),
-                        },
-                        lang: lang.clone(),
-                    },
-                    ElementKind::Table { rows } => ElementKind::Table {
-                        rows: rows
-                            .iter()
-                            .map(|row| TableRow {
-                                range: range(&row.range),
-                                cells: row.cells.iter().map(&range).collect(),
-                                is_header: row.is_header,
-                                is_delimiter: row.is_delimiter,
-                            })
-                            .collect(),
-                    },
-                    kind => kind.clone(),
-                };
-                Element {
-                    kind,
-                    range: range(&element.range),
-                    markup: element.markup.iter().map(&range).collect(),
-                    line_level: element.line_level,
-                }
-            })
-            .collect();
-        MarkdownIndex { elements }
+        map_elements(self.elements.iter(), start, end)
+    }
+
+    /// As [`Self::map_offsets`], keeping only the elements that intersect one of `ranges` (as
+    /// [`Self::elements_in`] tells), so the cost follows what the ranges hold rather than the
+    /// size of the whole index.
+    pub fn map_offsets_in(
+        &self,
+        ranges: &[Range<usize>],
+        start: impl Fn(usize) -> usize,
+        end: impl Fn(usize) -> usize,
+    ) -> MarkdownIndex {
+        let mut picked: Vec<usize> = Vec::new();
+        for range in ranges {
+            let first = self.first_ending_at_or_after(range.start);
+            picked.extend(
+                self.elements
+                    .iter()
+                    .enumerate()
+                    .skip(first)
+                    .take_while(|(_, element)| element.range.start <= range.end)
+                    .filter(|(_, element)| intersects(element, range))
+                    .map(|(i, _)| i),
+            );
+        }
+        picked.sort_unstable();
+        picked.dedup();
+        map_elements(picked.into_iter().map(|i| &self.elements[i]), start, end)
     }
 
     /// The innermost element whose range contains `offset`, ends inclusive.
@@ -163,4 +173,59 @@ impl MarkdownIndex {
         }
         best
     }
+}
+
+fn intersects(element: &Element, range: &Range<usize>) -> bool {
+    if range.is_empty() {
+        element.range.start <= range.start && range.start <= element.range.end
+    } else {
+        element.range.start < range.end && element.range.end > range.start
+    }
+}
+
+fn map_elements<'a>(
+    elements: impl Iterator<Item = &'a Element>,
+    start: impl Fn(usize) -> usize,
+    end: impl Fn(usize) -> usize,
+) -> MarkdownIndex {
+    let range = |range: &Range<usize>| {
+        let new_start = start(range.start);
+        new_start..end(range.end).max(new_start)
+    };
+    let elements = elements
+        .map(|element| {
+            let kind = match &element.kind {
+                ElementKind::ListItem { marker, task } => ElementKind::ListItem {
+                    marker: range(marker),
+                    task: *task,
+                },
+                ElementKind::CodeBlock { fences, lang } => ElementKind::CodeBlock {
+                    fences: CodeFences {
+                        open: range(&fences.open),
+                        close: fences.close.as_ref().map(&range),
+                    },
+                    lang: lang.clone(),
+                },
+                ElementKind::Table { rows } => ElementKind::Table {
+                    rows: rows
+                        .iter()
+                        .map(|row| TableRow {
+                            range: range(&row.range),
+                            cells: row.cells.iter().map(&range).collect(),
+                            is_header: row.is_header,
+                            is_delimiter: row.is_delimiter,
+                        })
+                        .collect(),
+                },
+                kind => kind.clone(),
+            };
+            Element {
+                kind,
+                range: range(&element.range),
+                markup: element.markup.iter().map(&range).collect(),
+                line_level: element.line_level,
+            }
+        })
+        .collect();
+    MarkdownIndex::from_sorted(elements)
 }
