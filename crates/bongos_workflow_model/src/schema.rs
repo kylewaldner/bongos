@@ -89,7 +89,82 @@ fn field_schema(field_type: &FieldType) -> Value {
         FieldType::Number => json!({ "type": "number" }),
         FieldType::List(item) => json!({ "type": "array", "items": item_schema(*item) }),
         FieldType::Data => json!({}),
+        FieldType::GraphEdits => graph_edits_schema(),
     }
+}
+
+/// The schema of a `graph_edits` field: `{ "project"?, "ops": [op] }` where `op` is one of the
+/// graph operations.
+fn graph_edits_schema() -> Value {
+    let text = json!({ "type": "string", "minLength": 1 });
+    let texts = json!({ "type": "array", "items": { "type": "string" } });
+    let kind = json!({ "type": "string", "enum": ["after", "stacked_on"] });
+    let op = |name: &str, properties: Value, required: &[&str]| {
+        let mut properties = properties.as_object().cloned().unwrap_or_default();
+        properties.insert("op".to_string(), json!({ "const": name }));
+        let mut required = required.to_vec();
+        required.push("op");
+        json!({
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": false,
+        })
+    };
+    json!({
+        "type": "object",
+        "properties": {
+            "project": { "type": "string" },
+            "ops": {
+                "type": "array",
+                "items": { "oneOf": [
+                    op("create", json!({
+                        "ref": text,
+                        "parent": text,
+                        "goal": text,
+                        "work_kind": { "type": "string" },
+                        "areas": texts,
+                        "size": { "type": "integer", "minimum": 0 },
+                        "repositories": texts,
+                        "todos": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": { "type": "string" },
+                                    "workflow": { "type": "string" },
+                                },
+                                "required": ["name"],
+                                "additionalProperties": false,
+                            },
+                        },
+                    }), &["parent", "goal"]),
+                    op("set", json!({
+                        "task": text,
+                        "goal": text,
+                        "work_kind": { "type": "string" },
+                        "size": { "type": "integer", "minimum": 0 },
+                        "areas": texts,
+                    }), &["task"]),
+                    op("move", json!({ "task": text, "parent": text }), &["task", "parent"]),
+                    op("remove", json!({ "task": text }), &["task"]),
+                    op("add_edge", json!({
+                        "from": text,
+                        "to": text,
+                        "kind": kind,
+                        "unblock": { "type": "string" },
+                    }), &["from", "to", "kind"]),
+                    op("remove_edge", json!({
+                        "from": text,
+                        "to": text,
+                        "kind": kind,
+                    }), &["from", "to", "kind"]),
+                ] },
+            },
+        },
+        "required": ["ops"],
+        "additionalProperties": false,
+    })
 }
 
 fn item_schema(item: ItemType) -> Value {
@@ -232,7 +307,7 @@ fn typed(field_type: &FieldType, value: &Value, path: &str) -> Result<TypedValue
         FieldType::Text => item(ItemType::Text, value, path),
         FieldType::Path => item(ItemType::Path, value, path),
         FieldType::Number => item(ItemType::Number, value, path),
-        FieldType::Data => Ok(TypedValue::Data(value.clone())),
+        FieldType::Data | FieldType::GraphEdits => Ok(TypedValue::Data(value.clone())),
         FieldType::List(item_type) => {
             let Value::Array(items) = value else {
                 return Err(wrong("a list"));

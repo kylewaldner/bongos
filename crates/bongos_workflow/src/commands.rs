@@ -624,7 +624,9 @@ pub(crate) fn parse_field(field_type: &FieldType, text: &str) -> Result<Value, S
             Ok(Value::String(text.to_string()))
         }
         FieldType::Number => parse_number(text).map(Value::Number),
-        FieldType::Data => Err("this field cannot be edited here".to_string()),
+        FieldType::Data | FieldType::GraphEdits => {
+            Err("this field cannot be edited here".to_string())
+        }
         FieldType::List(item) => text
             .split(',')
             .map(str::trim)

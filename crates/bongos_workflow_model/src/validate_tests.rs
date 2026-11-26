@@ -1312,3 +1312,29 @@ fn a_route_on_a_schema_data_field_is_refused() {
         "{diagnostics:?}"
     );
 }
+
+#[test]
+fn graph_edits_output_needs_a_declaration() {
+    let field = "output = { edits = { type = \"graph_edits\" } }";
+    let text = mutate(
+        IMPLEMENT_ROUTES,
+        &format!("{field}\nroutes = [{{ to = \"test\" }}]"),
+    );
+    assert_error(
+        &text,
+        Some("implement_item"),
+        "edits = { type = \"graph_edits\" }",
+        "output edits is graph_edits but the workflow declares no graph edits",
+    );
+
+    let declared = format!("{text}\n[graph_edits]\nscope = \"own-subtree\"\n");
+    assert_no_errors(&declared);
+
+    let none = format!("{text}\n[graph_edits]\nscope = \"none\"\n");
+    assert_error(
+        &none,
+        Some("implement_item"),
+        "edits = { type = \"graph_edits\" }",
+        "declares no graph edits",
+    );
+}

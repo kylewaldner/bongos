@@ -27,6 +27,7 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "defaults",
     "nodes",
     "ends",
+    "graph_edits",
 ];
 const NODE_KEYS: &[&str] = &[
     "kind",
@@ -117,6 +118,87 @@ pub struct Definition {
     pub nodes: Vec<Node>,
     pub ends: Vec<End>,
     pub unknown_keys: Vec<UnknownKey>,
+    /// The `[graph_edits]` table; `None` when absent, which means [`Scope::None`].
+    pub graph_edits: Option<GraphEditsDecl>,
+}
+
+/// Which tasks a workflow's graph edits may touch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// No graph edits (the default).
+    None,
+    /// The run's task and its descendants.
+    OwnSubtree,
+    /// Every task of the run's project.
+    OwnProject,
+    /// Exactly the projects listed in `projects`.
+    Projects,
+}
+
+impl Scope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Scope::None => "none",
+            Scope::OwnSubtree => "own-subtree",
+            Scope::OwnProject => "own-project",
+            Scope::Projects => "projects",
+        }
+    }
+}
+
+/// When a node's graph edits land.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LandAt {
+    /// At the end of each node (the default).
+    Step,
+    /// Once, when the run reaches a success end.
+    RunEnd,
+}
+
+impl LandAt {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LandAt::Step => "step",
+            LandAt::RunEnd => "run-end",
+        }
+    }
+}
+
+/// The parsed `[graph_edits]` table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphEditsDecl {
+    /// The line of the `[graph_edits]` header.
+    pub line: usize,
+    pub scope: Located<Scope>,
+    pub projects: Vec<Located<String>>,
+    pub land_at: LandAt,
+}
+
+impl GraphEditsDecl {
+    /// The sha256 (lowercase hex) of the table's canonical text, which does not depend on
+    /// spacing, comments or key order in the file.
+    pub fn digest(&self) -> String {
+        use sha2::{Digest, Sha256};
+        use std::fmt::Write;
+
+        let mut text = format!("[graph_edits]\nscope = {:?}\n", self.scope.value.as_str());
+        if !self.projects.is_empty() {
+            let projects = self
+                .projects
+                .iter()
+                .map(|project| format!("{:?}", project.value))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(text, "projects = [{projects}]");
+        }
+        let _ = writeln!(text, "land_at = {:?}", self.land_at.as_str());
+        Sha256::digest(text.as_bytes())
+            .iter()
+            .fold(String::new(), |mut hex, byte| {
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            })
+    }
 }
 
 impl Definition {
@@ -334,6 +416,9 @@ pub enum FieldType {
     /// Any other value of a file schema, kept as JSON in `result.json`: never routable, never an
     /// outcome and not editable. It cannot be declared in `output`.
     Data,
+    /// A batch of graph operations (`{ "project"?, "ops": [...] }`), kept as JSON. It is never
+    /// routable, an outcome or editable.
+    GraphEdits,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -419,6 +504,18 @@ struct RawDefinition {
     nodes: HashMap<String, Spanned<RawNode>>,
     #[serde(default)]
     ends: HashMap<String, Spanned<RawEnd>>,
+    #[serde(default)]
+    graph_edits: Option<Spanned<RawGraphEdits>>,
+}
+
+#[derive(Deserialize)]
+struct RawGraphEdits {
+    #[serde(default)]
+    scope: Option<Spanned<String>>,
+    #[serde(default)]
+    projects: Option<Vec<Spanned<String>>>,
+    #[serde(default)]
+    land_at: Option<Spanned<String>>,
 }
 
 #[derive(Deserialize)]
@@ -546,6 +643,8 @@ struct RawField {
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum RawFieldType {
+    #[serde(rename = "graph_edits")]
+    GraphEdits,
     Choice,
     Text,
     Path,
@@ -681,6 +780,11 @@ pub fn parse(text: &str) -> Result<Definition, ParseError> {
         instances = Some(1);
     }
 
+    let graph_edits = raw
+        .graph_edits
+        .map(|decl| convert_graph_edits(decl, &lines))
+        .transpose()?;
+
     Ok(Definition {
         schema: *raw.schema.get_ref(),
         name: raw.name,
@@ -694,6 +798,90 @@ pub fn parse(text: &str) -> Result<Definition, ParseError> {
         nodes: nodes.into_iter().map(|(_, node)| node).collect(),
         ends: ends.into_iter().map(|(_, end)| end).collect(),
         unknown_keys,
+        graph_edits,
+    })
+}
+
+fn convert_graph_edits(
+    decl: Spanned<RawGraphEdits>,
+    lines: &LineIndex,
+) -> Result<GraphEditsDecl, ParseError> {
+    let line = lines.line_of(&decl);
+    let raw = decl.into_inner();
+    let scope = match raw.scope {
+        None => Located {
+            value: Scope::None,
+            line,
+        },
+        Some(scope) => {
+            let scope = located(scope, lines);
+            let value = match scope.value.as_str() {
+                "none" => Scope::None,
+                "own-subtree" => Scope::OwnSubtree,
+                "own-project" => Scope::OwnProject,
+                "projects" => Scope::Projects,
+                other => {
+                    return Err(ParseError {
+                        line: scope.line,
+                        message: format!(
+                            "unknown graph_edits scope '{other}'; use none, own-subtree, \
+                             own-project or projects"
+                        ),
+                    });
+                }
+            };
+            Located {
+                value,
+                line: scope.line,
+            }
+        }
+    };
+    let land_at = match raw.land_at {
+        None => LandAt::Step,
+        Some(land_at) => {
+            let land_at = located(land_at, lines);
+            match land_at.value.as_str() {
+                "step" => LandAt::Step,
+                "run-end" => LandAt::RunEnd,
+                other => {
+                    return Err(ParseError {
+                        line: land_at.line,
+                        message: format!(
+                            "unknown graph_edits land_at '{other}'; use step or run-end"
+                        ),
+                    });
+                }
+            }
+        }
+    };
+    let projects_written = raw.projects.is_some();
+    let projects = raw
+        .projects
+        .unwrap_or_default()
+        .into_iter()
+        .map(|project| located(project, lines))
+        .collect::<Vec<_>>();
+    if projects_written && scope.value != Scope::Projects {
+        return Err(ParseError {
+            line: projects.first().map_or(line, |project| project.line),
+            message: format!(
+                "graph_edits `projects` needs scope = \"projects\", not \"{}\"",
+                scope.value.as_str()
+            ),
+        });
+    }
+    if scope.value == Scope::Projects && projects.is_empty() {
+        return Err(ParseError {
+            line: scope.line,
+            message: "graph_edits scope = \"projects\" needs a non-empty `projects` list"
+                .to_string(),
+        });
+    }
+    Ok(GraphEditsDecl {
+        line,
+        scope,
+        projects,
+        land_at,
     })
 }
 
@@ -831,6 +1019,7 @@ fn convert_field(
         RawFieldType::Text => FieldType::Text,
         RawFieldType::Path => FieldType::Path,
         RawFieldType::Number => FieldType::Number,
+        RawFieldType::GraphEdits => FieldType::GraphEdits,
         RawFieldType::List => match spec.of {
             Some(item) => FieldType::List(item),
             None => {

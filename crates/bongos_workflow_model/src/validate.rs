@@ -12,7 +12,7 @@ use std::path::{Component, Path};
 
 use crate::definition::{
     AgentKind, CHECKS_PROGRAM, Definition, EndKind, FieldType, NO_VERDICT, Node, NodeKind, Outcome,
-    OutputField, Route, Target, checks_output,
+    OutputField, Route, Scope, Target, checks_output,
 };
 
 /// The program nodes bongos ships, named by `use`.
@@ -426,6 +426,23 @@ impl<'a> Validator<'a> {
         }
 
         for field in &node.output {
+            if field.field_type == FieldType::GraphEdits
+                && self
+                    .definition
+                    .graph_edits
+                    .as_ref()
+                    .is_none_or(|decl| decl.scope.value == Scope::None)
+            {
+                self.error(
+                    Some(name),
+                    field.line,
+                    format!(
+                        "node {name}: output {} is graph_edits but the workflow declares no \
+                         graph edits",
+                        field.name
+                    ),
+                );
+            }
             if let FieldType::Choice(values) = &field.field_type {
                 let mut seen = HashSet::new();
                 for value in values {
@@ -1060,7 +1077,7 @@ impl<'a> Validator<'a> {
                         line,
                         format!("route on list field '{}'", condition.field),
                     ),
-                    FieldType::Data => self.error(
+                    FieldType::Data | FieldType::GraphEdits => self.error(
                         Some(name),
                         line,
                         format!("route on data field '{}'", condition.field),

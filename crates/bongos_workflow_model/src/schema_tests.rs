@@ -615,3 +615,49 @@ fn the_generated_document_and_the_strict_schema_derived_from_it_are_unchanged() 
         })
     );
 }
+
+fn graph_edits_schema_of_field() -> OutputSchema {
+    schema_of(&output("{ edits = { type = \"graph_edits\" } }"))
+}
+
+#[test]
+fn graph_edits_field_accepts_every_operation() {
+    let schema = graph_edits_schema_of_field();
+    let ops = json!([
+        { "op": "create", "ref": "a", "parent": "t1", "goal": "do it", "work_kind": "step",
+          "areas": ["search"], "size": 2, "repositories": ["app"],
+          "todos": [{ "name": "first", "workflow": "implement" }] },
+        { "op": "set", "task": "@a", "goal": "renamed", "work_kind": "step", "size": 3,
+          "areas": ["ui"] },
+        { "op": "move", "task": "t2", "parent": "@a" },
+        { "op": "remove", "task": "t3" },
+        { "op": "add_edge", "from": "@a", "to": "t4", "kind": "after", "unblock": "merged" },
+        { "op": "add_edge", "from": "t4", "to": "t5", "kind": "stacked_on" },
+        { "op": "remove_edge", "from": "@a", "to": "t4", "kind": "after" },
+    ]);
+    check(
+        &schema,
+        &json!({ "edits": { "project": "website", "ops": ops } }),
+    )
+    .unwrap();
+    check(&schema, &json!({ "edits": { "ops": [] } })).unwrap();
+}
+
+#[test]
+fn graph_edits_field_rejects_unknown_operations() {
+    let schema = graph_edits_schema_of_field();
+    for bad in [
+        json!({ "op": "teleport", "task": "t1" }),
+        json!({ "op": "remove" }),
+        json!({ "op": "remove", "task": "t1", "force": true }),
+        json!({ "op": "add_edge", "from": "a", "to": "b", "kind": "before" }),
+        json!({ "op": "create", "parent": "t1" }),
+    ] {
+        assert!(
+            check(&schema, &json!({ "edits": { "ops": [bad.clone()] } })).is_err(),
+            "{bad} must be refused"
+        );
+    }
+    assert!(check(&schema, &json!({ "edits": { "project": "w" } })).is_err());
+    assert!(check(&schema, &json!({ "edits": "none" })).is_err());
+}
