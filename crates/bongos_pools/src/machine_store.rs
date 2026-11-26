@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
-use bongos_pools_model::{GuardState, Hold, PoolKind, PoolState, PoolTable, Waiter};
+use bongos_pools_model::{GuardState, Hold, PoolKind, PoolState, PoolTable, WaitEdge, Waiter};
 use bongos_work_model::files::write_atomic;
 use gpui::{BackgroundExecutor, Task};
 use serde::{Deserialize, Serialize};
@@ -180,6 +180,9 @@ struct DiskFile {
     next_ticket: u64,
     #[serde(default)]
     pools: BTreeMap<String, DiskPool>,
+    /// The project side of the wait-for graph of each `mixed` waiter (D6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    edges: Vec<WaitEdge>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -212,6 +215,7 @@ impl MachineFile {
             table: PoolTable {
                 pools: BTreeMap::new(),
                 next_ticket: disk.next_ticket,
+                edges: disk.edges,
             },
             meta: BTreeMap::new(),
         };
@@ -263,6 +267,7 @@ impl MachineFile {
             generation: self.generation,
             next_ticket: self.table.next_ticket,
             pools,
+            edges: self.table.edges.clone(),
         })
         .context("writing machine.toml")
     }
@@ -376,6 +381,7 @@ impl MachineStore {
         let pruned = self.context.prune(&mut file.table);
         let value = f(&mut file)?;
         let grants = self.context.grant(&mut file.table, is_mixed);
+        file.table.drop_stale_edges();
         file.generation += 1;
         self.write_file(&lock, &file)?;
         drop(lock);

@@ -36,7 +36,7 @@ pub use schedule::{
 };
 pub use source::{Diagnostic, Located, ParseError, SCHEMA_VERSION};
 pub use validate::{Problem, validate_pools, validate_queues, validate_triggers};
-pub use wait_for::{CycleLink, Refused, judge, would_cycle};
+pub use wait_for::{CycleLink, EdgeEnd, Refused, WaitEdge, judge, project_side_edges, would_cycle};
 
 #[cfg(test)]
 mod decl_tests;

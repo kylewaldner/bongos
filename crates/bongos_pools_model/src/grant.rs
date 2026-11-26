@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::decl::{GuardCheck, PoolKind};
 use crate::holder::{Holder, HostRef};
 use crate::needs::{Need, NeedMode};
-use crate::wait_for::Refused;
+use crate::wait_for::{Refused, WaitEdge};
 
 /// Milliseconds since the Unix epoch, as given by the caller.
 #[derive(
@@ -56,11 +56,14 @@ pub struct Request {
     pub needs: Vec<Need>,
 }
 
-/// One store's pools and its ticket counter.
+/// One store's pools and its ticket counter. The machine table also carries the project side of
+/// the wait-for graph of every `mixed` waiter, as its owning host last wrote it.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct PoolTable {
     pub pools: BTreeMap<String, PoolState>,
     pub next_ticket: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<WaitEdge>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -406,6 +409,23 @@ impl PoolTable {
         let pool = self.pools.get_mut(pool)?;
         let index = pool.holds.iter().position(|hold| hold.ticket == ticket)?;
         Some(pool.holds.remove(index))
+    }
+
+    /// Whether the request of `host` has a waiter in this table.
+    pub fn is_waiting(&self, host: &HostRef, request: RequestId) -> bool {
+        self.pools
+            .values()
+            .flat_map(|pool| &pool.waiters)
+            .any(|waiter| waiter.request == request && waiter.holder.host == *host)
+    }
+
+    /// Drops the wait-for edges whose mixed request no longer waits here.
+    pub fn drop_stale_edges(&mut self) {
+        let edges = std::mem::take(&mut self.edges);
+        self.edges = edges
+            .into_iter()
+            .filter(|edge| self.is_waiting(&edge.owner_host, edge.owner))
+            .collect();
     }
 
     /// Records fresh readings as each pool's last reading, where they are newer.

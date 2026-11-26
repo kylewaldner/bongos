@@ -1,13 +1,14 @@
 use std::path::Path;
 use std::time::Duration;
 
+use bongos_checks::CheckPoolsRegistry;
 use bongos_lanes::{LaneTableFields, validate_folder_accepting};
 use gpui::{BorrowAppContext as _, TestAppContext};
 use settings::{Settings as _, SettingsStore};
 
 use crate::{
     HooksSettings, LANE_TABLE_KEYS, PoolsSettings, QueuesSettings, TriggersSettings, is_registered,
-    validate_pools_folder, validate_queues_folder, validate_triggers_folder,
+    pools_for_checks, validate_pools_folder, validate_queues_folder, validate_triggers_folder,
     workflow_reference_diagnostics,
 };
 
@@ -80,7 +81,14 @@ const PULLS_TABLE: &str = "schema = 1\n\n[[kind]]\nname = \"build\"\npulls = [{ 
 #[gpui::test]
 fn nothing_is_registered_or_judged_while_disabled(cx: &mut TestAppContext) {
     use_default_settings(cx);
-    cx.update(|cx| assert!(!is_registered(cx)));
+    cx.update(|cx| {
+        assert!(!is_registered(cx));
+        assert!(
+            CheckPoolsRegistry::get(cx).is_none(),
+            "checks run every part at once"
+        );
+        assert!(pools_for_checks(cx).is_none());
+    });
     assert!(LaneTableFields::registered().is_empty());
     assert!(validate_pools_folder(Path::new("pools/pools.toml"), BAD_POOLS).is_empty());
     let refused = bongos_lanes::validate_folder(Path::new("lanes/lanes.toml"), PULLS_TABLE);
@@ -91,7 +99,11 @@ fn nothing_is_registered_or_judged_while_disabled(cx: &mut TestAppContext) {
 fn enabling_registers_the_folders_and_the_lane_table_keys(cx: &mut TestAppContext) {
     use_default_settings(cx);
     set_enabled(cx, true);
-    cx.update(|cx| assert!(is_registered(cx)));
+    cx.update(|cx| {
+        assert!(is_registered(cx));
+        assert!(CheckPoolsRegistry::get(cx).is_some());
+        assert!(pools_for_checks(cx).is_some());
+    });
     let mut registered = LaneTableFields::registered();
     registered.sort();
     let mut expected = LANE_TABLE_KEYS.map(String::from).to_vec();

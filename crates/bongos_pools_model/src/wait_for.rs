@@ -13,9 +13,14 @@
 //! never confused; a cycle is reported as the paths it passes through.
 //!
 //! Every table given counts (the project's and the machine's), with every host's entries, dead or
-//! alive, as the grant rule counts them. Nothing here reads the system.
+//! alive, as the grant rule counts them. A table's [`WaitEdge`]s count too: the project side of a
+//! `mixed` waiter, written into the machine table by its owning host ([`project_side_edges`]), so
+//! a host that cannot see that project's table still sees a cycle through it. Nothing here reads
+//! the system.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+use serde::{Deserialize, Serialize};
 
 use crate::grant::{
     Blockers, Hold, PoolState, PoolTable, Request, RequestId, Satisfied, blocking_holds, own_holds,
@@ -41,6 +46,31 @@ pub struct CycleLink {
     pub path: HolderPath,
     pub label: HolderLabel,
     pub waits_for: Option<String>,
+}
+
+/// One end of a [`WaitEdge`]: a holder's path, or one of its waiting requests.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EdgeEnd {
+    pub holder: Holder,
+    /// The waiting request this end is; `None` is the holder's path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<RequestId>,
+}
+
+/// An edge of the project side of the wait-for graph of a `mixed` waiter, as its owning host
+/// wrote it into the machine table: `from` (the mixed request or a path enclosing it) waits,
+/// through its project's own pools, for `to` (a path that holds, or a request that waits, in a
+/// machine pool).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WaitEdge {
+    /// The mixed request the edge belongs to; it goes when that request no longer waits.
+    pub owner: RequestId,
+    pub owner_host: HostRef,
+    pub from: EdgeEnd,
+    pub to: EdgeEnd,
+    /// The project pool of the first step from `from`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -103,6 +133,30 @@ fn path_node(holder: &Holder) -> Node {
 
 fn request_node(holder: &Holder, request: RequestId) -> Node {
     Node::Request(holder.host, request)
+}
+
+fn end_node(end: &EdgeEnd) -> Node {
+    match end.request {
+        Some(request) => request_node(&end.holder, request),
+        None => path_node(&end.holder),
+    }
+}
+
+/// The written edges of `tables` whose mixed request waits in exactly one of them: the viewer
+/// cannot see that request's project table, so its project side comes from the edges. A viewer
+/// that holds both tables sees the project side itself.
+fn written_edges<'a>(tables: &[&'a PoolTable]) -> Vec<&'a WaitEdge> {
+    tables
+        .iter()
+        .flat_map(|table| &table.edges)
+        .filter(|edge| {
+            tables
+                .iter()
+                .filter(|table| table.is_waiting(&edge.owner_host, edge.owner))
+                .count()
+                == 1
+        })
+        .collect()
 }
 
 /// The first table's pool of this name. Validation keeps project and machine pool names
@@ -200,6 +254,12 @@ pub fn would_cycle(tables: &[&PoolTable], request: &Request) -> Result<(), Refus
             }
         }
     }
+    for edge in written_edges(tables) {
+        let (from, to) = (end_node(&edge.from), end_node(&edge.to));
+        graph.name(&from, &edge.from.holder);
+        graph.name(&to, &edge.to.holder);
+        graph.edge(from, to, edge.pool.as_deref());
+    }
 
     // A `slots` waiter is served once enough holders release, not all of them. A holder that
     // does not reach the requester can release while the requester waits; only when those
@@ -238,6 +298,150 @@ pub fn would_cycle(tables: &[&PoolTable], request: &Request) -> Result<(), Refus
         }),
         None => Ok(()),
     }
+}
+
+/// The project side of the wait-for graph of `owner`, a `mixed` request of `host` that waits in
+/// `machine` and in `project`: from the request and from every path enclosing it, through the
+/// edges of `project`'s own pools, to every path that holds in a machine pool and every request
+/// that waits in one, as one [`WaitEdge`] each. A `slots` wait that any one of several holders can
+/// end adds no edge here: only the request that would close a cycle can tell which holders count.
+pub fn project_side_edges(
+    project: &PoolTable,
+    machine: &PoolTable,
+    host: &HostRef,
+    owner: RequestId,
+) -> Vec<WaitEdge> {
+    let Some(owner_holder) = machine
+        .pools
+        .values()
+        .flat_map(|pool| &pool.waiters)
+        .find(|waiter| waiter.request == owner && waiter.holder.host == *host)
+        .map(|waiter| &waiter.holder)
+    else {
+        return Vec::new();
+    };
+    let mut holders: BTreeMap<Node, &Holder> = BTreeMap::new();
+    let mut edges: BTreeMap<Node, Vec<(Node, Option<&str>)>> = BTreeMap::new();
+    // Requests waiting anywhere, so a path of the project encloses one waiting in a machine pool.
+    let mut waiting: BTreeMap<Node, &Holder> = BTreeMap::new();
+    for table in [project, machine] {
+        for pool in table.pools.values() {
+            for waiter in &pool.waiters {
+                let node = request_node(&waiter.holder, waiter.request);
+                holders.insert(node.clone(), &waiter.holder);
+                waiting.insert(node, &waiter.holder);
+            }
+        }
+    }
+    for (name, pool) in &project.pools {
+        for hold in &pool.holds {
+            holders.insert(path_node(&hold.holder), &hold.holder);
+        }
+        for waiter in &pool.waiters {
+            let node = request_node(&waiter.holder, waiter.request);
+            if let Blockers::All(holds) = blocking_holds(pool, &waiter.need, &waiter.holder) {
+                for hold in holds {
+                    edges
+                        .entry(node.clone())
+                        .or_default()
+                        .push((path_node(&hold.holder), Some(name.as_str())));
+                }
+            }
+            for older in pool
+                .waiters
+                .iter()
+                .filter(|older| older.ticket < waiter.ticket)
+            {
+                edges.entry(node.clone()).or_default().push((
+                    request_node(&older.holder, older.request),
+                    Some(name.as_str()),
+                ));
+            }
+        }
+    }
+    // A path does not release while a request it encloses waits, wherever it holds.
+    let paths: BTreeMap<Node, &Holder> = [project, machine]
+        .into_iter()
+        .flat_map(|table| table.pools.values())
+        .flat_map(|pool| &pool.holds)
+        .map(|hold| (path_node(&hold.holder), &hold.holder))
+        .collect();
+    for (path, holder) in &paths {
+        holders.insert(path.clone(), *holder);
+        for (node, waiter) in &waiting {
+            if holder.is_or_encloses(waiter) {
+                edges
+                    .entry(path.clone())
+                    .or_default()
+                    .push((node.clone(), None));
+            }
+        }
+    }
+    let visible: BTreeSet<Node> = machine
+        .pools
+        .values()
+        .flat_map(|pool| {
+            pool.holds.iter().map(|hold| path_node(&hold.holder)).chain(
+                pool.waiters
+                    .iter()
+                    .map(|waiter| request_node(&waiter.holder, waiter.request)),
+            )
+        })
+        .collect();
+    let end = |node: &Node| -> Option<EdgeEnd> {
+        let holder = (*holders.get(node)?).clone();
+        Some(EdgeEnd {
+            holder,
+            request: match node {
+                Node::Request(_, request) => Some(*request),
+                Node::Path(..) => None,
+            },
+        })
+    };
+    // The request, and the enclosing paths another host can see (they hold a machine pool).
+    let mut starts = vec![request_node(owner_holder, owner)];
+    starts.extend(
+        paths
+            .iter()
+            .filter(|(path, holder)| holder.is_or_encloses(owner_holder) && visible.contains(path))
+            .map(|(path, _)| path.clone()),
+    );
+    let mut written = Vec::new();
+    for start in starts {
+        let Some(from) = end(&start) else {
+            continue;
+        };
+        // Breadth first, each node keeping the project pool of the first step that reached it.
+        let mut first_pool: BTreeMap<Node, Option<&str>> = BTreeMap::new();
+        let mut queue: VecDeque<Node> = VecDeque::new();
+        queue.push_back(start.clone());
+        while let Some(node) = queue.pop_front() {
+            let via = first_pool.get(&node).copied().flatten();
+            for (target, pool) in edges.get(&node).into_iter().flatten() {
+                if *target == start || first_pool.contains_key(target) {
+                    continue;
+                }
+                first_pool.insert(target.clone(), via.or(*pool));
+                queue.push_back(target.clone());
+            }
+        }
+        for (target, pool) in first_pool {
+            if !visible.contains(&target) {
+                continue;
+            }
+            let Some(to) = end(&target) else {
+                continue;
+            };
+            written.push(WaitEdge {
+                owner,
+                owner_host: *host,
+                from: from.clone(),
+                to,
+                pool: pool.map(str::to_string),
+            });
+        }
+    }
+    written
 }
 
 /// Runs the whole pre-queue judgment across the tables: the enclosing holders' holds first
