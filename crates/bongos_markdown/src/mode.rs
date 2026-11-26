@@ -1,18 +1,21 @@
 //! The markdown mode of a buffer (live view or source) and the addon that carries it on the
 //! editors of that buffer. The addon attaches to a full editor on a singleton buffer whose
-//! language is exactly `Markdown`, never while the prompts mode is on the editor. In the live
-//! mode it sets the live typography (UI font, 16 px scaled by the buffer font zoom, line height
-//! 1.5, a bar cursor, no gutter), keeps the buffer's index fresh and refreshes the live layers;
-//! in source mode and on detach the editor gets back what it had and every layer is cleared.
+//! language is exactly `Markdown`, never while the prompts mode is on the editor. In both modes it
+//! keeps the buffer's index fresh and adds the `markdown_mode` key context, and `markdown_table`
+//! while the newest selection's head is on a table row. In the live mode it sets the live
+//! typography (UI font, 16 px scaled by the buffer font zoom, line height 1.5, a bar cursor, no
+//! gutter) and refreshes the live layers; in source mode and on detach the editor gets back what
+//! it had and every layer is cleared.
 
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use bongos_markdown_model::ElementKind;
 use bongos_markdown_model::MarkdownIndex;
 use collections::HashMap;
-use editor::{Addon, Editor, EditorEvent};
+use editor::{Addon, Editor, EditorEvent, ToOffset as _};
 use gpui::{
     App, BorrowAppContext as _, Context, Entity, EntityId, Global, KeyContext, SharedString,
     TextStyleRefinement, px, relative,
@@ -27,6 +30,9 @@ use crate::layers::{self, LiveContext, LiveLayer};
 
 /// The key context identifier the addon adds, so the keymap context is `Editor && markdown_mode`.
 pub const KEY_CONTEXT: &str = "markdown_mode";
+
+/// The key context identifier the addon adds while the newest selection's head is on a table row.
+pub const TABLE_KEY_CONTEXT: &str = "markdown_table";
 
 /// The name of the language the addon attaches to.
 const LANGUAGE_NAME: &str = "Markdown";
@@ -138,11 +144,16 @@ pub struct MarkdownAddon {
     /// Set while the live typography is applied: what to give back.
     saved: RefCell<Option<Saved>>,
     live: Rc<RefCell<Live>>,
+    /// Whether the newest selection's head is on a table row, as of the last check.
+    in_table: Cell<bool>,
 }
 
 impl Addon for MarkdownAddon {
     fn extend_key_context(&self, context: &mut KeyContext, _: &App) {
         context.add(KEY_CONTEXT);
+        if self.in_table.get() {
+            context.add(TABLE_KEY_CONTEXT);
+        }
     }
 
     fn to_any(&self) -> &dyn Any {
@@ -197,9 +208,14 @@ pub(crate) fn init(cx: &mut App) {
         cx.subscribe(&this, |editor, _, event: &EditorEvent, cx| match event {
             // Also emitted on a language change; the language is checked again.
             EditorEvent::Reparsed(_) => refresh(editor, cx),
-            EditorEvent::BufferEdited => request_parse(editor, cx),
-            EditorEvent::ScrollPositionChanged { .. } | EditorEvent::SelectionsChanged { .. } => {
-                refresh_layers(editor, false, cx)
+            EditorEvent::BufferEdited => {
+                request_parse(editor, cx);
+                refresh_table_context(editor, cx);
+            }
+            EditorEvent::ScrollPositionChanged { .. } => refresh_layers(editor, false, cx),
+            EditorEvent::SelectionsChanged { .. } => {
+                refresh_layers(editor, false, cx);
+                refresh_table_context(editor, cx);
             }
             _ => {}
         })
@@ -279,14 +295,12 @@ fn apply(editor: &mut Editor, cx: &mut Context<Editor>) {
     } else {
         restore(editor, cx);
         clear_layers(editor, cx);
+        request_parse(editor, cx);
     }
 }
 
-/// Asks for a parse of the buffer as it is now, in the live mode.
+/// Asks for a parse of the buffer as it is now, in either mode.
 fn request_parse(editor: &mut Editor, cx: &mut Context<Editor>) {
-    if !is_live(editor, cx) {
-        return;
-    }
     let (Some(live), Some(buffer)) = (live_of(editor), editor.buffer().read(cx).as_singleton())
     else {
         return;
@@ -310,9 +324,44 @@ fn parsed(
     let finished = live.borrow_mut().index.finish(version, index, &current);
     if finished.accepted {
         refresh_layers(editor, false, cx);
+        refresh_table_context(editor, cx);
     }
     if finished.again {
         request_parse(editor, cx);
+    }
+}
+
+/// Whether the newest selection's head of `editor` is on a row of a table, by the fresh index.
+fn head_on_table_row(editor: &Editor, cx: &App) -> bool {
+    let Some(index) = fresh_index(editor, cx) else {
+        return false;
+    };
+    let snapshot = editor.buffer().read(cx).snapshot(cx);
+    let head = editor
+        .selections
+        .newest_anchor()
+        .head()
+        .to_offset(&snapshot)
+        .0;
+    index.elements().iter().any(|element| match &element.kind {
+        ElementKind::Table { rows } => rows
+            .iter()
+            .any(|row| row.range.start <= head && head <= row.range.end),
+        _ => false,
+    })
+}
+
+/// Brings the table key context in line with where the newest selection's head is.
+fn refresh_table_context(editor: &mut Editor, cx: &mut Context<Editor>) {
+    if !is_attached(editor) {
+        return;
+    }
+    let in_table = head_on_table_row(editor, cx);
+    let Some(addon) = editor.addon::<MarkdownAddon>() else {
+        return;
+    };
+    if addon.in_table.replace(in_table) != in_table {
+        cx.notify();
     }
 }
 
