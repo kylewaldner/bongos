@@ -8,7 +8,7 @@ use gpui::{
     Window, prelude::*,
 };
 use ui::prelude::*;
-use workspace::{DismissDecision, ModalView};
+use workspace::{DismissDecision, ModalView, PromptPlacement};
 
 /// The name the view is routed by (`minibuffer.enabled_for`), the host of the prompts too.
 pub const HOST: &str = crate::prompts::HOST;
@@ -96,6 +96,10 @@ impl Focusable for QueryReplaceView {
 impl ModalView for QueryReplaceView {
     fn minibuffer_name(&self) -> Option<&'static str> {
         Some(HOST)
+    }
+
+    fn prompt_placement(&self) -> PromptPlacement {
+        PromptPlacement::Inline
     }
 
     /// Always lets the view go; the session ends as `Exit`.
