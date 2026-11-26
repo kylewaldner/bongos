@@ -264,6 +264,10 @@ pub struct SettingsContent {
     /// Settings for the Work view: projects and tasks kept as files under `~/.bongos`.
     pub work: Option<WorkSettingsContent>,
 
+    /// Settings for the inbox: items that agents and tools deliver as files under
+    /// `~/.bongos/inbox`.
+    pub inbox: Option<InboxSettingsContent>,
+
     /// Settings for project repositories: a project's definitions kept in a git repository.
     pub project_repository: Option<ProjectRepositorySettingsContent>,
 
@@ -1482,6 +1486,17 @@ pub struct UndoTreeSettingsContent {
     ///
     /// Default: "zed"
     pub grouping: Option<UndoGroupingContent>,
+}
+
+/// Settings for the inbox.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct InboxSettingsContent {
+    /// Whether the inbox is on. While it is off, bongos neither creates, reads nor watches
+    /// `~/.bongos/inbox`.
+    ///
+    /// Default: false
+    pub enabled: Option<bool>,
 }
 
 #[with_fallible_options]
