@@ -178,6 +178,7 @@ pub fn run(project_id: String, mode: Mode) -> ! {
         bongos_workflow::init(cx);
         bongos_checks::init(cx);
         bongos_lanes::init(cx);
+        bongos_pools::init(cx);
         bongos_engine_host::init(cx);
 
         match start(&project_id, mode, locations.as_deref(), cx) {

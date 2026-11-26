@@ -159,6 +159,50 @@ fn not_available_fields_are_refused_by_name() {
 }
 
 #[test]
+fn registered_fields_are_accepted_and_kept_raw() {
+    let text = "schema = 1\n[[kind]]\nname = \"a\"\npulls = [{ queue = \"q\" }]\n[kind.binding]\npools = [\"jobs\"]\n[kind.binding.hooks]\nbefore_job = { run = \"x\" }\n";
+    let accepted = ["kind.pulls", "kind.binding.pools", "kind.binding.hooks"];
+    let table = crate::parse_accepting(text, &accepted).unwrap();
+    assert!(
+        validate_lane_table(&table, &ValidationContext::default()).is_empty(),
+        "{:?}",
+        table.diagnostics
+    );
+    let kind = &table.kinds[0];
+    let pulls = kind.raw.get("pulls").unwrap();
+    assert_eq!(pulls.line, 4);
+    assert_eq!(
+        pulls.value.as_array().unwrap()[0]["queue"].as_str(),
+        Some("q")
+    );
+    let binding = kind.binding.as_ref().unwrap();
+    assert_eq!(binding.raw.get("pools").unwrap().line, 6);
+    assert_eq!(
+        binding.raw.get("hooks").unwrap().value["before_job"]["run"].as_str(),
+        Some("x")
+    );
+
+    // Unregistered keys are refused as before, and their values are kept all the same.
+    let only_pulls = crate::parse_accepting(text, &["kind.pulls"]).unwrap();
+    let messages: Vec<&str> = only_pulls
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            "unknown key \"pools\" in [kind.binding]",
+            "unknown key \"hooks\" in [kind.binding]",
+        ]
+    );
+    assert!(only_pulls.kinds[0].raw.get("pulls").is_some());
+    let unregistered = parse(text).unwrap();
+    assert_eq!(unregistered.diagnostics.len(), 3);
+    assert_eq!(unregistered.kinds[0].raw, kind.raw);
+}
+
+#[test]
 fn duplicate_kind_names_the_second() {
     assert_one(
         "schema = 1\n[[kind]]\nname = \"a\"\n[[kind]]\nname = \"a\"\n",

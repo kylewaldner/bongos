@@ -182,6 +182,7 @@ bongos_minibuffer.workspace = true
 bongos_navigation.workspace = true
 bongos_window.workspace = true
 bongos_net.workspace = true
+bongos_pools.workspace = true
 bongos_project_repo.workspace = true
 bongos_prompts.workspace = true
 bongos_query_replace.workspace = true

@@ -44,6 +44,15 @@ pub fn set_resolver_dirs(dirs: Option<LayerDirs>) {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = dirs;
 }
 
+/// The shipped and user workflow folders the landing resolver reads; `None` until the engine
+/// sets them.
+pub fn resolver_dirs() -> Option<LayerDirs> {
+    RESOLVER_DIRS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
 /// Resolves a workflow name in the user's and the shipped workflows for check 4. The project's
 /// own workflows are looked up by the check itself in the change. With no folders set, every
 /// name resolves, since nothing can be said.

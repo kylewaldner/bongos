@@ -1005,6 +1005,26 @@ fn work_page(token_set: bool, (agent_steps, task_checks): (bool, bool)) -> Setti
         ]
     }
 
+    fn pools_section() -> [SettingsPageItem; 2] {
+        [
+            SettingsPageItem::SectionHeader("Pools, Queues and Triggers"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Enable Pools",
+                description: "Whether pools, queues, triggers and lane job hooks are on. A project declares its pools, queues and triggers in its definitions; with nothing declared nothing waits. The other settings are edited in settings.json.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("pools.enabled"),
+                    pick: |settings_content| settings_content.pools.as_ref()?.enabled.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.pools.get_or_insert_default().enabled = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
     fn lanes_section() -> [SettingsPageItem; 10] {
         macro_rules! lanes_item {
             ($title:expr, $description:expr, $key:ident) => {
@@ -1167,7 +1187,8 @@ fn work_page(token_set: bool, (agent_steps, task_checks): (bool, bool)) -> Setti
             workflows_section(),
             task_checks_section(),
             confinement_section(agent_steps, task_checks),
-            lanes_section()
+            lanes_section(),
+            pools_section()
         ]
         .into_boxed_slice(),
     }

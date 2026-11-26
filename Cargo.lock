@@ -2065,6 +2065,7 @@ dependencies = [
  "bongos_minibuffer",
  "bongos_navigation",
  "bongos_net",
+ "bongos_pools",
  "bongos_project_repo",
  "bongos_prompts",
  "bongos_query_replace",
@@ -2874,6 +2875,25 @@ dependencies = [
  "http_client",
  "log",
  "smol",
+]
+
+[[package]]
+name = "bongos_pools"
+version = "0.1.0"
+dependencies = [
+ "bongos_checks_model",
+ "bongos_lanes",
+ "bongos_lanes_model",
+ "bongos_pools_model",
+ "bongos_project_repo",
+ "bongos_project_repo_model",
+ "bongos_workflow",
+ "bongos_workflow_model",
+ "futures 0.3.32",
+ "gpui",
+ "settings",
+ "tempfile",
+ "toml 0.8.23",
 ]
 
 [[package]]

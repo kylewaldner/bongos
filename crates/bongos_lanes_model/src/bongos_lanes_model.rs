@@ -34,8 +34,8 @@ pub use state::{
 };
 pub use table::{
     Binding, Diagnostic, DispatchRule, Exemption, LaneKind, LaneTable, Locations, ParseError, Pin,
-    TreeMode, TreeSpec, ValidationContext, names_lane_instance, parse, prompt_lane_problems,
-    validate_lane_table,
+    RawFields, TreeMode, TreeSpec, ValidationContext, names_lane_instance, parse, parse_accepting,
+    prompt_lane_problems, validate_lane_table,
 };
 
 #[cfg(test)]

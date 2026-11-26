@@ -52,7 +52,8 @@ const RULE_KEYS: &[&str] = &[
 ];
 const PIN_KEYS: &[&str] = &["task", "lane", "kind"];
 const EXEMPT_KEYS: &[&str] = &["tags", "tasks"];
-/// Keys that a later feature will define; for now they are refused by name.
+/// Keys that a later feature will define; they are refused by name unless that feature
+/// registered them (see [`parse_accepting`]). Their values are kept raw in [`RawFields`].
 const NOT_AVAILABLE_KEYS: &[&str] = &["pools", "pulls", "hooks"];
 
 /// A value with the line it was written on.
@@ -149,6 +150,42 @@ pub struct LaneKind {
     pub rules: Vec<Located<String>>,
     pub unattended: Option<bool>,
     pub binding: Option<Binding>,
+    /// `pools`, `pulls` and `hooks` written on the kind, unparsed.
+    pub raw: RawFields,
+}
+
+/// The values of the keys another feature defines (`pools`, `pulls`, `hooks`), unparsed, by key,
+/// in the order written. This crate keeps them; the feature that registered a key reads it.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RawFields(pub Vec<(String, Located<toml::Value>)>);
+
+// A parsed TOML value compares equal to itself except for a NaN float, which no key kept here
+// is meant to hold; tables holding these fields keep their `Eq`.
+impl Eq for RawFields {}
+
+impl RawFields {
+    pub fn get(&self, key: &str) -> Option<&Located<toml::Value>> {
+        self.0
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn collect(lines: &LineIndex, fields: [(&str, Option<Spanned<toml::Value>>); 3]) -> Self {
+        let mut kept: Vec<(usize, (String, Located<toml::Value>))> = fields
+            .into_iter()
+            .filter_map(|(key, value)| {
+                let value = value?;
+                Some((value.span().start, (key.to_string(), lines.located(value))))
+            })
+            .collect();
+        kept.sort_by_key(|(start, _)| *start);
+        Self(kept.into_iter().map(|(_, entry)| entry).collect())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +201,8 @@ pub struct Binding {
     pub dirs: Vec<Located<String>>,
     pub trees: Vec<TreeSpec>,
     pub floors: Vec<Located<String>>,
+    /// `pools`, `pulls` and `hooks` written in the binding, unparsed.
+    pub raw: RawFields,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,6 +268,7 @@ impl LaneTable {
                 rules: Vec::new(),
                 unattended: None,
                 binding: None,
+                raw: RawFields::default(),
             }],
             rules: Vec::new(),
             pins: Vec::new(),
@@ -293,6 +333,9 @@ struct RawKind {
     rules: Vec<Spanned<String>>,
     unattended: Option<bool>,
     binding: Option<Spanned<RawBinding>>,
+    pools: Option<Spanned<toml::Value>>,
+    pulls: Option<Spanned<toml::Value>>,
+    hooks: Option<Spanned<toml::Value>>,
 }
 
 #[derive(Deserialize)]
@@ -310,6 +353,9 @@ struct RawBinding {
     trees: Vec<Spanned<RawTree>>,
     #[serde(default)]
     floors: Vec<Spanned<String>>,
+    pools: Option<Spanned<toml::Value>>,
+    pulls: Option<Spanned<toml::Value>>,
+    hooks: Option<Spanned<toml::Value>>,
 }
 
 #[derive(Deserialize)]
@@ -396,6 +442,13 @@ impl LineIndex {
 /// Parses `lanes.toml`. Syntax and type errors name their line; unknown keys and bad counts are
 /// kept in [`LaneTable::diagnostics`] for [`validate_lane_table`].
 pub fn parse(text: &str) -> Result<LaneTable, ParseError> {
+    parse_accepting(text, &[])
+}
+
+/// [`parse`], except that the keys another feature registered are not refused. A key is named by
+/// its path: `kind.pulls`, `kind.binding.pools`, `kind.binding.hooks`. Their values are kept in
+/// [`LaneKind::raw`] and [`Binding::raw`] either way.
+pub fn parse_accepting(text: &str, accepted: &[&str]) -> Result<LaneTable, ParseError> {
     let lines = LineIndex::new(text);
     let raw: RawTable =
         toml::from_str(text).map_err(|error| lines.error(error.span(), error.message()))?;
@@ -411,7 +464,7 @@ pub fn parse(text: &str) -> Result<LaneTable, ParseError> {
     }
 
     let mut diagnostics = Vec::new();
-    collect_unknown_keys(text, &lines, &mut diagnostics)?;
+    collect_unknown_keys(text, &lines, accepted, &mut diagnostics)?;
 
     let owner = match raw.owner {
         None => OwnerMode::Top,
@@ -587,6 +640,14 @@ fn convert_kind(
     let binding = raw
         .binding
         .map(|binding| convert_binding(binding, lines, diagnostics));
+    let raw_fields = RawFields::collect(
+        lines,
+        [
+            ("pools", raw.pools),
+            ("pulls", raw.pulls),
+            ("hooks", raw.hooks),
+        ],
+    );
     LaneKind {
         name,
         line,
@@ -601,6 +662,7 @@ fn convert_kind(
             .collect(),
         unattended: raw.unattended,
         binding,
+        raw: raw_fields,
     }
 }
 
@@ -666,6 +728,14 @@ fn convert_binding(
             .into_iter()
             .map(|floor| lines.located(floor))
             .collect(),
+        raw: RawFields::collect(
+            lines,
+            [
+                ("pools", raw.pools),
+                ("pulls", raw.pulls),
+                ("hooks", raw.hooks),
+            ],
+        ),
     }
 }
 
@@ -724,28 +794,80 @@ fn children<'a>(
     table.get(key).map(tables_in).unwrap_or_default()
 }
 
+/// Where a table sits, for the keys other features register: its key path (`kind`,
+/// `kind.binding`) and whether an unregistered key of [`NOT_AVAILABLE_KEYS`] is refused by name.
+#[derive(Clone, Copy)]
+struct Seam<'a> {
+    path: Option<&'a str>,
+    names_not_available: bool,
+    accepted: &'a [&'a str],
+}
+
+impl Seam<'_> {
+    fn accepts(&self, key: &str) -> bool {
+        self.path.is_some_and(|path| {
+            let named = format!("{path}.{key}");
+            NOT_AVAILABLE_KEYS.contains(&key)
+                && self.accepted.iter().any(|accepted| *accepted == named)
+        })
+    }
+}
+
 fn collect_unknown_keys(
     text: &str,
     lines: &LineIndex,
+    accepted: &[&str],
     out: &mut Vec<Diagnostic>,
 ) -> Result<(), ParseError> {
     let document = toml_edit::ImDocument::parse(text)
         .map_err(|error| lines.error(error.span(), error.message()))?;
     let root = document.as_table();
+    let plain = Seam {
+        path: None,
+        names_not_available: false,
+        accepted,
+    };
 
-    check_keys(root, TOP_LEVEL_KEYS, "the lane table", true, lines, out);
+    check_keys(
+        root,
+        TOP_LEVEL_KEYS,
+        "the lane table",
+        Seam {
+            names_not_available: true,
+            ..plain
+        },
+        lines,
+        out,
+    );
 
     for kind in children(root, "kind") {
-        check_keys(kind, KIND_KEYS, "[[kind]]", true, lines, out);
+        let kind_seam = Seam {
+            path: Some("kind"),
+            names_not_available: true,
+            accepted,
+        };
+        check_keys(kind, KIND_KEYS, "[[kind]]", kind_seam, lines, out);
         for ahead in children(kind, "ahead") {
-            check_keys(ahead, AHEAD_KEYS, "ahead", false, lines, out);
+            check_keys(ahead, AHEAD_KEYS, "ahead", plain, lines, out);
         }
         for binding in children(kind, "binding") {
-            check_keys(binding, BINDING_KEYS, "[kind.binding]", false, lines, out);
+            let binding_seam = Seam {
+                path: Some("kind.binding"),
+                names_not_available: false,
+                accepted,
+            };
+            check_keys(
+                binding,
+                BINDING_KEYS,
+                "[kind.binding]",
+                binding_seam,
+                lines,
+                out,
+            );
             for tree in children(binding, "trees") {
-                check_keys(tree, TREE_KEYS, "a tree", false, lines, out);
+                check_keys(tree, TREE_KEYS, "a tree", plain, lines, out);
                 for base in children(tree, "base_tree") {
-                    check_keys(base, BASE_TREE_KEYS, "base_tree", false, lines, out);
+                    check_keys(base, BASE_TREE_KEYS, "base_tree", plain, lines, out);
                 }
             }
         }
@@ -753,18 +875,18 @@ fn collect_unknown_keys(
     if let Some(rules) = root.get("rules").and_then(toml_edit::Item::as_table_like) {
         for (_, item) in rules.iter() {
             for rule in tables_in(item) {
-                check_keys(rule, RULE_KEYS, "a rule", false, lines, out);
+                check_keys(rule, RULE_KEYS, "a rule", plain, lines, out);
             }
         }
     }
     for pin in children(root, "pin") {
-        check_keys(pin, PIN_KEYS, "[[pin]]", false, lines, out);
+        check_keys(pin, PIN_KEYS, "[[pin]]", plain, lines, out);
     }
     for exempt in children(root, "exempt") {
-        check_keys(exempt, EXEMPT_KEYS, "[[exempt]]", false, lines, out);
+        check_keys(exempt, EXEMPT_KEYS, "[[exempt]]", plain, lines, out);
     }
     for locations in children(root, "locations") {
-        check_keys(locations, LOCATIONS_KEYS, "[locations]", false, lines, out);
+        check_keys(locations, LOCATIONS_KEYS, "[locations]", plain, lines, out);
     }
     Ok(())
 }
@@ -773,12 +895,12 @@ fn check_keys(
     table: &dyn toml_edit::TableLike,
     known: &[&str],
     place: &str,
-    allows_not_available: bool,
+    seam: Seam,
     lines: &LineIndex,
     out: &mut Vec<Diagnostic>,
 ) {
     for (key, item) in table.iter() {
-        if known.contains(&key) {
+        if known.contains(&key) || seam.accepts(key) {
             continue;
         }
         let span = table
@@ -786,7 +908,7 @@ fn check_keys(
             .and_then(|(key, _)| key.span())
             .or_else(|| item.span());
         let line = span.map_or(1, |span| lines.line(span.start));
-        let message = if allows_not_available && NOT_AVAILABLE_KEYS.contains(&key) {
+        let message = if seam.names_not_available && NOT_AVAILABLE_KEYS.contains(&key) {
             format!("{key} are not available yet")
         } else {
             format!("unknown key \"{key}\" in {place}")
