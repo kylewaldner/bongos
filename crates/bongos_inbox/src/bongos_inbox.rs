@@ -27,11 +27,11 @@ use bongos_inbox_model::format::Item;
 use bongos_inbox_model::maildir::{self, ARCHIVE, CUR, Entry, NEW, ParseCache, ParseResult, TMP};
 use bongos_inbox_model::view_model::{self, Filter, Row};
 use bongos_work_model::store::WorkTree;
+use command_palette_hooks::CommandPaletteFilter;
 use fs::{Fs, PathEvent, PathEventKind, Watcher};
 use futures::channel::{mpsc, oneshot};
 use futures::stream::{BoxStream, FusedStream};
 use futures::{FutureExt as _, StreamExt as _, select_biased};
-use command_palette_hooks::CommandPaletteFilter;
 use gpui::{
     App, AppContext as _, AsyncApp, BackgroundExecutor, Context, Entity, EventEmitter, Global,
     Subscription, Task, WeakEntity, actions,
