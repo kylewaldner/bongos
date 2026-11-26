@@ -2790,8 +2790,10 @@ name = "bongos_markdown"
 version = "0.1.0"
 dependencies = [
  "bongos_emacs",
+ "bongos_markdown_model",
  "bongos_minibuffer",
  "bongos_prompts",
+ "clock",
  "collections",
  "command_palette_hooks",
  "editor",
@@ -2800,6 +2802,8 @@ dependencies = [
  "multi_buffer",
  "project",
  "settings",
+ "text",
+ "theme",
  "theme_settings",
  "workspace",
 ]

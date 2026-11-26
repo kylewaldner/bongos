@@ -2,13 +2,17 @@
 //! editors of that buffer. The addon attaches to a full editor on a singleton buffer whose
 //! language is exactly `Markdown`, never while the prompts mode is on the editor. In the live
 //! mode it sets the live typography (UI font, 16 px scaled by the buffer font zoom, line height
-//! 1.5, a bar cursor, no gutter); in source mode and on detach the editor gets back what it had.
+//! 1.5, a bar cursor, no gutter), keeps the buffer's index fresh and refreshes the live layers;
+//! in source mode and on detach the editor gets back what it had and every layer is cleared.
 
 use std::any::Any;
 use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::Arc;
 
+use bongos_markdown_model::MarkdownIndex;
 use collections::HashMap;
-use editor::{Addon, Editor};
+use editor::{Addon, Editor, EditorEvent};
 use gpui::{
     App, BorrowAppContext as _, Context, Entity, EntityId, Global, KeyContext, SharedString,
     TextStyleRefinement, px, relative,
@@ -18,6 +22,8 @@ use settings::{Settings as _, SettingsStore};
 use theme_settings::ThemeSettings;
 
 use crate::MarkdownSettings;
+use crate::index::{IndexState, ParseStats};
+use crate::layers::{self, LiveContext, LiveLayer};
 
 /// The key context identifier the addon adds, so the keymap context is `Editor && markdown_mode`.
 pub const KEY_CONTEXT: &str = "markdown_mode";
@@ -111,11 +117,27 @@ struct Saved {
     gutter: bool,
 }
 
+/// The live view state of one editor: its index and its layers.
+pub struct Live {
+    pub index: IndexState,
+    pub layers: Vec<Box<dyn LiveLayer>>,
+}
+
+impl Default for Live {
+    fn default() -> Self {
+        Self {
+            index: IndexState::default(),
+            layers: layers::default_layers(),
+        }
+    }
+}
+
 /// The addon that marks an editor as a markdown editor.
 #[derive(Default)]
 pub struct MarkdownAddon {
     /// Set while the live typography is applied: what to give back.
     saved: RefCell<Option<Saved>>,
+    live: Rc<RefCell<Live>>,
 }
 
 impl Addon for MarkdownAddon {
@@ -133,21 +155,62 @@ pub fn is_attached(editor: &Editor) -> bool {
     editor.addon::<MarkdownAddon>().is_some()
 }
 
+fn live_of(editor: &Editor) -> Option<Rc<RefCell<Live>>> {
+    editor
+        .addon::<MarkdownAddon>()
+        .map(|addon| addon.live.clone())
+}
+
+/// The index of `editor`'s buffer in the offsets of its current text (the last parse result,
+/// mapped through the edits since), when the addon is attached.
+pub fn fresh_index(editor: &Editor, cx: &App) -> Option<Arc<MarkdownIndex>> {
+    let live = live_of(editor)?;
+    let buffer = editor.buffer().read(cx).as_singleton()?;
+    let snapshot = buffer.read(cx).text_snapshot();
+    Some(live.borrow_mut().index.fresh(&snapshot))
+}
+
+/// The parse counts of `editor`, when the addon is attached.
+pub fn parse_stats(editor: &Editor) -> Option<ParseStats> {
+    Some(live_of(editor)?.borrow().index.stats())
+}
+
+/// Whether `editor`'s buffer is in the live mode (and the addon is attached).
+fn is_live(editor: &Editor, cx: &App) -> bool {
+    is_attached(editor)
+        && editor
+            .buffer()
+            .read(cx)
+            .as_singleton()
+            .and_then(|buffer| mode_for_buffer(&buffer, cx))
+            == Some(Mode::Live)
+}
+
 /// Watches every new full editor on a single buffer: it gets the addon while its buffer's
 /// language is Markdown and the prompts mode is not on it.
 pub(crate) fn init(cx: &mut App) {
-    cx.observe_new(|editor: &mut Editor, _, cx: &mut Context<Editor>| {
+    cx.observe_new(|editor: &mut Editor, window, cx: &mut Context<Editor>| {
         if !editor.mode().is_full() || !editor.buffer().read(cx).is_singleton() {
             return;
         }
         let this = cx.entity();
-        cx.subscribe(&this, |editor, _, event: &editor::EditorEvent, cx| {
+        cx.subscribe(&this, |editor, _, event: &EditorEvent, cx| match event {
             // Also emitted on a language change; the language is checked again.
-            if matches!(event, editor::EditorEvent::Reparsed(_)) {
-                refresh(editor, cx);
+            EditorEvent::Reparsed(_) => refresh(editor, cx),
+            EditorEvent::BufferEdited => request_parse(editor, cx),
+            EditorEvent::ScrollPositionChanged { .. } | EditorEvent::SelectionsChanged { .. } => {
+                refresh_layers(editor, false, cx)
             }
+            _ => {}
         })
         .detach();
+        if let Some(window) = window {
+            // A resize changes the screen height, which the editor learns at its next layout.
+            cx.observe_window_bounds(window, |_, window, cx| {
+                cx.on_next_frame(window, |editor, _, cx| refresh_layers(editor, false, cx));
+            })
+            .detach();
+        }
         cx.observe_global::<SettingsStore>(refresh).detach();
         cx.observe_global::<MarkdownModes>(refresh).detach();
         theme_settings::observe_buffer_font_size_adjustment(cx, refresh).detach();
@@ -193,6 +256,7 @@ fn attach(editor: &mut Editor, cx: &mut Context<Editor>) {
 
 fn detach(editor: &mut Editor, cx: &mut Context<Editor>) {
     restore(editor, cx);
+    clear_layers(editor, cx);
     editor.unregister_addon::<MarkdownAddon>();
     cx.notify();
 }
@@ -210,9 +274,92 @@ fn apply(editor: &mut Editor, cx: &mut Context<Editor>) {
         == Some(Mode::Live);
     if live {
         apply_live(editor, cx);
+        request_parse(editor, cx);
+        refresh_layers(editor, true, cx);
     } else {
         restore(editor, cx);
+        clear_layers(editor, cx);
     }
+}
+
+/// Asks for a parse of the buffer as it is now, in the live mode.
+fn request_parse(editor: &mut Editor, cx: &mut Context<Editor>) {
+    if !is_live(editor, cx) {
+        return;
+    }
+    let (Some(live), Some(buffer)) = (live_of(editor), editor.buffer().read(cx).as_singleton())
+    else {
+        return;
+    };
+    let snapshot = buffer.read(cx).text_snapshot();
+    crate::index::request(&mut live.borrow_mut().index, snapshot, parsed, cx);
+}
+
+/// Takes a parse result: a current one refreshes the layers, and a wanted next parse starts.
+fn parsed(
+    editor: &mut Editor,
+    version: clock::Global,
+    index: MarkdownIndex,
+    cx: &mut Context<Editor>,
+) {
+    let (Some(live), Some(buffer)) = (live_of(editor), editor.buffer().read(cx).as_singleton())
+    else {
+        return;
+    };
+    let current = buffer.read(cx).version();
+    let finished = live.borrow_mut().index.finish(version, index, &current);
+    if finished.accepted {
+        refresh_layers(editor, false, cx);
+    }
+    if finished.again {
+        request_parse(editor, cx);
+    }
+}
+
+/// Refreshes every layer over the window, in the live mode. `force` makes the layers refresh
+/// even when the index, the text and the window are as they were.
+fn refresh_layers(editor: &mut Editor, force: bool, cx: &mut Context<Editor>) {
+    if !is_live(editor, cx) {
+        return;
+    }
+    let (Some(live), Some(buffer)) = (live_of(editor), editor.buffer().read(cx).as_singleton())
+    else {
+        return;
+    };
+    let snapshot = buffer.read(cx).snapshot();
+    let window = layers::window(editor, cx);
+    let (index, generation, mut list) = {
+        let mut live = live.borrow_mut();
+        let index = live.index.fresh(&snapshot);
+        (
+            index,
+            live.index.generation(),
+            std::mem::take(&mut live.layers),
+        )
+    };
+    let context = LiveContext {
+        index: &index,
+        generation,
+        snapshot: &snapshot,
+        window,
+        force,
+    };
+    for layer in &mut list {
+        layer.refresh(&context, editor, cx);
+    }
+    live.borrow_mut().layers = list;
+}
+
+/// Clears every layer.
+fn clear_layers(editor: &mut Editor, cx: &mut Context<Editor>) {
+    let Some(live) = live_of(editor) else {
+        return;
+    };
+    let mut list = std::mem::take(&mut live.borrow_mut().layers);
+    for layer in &mut list {
+        layer.clear(editor, cx);
+    }
+    live.borrow_mut().layers = list;
 }
 
 /// The live font family: the system UI font on macOS, the `ui_font_family` setting elsewhere.
