@@ -11,6 +11,8 @@ pub mod edit_prediction_registry;
 #[cfg(test)]
 mod emacs_keymap_tests;
 #[cfg(test)]
+mod inbox_keymap_tests;
+#[cfg(test)]
 mod isearch_keymap_tests;
 #[cfg(test)]
 mod keybinding_page_tests;

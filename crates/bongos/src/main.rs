@@ -615,6 +615,16 @@ fn main() {
             },
             cx,
         );
+        bongos_inbox::InboxActions::set_run_focus(
+            |id, workspace, window, cx| {
+                workspace
+                    .update(cx, |workspace, cx| {
+                        bongos_workflow::run_view::focus_run(id, workspace, window, cx)
+                    })
+                    .ok();
+            },
+            cx,
+        );
         bongos_chat::init(
             bongos_chat::ChatDirs::new(util::paths::home_dir(), paths::data_dir()),
             chat_channel_config(),
