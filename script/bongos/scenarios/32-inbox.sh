@@ -40,9 +40,9 @@
 #   the design's order. Ages are read from the clock when each capture is taken, so the minute rows
 #   can read a few minutes more than the design's.
 # - Stage 1 does not enforce five seconds itself: it polls `inbox: dump view` (each dump takes a few
-#   seconds) and fails when the item has not shown in 15 s, under the 30 s of the inbox's periodic
-#   rescan, so a dead watcher fails it unless a rescan happens to fall in those 15 s; it prints how
-#   long the item took to show. The other stages use a 90 s guard.
+#   seconds) and fails when the item has not shown in 8 s (checked again after the successful dump, so a
+#   slow dump cannot pass), well under the 30 s of the inbox's periodic rescan, so a dead watcher
+#   fails it unless a rescan happens to fall in those 8 s; it prints how long the item took to show. The other stages use a 90 s guard.
 # - RET in the item-focus captures reads the first row (the design's picture keeps it unread); `u`
 #   restores it before the next capture.
 # The scenario leaves the app quit and restores settings.json.
@@ -224,12 +224,13 @@ LEFT_IN_TMP=20261126T000002Z-bongos-partial-0002.md
 post "$LEFT_IN_TMP" tmp run-finished "$(ago '2 minutes')" bongos/partial "Left in tmp and never moved" "open"
 post "$SINGLE" new run-finished "$(ago '2 minutes')" bongos/nightly "Nightly index finished" "open" "" \
   "$RUN/inbox-target.txt:1" "The nightly index finished without problems."
-STAGE1_LIMIT=15
+STAGE1_LIMIT=8
 STARTED=$SECONDS
 # The watcher delivers it in a fraction of a second; the periodic rescan, the safety net, runs every
 # 30 s. Showing within STAGE1_LIMIT (under that) means the watcher did it, not the rescan.
 dump_until_within "$STAGE1_LIMIT" "the delivered item does not show with no view open" unread_is_and_has 1 "Nightly index finished"
 say "smoke: inbox 1: the item showed $((SECONDS - STARTED)) seconds after it was moved into new/ (limit ${STAGE1_LIMIT}s)"
+[ $((SECONDS - STARTED)) -le "$STAGE1_LIMIT" ] || fail "the item took $((SECONDS - STARTED)) s to show, over ${STAGE1_LIMIT}s: the watcher did not deliver it"
 grep -qF "Left in tmp and never moved" "$DUMP_FILE" && fail "an item left in tmp/ shows: $(cat "$DUMP_FILE")"
 grep -qF "bongos · run finished · nightly" "$DUMP_FILE" || fail "the row has no project, type and source: $(cat "$DUMP_FILE")"
 [ -f "$INBOX/new/$SINGLE" ] || fail "the item left new/ by itself"
