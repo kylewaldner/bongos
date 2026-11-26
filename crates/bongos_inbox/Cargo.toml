@@ -44,3 +44,4 @@ fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+zed_actions.workspace = true

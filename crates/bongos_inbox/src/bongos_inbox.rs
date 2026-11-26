@@ -32,7 +32,7 @@ mod view;
 
 use bongos_inbox_model::format::Item;
 use bongos_inbox_model::maildir::{self, ARCHIVE, CUR, Entry, NEW, ParseCache, ParseResult, TMP};
-use bongos_inbox_model::view_model::{self, Filter, Row};
+use bongos_inbox_model::view_model::{self, Filter as RowFilter, Row};
 use bongos_work_model::store::WorkTree;
 use command_palette_hooks::CommandPaletteFilter;
 use fs::{Fs, PathEvent, PathEventKind, Watcher};
@@ -107,6 +107,8 @@ actions!(
         Accept,
         /// Opens the target of the item under the inbox cursor.
         OpenTarget,
+        /// Asks for a kind or a source and shows only the inbox items of it; `all` clears it.
+        Filter,
     ]
 );
 
@@ -214,7 +216,7 @@ impl Snapshot {
     }
 
     /// The visible rows, with stale items marked.
-    pub fn rows(&self, filter: &Filter, known: &dyn Fn(&str) -> bool) -> Vec<Row> {
+    pub fn rows(&self, filter: &RowFilter, known: &dyn Fn(&str) -> bool) -> Vec<Row> {
         self.rows_hiding(filter, known, &|_| false)
     }
 
@@ -222,7 +224,7 @@ impl Snapshot {
     /// them from its count.
     pub fn rows_hiding(
         &self,
-        filter: &Filter,
+        filter: &RowFilter,
         known: &dyn Fn(&str) -> bool,
         hidden: &dyn Fn(&Entry) -> bool,
     ) -> Vec<Row> {
@@ -650,6 +652,7 @@ pub fn action_types() -> Vec<TypeId> {
         TypeId::of::<Dismiss>(),
         TypeId::of::<Accept>(),
         TypeId::of::<OpenTarget>(),
+        TypeId::of::<Filter>(),
     ];
     #[cfg(debug_assertions)]
     types.push(TypeId::of::<DumpView>());
@@ -1042,3 +1045,6 @@ mod dismiss_tests;
 
 #[cfg(test)]
 mod actions_tests;
+
+#[cfg(test)]
+mod filter_tests;
