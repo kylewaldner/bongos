@@ -273,6 +273,7 @@ async fn minibuffer_style_unknown_value_falls_back_with_one_error(cx: &mut TestA
 #[gpui::test]
 async fn minibuffer_style_profile_overrides_user_and_switching_flips_it(cx: &mut TestAppContext) {
     use_default_settings(cx);
+    cx.update(|cx| SettingsStore::observe_active_settings_profile_name(cx).detach());
     let user = r#"{
         "minibuffer": { "style": "minibuffer" },
         "profiles": { "dialogs": { "settings": { "minibuffer": { "style": "modal" } } } }

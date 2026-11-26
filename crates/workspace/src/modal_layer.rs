@@ -87,11 +87,7 @@ pub fn host_for(
 }
 
 /// [`host_for`] with the style from the [`MinibufferRouting`] global and whether `name` is routed.
-pub fn minibuffer_host(
-    name: &str,
-    placement: PromptPlacement,
-    cx: &App,
-) -> Option<MinibufferHost> {
+pub fn minibuffer_host(name: &str, placement: PromptPlacement, cx: &App) -> Option<MinibufferHost> {
     let style = cx
         .try_global::<MinibufferRouting>()
         .map(|routing| routing.style())
