@@ -79,6 +79,59 @@ pub fn checks_output(line: usize) -> Vec<OutputField> {
     ]
 }
 
+/// The shipped program node that reads messages from a Slack conversation, named by `use`.
+pub const SLACK_READ_PROGRAM: &str = "slack-read";
+/// The shipped program node that posts one message to Slack, named by `use`.
+pub const SLACK_POST_PROGRAM: &str = "slack-post";
+/// The values of a `slack-read` node's `has_older`.
+pub const SLACK_HAS_OLDER: [&str; 2] = ["yes", "no"];
+
+fn fixed_field(line: usize, name: &str, field_type: FieldType) -> OutputField {
+    OutputField {
+        name: name.to_string(),
+        line,
+        field_type,
+        optional: false,
+        outcome: None,
+    }
+}
+
+/// The fixed output of a `slack-read` node, every field on `line`: `messages` (the JSON array of
+/// the messages, oldest first, as text), `quoted` (the messages quoted as data for a prompt),
+/// `count` and `has_older`.
+pub fn slack_read_output(line: usize) -> Vec<OutputField> {
+    vec![
+        fixed_field(line, "messages", FieldType::Text),
+        fixed_field(line, "quoted", FieldType::Text),
+        fixed_field(line, "count", FieldType::Number),
+        fixed_field(
+            line,
+            "has_older",
+            FieldType::Choice(SLACK_HAS_OLDER.map(String::from).to_vec()),
+        ),
+    ]
+}
+
+/// The fixed output of a `slack-post` node, every field on `line`: the posted message's `link`,
+/// its `channel` id and its `ts`.
+pub fn slack_post_output(line: usize) -> Vec<OutputField> {
+    vec![
+        fixed_field(line, "link", FieldType::Text),
+        fixed_field(line, "channel", FieldType::Text),
+        fixed_field(line, "ts", FieldType::Text),
+    ]
+}
+
+/// The fixed output of the shipped program `program`, when it has one.
+pub fn fixed_output(program: &str, line: usize) -> Option<Vec<OutputField>> {
+    match program {
+        CHECKS_PROGRAM => Some(checks_output(line)),
+        SLACK_READ_PROGRAM => Some(slack_read_output(line)),
+        SLACK_POST_PROGRAM => Some(slack_post_output(line)),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 #[error("line {line}: {message}")]
 pub struct ParseError {
@@ -254,6 +307,16 @@ impl Node {
                 .use_node
                 .as_ref()
                 .is_some_and(|use_node| use_node.value == CHECKS_PROGRAM)
+    }
+
+    /// The program this node runs by `use`, when it is a program node with one.
+    pub fn program(&self) -> Option<&str> {
+        if self.kind.value != NodeKind::Program {
+            return None;
+        }
+        self.use_node
+            .as_ref()
+            .map(|use_node| use_node.value.as_str())
     }
 }
 
@@ -732,13 +795,15 @@ fn convert_node(
         .collect();
 
     let mut output: Vec<OutputField> = output.into_iter().map(|(_, field)| field).collect();
-    let is_checks = raw.kind.get_ref() == &NodeKind::Program
-        && raw
-            .use_node
-            .as_ref()
-            .is_some_and(|use_node| use_node.get_ref() == CHECKS_PROGRAM);
-    if is_checks && output.is_empty() {
-        output = checks_output(line);
+    let fixed = raw
+        .use_node
+        .as_ref()
+        .filter(|_| raw.kind.get_ref() == &NodeKind::Program)
+        .and_then(|use_node| fixed_output(use_node.get_ref(), line));
+    if let Some(fixed) = fixed
+        && output.is_empty()
+    {
+        output = fixed;
     }
 
     Ok(Node {

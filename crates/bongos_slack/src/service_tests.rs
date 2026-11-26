@@ -37,13 +37,13 @@ pub(crate) const ZONE: FixedOffset = FixedOffset(3600);
 
 pub(crate) struct Fixture {
     _root: tempfile::TempDir,
-    dir: PathBuf,
+    pub(crate) dir: PathBuf,
     credentials: Arc<FakeCredentials>,
     pub(crate) fake: FakeSlack,
     pub(crate) service: Entity<SlackService>,
 }
 
-fn set_enabled(enabled: bool, cx: &mut TestAppContext) {
+pub(crate) fn set_enabled(enabled: bool, cx: &mut TestAppContext) {
     cx.update(|cx| {
         cx.update_global::<SettingsStore, _>(|store, cx| {
             store.update_user_settings(cx, |content| {

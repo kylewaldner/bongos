@@ -10,7 +10,7 @@ use bongos_project_repo::StateReader;
 use gpui::{App, TestAppContext};
 use settings::{Settings as _, SettingsStore};
 
-use crate::engine_host::{Exit, Mode, Started, apply_user_settings, start};
+use crate::engine_host::{Exit, Mode, Started, apply_user_settings, init_network, start};
 
 const SETTINGS: [&str; 4] = ["work", "project_repository", "workflows", "lanes"];
 
@@ -145,4 +145,28 @@ fn a_read_refuses_while_work_or_project_repositories_are_off(cx: &mut TestAppCon
             "{off}: {exit:?}"
         );
     }
+}
+
+#[gpui::test]
+fn the_engine_host_gets_a_real_http_client_and_the_slack_workflow_steps(cx: &mut TestAppContext) {
+    const MARKER: &str = "bongos-engine-host-test/0";
+    let temp = tempfile::tempdir().expect("a temporary directory");
+    cx.update(|cx| {
+        let store = SettingsStore::test(cx);
+        cx.set_global(store);
+        gpui_tokio::init(cx);
+        if let Err(exit) = init_network(MARKER, temp.path().join("slack"), cx) {
+            panic!("the network starts: {exit:?}");
+        }
+        let http = cx.http_client();
+        assert_eq!(
+            http.user_agent().and_then(|agent| agent.to_str().ok()),
+            Some(MARKER),
+            "the window's client, not gpui's placeholder"
+        );
+        let builtins = bongos_workflow::BuiltinNodes::global(cx);
+        assert!(builtins.get("slack-read").is_some());
+        assert!(builtins.get("slack-post").is_some());
+        assert!(bongos_slack::SlackService::global(cx).is_some());
+    });
 }

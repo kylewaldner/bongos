@@ -11,7 +11,7 @@
 //! is off or the project cannot be read, 2 no read mode of that name is registered.
 
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::{process, rc::Rc, sync::Arc};
 
 use anyhow::anyhow;
@@ -24,10 +24,14 @@ use bongos_project_repo::{
     ClientKind, Location, RepositoryLocations, StateApplyHooks, StateStore, StateWriter,
 };
 use bongos_work::{OpenedProject, ProjectOpening};
+use client::ProxySettings;
 use fs::{Fs, RealFs};
 use gpui::{App, Task, UpdateGlobal as _};
+use gpui_tokio::Tokio;
+use http_client::HttpClient;
 use parking_lot::Mutex;
 use release_channel::{AppCommitSha, AppVersion};
+use reqwest_client::ReqwestClient;
 use settings::{Settings, SettingsStore};
 use util::rotating_log::RotatingLogFile;
 
@@ -124,6 +128,34 @@ pub(crate) fn apply_user_settings(text: &str, path: &Path, cx: &mut App) -> Resu
     Ok(())
 }
 
+/// The application's HTTP client, as every bongos process builds it: reqwest with the `proxy`
+/// setting (else the environment's proxy) and `user_agent`, behind the guard that refuses Zed's
+/// hosts. Needs the Tokio runtime ([`gpui_tokio::init`]) and the settings.
+pub(crate) fn guarded_http_client(
+    user_agent: &str,
+    cx: &mut App,
+) -> anyhow::Result<Arc<dyn HttpClient>> {
+    let proxy_url = ProxySettings::get_global(cx).proxy_url();
+    let http = {
+        let _guard = Tokio::handle(cx).enter();
+        ReqwestClient::proxy_and_user_agent(proxy_url, user_agent)?
+    };
+    Ok(Arc::new(bongos_net::GuardedHttpClient::new(Arc::new(http))))
+}
+
+/// Gives the engine host the window's HTTP client, built with `user_agent` (a client without
+/// one is gpui's placeholder, over which Slack makes no request), and the Slack of an engine
+/// host with its files in `slack_dir`: the `slack-read` and `slack-post` workflow steps, which
+/// read `connection.toml` and the user settings file again before every try. Call once the user
+/// settings are loaded.
+pub(crate) fn init_network(user_agent: &str, slack_dir: PathBuf, cx: &mut App) -> Result<(), Exit> {
+    let http = guarded_http_client(user_agent, cx)
+        .map_err(|error| Exit::new(1, format!("could not start the HTTP client: {error:#}")))?;
+    cx.set_http_client(http);
+    bongos_slack::init_engine_host_in(slack_dir, paths::settings_file().clone(), cx);
+    Ok(())
+}
+
 /// Checks the settings `mode` needs and, for a read mode, starts it. `locations` is the record of
 /// project repositories.
 pub(crate) fn start(
@@ -169,8 +201,13 @@ pub fn run(project_id: String, mode: Mode) -> ! {
     app.run(move |cx| {
         cx.set_global(app_db);
         release_channel::init(app_version, cx);
+        gpui_tokio::init(cx);
         settings::init(cx);
         load_user_settings(cx);
+        let user_agent = bongos_version::user_agent(std::env::consts::OS, std::env::consts::ARCH);
+        if let Err(exit) = init_network(&user_agent, bongos_slack::connection::default_dir(), cx) {
+            exit.exit();
+        }
         <dyn Fs>::set_global(fs.clone(), cx);
         let dirs = bongos_work::WorkDirs::new(util::paths::home_dir(), paths::data_dir());
         let locations = dirs.locations.clone();
