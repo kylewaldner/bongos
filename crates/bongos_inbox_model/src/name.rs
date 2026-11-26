@@ -39,7 +39,9 @@ pub struct ParsedName {
 
 impl ParsedName {
     pub fn is_read(&self) -> bool {
-        self.flags.as_ref().is_some_and(|flags| flags.contains(SEEN))
+        self.flags
+            .as_ref()
+            .is_some_and(|flags| flags.contains(SEEN))
     }
 
     pub fn render(&self) -> String {
@@ -114,7 +116,11 @@ pub fn slug(source: &str) -> String {
         }
     }
     let out = out.trim_matches('-');
-    if out.is_empty() { "item".into() } else { out.into() }
+    if out.is_empty() {
+        "item".into()
+    } else {
+        out.into()
+    }
 }
 
 /// `<YYYYMMDDTHHMMSSZ>-<source-slug>-<hex8>.md`
