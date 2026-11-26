@@ -18,7 +18,7 @@ use bongos_project_repo::{PeerIdentity, ProjectRepo, StateEvent, StateWriter, pe
 use futures::StreamExt as _;
 use futures::channel::mpsc;
 use gpui::{App, AppContext as _, Task};
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 
 use crate::host_file::HostInfo;
 use crate::protocol::{
@@ -40,11 +40,57 @@ struct Connection {
     stream: UnixStream,
     /// The lines the connection's writing thread sends, so no caller ever blocks on a client.
     outbox: SyncSender<Vec<u8>>,
+    /// Counts the lines queued and written, so a caller can wait for the writing thread.
+    flush: Arc<Flush>,
     /// `None` until the client subscribes; an empty set is every topic.
     topics: Mutex<Option<HashSet<HostTopic>>>,
 }
 
+/// How many lines were queued for a connection's writing thread and how many it has written.
+#[derive(Default)]
+struct Flush {
+    queued: AtomicU64,
+    /// Lines written; `u64::MAX` once the writing thread has stopped, since nothing more will be.
+    written: Mutex<u64>,
+    changed: Condvar,
+}
+
+impl Flush {
+    fn wrote(&self, lines: u64) {
+        *self.written.lock() = lines;
+        self.changed.notify_all();
+    }
+
+    /// Waits until every line queued so far is written (or can never be); false on `timeout`.
+    fn wait(&self, timeout: Duration) -> bool {
+        let target = self.queued.load(Ordering::SeqCst);
+        let mut written = self.written.lock();
+        let deadline = std::time::Instant::now().checked_add(timeout);
+        while *written < target {
+            let timed_out = match deadline {
+                Some(deadline) => self.changed.wait_until(&mut written, deadline).timed_out(),
+                None => {
+                    self.changed.wait(&mut written);
+                    false
+                }
+            };
+            if timed_out {
+                return *written >= target;
+            }
+        }
+        true
+    }
+}
+
+/// How long a stop waits for its reply to be written before stopping anyway.
+const REPLY_FLUSH_TIMEOUT: Duration = Duration::from_secs(10);
+
 impl Connection {
+    /// Waits for the writing thread to have written what is queued so far; false on `timeout`.
+    fn flush(&self, timeout: Duration) -> bool {
+        self.flush.wait(timeout)
+    }
+
     /// Queues `message` without blocking; false when the connection is gone. A client whose
     /// queue is full is not reading, so its connection is ended.
     fn send(&self, message: &ServerMessage) -> bool {
@@ -52,7 +98,10 @@ impl Connection {
             return false;
         };
         match self.outbox.try_send(line) {
-            Ok(()) => true,
+            Ok(()) => {
+                self.flush.queued.fetch_add(1, Ordering::SeqCst);
+                true
+            }
             Err(TrySendError::Full(_)) => {
                 log::warn!(
                     "dropping the connection of pid {}: it stopped reading",
@@ -177,6 +226,11 @@ impl EngineServer {
                         };
                         let accepted = matches!(result, HostResult::Ok(_));
                         connection.send(&ServerMessage::Reply { id, result });
+                        if accepted && stop.is_some() {
+                            // The stop may shut the sockets down at once; the client gets its
+                            // answer first. A client that stopped reading cannot hold it up.
+                            connection.flush(REPLY_FLUSH_TIMEOUT);
+                        }
                         if let (true, Some((sender, at_job_boundary))) = (accepted, stop) {
                             sender.unbounded_send(at_job_boundary).ok();
                         }
@@ -362,17 +416,19 @@ fn serve_connection(
     let peer = peer_identity(&stream, client).context("reading the peer's identity")?;
     stream.set_read_timeout(None)?;
     let (outbox, lines) = std::sync::mpsc::sync_channel::<Vec<u8>>(OUTBOX_LINES);
+    let flush = Arc::new(Flush::default());
     let connection = Arc::new(Connection {
         id: shared.next_connection.fetch_add(1, Ordering::SeqCst),
         peer,
         stream: stream.try_clone()?,
         outbox,
+        flush: flush.clone(),
         topics: Mutex::new(None),
     });
     let closer = stream.try_clone()?;
     std::thread::Builder::new()
         .name("engine-host-writer".to_string())
-        .spawn(move || write_lines(writer, closer, lines))
+        .spawn(move || write_lines(writer, closer, lines, &flush))
         .context("starting a connection's writing thread")?;
     shared.connections.lock().push(connection.clone());
     shared.connections_changed();
@@ -395,7 +451,13 @@ fn serve_connection(
 
 /// Writes a connection's queued lines until every sender is gone; a failed write ends the
 /// connection.
-fn write_lines(mut writer: UnixStream, closer: UnixStream, lines: Receiver<Vec<u8>>) {
+fn write_lines(
+    mut writer: impl std::io::Write,
+    closer: UnixStream,
+    lines: Receiver<Vec<u8>>,
+    flush: &Flush,
+) {
+    let mut written = 0;
     for line in lines {
         if writer
             .write_all(&line)
@@ -403,8 +465,86 @@ fn write_lines(mut writer: UnixStream, closer: UnixStream, lines: Receiver<Vec<u
             .is_err()
         {
             closer.shutdown(std::net::Shutdown::Both).ok();
+            flush.wrote(u64::MAX);
             return;
         }
+        written += 1;
+        flush.wrote(written);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A writer that holds every write back until `gate` is opened.
+    struct Gated {
+        gate: std::sync::mpsc::Receiver<()>,
+        out: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Write for Gated {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.gate.recv().ok();
+            self.out.lock().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn flush_waits_for_the_writing_thread_to_write_what_is_queued() {
+        let (outbox, lines) = std::sync::mpsc::sync_channel::<Vec<u8>>(OUTBOX_LINES);
+        let (open, gate) = std::sync::mpsc::channel();
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let flush = Arc::new(Flush::default());
+        let (closer, _other) = UnixStream::pair().unwrap();
+        let thread = std::thread::spawn({
+            let (flush, out) = (flush.clone(), out.clone());
+            move || write_lines(Gated { gate, out }, closer, lines, &flush)
+        });
+
+        // Nothing queued: nothing to wait for.
+        assert!(flush.wait(Duration::ZERO));
+
+        outbox.send(b"reply\n".to_vec()).unwrap();
+        flush.queued.fetch_add(1, Ordering::SeqCst);
+        // The writing thread holds the reply back, so a stop signaled now would beat it.
+        assert!(
+            !flush.wait(Duration::ZERO),
+            "the wait returned while the reply was still queued"
+        );
+        assert!(out.lock().is_empty());
+
+        open.send(()).unwrap();
+        assert!(flush.wait(Duration::from_secs(60)));
+        assert_eq!(out.lock().as_slice(), b"reply\n");
+
+        drop(outbox);
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn flush_does_not_wait_for_a_writing_thread_that_failed() {
+        struct Broken;
+        impl std::io::Write for Broken {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let (outbox, lines) = std::sync::mpsc::sync_channel::<Vec<u8>>(OUTBOX_LINES);
+        let flush = Arc::new(Flush::default());
+        let (closer, _other) = UnixStream::pair().unwrap();
+        outbox.send(b"reply\n".to_vec()).unwrap();
+        flush.queued.fetch_add(1, Ordering::SeqCst);
+        write_lines(Broken, closer, lines, &flush);
+        assert!(flush.wait(Duration::from_secs(60)));
     }
 }
 
