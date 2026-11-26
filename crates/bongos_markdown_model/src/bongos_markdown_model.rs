@@ -13,7 +13,7 @@ mod table;
 mod tests;
 
 pub use blocks::{
-    Block, BlockId, BlockKind, BlockSelection, BlockTree, Direction, MoveEdit, NoNeighbor,
+    Block, BlockId, BlockNodeKind, BlockSelection, BlockTree, Direction, MoveEdit, NoNeighbor,
     move_block,
 };
 pub use conceal::{Conceal, ConcealKind, diff, plan};

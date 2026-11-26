@@ -13,7 +13,7 @@ use crate::index::{ElementKind, MarkdownIndex};
 pub type BlockId = usize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BlockKind {
+pub enum BlockNodeKind {
     /// A heading and everything up to the next heading of the same or a
     /// higher level. `heading` is the heading line.
     Section {
@@ -32,7 +32,7 @@ pub enum BlockKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
-    pub kind: BlockKind,
+    pub kind: BlockNodeKind,
     /// Whole lines, without the final line terminator.
     pub range: Range<usize>,
     pub parent: Option<BlockId>,
@@ -136,16 +136,16 @@ impl BlockTree {
         let mut open: Vec<(Range<usize>, Option<BlockId>)> = Vec::new();
         for element in index.elements() {
             let kind = match &element.kind {
-                ElementKind::Heading(level) => Some(BlockKind::Section {
+                ElementKind::Heading(level) => Some(BlockNodeKind::Section {
                     level: *level,
                     heading: lines.whole(element.range.clone()),
                 }),
-                ElementKind::ListItem { .. } => Some(BlockKind::ListItem),
-                ElementKind::Paragraph => Some(BlockKind::Paragraph),
-                ElementKind::Table { .. } => Some(BlockKind::Table),
-                ElementKind::CodeBlock { .. } => Some(BlockKind::CodeBlock),
-                ElementKind::Quote => Some(BlockKind::Quote),
-                ElementKind::Rule => Some(BlockKind::Rule),
+                ElementKind::ListItem { .. } => Some(BlockNodeKind::ListItem),
+                ElementKind::Paragraph => Some(BlockNodeKind::Paragraph),
+                ElementKind::Table { .. } => Some(BlockNodeKind::Table),
+                ElementKind::CodeBlock { .. } => Some(BlockNodeKind::CodeBlock),
+                ElementKind::Quote => Some(BlockNodeKind::Quote),
+                ElementKind::Rule => Some(BlockNodeKind::Rule),
                 _ => None,
             };
             let Some(kind) = kind else { continue };
@@ -159,7 +159,7 @@ impl BlockTree {
             let range = lines.whole(raw.clone());
             let mut id = None;
             match (&kind, open.last()) {
-                (BlockKind::Section { level, .. }, None) => {
+                (BlockNodeKind::Section { level, .. }, None) => {
                     entries.push(Entry::Heading(*level, range));
                 }
                 (_, None) => {
@@ -175,11 +175,12 @@ impl BlockTree {
                     entries.push(Entry::Block(new));
                     id = Some(new);
                 }
-                (BlockKind::ListItem, Some((_, Some(parent)))) => {
+                (BlockNodeKind::ListItem, Some((_, Some(parent)))) => {
                     let parent = *parent;
-                    if tree.blocks[parent].kind == BlockKind::ListItem && tree.fits(parent, &range)
+                    if tree.blocks[parent].kind == BlockNodeKind::ListItem
+                        && tree.fits(parent, &range)
                     {
-                        let new = tree.push(BlockKind::ListItem, range, Some(parent));
+                        let new = tree.push(BlockNodeKind::ListItem, range, Some(parent));
                         tree.blocks[parent].children.push(new);
                         id = Some(new);
                     }
@@ -192,7 +193,12 @@ impl BlockTree {
         tree
     }
 
-    fn push(&mut self, kind: BlockKind, range: Range<usize>, parent: Option<BlockId>) -> BlockId {
+    fn push(
+        &mut self,
+        kind: BlockNodeKind,
+        range: Range<usize>,
+        parent: Option<BlockId>,
+    ) -> BlockId {
         self.blocks.push(Block {
             kind,
             range,
@@ -226,7 +232,7 @@ impl BlockTree {
         let mut last_item: Option<BlockId> = None;
         for entry in entries {
             match entry {
-                Entry::Block(id) if self.blocks[id].kind == BlockKind::ListItem => {
+                Entry::Block(id) if self.blocks[id].kind == BlockNodeKind::ListItem => {
                     let joins = last_item.is_some_and(|prev| {
                         markers.get(&prev) == markers.get(&id)
                             && text
@@ -239,7 +245,8 @@ impl BlockTree {
                         self.blocks[list].range.end = self.blocks[id].range.end;
                         self.blocks[id].parent = Some(list);
                     } else {
-                        let list = self.push(BlockKind::List, self.blocks[id].range.clone(), None);
+                        let list =
+                            self.push(BlockNodeKind::List, self.blocks[id].range.clone(), None);
                         self.blocks[list].children.push(id);
                         self.blocks[id].parent = Some(list);
                         grouped.push(Entry::Block(list));
@@ -268,7 +275,7 @@ impl BlockTree {
                     }
                     let parent = sections.last().copied();
                     let id = self.push(
-                        BlockKind::Section {
+                        BlockNodeKind::Section {
                             level,
                             heading: heading.clone(),
                         },
@@ -292,7 +299,7 @@ impl BlockTree {
 
     fn level(&self, id: BlockId) -> u8 {
         match self.blocks[id].kind {
-            BlockKind::Section { level, .. } => level,
+            BlockNodeKind::Section { level, .. } => level,
             _ => 0,
         }
     }
@@ -348,12 +355,12 @@ impl BlockTree {
             };
             let block = &self.blocks[id];
             match &block.kind {
-                BlockKind::Section { heading, .. } => {
+                BlockNodeKind::Section { heading, .. } => {
                     if heading.start <= offset && offset <= heading.end {
                         best = Some(id);
                     }
                 }
-                BlockKind::List => {}
+                BlockNodeKind::List => {}
                 _ => best = Some(id),
             }
             level = &block.children;
@@ -378,7 +385,7 @@ impl BlockTree {
         if let Some(id) = self.block_at(from) {
             return Some(id);
         }
-        let candidates = self.blocks.iter().filter(|b| b.kind != BlockKind::List);
+        let candidates = self.blocks.iter().filter(|b| b.kind != BlockNodeKind::List);
         let edge = if forward {
             candidates
                 .map(|b| b.range.start)
@@ -425,8 +432,10 @@ impl BlockTree {
     /// block.
     fn compatible(&self, a: BlockId, b: BlockId) -> bool {
         match (&self.blocks[a].kind, &self.blocks[b].kind) {
-            (BlockKind::Section { level: x, .. }, BlockKind::Section { level: y, .. }) => x == y,
-            (BlockKind::Section { .. }, _) | (_, BlockKind::Section { .. }) => false,
+            (BlockNodeKind::Section { level: x, .. }, BlockNodeKind::Section { level: y, .. }) => {
+                x == y
+            }
+            (BlockNodeKind::Section { .. }, _) | (_, BlockNodeKind::Section { .. }) => false,
             _ => true,
         }
     }
