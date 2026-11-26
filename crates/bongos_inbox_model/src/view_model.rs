@@ -26,6 +26,9 @@ pub struct ItemRow {
     pub read: bool,
     pub created: DateTime<Utc>,
     pub actions: Vec<String>,
+    /// The item's target no longer exists. The row shows `stale` after the kind and stays
+    /// openable and dismissable.
+    pub stale: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,8 +95,14 @@ pub fn unread_count(snapshot: &Snapshot) -> usize {
         .count()
 }
 
-fn item_row(entry: &Entry, parsed: &ParseResult, known: &dyn Fn(&str) -> bool) -> ItemRow {
+fn item_row(
+    entry: &Entry,
+    parsed: &ParseResult,
+    known: &dyn Fn(&str) -> bool,
+    stale: &dyn Fn(&Entry) -> bool,
+) -> ItemRow {
     let read = entry.is_read();
+    let stale = stale(entry);
     match parsed.as_ref() {
         Ok(item) => ItemRow {
             unique: entry.unique.clone(),
@@ -105,6 +114,7 @@ fn item_row(entry: &Entry, parsed: &ParseResult, known: &dyn Fn(&str) -> bool) -
             read,
             created: item.created,
             actions: resolve_actions(&item.actions, known),
+            stale,
         },
         Err(_) => ItemRow {
             unique: entry.unique.clone(),
@@ -116,6 +126,7 @@ fn item_row(entry: &Entry, parsed: &ParseResult, known: &dyn Fn(&str) -> bool) -
             read,
             created: DateTime::<Utc>::from(entry.mtime),
             actions: vec![OPEN.to_string(), DISMISS.to_string()],
+            stale,
         },
     }
 }
@@ -123,9 +134,19 @@ fn item_row(entry: &Entry, parsed: &ParseResult, known: &dyn Fn(&str) -> bool) -
 /// Builds the visible rows: filter, order newest first, then collapse items
 /// sharing a group key into one row at the position of the newest member.
 pub fn rows(snapshot: &Snapshot, filter: &Filter, known: &dyn Fn(&str) -> bool) -> Vec<Row> {
+    rows_marked(snapshot, filter, known, &|_| false)
+}
+
+/// [`rows`], with each item row's `stale` set by `stale`.
+pub fn rows_marked(
+    snapshot: &Snapshot,
+    filter: &Filter,
+    known: &dyn Fn(&str) -> bool,
+    stale: &dyn Fn(&Entry) -> bool,
+) -> Vec<Row> {
     let mut items: Vec<ItemRow> = snapshot
         .iter()
-        .map(|(entry, parsed)| item_row(entry, parsed, known))
+        .map(|(entry, parsed)| item_row(entry, parsed, known, stale))
         .filter(|row| filter.matches(row))
         .collect();
     items.sort_by(|a, b| (Reverse(a.created), &a.unique).cmp(&(Reverse(b.created), &b.unique)));

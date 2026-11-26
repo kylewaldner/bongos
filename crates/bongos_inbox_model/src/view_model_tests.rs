@@ -215,3 +215,39 @@ fn unread_count_counts_new_and_cur_without_seen() {
     ];
     assert_eq!(unread_count(&snapshot), 2);
 }
+
+#[test]
+fn a_stale_item_keeps_open_and_dismiss() {
+    let snapshot = vec![
+        pair(
+            "a",
+            Dir::New,
+            "",
+            item("note", "agent/a", None, 1, &["accept"]),
+        ),
+        pair(
+            "b",
+            Dir::New,
+            "",
+            item("note", "agent/b", None, 2, &["accept"]),
+        ),
+    ];
+    let rows = rows_marked(&snapshot, &Filter::All, &known, &|entry| {
+        entry.unique == "a"
+    });
+    let stale: Vec<(String, bool, Vec<String>)> = rows
+        .into_iter()
+        .map(|row| match row {
+            Row::Item(item) => (item.unique, item.stale, item.actions),
+            Row::Group(_) => panic!("expected items"),
+        })
+        .collect();
+    let actions = vec!["accept".to_string(), OPEN.to_string(), DISMISS.to_string()];
+    assert_eq!(
+        stale,
+        vec![
+            ("a".to_string(), true, actions.clone()),
+            ("b".to_string(), false, actions),
+        ]
+    );
+}
