@@ -72,14 +72,20 @@ pub struct ItemDetail {
 }
 
 impl ItemDetail {
-    pub fn new(row: &ViewRow, entry: &Entry, parsed: &ParseResult, now: DateTime<Utc>) -> Self {
+    pub fn new(
+        row: &ViewRow,
+        entry: &Entry,
+        parsed: &ParseResult,
+        now: DateTime<Utc>,
+        known: &dyn Fn(&str) -> bool,
+    ) -> Self {
         let (blocks, unreadable, truncated, names) = match parsed.as_ref() {
             Ok(item) => (
                 parse_body(&item.body),
                 None,
                 !item.body_loaded,
-                // No handler is registered yet, so only `open` and `dismiss` resolve.
-                view_model::resolve_actions(&item.actions, &|_| false),
+                // The registered actions among the item's, then `open` and `dismiss`.
+                view_model::resolve_actions(&item.actions, known),
             ),
             Err(error) => (
                 Vec::new(),

@@ -19,6 +19,7 @@
 //!
 //! Every scan also resolves each item's `target` (see [`targets`]) to tell stale rows.
 
+mod actions;
 mod badge;
 #[cfg(debug_assertions)]
 mod dump;
@@ -57,11 +58,12 @@ use targets::PreparedResolvers;
 use util::ResultExt as _;
 use workspace::Workspace;
 
+pub use actions::{ActionHandler, ActionOutcome, InboxActions, ItemRef};
 pub use badge::{InboxBadge, badge_label};
 pub use inbox_settings::InboxSettings;
 pub use item::{ActionCap, Block, ItemDetail, LineKind, Paragraph};
 pub use modal::ItemModal;
-pub use targets::{TargetResolvers, TargetState};
+pub use targets::{Located, TargetResolvers, TargetState};
 pub use view::{Clock, InboxView, Layout, now, set_clock};
 
 #[cfg(debug_assertions)]
@@ -101,6 +103,10 @@ actions!(
         MarkUnread,
         /// Archives the item under the inbox cursor, or every item of the group under it.
         Dismiss,
+        /// Runs the first registered action of the item under the inbox cursor.
+        Accept,
+        /// Opens the target of the item under the inbox cursor.
+        OpenTarget,
     ]
 );
 
@@ -402,6 +408,11 @@ impl InboxState {
         self.stats
     }
 
+    /// The target resolvers.
+    pub fn resolvers(&self) -> &TargetResolvers {
+        &self.resolvers
+    }
+
     /// The target resolvers; changes apply from the next scan.
     pub fn resolvers_mut(&mut self) -> &mut TargetResolvers {
         &mut self.resolvers
@@ -604,6 +615,7 @@ pub fn init(dirs: InboxDirs, fs: Arc<dyn Fs>, cx: &mut App) {
 /// Registers the workspace-level handlers on every workspace: `inbox: open`, `inbox: refresh`
 /// and, in debug builds, `inbox: dump view`. The cursor and read actions are the view's.
 fn register_actions(cx: &mut App) {
+    cx.default_global::<InboxActions>();
     cx.observe_new(|workspace: &mut Workspace, _, _| register(workspace))
         .detach();
 }
@@ -636,6 +648,8 @@ pub fn action_types() -> Vec<TypeId> {
         TypeId::of::<OpenFile>(),
         TypeId::of::<MarkUnread>(),
         TypeId::of::<Dismiss>(),
+        TypeId::of::<Accept>(),
+        TypeId::of::<OpenTarget>(),
     ];
     #[cfg(debug_assertions)]
     types.push(TypeId::of::<DumpView>());
@@ -1025,3 +1039,6 @@ mod view_tests;
 
 #[cfg(test)]
 mod dismiss_tests;
+
+#[cfg(test)]
+mod actions_tests;

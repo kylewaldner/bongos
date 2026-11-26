@@ -1402,6 +1402,8 @@ async fn inbox_commands_dispatch_by_name(cx: &mut TestAppContext) {
             ("inbox::FocusList", "inbox: focus list"),
             ("inbox::OpenFile", "inbox: open file"),
             ("inbox::Dismiss", "inbox: dismiss"),
+            ("inbox::Accept", "inbox: accept"),
+            ("inbox::OpenTarget", "inbox: open target"),
         ];
         #[cfg(debug_assertions)]
         names.push(("inbox::DumpView", "inbox: dump view"));

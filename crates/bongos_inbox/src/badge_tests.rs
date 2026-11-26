@@ -169,7 +169,17 @@ pub(crate) struct Win {
 /// A window whose status bar has the badge first among the right items, then another right item.
 /// With `long`, a long left item comes first.
 pub(crate) async fn window(cx: &mut TestAppContext, env: &Env, long: bool) -> Win {
-    let project = Project::test(env.app_state.fs.clone(), [], cx).await;
+    window_in(cx, env, long, &[]).await
+}
+
+/// [`window`] with the worktrees `roots` open in its project.
+pub(crate) async fn window_in(
+    cx: &mut TestAppContext,
+    env: &Env,
+    long: bool,
+    roots: &[&Path],
+) -> Win {
+    let project = Project::test(env.app_state.fs.clone(), roots.iter().copied(), cx).await;
     let handle: WindowHandle<MultiWorkspace> =
         cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
     let workspace = handle

@@ -605,6 +605,16 @@ fn main() {
             |cx| bongos_work::WorkStore::global(cx).and_then(|store| store.read(cx).snapshot()),
             cx,
         );
+        bongos_inbox::InboxActions::set_task_focus(
+            |id, workspace, window, cx| {
+                workspace
+                    .update(cx, |workspace, cx| {
+                        bongos_work::focus_task(id, workspace, window, cx)
+                    })
+                    .ok();
+            },
+            cx,
+        );
         bongos_chat::init(
             bongos_chat::ChatDirs::new(util::paths::home_dir(), paths::data_dir()),
             chat_channel_config(),

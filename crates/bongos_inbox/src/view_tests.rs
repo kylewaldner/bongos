@@ -401,9 +401,9 @@ async fn the_item_pane_shows_the_parsed_header_and_body(cx: &mut TestAppContext)
             bold: Vec::new(),
         })]
     );
-    // `open` and `dismiss` are always there (nothing is registered yet), then `u`.
+    // The item's registered action, `open` and `dismiss`, then `u`.
     let names: Vec<_> = detail.actions.iter().map(|cap| cap.name.as_str()).collect();
-    assert_eq!(names, ["open", "dismiss", "mark-unread"]);
+    assert_eq!(names, ["accept", "open", "dismiss", "mark-unread"]);
     assert!(detail.unreadable.is_none());
     win.cx.run_until_parked();
 }

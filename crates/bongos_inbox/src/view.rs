@@ -18,13 +18,15 @@
 //! it as the list showed them at the keypress (an item delivered meanwhile stays), one operation
 //! each through the inbox's queue, and then says "<n> archived". The rows go at once.
 
+use crate::actions::{self, ActionOutcome, EXPAND_FIRST, InboxActions, ItemRef, NO_PRIMARY_ACTION};
 use crate::item::{self, ItemDetail};
 use crate::modal::ItemModal;
 use crate::rows::{self, PILL_FILL_OPACITY, Pill, RowKey, ViewRow};
 use crate::{
-    Dismiss, FocusItem, FocusList, Inbox, InboxEvent, InboxSettings, InboxState, MarkUnread, Next,
-    OpOutcome, OpenFile, OpenItem, Previous,
+    Accept, Dismiss, FocusItem, FocusList, Inbox, InboxEvent, InboxSettings, InboxState,
+    MarkUnread, Next, OpOutcome, OpenFile, OpenItem, OpenTarget, Previous,
 };
+use bongos_inbox_model::view_model;
 use chrono::{DateTime, Utc};
 use gpui::{
     AnyElement, App, ClickEvent, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
@@ -32,7 +34,6 @@ use gpui::{
     SharedString, Subscription, UniformListScrollHandle, WeakEntity, Window, div, point, px,
     relative, uniform_list,
 };
-use language::Buffer;
 use settings::Settings as _;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -161,7 +162,35 @@ impl InboxView {
             .items()
             .iter()
             .find(|(entry, _)| &entry.unique == unique && entry.inode == *inode)?;
-        Some(ItemDetail::new(self.selected()?, entry, parsed, now(cx)))
+        let known = |name: &str| InboxActions::is_registered(name, cx);
+        Some(ItemDetail::new(
+            self.selected()?,
+            entry,
+            parsed,
+            now(cx),
+            &known,
+        ))
+    }
+
+    /// The item under the cursor as an action sees it; `None` on a group row or an empty list.
+    pub fn item_ref(&self, cx: &App) -> Option<ItemRef> {
+        let (unique, inode) = self.selected()?.item.as_ref()?;
+        let snapshot = self.inbox.as_ref()?.read(cx).snapshot()?;
+        let index = snapshot
+            .items()
+            .iter()
+            .position(|(entry, _)| &entry.unique == unique && entry.inode == *inode)?;
+        let (entry, parsed) = &snapshot.items()[index];
+        let item = parsed.as_ref().as_ref().ok();
+        Some(ItemRef {
+            unique: unique.clone(),
+            inode: *inode,
+            path: entry.path.clone(),
+            target: item.and_then(|item| item.target.clone()),
+            target_state: snapshot.target(index),
+            actions: item.map(|item| item.actions.clone()).unwrap_or_default(),
+            workspace: self.workspace.clone(),
+        })
     }
 
     /// The cursor's place for the item bar: `(<i>, <n>)`, `None` on an empty list.
@@ -409,47 +438,84 @@ impl InboxView {
         let Some(path) = self.detail(cx).map(|detail| detail.path) else {
             return;
         };
-        self.workspace
-            .update(cx, |workspace, cx| {
-                let location =
-                    Workspace::project_path_for_path(workspace.project().clone(), &path, false, cx);
-                cx.spawn_in(window, async move |workspace, cx| {
-                    let (worktree, project_path) = location.await?;
-                    // A file outside the project is a worktree of its own, and its entry is there
-                    // once the scan has finished.
-                    let scanned = worktree.read_with(cx, |worktree, _| {
-                        worktree.as_local().map(|local| local.scan_complete())
-                    });
-                    if let Some(scanned) = scanned {
-                        scanned.await;
-                    }
-                    let item = workspace
-                        .update_in(cx, |workspace, window, cx| {
-                            workspace.open_path(project_path, None, true, window, cx)
-                        })?
-                        .await?;
-                    workspace.update_in(cx, |workspace, _, cx| {
-                        let Some(editor) = item.downcast::<editor::Editor>() else {
-                            return;
-                        };
-                        editor.update(cx, |editor, _| editor.set_read_only(true));
-                        let buffer = editor.read(cx).buffer().read(cx).as_singleton();
-                        let languages = workspace.project().read(cx).languages().clone();
-                        if let Some(buffer) = buffer {
-                            cx.spawn(async move |_, cx| {
-                                let language = languages.language_for_name("Markdown").await?;
-                                buffer.update(cx, |buffer: &mut Buffer, cx| {
-                                    buffer.set_language(Some(language), cx)
-                                });
-                                anyhow::Ok(())
-                            })
-                            .detach_and_log_err(cx);
-                        }
-                    })
-                })
-                .detach_and_log_err(cx);
-            })
-            .log_err();
+        actions::open_in_editor(&self.workspace, path, None, true, window, cx);
+    }
+
+    /// `a`: runs the first action of the item under the cursor that is registered, or says there
+    /// is none. On a group row it says to expand the group. `in_modal` archives as `d` does in
+    /// the modal. Returns what the action asked for.
+    pub fn accept(
+        &mut self,
+        in_modal: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ActionOutcome {
+        let Some(item) = self.item_ref_or_say(window, cx) else {
+            return ActionOutcome::Keep;
+        };
+        let known = |name: &str| InboxActions::is_registered(name, cx);
+        let Some(name) = view_model::primary_action(&item.actions, &known) else {
+            bongos_minibuffer::message(window, cx, NO_PRIMARY_ACTION);
+            return ActionOutcome::Keep;
+        };
+        self.run_action(&name, item, in_modal, window, cx)
+    }
+
+    /// `o`: opens the target of the item under the cursor, or says why it cannot.
+    pub fn open_target(
+        &mut self,
+        in_modal: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ActionOutcome {
+        let Some(item) = self.item_ref_or_say(window, cx) else {
+            return ActionOutcome::Keep;
+        };
+        let outcome = actions::open_target(&item, window, cx);
+        self.apply(outcome, in_modal, window, cx);
+        outcome
+    }
+
+    /// The item under the cursor; on a group row, says to expand it and returns `None`.
+    fn item_ref_or_say(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<ItemRef> {
+        let row = self.selected()?;
+        if row.item.is_none() {
+            bongos_minibuffer::message(window, cx, EXPAND_FIRST);
+            return None;
+        }
+        self.item_ref(cx)
+    }
+
+    /// Runs the registered action `name` on `item`.
+    fn run_action(
+        &mut self,
+        name: &str,
+        item: ItemRef,
+        in_modal: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ActionOutcome {
+        let Some(handler) = InboxActions::handler(name, cx) else {
+            return ActionOutcome::Keep;
+        };
+        let outcome = handler(&item, window, cx);
+        self.apply(outcome, in_modal, window, cx);
+        outcome
+    }
+
+    fn apply(
+        &mut self,
+        outcome: ActionOutcome,
+        in_modal: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match outcome {
+            ActionOutcome::Keep => {}
+            ActionOutcome::MarkRead => self.operate(true, cx),
+            ActionOutcome::Archive if in_modal => self.dismiss_in_modal(window, cx),
+            ActionOutcome::Archive => self.dismiss(window, cx),
+        }
     }
 
     /// Marks the item under the cursor unread. Does nothing on an unread item or a group row.
@@ -814,6 +880,12 @@ impl Render for InboxView {
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| this.open_file(window, cx)))
             .on_action(cx.listener(|this, _: &MarkUnread, _, cx| this.mark_unread(cx)))
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| this.dismiss(window, cx)))
+            .on_action(cx.listener(|this, _: &Accept, window, cx| {
+                this.accept(false, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenTarget, window, cx| {
+                this.open_target(false, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &crate::Refresh, _, cx| this.refresh(cx)))
             .size_full()
             .overflow_hidden()
