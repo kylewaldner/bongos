@@ -161,9 +161,9 @@ elif [ -n "${BONGOS_SET_SPLIT_DEBUGINFO:-}" ]; then
   unset CARGO_PROFILE_DEV_SPLIT_DEBUGINFO CARGO_PROFILE_DEV_BUILD_OVERRIDE_SPLIT_DEBUGINFO BONGOS_SET_SPLIT_DEBUGINFO
 fi
 # Dev builds do not rebuild the app crates on every commit: the build scripts of bongos, cli and remote_server skip watching
-# git HEAD. The bongos and cli build scripts then embed no commit sha (it would be as of the last time each ran,
-# so the two would differ and the engine host would refuse the command line); remote_server's sha is as of the
-# last time it ran. Release builds (BONGOS_RELEASE_BUILD=1) remove the variable, so their sha is always current.
+# git HEAD. All three build scripts then embed no commit sha (it would be as of the last time each ran,
+# so the bongos and cli ones would differ and the engine host would refuse the command line, and the remote
+# server would be mislabeled). Release builds (BONGOS_RELEASE_BUILD=1) remove the variable, so their sha is always current.
 if [ "${BONGOS_RELEASE_BUILD:-}" != 1 ]; then
   export BONGOS_SKIP_GIT_HEAD_WATCH="${BONGOS_SKIP_GIT_HEAD_WATCH:-1}"  # an exported 0 opts out
 else
