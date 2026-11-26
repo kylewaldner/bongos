@@ -601,6 +601,10 @@ fn main() {
             cx,
         );
         bongos_work::init(fs.clone(), work_dirs, cx);
+        bongos_inbox::set_work_tree(
+            |cx| bongos_work::WorkStore::global(cx).and_then(|store| store.read(cx).snapshot()),
+            cx,
+        );
         bongos_chat::init(
             bongos_chat::ChatDirs::new(util::paths::home_dir(), paths::data_dir()),
             chat_channel_config(),

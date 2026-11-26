@@ -2554,6 +2554,8 @@ name = "bongos_inbox"
 version = "0.1.0"
 dependencies = [
  "bongos_inbox_model",
+ "bongos_minibuffer",
+ "bongos_work_model",
  "chrono",
  "fs",
  "futures 0.3.32",
@@ -2563,6 +2565,7 @@ dependencies = [
  "settings",
  "tempfile",
  "util",
+ "workspace",
 ]
 
 [[package]]
