@@ -197,6 +197,68 @@ fn holds_or_waits_in(tables: &[PoolTable], link: &CycleLink, pool: &str) -> bool
         })
 }
 
+/// Whether this holder's path, or a path inside it, waits anywhere (the new request included).
+/// A holder that does not can release while anybody waits.
+fn busy(tables: &[PoolTable], request: &Request, holder: &Holder) -> bool {
+    holder.is_or_encloses(&request.holder)
+        || tables
+            .iter()
+            .flat_map(|table| table.pools.values())
+            .flat_map(|state| &state.waiters)
+            .any(|waiter| holder.is_or_encloses(&waiter.holder))
+}
+
+/// On a `slots` pool where `next` only holds, the link must be a real wait: the free slots and
+/// those of every idle holder must not cover the largest need the link's path waits with there.
+fn assert_slots_wait_is_real(
+    seed: u64,
+    tables: &[PoolTable],
+    request: &Request,
+    link: &CycleLink,
+    next: &CycleLink,
+    pool: &str,
+) {
+    let Some(state) = tables.iter().find_map(|table| table.pools.get(pool)) else {
+        return;
+    };
+    if state.kind != PoolKind::Slots
+        || state
+            .waiters
+            .iter()
+            .any(|waiter| same(next, &waiter.holder))
+    {
+        return;
+    }
+    let new = same(link, &request.holder)
+        .then(|| request.needs.iter().find(|need| need.pool == pool))
+        .flatten();
+    let need = state
+        .waiters
+        .iter()
+        .filter(|waiter| same(link, &waiter.holder))
+        .map(|waiter| &waiter.need)
+        .chain(new)
+        .map(|need| u64::from(need.count()))
+        .max()
+        .unwrap_or(0);
+    let held: u64 = state
+        .holds
+        .iter()
+        .map(|hold| u64::from(hold.need.count()))
+        .sum();
+    let idle: u64 = state
+        .holds
+        .iter()
+        .filter(|hold| !busy(tables, request, &hold.holder))
+        .map(|hold| u64::from(hold.need.count()))
+        .sum();
+    let free = u64::from(state.size).saturating_sub(held);
+    assert!(
+        free + idle < need,
+        "seed {seed}: {link:?} waits in {pool} though {free} free and {idle} idle slots cover {need}"
+    );
+}
+
 #[test]
 fn would_cycle_refuses_only_real_cycles_and_never_a_free_request() {
     let holders = paths();
@@ -258,6 +320,7 @@ fn would_cycle_refuses_only_real_cycles_and_never_a_free_request() {
                         holds_or_waits_in(&tables, next, pool),
                         "seed {seed}: {next:?} holds or waits in {pool}"
                     );
+                    assert_slots_wait_is_real(seed, &tables, &request, link, next, pool);
                 }
                 None => assert!(
                     link.project == next.project && link.path.encloses(&next.path),

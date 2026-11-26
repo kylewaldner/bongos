@@ -453,7 +453,8 @@ pub fn grant(
     grants
 }
 
-/// Whether the request could be admitted at once without queuing. Each pool is first judged
+/// Whether the request could be admitted at once without queuing. A request naming a pool twice
+/// is `Blocked::NamedTwice` before anything else. Each pool is first judged
 /// against the enclosing holders' holds: a covered pool is [`Admit::Satisfied`] whatever waits
 /// there, and an incompatible one is `Blocked::OwnHold`. Every other pool must have no waiter at
 /// all and the grant rule must admit it now. Nothing is queued either way.
@@ -466,7 +467,6 @@ pub fn try_now(
     request: &Request,
     guards: &GuardReadings,
 ) -> Result<Vec<(String, Admit)>, Blocked> {
-    let mut admitted = Vec::new();
     let mut named = BTreeSet::new();
     for need in &request.needs {
         if !named.insert(need.pool.as_str()) {
@@ -474,6 +474,9 @@ pub fn try_now(
                 pool: need.pool.clone(),
             });
         }
+    }
+    let mut admitted = Vec::new();
+    for need in &request.needs {
         let Some(pool) = table.pools.get(&need.pool) else {
             return Err(Blocked::UnknownPool {
                 pool: need.pool.clone(),
@@ -638,32 +641,58 @@ pub(crate) fn cover(pool: &PoolState, need: &Need, requester: &Holder) -> Cover 
     }
 }
 
+/// What a waiter with one need waits for in one pool, by [`blocking_holds`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Blockers<'a> {
+    /// Every one of these holds must release before the need fits (none when it fits now).
+    All(Vec<&'a Hold>),
+    /// A `slots` pool where the need fits beside the holds of the waiter's own and enclosing
+    /// paths: it fits once enough of these other holds release to add `need` slots to the `free`
+    /// ones, so any of them may be the one that must release, but not all of them need to.
+    Enough {
+        holds: Vec<&'a Hold>,
+        free: u64,
+        need: u64,
+    },
+}
+
 /// The holds a waiter with this need waits for, by the grant rule's own fit test: none when it
 /// fits beside every hold. Otherwise, when it would fit beside the holds of its own path and its
 /// enclosing paths (which are not released while it waits), only the other holds that conflict
 /// with it; when it would not, every conflicting hold, its own included. A hold conflicts unless
-/// the need is `shared` on an `rw` pool and the hold is `shared` too. On a `slots` pool every
-/// other hold counts, since any of them may be the one that must release.
+/// the need is `shared` on an `rw` pool and the hold is `shared` too. On a `slots` pool that the
+/// need fits beside its own holds, the other holds are [`Blockers::Enough`]: some of them must
+/// release, as many as free the slots it lacks.
 pub(crate) fn blocking_holds<'a>(
     pool: &'a PoolState,
     need: &Need,
     requester: &Holder,
-) -> Vec<&'a Hold> {
-    if Usage::of(pool).fits(pool, need) {
-        return Vec::new();
+) -> Blockers<'a> {
+    let usage = Usage::of(pool);
+    if usage.fits(pool, need) {
+        return Blockers::All(Vec::new());
     }
     let own = |hold: &Hold| hold.holder.is_or_encloses(requester);
     let own_fits =
         Usage::of_holds(pool, pool.holds.iter().filter(|hold| own(hold))).fits(pool, need);
-    pool.holds
-        .iter()
-        .filter(|hold| !own_fits || !own(hold))
-        .filter(|hold| {
-            !(pool.kind == PoolKind::Rw
-                && mode(need) == NeedMode::Shared
-                && mode(&hold.need) == NeedMode::Shared)
-        })
-        .collect()
+    if own_fits && pool.kind == PoolKind::Slots {
+        return Blockers::Enough {
+            holds: pool.holds.iter().filter(|hold| !own(hold)).collect(),
+            free: u64::from(pool.size).saturating_sub(usage.count),
+            need: u64::from(need.count()),
+        };
+    }
+    Blockers::All(
+        pool.holds
+            .iter()
+            .filter(|hold| !own_fits || !own(hold))
+            .filter(|hold| {
+                !(pool.kind == PoolKind::Rw
+                    && mode(need) == NeedMode::Shared
+                    && mode(&hold.need) == NeedMode::Shared)
+            })
+            .collect(),
+    )
 }
 
 /// Where the request waits and why, judged as its own host would judge it, with the readings

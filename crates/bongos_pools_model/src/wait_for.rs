@@ -5,6 +5,10 @@
 //! [`crate::grant`]) and to every older waiting request of that pool, since nobody is granted
 //! ahead of an older waiter. A path has an edge to every waiting request of its own path or of a
 //! path it encloses, because a holder does not release while it, or a node inside it, waits.
+//!
+//! A `slots` pool needs only enough holders to release, not all: its waiter has an edge to the
+//! holders that (transitively) wait on the requester only when the free slots and those of every
+//! other holder, which can release meanwhile, still fall short of its need.
 //! Requests are nodes of their own (named by host and id) so that two requests of one path are
 //! never confused; a cycle is reported as the paths it passes through.
 //!
@@ -14,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::grant::{
-    PoolState, PoolTable, Request, RequestId, Satisfied, blocking_holds, own_holds,
+    Blockers, Hold, PoolState, PoolTable, Request, RequestId, Satisfied, blocking_holds, own_holds,
 };
 use crate::holder::{Holder, HolderLabel, HolderPath, HostRef};
 use crate::needs::Need;
@@ -70,19 +74,27 @@ impl Graph {
         });
     }
 
-    fn edge(&mut self, from: Node, to: Node, pool: Option<&str>) {
-        let label = self
-            .edges
-            .entry(from)
-            .or_default()
-            .entry(to)
-            .or_insert(None);
+    /// Adds the edge, or lowers its pool; returns whether the edge is new.
+    fn edge(&mut self, from: Node, to: Node, pool: Option<&str>) -> bool {
+        let targets = self.edges.entry(from).or_default();
+        let new = !targets.contains_key(&to);
+        let label = targets.entry(to).or_insert(None);
         if let Some(pool) = pool {
             if label.as_deref().map_or(true, |old| pool < old) {
                 *label = Some(pool.to_string());
             }
         }
+        new
     }
+}
+
+/// A `slots` wait served once enough of `holds` release (see [`Blockers::Enough`]).
+struct Enough<'a> {
+    from: Node,
+    pool: &'a str,
+    holds: Vec<&'a Hold>,
+    free: u64,
+    need: u64,
 }
 
 fn path_node(holder: &Holder) -> Node {
@@ -93,6 +105,9 @@ fn request_node(holder: &Holder, request: RequestId) -> Node {
     Node::Request(holder.host, request)
 }
 
+/// The first table's pool of this name. Validation keeps project and machine pool names
+/// distinct, so a name is in at most one table and the waiters and holds gathered from every
+/// table belong to this pool.
 fn find_pool<'a>(tables: &[&'a PoolTable], name: &str) -> Option<&'a PoolState> {
     tables.iter().find_map(|table| table.pools.get(name))
 }
@@ -140,14 +155,34 @@ pub fn would_cycle(tables: &[&PoolTable], request: &Request) -> Result<(), Refus
     let mut graph = Graph::default();
     graph.name(&start, &request.holder);
     let mut holders: BTreeMap<Node, &Holder> = BTreeMap::new();
+    for table in tables {
+        for pool in table.pools.values() {
+            for hold in &pool.holds {
+                holders
+                    .entry(path_node(&hold.holder))
+                    .or_insert(&hold.holder);
+            }
+        }
+    }
+    let mut enough: Vec<Enough> = Vec::new();
     for (node, entry) in &waiting {
         graph.name(node, entry.holder);
         for (pool, name, need, ticket) in &entry.needs {
-            for hold in blocking_holds(pool, need, entry.holder) {
-                let target = path_node(&hold.holder);
-                graph.name(&target, &hold.holder);
-                holders.entry(target.clone()).or_insert(&hold.holder);
-                graph.edge(node.clone(), target, Some(name));
+            match blocking_holds(pool, need, entry.holder) {
+                Blockers::All(holds) => {
+                    for hold in holds {
+                        let target = path_node(&hold.holder);
+                        graph.name(&target, &hold.holder);
+                        graph.edge(node.clone(), target, Some(name));
+                    }
+                }
+                Blockers::Enough { holds, free, need } => enough.push(Enough {
+                    from: node.clone(),
+                    pool: name,
+                    holds,
+                    free,
+                    need,
+                }),
             }
             for older in &pool.waiters {
                 let is_older = ticket.map_or(true, |ticket| older.ticket < ticket);
@@ -166,6 +201,37 @@ pub fn would_cycle(tables: &[&PoolTable], request: &Request) -> Result<(), Refus
         }
     }
 
+    // A `slots` waiter is served once enough holders release, not all of them. A holder that
+    // does not reach the requester can release while the requester waits; only when those
+    // holders' slots and the free ones together still fall short does the waiter wait on the
+    // holders that do reach it. Each round only adds edges, so the set of nodes reaching the
+    // requester only grows and the loop ends.
+    loop {
+        let reaching = reaching(&graph, &start);
+        let mut added = false;
+        for wait in &enough {
+            let released: u64 = wait
+                .holds
+                .iter()
+                .filter(|hold| !reaching.contains(&path_node(&hold.holder)))
+                .map(|hold| u64::from(hold.need.count()))
+                .sum();
+            if wait.free + released >= wait.need {
+                continue;
+            }
+            for hold in &wait.holds {
+                let target = path_node(&hold.holder);
+                if reaching.contains(&target) {
+                    graph.name(&target, &hold.holder);
+                    added |= graph.edge(wait.from.clone(), target, Some(wait.pool));
+                }
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+
     match shortest_cycle(&graph, &start) {
         Some(nodes) => Err(Refused::Deadlock {
             cycle: links(&graph, &nodes),
@@ -181,6 +247,28 @@ pub fn judge(tables: &[&PoolTable], request: &Request) -> Result<Satisfied, Refu
     let satisfied = own_holds(|name| find_pool(tables, name), request)?;
     would_cycle(tables, request)?;
     Ok(satisfied)
+}
+
+/// Every node with a path of edges to `start`, `start` included.
+fn reaching(graph: &Graph, start: &Node) -> BTreeSet<Node> {
+    let mut sources: BTreeMap<&Node, Vec<&Node>> = BTreeMap::new();
+    for (from, targets) in &graph.edges {
+        for to in targets.keys() {
+            sources.entry(to).or_default().push(from);
+        }
+    }
+    let mut seen: BTreeSet<Node> = BTreeSet::new();
+    let mut queue: VecDeque<&Node> = VecDeque::new();
+    seen.insert(start.clone());
+    queue.push_back(start);
+    while let Some(node) = queue.pop_front() {
+        for from in sources.get(node).into_iter().flatten() {
+            if seen.insert((*from).clone()) {
+                queue.push_back(from);
+            }
+        }
+    }
+    seen
 }
 
 /// The shortest cycle from `start` back to it, as its nodes in order from `start`, found

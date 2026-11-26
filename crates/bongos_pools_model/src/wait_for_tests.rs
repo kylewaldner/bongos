@@ -536,6 +536,81 @@ fn a_path_waiting_for_its_own_hold_is_a_one_path_cycle() {
 }
 
 #[test]
+fn a_full_slots_pool_waits_only_for_enough_holders_to_release() {
+    let mut t = table(&[("cores", PoolKind::Slots, 3), ("merge", PoolKind::Mutex, 1)]);
+    let a = holder("A", Level::Job);
+    let b = holder("B", Level::Job);
+    let c = holder("C", Level::Job);
+    let d = holder("D", Level::Job);
+    hold(&mut t, 1, &a, count("cores", 1));
+    hold(&mut t, 2, &b, count("cores", 1));
+    hold(&mut t, 3, &c, count("cores", 1));
+    hold(&mut t, 4, &d, need("merge"));
+    queue(&mut t, &request(5, &a, vec![need("merge")]));
+    assert_eq!(
+        would_cycle(&[&t], &request(6, &d, vec![count("cores", 1)])),
+        Ok(()),
+        "B or C releases a slot while A waits on D"
+    );
+    assert_eq!(
+        cycle_paths(would_cycle(&[&t], &request(7, &d, vec![count("cores", 3)])).unwrap_err()),
+        vec![waits(&d, Some("cores")), waits(&a, Some("merge"))],
+        "all three slots need A's too"
+    );
+}
+
+#[test]
+fn a_slots_deadlock_is_refused_when_only_a_waiting_holder_could_free_a_slot() {
+    let mut t = table(&[("cores", PoolKind::Slots, 2), ("merge", PoolKind::Mutex, 1)]);
+    let a = holder("A", Level::Job);
+    let b = holder("B", Level::Job);
+    hold(&mut t, 1, &a, count("cores", 1));
+    hold(&mut t, 2, &b, count("cores", 1));
+    hold(&mut t, 3, &b, need("merge"));
+    queue(&mut t, &request(4, &a, vec![need("merge")]));
+    assert_eq!(
+        cycle_paths(would_cycle(&[&t], &request(5, &b, vec![count("cores", 1)])).unwrap_err()),
+        vec![waits(&b, Some("cores")), waits(&a, Some("merge"))],
+        "B's own slot stays held and A waits on B"
+    );
+
+    let mut t = table(&[("cores", PoolKind::Slots, 3), ("merge", PoolKind::Mutex, 1)]);
+    let c = holder("C", Level::Job);
+    hold(&mut t, 1, &a, count("cores", 1));
+    hold(&mut t, 2, &b, count("cores", 1));
+    hold(&mut t, 3, &c, count("cores", 1));
+    hold(&mut t, 4, &b, need("merge"));
+    queue(&mut t, &request(5, &a, vec![need("merge")]));
+    queue(&mut t, &request(6, &c, vec![need("merge")]));
+    assert!(
+        would_cycle(&[&t], &request(7, &b, vec![count("cores", 1)])).is_err(),
+        "A and C both wait on B, so no slot frees"
+    );
+}
+
+#[test]
+fn try_now_reports_a_pool_named_twice_before_an_own_hold() {
+    let mut t = table(&[("db", PoolKind::Rw, 0), ("merge", PoolKind::Mutex, 1)]);
+    let job = holder("r1", Level::Job);
+    hold(&mut t, 1, &job, mode("db", NeedMode::Shared));
+    let r = request(
+        2,
+        &holder("r1", step("s")),
+        vec![
+            mode("db", NeedMode::Exclusive),
+            need("merge"),
+            need("merge"),
+        ],
+    );
+    assert_eq!(
+        try_now(&t, &r, &GuardReadings::default()),
+        Err(Blocked::NamedTwice {
+            pool: "merge".to_string()
+        })
+    );
+}
+
+#[test]
 fn an_empty_table_queues_as_before() {
     let t = table(&[("merge", PoolKind::Mutex, 1)]);
     let r = request(1, &holder("r1", Level::Job), vec![need("merge")]);
