@@ -1524,4 +1524,32 @@
       "ctrl-g": "undo_tree::VundoQuit",
     },
   },
+  {
+    // The Inbox view. Esc goes back to the list through `menu::Cancel`.
+    "context": "InboxView",
+    "bindings": {
+      "n": "inbox::Next",
+      "p": "inbox::Previous",
+      "enter": "inbox::OpenItem",
+      "a": "inbox::Accept",
+      "d": "inbox::Dismiss",
+      "o": "inbox::OpenTarget",
+      "u": "inbox::MarkUnread",
+      "/": "inbox::Filter",
+      "g": "inbox::Refresh",
+      "right": "inbox::FocusItem",
+      "left": "inbox::FocusList",
+    },
+  },
+  {
+    // The item modal of the Inbox sidebar. Esc closes it through `menu::Cancel`.
+    "context": "InboxItemModal",
+    "bindings": {
+      "n": "inbox::Next",
+      "p": "inbox::Previous",
+      "a": "inbox::Accept",
+      "d": "inbox::Dismiss",
+      "o": "inbox::OpenTarget",
+    },
+  },
 ]
