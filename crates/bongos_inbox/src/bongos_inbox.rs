@@ -19,6 +19,7 @@
 //!
 //! Every scan also resolves each item's `target` (see [`targets`]) to tell stale rows.
 
+mod badge;
 mod inbox_settings;
 pub mod targets;
 
@@ -26,16 +27,18 @@ use bongos_inbox_model::format::Item;
 use bongos_inbox_model::maildir::{self, ARCHIVE, CUR, Entry, NEW, ParseCache, ParseResult, TMP};
 use bongos_inbox_model::view_model::{self, Filter, Row};
 use bongos_work_model::store::WorkTree;
+use command_palette_hooks::CommandPaletteFilter;
 use fs::{Fs, PathEvent, PathEventKind, Watcher};
 use futures::channel::{mpsc, oneshot};
 use futures::stream::{BoxStream, FusedStream};
 use futures::{FutureExt as _, StreamExt as _, select_biased};
 use gpui::{
     App, AppContext as _, AsyncApp, BackgroundExecutor, Context, Entity, EventEmitter, Global,
-    Subscription, Task, WeakEntity,
+    Subscription, Task, WeakEntity, actions,
 };
 use parking_lot::Mutex;
 use settings::{Settings as _, SettingsStore};
+use std::any::TypeId;
 use std::collections::{HashSet, VecDeque};
 use std::io;
 use std::os::unix::fs::MetadataExt as _;
@@ -47,6 +50,7 @@ use std::time::Duration;
 use targets::PreparedResolvers;
 use util::ResultExt as _;
 
+pub use badge::{InboxBadge, badge_label};
 pub use inbox_settings::InboxSettings;
 pub use targets::{TargetResolvers, TargetState};
 
@@ -56,6 +60,17 @@ pub const WATCH_LATENCY: Duration = Duration::from_millis(200);
 pub const RESCAN_INTERVAL: Duration = Duration::from_secs(30);
 /// What an operation on an item that is no longer where the last scan saw it reports.
 pub const MOVED_MESSAGE: &str = "item moved outside bongos";
+
+/// What opening the inbox says until the inbox view exists.
+pub const NOT_YET: &str = "The inbox view is not available yet";
+
+actions!(
+    inbox,
+    [
+        /// Opens the inbox.
+        Open
+    ]
+);
 
 /// Where the inbox lives: `<bongos root>/inbox` and its four subdirectories.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -455,6 +470,12 @@ impl InboxState {
         cx: &mut Context<Self>,
     ) {
         self.stats.operations += 1;
+        if matches!(scan.scanned, Scanned::Failed) {
+            log::warn!(
+                "inbox: the scan after {} failed; the rows may be out of date",
+                operation.verb()
+            );
+        }
         self.finish(scan, cx);
         let message = match outcome {
             OpOutcome::Moved => MOVED_MESSAGE.to_string(),
@@ -516,6 +537,37 @@ pub fn init(dirs: InboxDirs, fs: Arc<dyn Fs>, cx: &mut App) {
     InboxSettings::register(cx);
     let state = cx.new(|cx| InboxState::new(fs, dirs, periodic_rescan(RESCAN_INTERVAL), cx));
     cx.set_global(Inbox(state));
+    register_open(cx);
+}
+
+/// The handler of [`Open`] until the inbox view exists.
+fn register_open(cx: &mut App) {
+    cx.on_action(|_: &Open, cx| say_not_yet(cx));
+}
+
+/// Hides [`Open`] from the command palette: the badge opens the inbox, and the action has no
+/// name worth typing yet. Call after `command_palette_hooks::init`.
+pub fn init_palette(cx: &mut App) {
+    CommandPaletteFilter::update_global(cx, |filter, _| {
+        filter.hide_action_types(&[TypeId::of::<Open>()]);
+    });
+}
+
+/// Says in the echo area of the active window that opening the inbox is not there yet.
+fn say_not_yet(cx: &mut App) {
+    // The action is dispatched inside a window update; the echo area is reached after it.
+    cx.defer(|cx| {
+        let shown = cx.active_window().is_some_and(|window| {
+            window
+                .update(cx, |_, window, cx| {
+                    bongos_minibuffer::message(window, cx, NOT_YET);
+                })
+                .is_ok()
+        });
+        if !shown {
+            log::info!("inbox: {NOT_YET}");
+        }
+    });
 }
 
 /// Tells the global inbox's `task:` and `run:` resolvers where to read the work tree.
@@ -794,7 +846,7 @@ fn operate(
     };
     // Checked again right before the link: someone may have moved or removed it since the scan.
     match std::fs::symlink_metadata(&entry.path) {
-        Ok(meta) if meta.ino() == entry.inode => {}
+        Ok(meta) if meta.ino() == entry.inode && meta.dev() == entry.dev() => {}
         _ => return OpOutcome::Moved,
     }
     let result = match operation {
@@ -804,28 +856,35 @@ fn operate(
     };
     match result {
         Ok(path) => OpOutcome::Done(path),
-        // Another process moved the file first, or won the lock and changed its names.
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::AlreadyExists
-            ) =>
-        {
-            log::warn!(
-                "inbox: cannot {} {}: {error}",
-                operation.verb(),
-                entry.file_name()
-            );
-            OpOutcome::Moved
-        }
         Err(error) => {
-            log::error!(
-                "inbox: cannot {} {}: {error}",
-                operation.verb(),
-                entry.file_name()
-            );
-            OpOutcome::Failed(error.to_string())
+            let outcome = outcome_of_error(operation, &error);
+            if outcome == OpOutcome::Moved {
+                log::warn!(
+                    "inbox: cannot {} {}: {error}",
+                    operation.verb(),
+                    entry.file_name()
+                );
+            } else {
+                log::error!(
+                    "inbox: cannot {} {}: {error}",
+                    operation.verb(),
+                    entry.file_name()
+                );
+            }
+            outcome
         }
+    }
+}
+
+/// How an error from the file system ends `operation`. Another process moving the file first
+/// (`NotFound`), or winning the lock and changing its names (`AlreadyExists` of a read or unread),
+/// is a move. `AlreadyExists` from an archive means no free name in `archive/`: the item is
+/// still where it was, so that is a failure to report as such.
+fn outcome_of_error(operation: Operation, error: &io::Error) -> OpOutcome {
+    match error.kind() {
+        io::ErrorKind::NotFound => OpOutcome::Moved,
+        io::ErrorKind::AlreadyExists if operation != Operation::Archive => OpOutcome::Moved,
+        _ => OpOutcome::Failed(error.to_string()),
     }
 }
 
@@ -866,3 +925,6 @@ fn scan(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod badge_tests;

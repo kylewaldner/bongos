@@ -99,6 +99,11 @@ impl Entry {
         }
     }
 
+    /// The device the file was on when scanned; an inode number is only unique per device.
+    pub fn dev(&self) -> u64 {
+        self.dev
+    }
+
     pub fn parsed_name(&self) -> ParsedName {
         ParsedName {
             unique: self.unique.clone(),
