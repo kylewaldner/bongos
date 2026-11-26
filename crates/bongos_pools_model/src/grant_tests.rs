@@ -350,6 +350,64 @@ fn try_now_refuses_a_full_pool() {
 }
 
 #[test]
+fn a_pool_named_twice_is_refused_by_try_now_and_admit_now() {
+    let mut t = table(&[("merge", PoolState::new(PoolKind::Mutex, 1))]);
+    let twice = request(1, vec![need("merge"), need("merge")]);
+    let before = t.clone();
+    let refused = Blocked::NamedTwice {
+        pool: "merge".to_string(),
+    };
+    assert_eq!(
+        try_now(&t, &twice, &GuardReadings::default()),
+        Err(refused.clone())
+    );
+    assert_eq!(
+        admit_now(&mut t, &twice, &GuardReadings::default(), at(0)),
+        Err(refused)
+    );
+    assert_eq!(t, before, "the table is unchanged");
+}
+
+#[test]
+fn admit_now_records_a_hold_in_each_pool_of_a_multi_pool_request() {
+    let mut t = table(&[
+        ("merge", PoolState::new(PoolKind::Mutex, 1)),
+        ("cpu", PoolState::new(PoolKind::Slots, 3)),
+    ]);
+    let r = request(1, vec![need("merge"), need("cpu")]);
+    let grant = admit_now(&mut t, &r, &GuardReadings::default(), at(5)).unwrap();
+    assert_eq!(grant.pools.len(), 2);
+    assert_eq!(t.pools["merge"].holds.len(), 1);
+    assert_eq!(t.pools["cpu"].holds.len(), 1);
+    assert_eq!(t.pools["merge"].holds[0].request, RequestId(1));
+    assert_eq!(t.pools["cpu"].holds[0].request, RequestId(1));
+    assert_eq!(t.pools["merge"].holds[0].since, at(5));
+    assert_ne!(grant.pools[0].ticket, grant.pools[1].ticket);
+}
+
+#[test]
+fn a_blocked_admit_now_leaves_the_table_unchanged() {
+    let mut t = table(&[
+        ("merge", PoolState::new(PoolKind::Mutex, 1)),
+        ("cpu", PoolState::new(PoolKind::Slots, 3)),
+    ]);
+    t.enqueue(&request(1, vec![need("merge")]), at(0)).unwrap();
+    step(&mut t);
+    let before = t.clone();
+    let r = request(2, vec![need("cpu"), need("merge")]);
+    assert_eq!(
+        admit_now(&mut t, &r, &GuardReadings::default(), at(1)),
+        Err(Blocked::Busy {
+            pool: "merge".to_string()
+        })
+    );
+    assert_eq!(
+        t, before,
+        "holds, waiters and the ticket counter are unchanged"
+    );
+}
+
+#[test]
 fn a_multi_pool_request_is_all_or_none() {
     let mut t = table(&[
         ("a", PoolState::new(PoolKind::Mutex, 1)),

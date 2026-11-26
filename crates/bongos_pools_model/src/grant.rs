@@ -199,6 +199,8 @@ pub enum Blocked {
     Mixed { pool: String, ticket: u64 },
     /// Grantable here, but the request cannot be granted in `other`, and it is all or none.
     OtherPool { pool: String, other: String },
+    /// `try_now` only: the request names this pool in more than one need.
+    NamedTwice { pool: String },
 }
 
 impl Blocked {
@@ -212,7 +214,8 @@ impl Blocked {
             | Blocked::GuardUnread { pool }
             | Blocked::GuardSettling { pool, .. }
             | Blocked::Mixed { pool, .. }
-            | Blocked::OtherPool { pool, .. } => pool,
+            | Blocked::OtherPool { pool, .. }
+            | Blocked::NamedTwice { pool } => pool,
         }
     }
 
@@ -415,7 +418,13 @@ pub fn try_now(
     guards: &GuardReadings,
 ) -> Result<Vec<(String, Option<GuardReading>)>, Blocked> {
     let mut admitted = Vec::new();
+    let mut named = BTreeSet::new();
     for need in &request.needs {
+        if !named.insert(need.pool.as_str()) {
+            return Err(Blocked::NamedTwice {
+                pool: need.pool.clone(),
+            });
+        }
         let Some(pool) = table.pools.get(&need.pool) else {
             return Err(Blocked::UnknownPool {
                 pool: need.pool.clone(),
