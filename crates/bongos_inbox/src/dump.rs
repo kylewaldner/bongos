@@ -1,9 +1,10 @@
 //! `inbox: dump view` (debug builds): the unread count and the rows of the inbox as text, written
 //! to `inbox-view.txt` in the logs directory, for tests and the smoke scenario. With an inbox view
-//! in the window it writes that view's rows and cursor; without one it writes the rows of the
-//! inbox's latest snapshot. The first line is `unread: <n>`, the badge's count, or `unread: off`.
+//! (a tab, or the sidebar panel) in the window it writes that view's rows and cursor; without one
+//! it writes the rows of the inbox's latest snapshot. The first line is `unread: <n>`, the badge's count, or `unread: off`.
 
 use crate::rows;
+use crate::sidebar::InboxSidebar;
 use crate::view::{InboxView, now};
 use crate::{Inbox, InboxSettings};
 use gpui::{App, Context, Global, Window};
@@ -54,7 +55,11 @@ pub(crate) fn dump_view(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    let text = match workspace.items_of_type::<InboxView>(cx).next() {
+    let view = workspace.items_of_type::<InboxView>(cx).next().or_else(|| {
+        let panel = workspace.panel::<InboxSidebar>(cx)?;
+        Some(panel.read(cx).view().clone())
+    });
+    let text = match view {
         Some(view) => view.read(cx).dump_text(cx),
         None => snapshot_text(cx),
     };

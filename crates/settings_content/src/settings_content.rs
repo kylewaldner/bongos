@@ -1495,7 +1495,7 @@ pub struct InboxSettingsContent {
     /// Whether the inbox is on. While it is off, bongos neither creates, reads nor watches
     /// `~/.bongos/inbox`.
     ///
-    /// Default: false
+    /// Default: true
     pub enabled: Option<bool>,
 }
 

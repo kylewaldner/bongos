@@ -27,6 +27,8 @@ mod inbox_settings;
 mod item;
 mod modal;
 pub mod rows;
+#[cfg(debug_assertions)]
+mod sidebar;
 pub mod targets;
 mod view;
 
@@ -68,6 +70,8 @@ pub use view::{Clock, InboxView, Layout, now, set_clock};
 
 #[cfg(debug_assertions)]
 pub use dump::{DUMP_FILE, DumpDir};
+#[cfg(debug_assertions)]
+pub use sidebar::InboxSidebar;
 
 /// How long the watcher gathers events before delivering them.
 pub const WATCH_LATENCY: Duration = Duration::from_millis(200);
@@ -118,7 +122,10 @@ actions!(
     [
         /// Debug builds only: writes the unread count and the rows of the inbox (of this window's
         /// inbox view when it has one) to `inbox-view.txt` in the logs directory.
-        DumpView
+        DumpView,
+        /// Debug builds only: shows the inbox list alone, in the sidebar layout, in a panel of the
+        /// right dock; RET on a row opens the item in a modal.
+        OpenAsSidebar
     ]
 );
 
@@ -615,7 +622,7 @@ pub fn init(dirs: InboxDirs, fs: Arc<dyn Fs>, cx: &mut App) {
 }
 
 /// Registers the workspace-level handlers on every workspace: `inbox: open`, `inbox: refresh`
-/// and, in debug builds, `inbox: dump view`. The cursor and read actions are the view's.
+/// and, in debug builds, `inbox: dump view` and `inbox: open as sidebar`. The cursor and read actions are the view's.
 fn register_actions(cx: &mut App) {
     cx.default_global::<InboxActions>();
     cx.observe_new(|workspace: &mut Workspace, _, _| register(workspace))
@@ -633,6 +640,10 @@ fn register(workspace: &mut Workspace) {
     #[cfg(debug_assertions)]
     workspace.register_action(|workspace, _: &DumpView, window, cx| {
         dump::dump_view(workspace, window, cx)
+    });
+    #[cfg(debug_assertions)]
+    workspace.register_action(|workspace, _: &OpenAsSidebar, window, cx| {
+        sidebar::open_as_sidebar(workspace, window, cx)
     });
 }
 
@@ -655,7 +666,10 @@ pub fn action_types() -> Vec<TypeId> {
         TypeId::of::<Filter>(),
     ];
     #[cfg(debug_assertions)]
-    types.push(TypeId::of::<DumpView>());
+    {
+        types.push(TypeId::of::<DumpView>());
+        types.push(TypeId::of::<OpenAsSidebar>());
+    }
     types
 }
 
