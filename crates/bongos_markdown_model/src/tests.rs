@@ -1,9 +1,21 @@
 use std::ops::Range;
 
 use crate::{
-    Conceal, ConcealKind, Element, ElementKind, MarkdownIndex, RevealSelection, diff, parse, plan,
-    revealed,
+    BlockKind, CellDirection, Conceal, ConcealKind, Edit, Element, ElementKind, LABELS,
+    MarkdownIndex, RevealSelection, diff, insert_block, parse, plan, revealed, table_cell,
+    toggle_checkbox,
 };
+
+fn apply(text: &str, edit: &Edit) -> String {
+    let mut text = text.to_string();
+    text.replace_range(edit.range.clone(), &edit.new_text);
+    text
+}
+
+fn insert(text: &str, offset: usize, kind: BlockKind) -> (String, usize) {
+    let (edit, point) = insert_block(text, offset, kind);
+    (apply(text, &edit), point)
+}
 
 fn find(index: &MarkdownIndex, pred: impl Fn(&ElementKind) -> bool) -> &Element {
     index
@@ -510,4 +522,115 @@ fn block_markup_kinds_appear_when_the_head_is_elsewhere() {
     let plan = plan_at(text, &[3]);
     assert!(!conceals(&plan, 0..2), "{plan:?}");
     assert!(has(&plan, 4..10, ConcealKind::Checkbox(true)), "{plan:?}");
+}
+
+#[test]
+fn checkbox_flips_both_ways_and_capital_x() {
+    let text = "- [ ] a\n* [x] b\n1. [X] c\n";
+    let edit = toggle_checkbox(text, 3).expect("task item");
+    assert_eq!(edit.range, 2..5);
+    assert_eq!(apply(text, &edit), "- [x] a\n* [x] b\n1. [X] c\n");
+    let edit = toggle_checkbox(text, 10).expect("task item");
+    assert_eq!(apply(text, &edit), "- [ ] a\n* [ ] b\n1. [X] c\n");
+    let edit = toggle_checkbox(text, 16).expect("task item");
+    assert_eq!(edit.range, 19..22);
+    assert_eq!(apply(text, &edit), "- [ ] a\n* [x] b\n1. [ ] c\n");
+}
+
+#[test]
+fn plain_lines_give_no_checkbox_edit() {
+    let text = "plain\n- item\n- [ ] task\n  continued\n";
+    assert_eq!(toggle_checkbox(text, 2), None);
+    assert_eq!(toggle_checkbox(text, 9), None);
+    assert_eq!(toggle_checkbox(text, 28), None);
+    assert_eq!(toggle_checkbox("", 0), None);
+}
+
+#[test]
+fn every_template_goes_on_an_empty_line() {
+    let expected = [
+        ("# ", 2),
+        ("- ", 2),
+        ("- [ ] ", 6),
+        ("```\n\n```", 4),
+        ("| Column 1 | Column 2 |\n| --- | --- |\n|  |  |", 40),
+        ("> ", 2),
+        ("---", 3),
+    ];
+    for (label, (template, point)) in LABELS.iter().zip(expected) {
+        let kind = BlockKind::from_label(label).expect("label");
+        assert_eq!(
+            insert("", 0, kind),
+            (template.to_string(), point),
+            "{label}"
+        );
+        let text = "a\n  \n";
+        assert_eq!(
+            insert(text, 3, kind),
+            (format!("a\n{template}\n"), 2 + point),
+            "{label}"
+        );
+    }
+    assert_eq!(BlockKind::from_label("nope"), None);
+}
+
+#[test]
+fn divider_after_a_paragraph_gets_a_blank_line() {
+    let (text, point) = insert("para\nnext", 2, BlockKind::Divider);
+    assert_eq!(text, "para\n\n---\n\nnext");
+    assert_eq!(point, 9);
+    let (text, point) = insert("para", 100, BlockKind::Divider);
+    assert_eq!(text, "para\n\n---");
+    assert_eq!(point, 9);
+    // Other blocks go on the next line with no blank line.
+    let (text, point) = insert("para", 4, BlockKind::Bullet);
+    assert_eq!(text, "para\n- ");
+    assert_eq!(point, 7);
+}
+
+#[test]
+fn code_block_and_table_place_point_in_their_middle() {
+    let (text, point) = insert("a\n\nb", 2, BlockKind::CodeBlock);
+    assert_eq!(text, "a\n```\n\n```\n\nb");
+    assert_eq!(&text[point..], "\n```\n\nb");
+    assert_eq!(text.as_bytes()[point - 1], b'\n');
+
+    let (text, point) = insert("a\nb", 0, BlockKind::Table);
+    assert_eq!(
+        text,
+        "a\n\n| Column 1 | Column 2 |\n| --- | --- |\n|  |  |\n\nb"
+    );
+    assert_eq!(&text[point - 2..point + 1], "|  ");
+    assert_eq!(&text[point..], " |  |\n\nb");
+}
+
+const TABLE: &str = "| a | b |\n|---|---|\n| 1 |  |\n";
+
+#[test]
+fn next_cell_skips_the_delimiter_row_and_wraps() {
+    let index = parse(TABLE);
+    let next = |offset| table_cell(TABLE, &index, offset, CellDirection::Next);
+    assert_eq!(next(0), Some(2));
+    assert_eq!(next(2), Some(6));
+    // From the last header cell, past the delimiter row, to the first body cell.
+    assert_eq!(next(6), Some(22));
+    // Into an empty cell, after the pipe and one space.
+    assert_eq!(next(22), Some(26));
+    assert_eq!(next(26), None);
+    assert_eq!(next(11), None);
+    assert_eq!(
+        table_cell("plain\n", &parse("plain\n"), 2, CellDirection::Next),
+        None
+    );
+}
+
+#[test]
+fn previous_before_the_first_cell_is_none() {
+    let index = parse(TABLE);
+    let previous = |offset| table_cell(TABLE, &index, offset, CellDirection::Previous);
+    assert_eq!(previous(0), None);
+    assert_eq!(previous(2), None);
+    assert_eq!(previous(6), Some(2));
+    assert_eq!(previous(22), Some(6));
+    assert_eq!(previous(26), Some(22));
 }
