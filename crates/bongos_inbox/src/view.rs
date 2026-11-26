@@ -23,10 +23,11 @@ use crate::item::{self, ItemDetail};
 use crate::modal::ItemModal;
 use crate::rows::{self, PILL_FILL_OPACITY, Pill, RowKey, ViewRow};
 use crate::{
-    Accept, Dismiss, FocusItem, FocusList, Inbox, InboxEvent, InboxSettings, InboxState,
+    Accept, Dismiss, Filter, FocusItem, FocusList, Inbox, InboxEvent, InboxSettings, InboxState,
     MarkUnread, Next, OpOutcome, OpenFile, OpenItem, OpenTarget, Previous,
 };
 use bongos_inbox_model::view_model;
+use bongos_minibuffer::{Candidate, Outcome, Session, Source};
 use chrono::{DateTime, Utc};
 use gpui::{
     AnyElement, App, ClickEvent, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
@@ -103,6 +104,8 @@ pub struct InboxView {
     expanded: HashSet<String>,
     /// The row under the cursor, kept across rescans.
     selected: Option<RowKey>,
+    /// What the list shows: all items, or those of one kind or source.
+    filter: view_model::Filter,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -133,6 +136,7 @@ impl InboxView {
             dismissing: HashSet::new(),
             expanded: HashSet::new(),
             selected: None,
+            filter: view_model::Filter::All,
             _subscriptions: subscriptions,
         };
         this.rebuild(cx);
@@ -211,6 +215,68 @@ impl InboxView {
         self.cursor().and_then(|index| self.rows.get(index))
     }
 
+    /// The filter the list shows through.
+    pub fn filter(&self) -> &view_model::Filter {
+        &self.filter
+    }
+
+    /// Sets the filter and shows the rows it lets through; the tab title follows it.
+    pub fn set_filter(&mut self, filter: view_model::Filter, cx: &mut Context<Self>) {
+        if self.filter == filter {
+            return;
+        }
+        self.filter = filter;
+        self.rebuild(cx);
+        cx.emit(());
+    }
+
+    /// The title of the tab: `Inbox`, then `: <kind or source>` while a filter is set.
+    pub fn title(&self) -> String {
+        match &self.filter {
+            view_model::Filter::All => "Inbox".to_string(),
+            view_model::Filter::Kind(name) | view_model::Filter::Source(name) => {
+                format!("Inbox: {name}")
+            }
+        }
+    }
+
+    /// What `Filter: ` offers: `all`, then `kind: <k>` and `source: <s>` for each kind and source
+    /// in the current snapshot, sorted and without repeats.
+    pub fn filter_candidates(&self, cx: &App) -> Vec<(String, view_model::Filter)> {
+        self.inbox
+            .as_ref()
+            .and_then(|inbox| inbox.read(cx).snapshot())
+            .map(|snapshot| view_model::filter_candidates(snapshot.items()))
+            .unwrap_or_else(|| vec![("all".to_string(), view_model::Filter::All)])
+    }
+
+    /// `/`: asks for a filter in the minibuffer, `Filter: `, among `all` and the kinds and sources
+    /// of the items now in the inbox. Cancelling leaves the filter as it is.
+    pub fn ask_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let candidates: Vec<Candidate> = self
+            .filter_candidates(cx)
+            .into_iter()
+            .map(|(label, filter)| Candidate::new(label, filter))
+            .collect();
+        let view = cx.entity().downgrade();
+        let session = Session::completing_read("inbox", "Filter: ")
+            .source(Source::Fixed(candidates))
+            .on_confirm(move |outcome, _, cx| {
+                let Outcome::Candidate(value) = outcome else {
+                    return;
+                };
+                let Some(filter) = value.downcast_ref::<view_model::Filter>().cloned() else {
+                    return;
+                };
+                view.update(cx, |this, cx| this.set_filter(filter, cx)).ok();
+            });
+        self.workspace
+            .update(cx, |workspace, cx| {
+                bongos_minibuffer::open(workspace, session, window, cx);
+            })
+            .log_err();
+    }
+
     /// The text `inbox: dump view` writes for this view.
     pub fn dump_text(&self, cx: &App) -> String {
         rows::dump_text(self.unread, &self.rows, self.cursor(), now(cx))
@@ -223,7 +289,7 @@ impl InboxView {
             Some(inbox) if inbox.is_enabled() => match inbox.snapshot() {
                 Some(snapshot) => (
                     Some(snapshot.unread_count()),
-                    rows::view_rows_hiding(&snapshot, &self.dismissing),
+                    rows::view_rows_hiding(&snapshot, &self.dismissing, &self.filter),
                 ),
                 None => (Some(0), Vec::new()),
             },
@@ -886,6 +952,7 @@ impl Render for InboxView {
             .on_action(cx.listener(|this, _: &OpenTarget, window, cx| {
                 this.open_target(false, window, cx);
             }))
+            .on_action(cx.listener(|this, _: &Filter, window, cx| this.ask_filter(window, cx)))
             .on_action(cx.listener(|this, _: &crate::Refresh, _, cx| this.refresh(cx)))
             .size_full()
             .overflow_hidden()
@@ -905,14 +972,16 @@ impl Item for InboxView {
     type Event = ();
 
     fn tab_content_text(&self, _detail: usize, _cx: &App) -> SharedString {
-        "Inbox".into()
+        self.title().into()
     }
 
     fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {
         Some(Icon::new(IconName::Envelope))
     }
 
-    fn to_item_events(_event: &(), _f: &mut dyn FnMut(ItemEvent)) {}
+    fn to_item_events(_event: &(), f: &mut dyn FnMut(ItemEvent)) {
+        f(ItemEvent::UpdateTab);
+    }
 }
 
 /// `inbox: open`: focuses the inbox view of this window, else opens one in the active pane. While
