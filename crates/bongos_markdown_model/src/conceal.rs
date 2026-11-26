@@ -8,7 +8,8 @@
 use std::cmp::Ordering;
 use std::ops::Range;
 
-use crate::{Element, ElementKind, MarkdownIndex, RevealSet};
+use crate::table::row_pipes;
+use crate::{Element, ElementKind, MarkdownIndex, RevealSet, TableRow};
 
 /// How a concealed range is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -27,6 +28,9 @@ pub enum ConcealKind {
     FenceLine,
     /// A table's delimiter row, drawn as a separator line.
     DelimiterRow,
+    /// A pipe of a table row, drawn as a thin vertical rule wide enough to
+    /// line its cell up with the column.
+    TablePipe,
 }
 
 /// One concealed byte range. The range is never empty, never holds a
@@ -57,7 +61,9 @@ impl Conceal {
 ///   [`ConcealKind::Checkbox`] (for an ordered task item only the box).
 /// - Quote markers become a [`ConcealKind::QuoteBar`], a thematic break a
 ///   [`ConcealKind::Rule`], fence lines a [`ConcealKind::FenceLine`] and a
-///   table's delimiter row a [`ConcealKind::DelimiterRow`].
+///   table's delimiter row a [`ConcealKind::DelimiterRow`]. Every unescaped
+///   pipe of a table row that holds no head (ends included) becomes a
+///   [`ConcealKind::TablePipe`]; the row under point keeps its pipes.
 /// - An image whose url passes `image_ok` is hidden whole (`![alt](url)`),
 ///   split at newlines; one that fails keeps all its text.
 /// - Markup in `revealed` is never concealed, and no conceal holds a head of
@@ -155,6 +161,10 @@ fn candidates_for(
             list_item(element, marker, *task, text, revealed, out);
             return;
         }
+        ElementKind::Table { rows } => {
+            table_pipes(rows, text, revealed, out);
+            ConcealKind::DelimiterRow
+        }
         ElementKind::Paragraph => return,
         ElementKind::Heading(_)
         | ElementKind::Strong
@@ -166,7 +176,6 @@ fn candidates_for(
         ElementKind::Quote => ConcealKind::QuoteBar,
         ElementKind::Rule => ConcealKind::Rule,
         ElementKind::CodeBlock { .. } => ConcealKind::FenceLine,
-        ElementKind::Table { .. } => ConcealKind::DelimiterRow,
     };
     for m in &element.markup {
         if !revealed.is_revealed(m) {
@@ -209,6 +218,26 @@ fn list_item(
         }
         if !range.is_empty() {
             out.push(Conceal { range, kind });
+        }
+    }
+}
+
+/// Pushes the pipes of the table rows (not the delimiter row) that hold no
+/// head.
+fn table_pipes(rows: &[TableRow], text: &str, revealed: &RevealSet, out: &mut Vec<Conceal>) {
+    for row in rows {
+        if row.is_delimiter || revealed.has_head_within(&row.range) {
+            continue;
+        }
+        let Some(line) = text.get(row.range.clone()) else {
+            continue;
+        };
+        for pipe in row_pipes(line) {
+            let start = row.range.start + pipe;
+            out.push(Conceal {
+                range: start..start + 1,
+                kind: ConcealKind::TablePipe,
+            });
         }
     }
 }

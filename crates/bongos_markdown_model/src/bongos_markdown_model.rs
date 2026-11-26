@@ -21,4 +21,4 @@ pub use edits::{BlockKind, Edit, LABELS, insert_block, toggle_checkbox};
 pub use index::{CodeFences, Element, ElementKind, MarkdownIndex, TableRow};
 pub use parse::parse;
 pub use reveal::{RevealSelection, RevealSet, revealed};
-pub use table::{CellDirection, table_cell};
+pub use table::{CellDirection, has_leading_pipe, row_pipes, table_cell};

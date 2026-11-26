@@ -1,7 +1,7 @@
 //! The app side of the bongos markdown editor: the `markdown` settings, the per-buffer mode
 //! (live view or source), the addon that carries it on markdown editors and gives them the live
 //! typography, the background parse of the buffer's index, the live layers (inline styles and
-//! hidden markup with reveal at point, images below their links), and the `markdown` actions (block
+//! hidden markup with reveal at point, images below their links, tables as grids), and the `markdown` actions (block
 //! moves, insert block, checkbox toggle and table cell moves), hidden from the command palette for now.
 //! The pure parsing and block logic lives in `bongos_markdown_model`.
 
@@ -14,6 +14,7 @@ mod layers;
 mod mode;
 mod settings;
 mod styles;
+mod tables;
 
 use ::settings::Settings as _;
 use gpui::App;
@@ -32,6 +33,7 @@ pub use mode::{
 };
 pub use settings::MarkdownSettings;
 pub use styles::{MarkdownCodeBlock, Style, StyleLayer};
+pub use tables::{PIPE_GAP, PIPE_WIDTH, TableLayer, TablePads};
 
 /// Registers the `markdown` settings, the prefix argument meanings of the actions, their
 /// workspace handlers, and watches new editors for the markdown addon. Call before
@@ -52,3 +54,5 @@ mod image_tests;
 mod live_tests;
 #[cfg(test)]
 mod markdown_tests;
+#[cfg(test)]
+mod tables_tests;
