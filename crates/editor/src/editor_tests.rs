@@ -33566,7 +33566,10 @@ async fn test_markdown_indents(cx: &mut gpui::TestAppContext) {
     let markdown_language = languages::language("markdown", tree_sitter_md::LANGUAGE.into());
     let mut cx = EditorTestContext::new(cx).await;
 
-    cx.update_buffer(|buffer, cx| buffer.set_language(Some(markdown_language), cx));
+    cx.update_buffer(|buffer, cx| {
+        buffer.set_sync_parse_timeout(Some(Duration::from_secs(10)));
+        buffer.set_language(Some(markdown_language), cx)
+    });
 
     // Case 1: Test if adding a character with multi cursors preserves nested list indents
     cx.set_state(&indoc! {"

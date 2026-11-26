@@ -1048,3 +1048,30 @@ fn a_failed_run_is_not_halted_by_a_cap_set_afterwards() {
     runtime.tick();
     assert!(cap_events(&runtime).is_empty());
 }
+
+#[test]
+fn two_runtimes_on_one_log_append_after_each_other_without_overwriting() {
+    let temp = TempDir::new().unwrap();
+    let mut a = runtime(FakeRunner::new());
+    let mut b = runtime(FakeRunner::new());
+    a.add(spec(temp.path(), 1, SINGLE)).unwrap();
+    // The second writer opens the log after the first wrote `Created`.
+    b.add(spec(temp.path(), 1, SINGLE)).unwrap();
+
+    a.pause(&run_id(1)).unwrap();
+    b.pause(&run_id(1)).unwrap();
+    a.cancel(&run_id(1)).unwrap();
+
+    let path = spec(temp.path(), 1, SINGLE).attempt_dir.join(EVENTS_FILE);
+    let parsed = bongos_workflow_model::record::parse_log(fs::read(path).unwrap()).unwrap();
+    assert!(!parsed.dropped_tail);
+    assert_eq!(
+        parsed.events,
+        vec![
+            Event::Created,
+            Event::Paused,
+            Event::Paused,
+            Event::Cancelled
+        ]
+    );
+}
