@@ -2,6 +2,7 @@
 //! real brokers and stores in temporary directories. The liveness of every process and the clock
 //! are the test's; nothing sleeps.
 
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::time::Duration;
@@ -208,29 +209,48 @@ fn keeping(name: &str) -> PoolConfig {
 struct Bench {
     world: World,
     project: Project,
+    brokers: Rc<PoolsForChecks>,
     nodes: Rc<PoolsNodes>,
     runtime: Runtime<LiveRunner>,
+    /// How often the nodes' side woke the engine.
+    wakes: Rc<Cell<usize>>,
     temp: TempDir,
 }
 
 impl Bench {
     fn new(cx: &mut TestAppContext, pools: Vec<PoolConfig>) -> Bench {
+        Bench::build(cx, pools, vec![], true, Box::new(|_| Some("p".to_string())))
+    }
+
+    /// A bench whose broker serves the nodes from the start (`open`) or only once the test
+    /// inserts it, finding a run's project with `project_of`.
+    fn build(
+        cx: &mut TestAppContext,
+        pools: Vec<PoolConfig>,
+        machine: Vec<PoolConfig>,
+        open: bool,
+        project_of: crate::nodes::ProjectOf,
+    ) -> Bench {
         let world = World::new();
-        let project = world.project(cx, "p", host(1), pools, vec![]);
+        let project = world.project(cx, "p", host(1), pools, machine);
         let brokers = PoolsForChecks::new();
-        brokers.insert(project.broker.clone());
-        let (nodes, admission) = PoolsNodes::new(
-            brokers,
-            Box::new(|_| Some("p".to_string())),
-            cx.foreground_executor().clone(),
-        );
+        if open {
+            brokers.insert(project.broker.clone());
+        }
+        let (nodes, admission) =
+            PoolsNodes::new(brokers.clone(), project_of, cx.foreground_executor().clone());
+        let wakes = Rc::new(Cell::new(0));
+        let counter = wakes.clone();
+        nodes.set_wake(move || counter.set(counter.get() + 1));
         let mut runtime = Runtime::new(Limits::default(), LiveRunner::default());
         runtime.set_admission(Box::new(admission));
         Bench {
             world,
             project,
+            brokers,
             nodes,
             runtime,
+            wakes,
             temp: TempDir::new().unwrap(),
         }
     }
@@ -671,6 +691,174 @@ fn several_runs_ask_their_own_projects_brokers(cx: &mut TestAppContext) {
         runtime.in_flight(&run_id(1)).len() + runtime.in_flight(&run_id(3)).len(),
         1
     );
+}
+
+#[gpui::test]
+fn a_node_asked_before_its_broker_opens_waits_and_is_asked_once_it_opens(
+    cx: &mut TestAppContext,
+) {
+    // The run's project is not known yet and no broker is open: the app is starting.
+    let mut bench = Bench::build(
+        cx,
+        vec![pool("m", PoolKind::Mutex, 1)],
+        vec![],
+        false,
+        Box::new(|_| None),
+    );
+    bench.add(1, SINGLE);
+    for _ in 0..3 {
+        bench.settle(cx);
+    }
+    assert_eq!(bench.failure(1), None, "not refused");
+    assert!(bench.runner().started.is_empty());
+    assert_eq!(bench.runtime.pool_waiting(&run_id(1)).len(), 1);
+    assert_eq!(bench.wakes.get(), 0, "nothing to wake the engine for yet");
+
+    bench.brokers.insert(bench.project.broker.clone());
+    cx.run_until_parked();
+    assert_eq!(bench.holders("m"), [(run_id(1), step("work"))]);
+    assert_eq!(bench.wakes.get(), 1, "the grant wakes the engine");
+    bench.settle(cx);
+    assert_eq!(bench.started(1, "work"), 1);
+    assert_eq!(bench.runner().started.len(), 1);
+}
+
+#[gpui::test]
+fn a_node_asked_while_its_broker_drains_waits_without_spinning_until_it_starts(
+    cx: &mut TestAppContext,
+) {
+    let mut bench = Bench::new(cx, vec![pool("m", PoolKind::Mutex, 1)]);
+    let drained = bench.project.broker.drain();
+    cx.run_until_parked();
+    cx.foreground_executor().block_on(drained);
+    bench.add(1, SINGLE);
+    for _ in 0..3 {
+        bench.settle(cx);
+    }
+    assert_eq!(bench.failure(1), None, "not refused");
+    assert!(bench.runner().started.is_empty());
+    assert_eq!(bench.runtime.pool_waiting(&run_id(1)).len(), 1);
+    assert_eq!(bench.wakes.get(), 0, "a draining broker never wakes the engine");
+    assert!(bench.waiters("m").is_empty());
+
+    // The writer stays here after all.
+    bench.project.broker.undrain();
+    bench.project.broker.started();
+    cx.run_until_parked();
+    assert_eq!(bench.holders("m"), [(run_id(1), step("work"))]);
+    assert_eq!(bench.wakes.get(), 1);
+    bench.settle(cx);
+    assert_eq!(bench.started(1, "work"), 1);
+}
+
+#[gpui::test]
+fn a_drain_takes_back_a_granted_key_not_started_yet_and_asks_again_after(
+    cx: &mut TestAppContext,
+) {
+    let mut bench = Bench::new(cx, vec![pool("m", PoolKind::Mutex, 1)]);
+    let holder = watch(cx, bench.project.broker.acquire(ask("x", &[need("m")])));
+    cx.run_until_parked();
+    let holder = lease(&holder);
+    bench.add(1, SINGLE);
+    bench.settle(cx);
+    assert_eq!(bench.waiters("m"), [run_id(1)]);
+    // Granted, and the engine has not started the key yet when the writer starts moving.
+    drop(holder);
+    cx.run_until_parked();
+    assert_eq!(bench.holders("m"), [(run_id(1), step("work"))]);
+    assert_eq!(bench.started(1, "work"), 0);
+
+    let drained = bench.project.broker.drain();
+    cx.run_until_parked();
+    cx.foreground_executor().block_on(drained);
+    assert!(bench.holders("m").is_empty(), "the drain removed the hold");
+    assert!(bench.nodes.node_pools(&run_id(1), &key("work")).is_empty());
+
+    // The writer stays; a stranger asks before the broker asks again what the drain gave up.
+    bench.project.broker.undrain();
+    let stranger = watch(cx, bench.project.broker.acquire(ask("z", &[need("m")])));
+    bench.project.broker.started();
+    cx.run_until_parked();
+    assert!(bench.project.broker.given_up().is_empty());
+    assert_eq!(bench.holders("m"), [("z".to_string(), Level::Job)]);
+    assert_eq!(bench.waiters("m"), [run_id(1)]);
+    bench.settle(cx);
+    assert_eq!(
+        bench.started(1, "work"),
+        0,
+        "the key waits again: no start without its hold"
+    );
+    assert_eq!(bench.runtime.pool_waiting(&run_id(1)).len(), 1);
+
+    drop(lease(&stranger));
+    bench.settle(cx);
+    assert_eq!(bench.started(1, "work"), 1);
+    assert_eq!(bench.holders("m"), [(run_id(1), step("work"))]);
+}
+
+#[gpui::test]
+fn a_runs_own_holds_are_asked_again_after_a_drain(cx: &mut TestAppContext) {
+    let mut bench = Bench::new(cx, vec![keeping("h"), pool("q", PoolKind::Mutex, 1)]);
+    bench.add(1, KEEPING);
+    bench.settle(cx);
+    bench.runner().release_all();
+    bench.settle(cx);
+    assert_eq!(bench.holders("h"), [(run_id(1), Level::Run)]);
+
+    let drained = bench.project.broker.drain();
+    cx.run_until_parked();
+    cx.foreground_executor().block_on(drained);
+    assert!(bench.holders("h").is_empty(), "the drain removed the run's hold");
+
+    bench.project.broker.undrain();
+    bench.project.broker.started();
+    cx.run_until_parked();
+    assert_eq!(bench.holders("h"), [(run_id(1), Level::Run)], "held again");
+    assert_eq!(bench.nodes.run_pools(&run_id(1)), ["h"]);
+    let stranger = watch(cx, bench.project.broker.acquire(ask("z", &[need("h")])));
+    cx.run_until_parked();
+    assert_eq!(bench.waiters("h"), ["z"]);
+
+    bench
+        .runtime
+        .close_gate(&run_id(1), key("second"), "kyle", None, None)
+        .unwrap();
+    bench.settle(cx);
+    assert_eq!(bench.started(1, "second"), 1, "covered by the run's hold");
+    assert_eq!(bench.holders("h"), [(run_id(1), Level::Run)]);
+    assert!(stranger.borrow().is_none());
+}
+
+#[gpui::test]
+fn a_node_whose_store_failed_waits_and_is_asked_again_at_its_next_start(
+    cx: &mut TestAppContext,
+) {
+    let mut bench = Bench::build(
+        cx,
+        vec![],
+        vec![pool("g", PoolKind::Slots, 1)],
+        true,
+        Box::new(|_| Some("p".to_string())),
+    );
+    let machine_file = bench.world.machine_dir.path().join(crate::MACHINE_FILE);
+    std::fs::write(&machine_file, "not a machine file [[").unwrap();
+    bench.add(1, &SINGLE.replace("needs = [\"m\"]", "needs = [\"g\"]"));
+    for _ in 0..3 {
+        bench.settle(cx);
+    }
+    assert_eq!(bench.failure(1), None, "a store failure is not the definition's");
+    assert!(bench.runner().started.is_empty());
+    assert_eq!(bench.runtime.pool_waiting(&run_id(1)).len(), 1);
+    assert_eq!(bench.wakes.get(), 0, "a failing store is not asked in a loop");
+    assert!(
+        bench.nodes.waiting_node(&run_id(1), &key("work")).is_none(),
+        "no request is in line while its store fails"
+    );
+
+    std::fs::remove_file(&machine_file).unwrap();
+    bench.settle(cx);
+    assert_eq!(bench.started(1, "work"), 1);
+    assert_eq!(bench.wakes.get(), 1);
 }
 
 #[test]

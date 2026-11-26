@@ -1,12 +1,20 @@
-//! Workflow nodes that wait for their pools (51 D9): feature 20's [`NodeAdmission`] served by the
-//! pool brokers, registered with the engine once `pools.enabled` is on.
+//! Workflow nodes that wait for their pools: feature 20's [`NodeAdmission`] served by the pool
+//! brokers, registered with the engine once `pools.enabled` is on.
 //!
 //! - A node's `needs` is asked of the broker of its run's project as one request of the holder
 //!   `Step { key }` of owner `<run id>`. The first start of the key answers `Wait`; the broker's
 //!   grant marks it granted and wakes the engine, whose next start of the key goes ahead
 //!   (`Go`), so nothing of the try (its process, its time cap) begins before the grant. A refusal
-//!   (undeclared pool, kind clash, deadlock) answers `Refused` and the try fails `pool request
-//!   refused`. A node with no `needs` always goes.
+//!   of the request itself (undeclared pool, kind clash, bad need, deadlock) answers `Refused`
+//!   and the try fails `pool request refused`. A node with no `needs` always goes.
+//! - A key whose broker is not open yet (or whose run's project is not known yet), or whose
+//!   broker drains or closes, keeps waiting with no request, and is asked again when a broker is
+//!   opened or its broker undrains or starts. A key whose store failed keeps waiting too and is
+//!   asked again at its next start (the engine's next tick), or when a broker opens or starts;
+//!   nothing wakes the engine for it, so a failing store is not asked in a loop.
+//! - A drain takes back the holds of a granted key not started yet: the key waits again with no
+//!   request and is asked again once its broker undrains or starts. The run's own holds
+//!   (`Level::Run`) are asked again by the broker itself when it starts.
 //! - The runtime is locked while it asks, so [`PoolsNodeAdmission`] only reads and writes the
 //!   slots it shares with [`PoolsNodes`] and sends it a message; [`PoolsNodes`] owns the waits and
 //!   the leases on the foreground and handles the messages in order.
@@ -18,7 +26,7 @@
 //! - Waiters: a key's wait is dropped (its rows leave every pool's line) when it is no longer
 //!   offered, when its run waits for a person and when its run ends.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -89,6 +97,8 @@ struct Slot {
     id: u64,
     state: SlotState,
     wait: NodeWait,
+    /// Its store failed: the next start of the key asks again.
+    retry: bool,
 }
 
 #[derive(Default)]
@@ -98,16 +108,15 @@ struct Slots {
 }
 
 impl Slots {
-    /// Sets the state of the slot of request `id`, when it is still that request's.
-    fn set(&mut self, id: u64, state: SlotState) {
-        if let Some(slot) = self.by_key.values_mut().find(|slot| slot.id == id) {
-            slot.state = state;
-        }
+    fn by_id(&mut self, id: u64) -> Option<&mut Slot> {
+        self.by_key.values_mut().find(|slot| slot.id == id)
     }
 
-    /// Drops the slot of request `id`, when it is still that request's.
-    fn remove(&mut self, id: u64) {
-        self.by_key.retain(|_, slot| slot.id != id);
+    /// Sets the state of the slot of request `id`, when it is still that request's.
+    fn set(&mut self, id: u64, state: SlotState) {
+        if let Some(slot) = self.by_id(id) {
+            slot.state = state;
+        }
     }
 }
 
@@ -117,6 +126,10 @@ enum Message {
         run: String,
         key: NodeKey,
         needs: Vec<Need>,
+    },
+    /// The key whose store failed starts again: ask again.
+    Retry {
+        id: u64,
     },
     Started {
         id: u64,
@@ -164,7 +177,12 @@ impl NodeAdmission for PoolsNodeAdmission {
             return Admission::Go;
         }
         let mut slots = self.slots();
-        if let Some(slot) = slots.by_key.get(&(run.to_string(), key.clone())) {
+        if let Some(slot) = slots.by_key.get_mut(&(run.to_string(), key.clone())) {
+            if slot.retry {
+                slot.retry = false;
+                let id = slot.id;
+                self.send(Message::Retry { id });
+            }
             return match &slot.state {
                 SlotState::Asked => Admission::Wait(slot.wait.clone()),
                 SlotState::Granted | SlotState::Started => Admission::Go,
@@ -185,6 +203,7 @@ impl NodeAdmission for PoolsNodeAdmission {
                 id,
                 state: SlotState::Asked,
                 wait: wait.clone(),
+                retry: false,
             },
         );
         drop(slots);
@@ -254,6 +273,7 @@ impl NodeAdmission for PoolsNodeAdmission {
 struct Entry {
     run: String,
     key: NodeKey,
+    needs: Vec<Need>,
     broker: Rc<PoolBroker>,
     /// Where the wait stands, until it is granted.
     status: Option<StatusSource>,
@@ -265,6 +285,13 @@ struct Entry {
     keep: Option<Lease>,
 }
 
+/// A key that waits with no request: asked again later.
+struct Parked {
+    run: String,
+    key: NodeKey,
+    needs: Vec<Need>,
+}
+
 /// Finds the project of a run: the id of the broker its nodes ask.
 pub type ProjectOf = Box<dyn Fn(&str) -> Option<String>>;
 
@@ -272,9 +299,13 @@ struct Worker {
     brokers: Rc<PoolsForChecks>,
     project_of: ProjectOf,
     wake: Option<Rc<dyn Fn()>>,
+    /// Schedules [`Worker::resync`] once on the foreground.
+    poke: Rc<dyn Fn()>,
     slots: Arc<Mutex<Slots>>,
     foreground: ForegroundExecutor,
     entries: BTreeMap<u64, Entry>,
+    /// The keys waiting with no request, by request id.
+    parked: BTreeMap<u64, Parked>,
     /// The holds each run keeps until it ends (`hold_while_waiting`).
     run_holds: BTreeMap<String, Vec<Lease>>,
 }
@@ -297,15 +328,45 @@ impl PoolsNodes {
     ) -> (Rc<PoolsNodes>, PoolsNodeAdmission) {
         let slots = Arc::new(Mutex::new(Slots::default()));
         let (sender, mut receiver) = mpsc::unbounded();
-        let worker = Rc::new(RefCell::new(Worker {
-            brokers,
-            project_of,
-            wake: None,
-            slots: slots.clone(),
-            foreground: foreground.clone(),
-            entries: BTreeMap::new(),
-            run_holds: BTreeMap::new(),
-        }));
+        let worker = Rc::new_cyclic(|weak: &std::rc::Weak<RefCell<Worker>>| {
+            let scheduled = Rc::new(Cell::new(false));
+            let weak = weak.clone();
+            let executor = foreground.clone();
+            let poke: Rc<dyn Fn()> = Rc::new(move || {
+                if scheduled.replace(true) {
+                    return;
+                }
+                let scheduled = scheduled.clone();
+                let weak = weak.clone();
+                executor
+                    .spawn(async move {
+                        scheduled.set(false);
+                        if let Some(worker) = weak.upgrade() {
+                            Worker::resync(&worker);
+                        }
+                    })
+                    .detach();
+            });
+            RefCell::new(Worker {
+                brokers: brokers.clone(),
+                project_of,
+                wake: None,
+                poke,
+                slots: slots.clone(),
+                foreground: foreground.clone(),
+                entries: BTreeMap::new(),
+                parked: BTreeMap::new(),
+                run_holds: BTreeMap::new(),
+            })
+        });
+        // A broker opened, drained, undrained or started: the keys waiting with no request may be
+        // asked now, and a drain takes back what granted keys not started yet held.
+        let poke = worker.borrow().poke.clone();
+        brokers.on_insert(move |broker| {
+            let on_writer = poke.clone();
+            broker.on_writer(move || on_writer());
+            poke();
+        });
         let weak = Rc::downgrade(&worker);
         let messages = foreground.spawn(async move {
             while let Some(message) = receiver.next().await {
@@ -441,6 +502,12 @@ impl Worker {
                 key,
                 needs,
             } => Self::ask(this, id, run, key, needs),
+            Message::Retry { id } => {
+                let parked = this.borrow_mut().parked.remove(&id);
+                if let Some(parked) = parked {
+                    Self::ask(this, id, parked.run, parked.key, parked.needs);
+                }
+            }
             Message::Started { id, process } => {
                 let worker = this.borrow();
                 // A built-in has no process of its own: its holds stay with the host.
@@ -455,6 +522,7 @@ impl Worker {
             }
             Message::Finished { id, ran } => {
                 let mut worker = this.borrow_mut();
+                worker.parked.remove(&id);
                 let Some(entry) = worker.entries.remove(&id) else {
                     return;
                 };
@@ -473,6 +541,9 @@ impl Worker {
             Message::Drop { ids } => {
                 let dropped: Vec<Entry> = {
                     let mut worker = this.borrow_mut();
+                    for id in &ids {
+                        worker.parked.remove(id);
+                    }
                     ids.iter()
                         .filter_map(|id| worker.entries.remove(id))
                         .collect()
@@ -486,21 +557,16 @@ impl Worker {
         }
     }
 
+    /// Asks the broker of `run` for `needs` as request `id`; with no broker open for it, or one
+    /// that drains or is closed, the key waits with no request until a broker opens or starts.
     fn ask(this: &Rc<RefCell<Worker>>, id: u64, run: String, key: NodeKey, needs: Vec<Need>) {
         let mut worker = this.borrow_mut();
-        let Some(broker) = worker.broker_of(&run) else {
-            worker.slots().set(
-                id,
-                SlotState::Refused(format!(
-                    "the pools of run {run}'s project are not open in this process"
-                )),
-            );
-            let wake = worker.wake.clone();
-            drop(worker);
-            if let Some(wake) = wake {
-                wake();
+        let broker = match worker.broker_of(&run) {
+            Some(broker) if !broker.is_draining() => broker,
+            _ => {
+                worker.parked.insert(id, Parked { run, key, needs });
+                return;
             }
-            return;
         };
         let holder = Holder {
             // The broker sets its own project and host.
@@ -515,7 +581,10 @@ impl Worker {
             host: HostRef { pid: 0, start: 0 },
             process: None,
         };
-        let waiting = broker.acquire(Request { needs, holder });
+        let waiting = broker.acquire(Request {
+            needs: needs.clone(),
+            holder,
+        });
         let status = waiting.status_source();
         let weak = Rc::downgrade(this);
         let task = worker.foreground.spawn(async move {
@@ -529,6 +598,7 @@ impl Worker {
             Entry {
                 run,
                 key,
+                needs,
                 broker,
                 status: Some(status),
                 waiting: Some(task),
@@ -539,10 +609,10 @@ impl Worker {
     }
 
     fn resolved(this: &Rc<RefCell<Worker>>, id: u64, answer: Result<Lease, Refused>) {
-        let wake = {
+        let after = {
             let mut guard = this.borrow_mut();
             let worker = &mut *guard;
-            let Some(entry) = worker.entries.get_mut(&id) else {
+            let Some(mut entry) = worker.entries.remove(&id) else {
                 // Dropped meanwhile: a lease is released as it drops here.
                 return;
             };
@@ -562,22 +632,93 @@ impl Worker {
                     entry.keep = lease.split_off(&keep);
                     entry.lease = Some(lease);
                     slots.set(id, SlotState::Granted);
+                    worker.entries.insert(id, entry);
+                    worker.wake.clone()
                 }
-                // The writer moves or closes: asked again at the key's next start.
+                // The writer moves or closes: the key waits with no request until a broker opens
+                // or starts; a broker already open in its place is asked at once.
                 Err(Refused::Draining | Refused::Closed) => {
-                    worker.entries.remove(&id);
-                    slots.remove(id);
+                    let moved = worker.broker_of(&entry.run).is_some_and(|broker| {
+                        !Rc::ptr_eq(&broker, &entry.broker) && !broker.is_draining()
+                    });
+                    worker.parked.insert(id, Parked::of(entry));
+                    moved.then(|| worker.poke.clone())
+                }
+                // Nothing to do with the request: asked again at the key's next start.
+                Err(refused @ Refused::Store { .. }) => {
+                    log::warn!(
+                        "pools: node {} of run {}: {refused}; asking again at its next start",
+                        entry.key,
+                        entry.run
+                    );
+                    if let Some(slot) = slots.by_id(id) {
+                        slot.retry = true;
+                    }
+                    worker.parked.insert(id, Parked::of(entry));
+                    None
                 }
                 Err(refused) => {
-                    worker.entries.remove(&id);
                     slots.set(id, SlotState::Refused(refused.to_string()));
+                    worker.wake.clone()
                 }
             }
-            drop(slots);
-            worker.wake.clone()
         };
-        if let Some(wake) = wake {
-            wake();
+        if let Some(after) = after {
+            after();
+        }
+    }
+
+    /// Takes back the granted keys not started yet whose broker drains (its drain removed their
+    /// holds), and asks again every key waiting with no request whose broker is open and not
+    /// draining.
+    fn resync(this: &Rc<RefCell<Worker>>) {
+        let parked = {
+            let mut guard = this.borrow_mut();
+            let worker = &mut *guard;
+            let mut slots = worker.slots.lock().unwrap_or_else(PoisonError::into_inner);
+            let drained: Vec<u64> = worker
+                .entries
+                .iter()
+                .filter(|(id, entry)| {
+                    entry.lease.is_some()
+                        && entry.broker.is_draining()
+                        && slots
+                            .by_id(**id)
+                            .is_some_and(|slot| slot.state == SlotState::Granted)
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            for id in drained {
+                if let Some(entry) = worker.entries.remove(&id) {
+                    slots.set(id, SlotState::Asked);
+                    // The drain removes its holds anyway; its lease goes with it.
+                    worker.parked.insert(id, Parked::of(entry));
+                }
+            }
+            let parked: Vec<u64> = worker
+                .parked
+                .iter()
+                .filter(|(id, _)| slots.by_id(**id).is_some())
+                .map(|(id, _)| *id)
+                .collect();
+            drop(slots);
+            parked
+        };
+        for id in parked {
+            let parked = this.borrow_mut().parked.remove(&id);
+            if let Some(parked) = parked {
+                Self::ask(this, id, parked.run, parked.key, parked.needs);
+            }
+        }
+    }
+}
+
+impl Parked {
+    fn of(entry: Entry) -> Parked {
+        Parked {
+            run: entry.run,
+            key: entry.key,
+            needs: entry.needs,
         }
     }
 }
