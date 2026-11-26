@@ -162,7 +162,7 @@ fn a_parallel_part_never_jumps_a_queued_waiter(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let first = granted(&mut first);
     let two = table("pool = 'compile'\ncount = 2");
-    let mut other_run = checks.acquire(request(1, &[two]));
+    let mut other_run = checks.acquire(request(4, &[two]));
     cx.run_until_parked();
     assert!(ready(&mut other_run).is_none());
     // One slot is free, but a request waits in line for the pool.

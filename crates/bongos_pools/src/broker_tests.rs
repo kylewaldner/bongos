@@ -908,7 +908,8 @@ fn a_dropped_broker_fails_its_waits_and_removes_their_rows(cx: &mut TestAppConte
     cx.run_until_parked();
     assert_eq!(waiters(&read(&a).0, "db"), vec!["second"]);
 
-    let broker = std::mem::replace(&mut a.broker, Rc::new(world.bare_broker(cx, &a)));
+    let stand_in = Rc::new(world.bare_broker(cx, &a));
+    let broker = std::mem::replace(&mut a.broker, stand_in);
     drop(broker);
     cx.run_until_parked();
     assert_eq!(

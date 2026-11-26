@@ -592,7 +592,11 @@ impl PoolBroker {
         let given_up = {
             let mut state = self.shared.state.borrow_mut();
             state.draining = false;
-            std::mem::take(&mut state.given_up)
+            let mut given_up = std::mem::take(&mut state.given_up);
+            // What held its pools before asks first, so it does not queue behind what only
+            // waited; each kind keeps its order.
+            given_up.sort_by_key(|(_, _, held)| !*held);
+            given_up
         };
         for (request, answer, _) in given_up {
             if !answer.alive() || self.shared.state.borrow().closed {
@@ -1404,20 +1408,24 @@ impl Shared {
             .await;
         match &result {
             Ok(done) => self.absorb(done),
-            Err(TxError::HalfUnwritten { project_grants, .. }) => {
-                // Committed in the project store, never in the machine store: those requests
-                // are failed and both their halves withdrawn.
-                let failed: BTreeSet<RequestId> =
-                    project_grants.iter().map(|grant| grant.request).collect();
-                for request in failed {
+            Err(TxError::HalfUnwritten {
+                project_grants,
+                reason,
+            }) => {
+                // Committed in the project store, never in the machine store, even on a retry. A
+                // request of the project store alone is granted; a mixed one, whose machine half
+                // stays a waiter, is failed and both its halves withdrawn.
+                self.take_grants(StoreKind::Project, project_grants);
+                let stuck: BTreeSet<RequestId> = project_grants
+                    .iter()
+                    .map(|grant| grant.request)
+                    .filter(|request| self.state.borrow().pending.contains_key(request))
+                    .collect();
+                for request in stuck {
                     self.fail(
                         request,
                         Refused::Store {
-                            reason: result
-                                .as_ref()
-                                .err()
-                                .map(TxError::reason)
-                                .unwrap_or_default(),
+                            reason: reason.clone(),
                         },
                     );
                 }
@@ -1715,7 +1723,7 @@ impl Shared {
                     .tx(
                         Stores::of_holds(&holds),
                         BTreeSet::new(),
-                        Box::new(move |machine, project| {
+                        Box::new(move |mut machine, mut project| {
                             let mut released = Vec::new();
                             for hold in &tickets {
                                 let table = match hold.store {
@@ -1764,7 +1772,7 @@ impl Shared {
                     .tx(
                         Stores::of_holds(&holds),
                         BTreeSet::new(),
-                        Box::new(move |machine, project| {
+                        Box::new(move |mut machine, mut project| {
                             let mut bound = 0;
                             for hold in &tickets {
                                 let table = match hold.store {
@@ -2054,7 +2062,7 @@ impl Shared {
             .background
             .spawn(async move {
                 let project_result = project.transact(remove).map(|_| ());
-                let machine_result = match machine {
+                let machine_result = match &machine {
                     Some(machine) => machine.transact(remove_machine).map(|_| ()),
                     None => Ok(()),
                 };
