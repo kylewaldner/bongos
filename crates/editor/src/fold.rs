@@ -190,7 +190,10 @@ impl Editor {
         } else {
             selection.range()
         };
-        if display_map.folds_in_range(range).next().is_some() {
+        let has_user_fold = display_map
+            .folds_in_range(range)
+            .any(|fold| !is_conceal_tag(fold.placeholder.type_tag, cx));
+        if has_user_fold {
             self.unfold_recursive(&Default::default(), window, cx)
         } else {
             self.fold_recursive(&Default::default(), window, cx)
@@ -261,8 +264,7 @@ impl Editor {
             let display_map = self.display_map.update(cx, |map, cx| map.snapshot(cx));
             let has_folds = display_map
                 .folds_in_range(MultiBufferOffset(0)..display_map.buffer_snapshot().len())
-                .next()
-                .is_some();
+                .any(|fold| !is_conceal_tag(fold.placeholder.type_tag, cx));
             has_folds
         } else {
             let snapshot = self.buffer.read(cx).snapshot(cx);
@@ -651,7 +653,8 @@ impl Editor {
     /// Replaces the folds tagged `tag` that intersect `within` with `conceals`,
     /// in one display map update. Folds with other tags are kept. Does not
     /// scroll, change selections or persist folds; an empty `conceals` clears
-    /// the tag's folds in `within`.
+    /// the tag's folds in `within`. In an editor with a split-diff companion,
+    /// `DisplayMap::fold` returns early, so no conceals are added there.
     pub fn set_conceals(
         &mut self,
         tag: TypeId,

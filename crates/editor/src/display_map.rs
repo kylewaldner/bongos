@@ -2186,14 +2186,23 @@ impl DisplaySnapshot {
     }
 
     fn row_has_non_conceal_fold(&self, buffer_row: MultiBufferRow) -> bool {
-        let row_range = MultiBufferPoint::new(buffer_row.0, 0)
-            ..MultiBufferPoint::new(buffer_row.0, self.buffer_snapshot().line_len(buffer_row));
-        self.folds_in_range(row_range).any(|fold| {
-            !fold
-                .placeholder
-                .type_tag
-                .is_some_and(|tag| self.conceal_tags.contains(&tag))
-        })
+        // Indent and crease folds start at the row's end, so the lookup must
+        // include folds touching the range's endpoints. A fold that only ends
+        // at the row's start belongs to the rows above.
+        let buffer = self.buffer_snapshot();
+        let row_start = MultiBufferPoint::new(buffer_row.0, 0);
+        let row_end = MultiBufferPoint::new(buffer_row.0, buffer.line_len(buffer_row));
+        self.fold_snapshot()
+            .folds_touching_range(row_start..row_end)
+            .any(|fold| {
+                let start = fold.range.start.to_point(buffer);
+                let end = fold.range.end.to_point(buffer);
+                (start.row == buffer_row.0 || end > row_start)
+                    && !fold
+                        .placeholder
+                        .type_tag
+                        .is_some_and(|tag| self.conceal_tags.contains(&tag))
+            })
     }
 
     pub fn is_block_line(&self, display_row: DisplayRow) -> bool {
