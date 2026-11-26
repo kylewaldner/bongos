@@ -715,6 +715,7 @@ fn main() {
         );
         command_palette::init(cx);
         bongos_work::init_palette(cx);
+        bongos_inbox::init_palette(cx);
         bongos_chat::init_palette(cx);
         bongos_prompts::init_palette(cx);
         bongos_builder::init_palette(cx);
