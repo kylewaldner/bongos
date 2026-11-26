@@ -184,6 +184,9 @@ pub struct SettingsContent {
     /// The settings for the markdown preview.
     pub markdown_preview: Option<MarkdownPreviewSettingsContent>,
 
+    /// Settings for the markdown editor: the live view of markdown buffers.
+    pub markdown: Option<MarkdownSettingsContent>,
+
     pub repl: Option<ReplSettingsContent>,
 
     /// Whether or not to enable Helix mode.
@@ -1621,6 +1624,21 @@ pub struct PromptsSettingsContent {
     ///
     /// Default: "==="
     pub marker_close: Option<String>,
+}
+
+/// Settings for the markdown editor.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct MarkdownSettingsContent {
+    /// Whether markdown buffers start in the live view, with markup hidden and styled.
+    ///
+    /// Default: false
+    pub live_view: Option<bool>,
+    /// The largest markdown file, in bytes, that starts in the live view. A larger one starts as
+    /// source. 0 means no limit.
+    ///
+    /// Default: 5000000
+    pub live_view_max_file_size: Option<u64>,
 }
 
 /// Settings for the task builder.
