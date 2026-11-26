@@ -6,8 +6,8 @@ use super::tests::{item, key_of, outcome_of, real_inbox, set_enabled, wait_for};
 use super::*;
 use crate::badge::badge_label;
 use gpui::{
-    AnyWindowHandle, Bounds, Focusable as _, Render, TestAppContext, UpdateGlobal as _,
-    VisualTestContext, WindowHandle, px, size,
+    Bounds, Focusable as _, Render, TestAppContext, UpdateGlobal as _, VisualTestContext,
+    WindowHandle, px, size,
 };
 use project::Project;
 use tempfile::TempDir;
@@ -100,15 +100,15 @@ impl StatusItemView for OtherRightItem {
     }
 }
 
-struct Env {
-    app_state: Arc<AppState>,
-    inbox: Entity<InboxState>,
-    root: PathBuf,
+pub(crate) struct Env {
+    pub(crate) app_state: Arc<AppState>,
+    pub(crate) inbox: Entity<InboxState>,
+    pub(crate) root: PathBuf,
     _temp: TempDir,
 }
 
 /// An enabled inbox over a temporary directory, scanned once.
-async fn env(cx: &mut TestAppContext) -> Env {
+pub(crate) async fn env(cx: &mut TestAppContext) -> Env {
     let app_state = cx.update(|cx| {
         let app_state = AppState::test(cx);
         command_palette_hooks::init(cx);
@@ -116,7 +116,7 @@ async fn env(cx: &mut TestAppContext) -> Env {
         bongos_minibuffer::init(cx);
         InboxSettings::register(cx);
         init_palette(cx);
-        register_open(cx);
+        register_actions(cx);
         app_state
     });
     cx.update(|cx| {
@@ -149,7 +149,7 @@ impl Env {
         maildir::deliver(&self.root, &item(summary)).unwrap();
     }
 
-    async fn wait_unread(&self, cx: &mut TestAppContext, count: usize) {
+    pub(crate) async fn wait_unread(&self, cx: &mut TestAppContext, count: usize) {
         wait_for(cx, &self.inbox, &format!("{count} unread"), |inbox| {
             inbox
                 .snapshot()
@@ -159,16 +159,16 @@ impl Env {
     }
 }
 
-struct Win {
-    handle: WindowHandle<MultiWorkspace>,
-    workspace: Entity<Workspace>,
-    badge: Entity<InboxBadge>,
-    cx: VisualTestContext,
+pub(crate) struct Win {
+    pub(crate) handle: WindowHandle<MultiWorkspace>,
+    pub(crate) workspace: Entity<Workspace>,
+    pub(crate) badge: Entity<InboxBadge>,
+    pub(crate) cx: VisualTestContext,
 }
 
 /// A window whose status bar has the badge first among the right items, then another right item.
 /// With `long`, a long left item comes first.
-async fn window(cx: &mut TestAppContext, env: &Env, long: bool) -> Win {
+pub(crate) async fn window(cx: &mut TestAppContext, env: &Env, long: bool) -> Win {
     let project = Project::test(env.app_state.fs.clone(), [], cx).await;
     let handle: WindowHandle<MultiWorkspace> =
         cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
@@ -199,16 +199,16 @@ async fn window(cx: &mut TestAppContext, env: &Env, long: bool) -> Win {
 }
 
 impl Win {
-    fn text(&self) -> Option<String> {
+    pub(crate) fn text(&self) -> Option<String> {
         self.badge.read_with(&self.cx, |badge, cx| badge.text(cx))
     }
 
-    fn notifications(&self) -> usize {
+    pub(crate) fn notifications(&self) -> usize {
         self.workspace
             .read_with(&self.cx, |workspace, _| workspace.notification_ids().len())
     }
 
-    fn has_modal(&mut self) -> bool {
+    pub(crate) fn has_modal(&mut self) -> bool {
         self.workspace
             .update_in(&mut self.cx, |workspace, window, cx| {
                 workspace.has_active_modal(window, cx)
@@ -302,31 +302,6 @@ async fn deliveries_raise_no_notification_toast_or_modal(cx: &mut TestAppContext
     assert!(!win.has_modal());
 }
 
-#[gpui::test]
-async fn open_says_not_yet_in_the_echo_area_and_is_hidden_from_the_palette(
-    cx: &mut TestAppContext,
-) {
-    let env = env(cx).await;
-    let mut win = window(cx, &env, false).await;
-    cx.update(|cx| {
-        let filter = command_palette_hooks::CommandPaletteFilter::try_global(cx).unwrap();
-        assert!(filter.is_hidden(&Open));
-    });
-    win.cx.dispatch_action(Open);
-    win.cx.run_until_parked();
-    let window: AnyWindowHandle = win.handle.into();
-    let messages = win.cx.update(|_, cx| {
-        bongos_minibuffer::minibuffer_for_window(window, cx)
-            .expect("the window has a strip")
-            .read(cx)
-            .messages()
-    });
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].text.as_ref(), NOT_YET);
-    assert_eq!(win.notifications(), 0);
-    assert!(!win.has_modal());
-}
-
 fn intersects(a: Bounds<Pixels>, b: Bounds<Pixels>) -> bool {
     a.intersect(&b).size.width > px(0.) && a.intersect(&b).size.height > px(0.)
 }
@@ -367,7 +342,9 @@ async fn at_480_pixels_the_badge_is_the_rightmost_item_and_overlaps_nothing(
     assert!(!intersects(badge, long));
     assert!(!intersects(badge, other));
     assert_eq!(window_bounds.intersect(&badge), badge, "inside the window");
-    if let Some(echo) = win.cx.debug_bounds("echo-text") {
-        assert!(!intersects(badge, echo), "{badge:?} vs {echo:?}");
-    }
+    let echo = win
+        .cx
+        .debug_bounds("echo-text")
+        .expect("the echo line is drawn");
+    assert!(!intersects(badge, echo), "{badge:?} vs {echo:?}");
 }
