@@ -643,6 +643,11 @@ impl ChannelServer {
         lock(&self.request_handlers).insert(kind, Arc::new(handler));
     }
 
+    /// Removes the handler of `kind`; its requests are answered `unknown request` from now on.
+    pub fn remove_request_handler(&mut self, kind: &RequestKind) {
+        lock(&self.request_handlers).remove(kind);
+    }
+
     /// Replaces how the peer's uid is read, for servers started from now on.
     #[cfg(test)]
     pub(crate) fn set_peer_uid(&mut self, peer_uid: PeerUid) {

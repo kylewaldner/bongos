@@ -223,6 +223,13 @@ fn main() {
         process::exit(0);
     }
 
+    // `bongos --slack <op> ...` is a chat agent's Slack bridge: it sends one request over the chat
+    // channel, prints the reply and exits, before any settings, logging, database or UI work.
+    #[cfg(not(target_os = "windows"))]
+    if let Some(words) = &args.slack {
+        process::exit(slack_bridge(words));
+    }
+
     #[cfg(target_os = "windows")]
     if args.record_etw_trace {
         let zed_pid = args
@@ -607,6 +614,7 @@ fn main() {
         bongos_linear::init(cx);
         bongos_linear::init_client(cx);
         bongos_slack::init(cx);
+        bongos_slack::bridge_handler::install(&slack_bridge_program(), cx);
         bongos_workflow::init(cx);
         bongos_checks::init(cx);
         bongos_lanes::init(cx);
@@ -1615,6 +1623,51 @@ fn chat_channel_config() -> bongos_chat::ChannelConfig {
     bongos_chat::ChannelConfig { reporter }
 }
 
+/// `bongos --slack <op> ...`: sends the operation to the bongos that runs this chat, prints the
+/// answer and returns the exit status.
+#[cfg(not(target_os = "windows"))]
+fn slack_bridge(words: &[String]) -> i32 {
+    use bongos_chat_model::channel::report::ReplyError;
+    use bongos_chat_model::channel::request::{self, REPLY_WAIT, SendError};
+    use bongos_slack::model::bridge;
+
+    let (output, status) =
+        bridge::run_client(words, &|path| std::fs::read_to_string(path), &|body| {
+            request::send(
+                &|name| std::env::var(name).ok(),
+                bridge::KIND,
+                body,
+                REPLY_WAIT,
+            )
+            .map_err(|error| match error {
+                SendError::NoChannel => {
+                    "Not in a bongos chat: the chat channel is not in the environment".to_string()
+                }
+                SendError::Refused(ReplyError::UnknownRequest) => {
+                    "Slack is off in this bongos (slack.enabled)".to_string()
+                }
+                error => format!("Could not reach bongos: {error}"),
+            })
+        });
+    if status == 0 {
+        println!("{output}");
+    } else {
+        eprintln!("{output}");
+    }
+    status
+}
+
+/// How chat agents run the Slack bridge: this executable, then `--slack`.
+fn slack_bridge_program() -> Vec<String> {
+    match std::env::current_exe() {
+        Ok(exe) => vec![exe.to_string_lossy().into_owned()],
+        Err(error) => {
+            log::error!("slack: cannot find the bongos executable for chats: {error}");
+            Vec::new()
+        }
+    }
+}
+
 fn stdout_is_a_pty() -> bool {
     !*FORCE_CLI_MODE && io::stdout().is_terminal()
 }
@@ -1710,6 +1763,18 @@ struct Args {
         value_names = ["MODE", "ARGS"]
     )]
     chat_report: Option<Vec<String>>,
+
+    /// Runs one Slack operation for the chat agent this process runs in, over the chat channel
+    /// socket: `read`, `channels`, `post` or `post-status`. Takes every word after it.
+    #[cfg(not(target_os = "windows"))]
+    #[arg(
+        long,
+        hide = true,
+        num_args = 1..,
+        allow_hyphen_values = true,
+        value_names = ["OP", "ARGS"]
+    )]
+    slack: Option<Vec<String>>,
 
     #[arg(long, hide = true)]
     dump_all_actions: bool,
