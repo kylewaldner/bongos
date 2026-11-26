@@ -2877,6 +2877,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bongos_pools_model"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml 0.8.23",
+ "toml_edit 0.22.27",
+]
+
+[[package]]
 name = "bongos_project_repo"
 version = "0.1.0"
 dependencies = [
