@@ -6,6 +6,7 @@
 //! written and no run starts.
 
 mod actions;
+pub mod admission;
 pub mod agent_confinement;
 pub mod builtin_merge;
 pub mod builtin_nodes;
@@ -48,6 +49,10 @@ use ::settings::Settings as _;
 use gpui::App;
 
 pub use actions::{WorkflowToast, action_types, init_palette, register, workflow};
+pub use admission::{
+    Admission, NEEDS_NOT_AVAILABLE, NeedsValidator, NodeAdmission, NodeNeeds, NodeWait,
+    register_admission,
+};
 pub use builtin_nodes::{BuiltinNode, BuiltinNodes, BuiltinStart};
 pub use completion::{CompletionHook, CompletionHooks};
 pub use definitions::{ValidationHook, ValidationHooks};
@@ -99,6 +104,8 @@ fn init_test_job_roots() {
 
 #[cfg(test)]
 mod actions_tests;
+#[cfg(test)]
+mod admission_tests;
 #[cfg(test)]
 mod builtin_run_tests;
 #[cfg(test)]

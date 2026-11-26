@@ -51,6 +51,7 @@ const NODE_KEYS: &[&str] = &[
     "max_cost_usd",
     "max_minutes",
     "retries",
+    "needs",
 ];
 const END_KEYS: &[&str] = &["kind", "outcomes", "reason"];
 
@@ -252,6 +253,10 @@ pub struct Node {
     pub join: Option<Join>,
     pub gate: Option<Gate>,
     pub polls: Option<Polls>,
+    /// `needs`: the pools the node's try waits for before it starts, as written (a pool name, a
+    /// `{ pool, mode, count }` table, or an array of them). The pools feature reads it; without
+    /// it, validation refuses a node that has it, so it is never silently ignored.
+    pub needs: Option<Located<toml::Value>>,
     pub settings: Settings,
 }
 
@@ -516,6 +521,7 @@ struct RawNode {
     join: Option<Spanned<Join>>,
     gate: Option<Spanned<RawGate>>,
     polls: Option<Polls>,
+    needs: Option<Spanned<toml::Value>>,
     agent: Option<Spanned<AgentKind>>,
     model: Option<Spanned<String>>,
     permission_mode: Option<Spanned<String>>,
@@ -797,6 +803,7 @@ fn convert_node(
             }
         }),
         polls: raw.polls,
+        needs: raw.needs.map(|needs| located(needs, lines)),
         settings: RawSettings {
             agent: raw.agent,
             model: raw.model,

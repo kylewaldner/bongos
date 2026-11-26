@@ -624,7 +624,8 @@ fn compatible(old: &FieldType, new: &FieldType) -> bool {
 /// Whether a failure with this reason is retried automatically. Not retried: failures a rerun of
 /// the same key cannot change (routing, bounds, width, outcomes, a merge conflict), and those that
 /// are Kyle's or the engine's decision (a cancelled gate, an interruption not resumed, a missing
-/// OS sandbox that needs or got an answer).
+/// OS sandbox that needs or got an answer), and a pool request refused (an undeclared pool, a kind
+/// clash or a deadlock, which an immediate rerun meets again).
 pub fn is_retried(reason: FailureReason) -> bool {
     !matches!(
         reason,
@@ -637,6 +638,7 @@ pub fn is_retried(reason: FailureReason) -> bool {
             | FailureReason::InterruptedNotResumed
             | FailureReason::SandboxRequired
             | FailureReason::SandboxRefused
+            | FailureReason::PoolRefused
     )
 }
 

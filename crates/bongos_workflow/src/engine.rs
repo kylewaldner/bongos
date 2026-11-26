@@ -803,6 +803,7 @@ impl WorkflowEngine {
         }
         let engine = Self::open(cx);
         engine.use_builtins(cx);
+        crate::admission::use_registered(&engine, cx);
         cx.set_global(engine.clone());
         crate::sources::register(&engine, cx);
         engine.register_project_sources(cx);
@@ -822,6 +823,23 @@ impl WorkflowEngine {
 
     pub fn dirs(&self) -> &LayerDirs {
         &self.dirs
+    }
+
+    /// Ticks the runs now and publishes what changed, as the loop's next pass would: for what
+    /// another crate knows changed (a pool granted to a waiting key).
+    pub fn wake(&self, cx: &mut App) {
+        if self.tick_runs(cx) {
+            self.publish(cx);
+        }
+    }
+
+    /// The id of the project run `run` belongs to, once it was placed.
+    pub fn run_project_id(&self, run: &str) -> Option<String> {
+        self.projects
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(run)
+            .map(|repo| repo.location().id.clone())
     }
 
     /// The layers a command on `task` reads: the engine's own, with the project layer of a

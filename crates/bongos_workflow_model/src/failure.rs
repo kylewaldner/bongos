@@ -57,10 +57,13 @@ pub enum FailureReason {
     /// A program start found no OS sandbox and was refused (by the setting, the project, the
     /// person, or because the run is unattended). Never retried.
     SandboxRefused,
+    /// The node's `needs` can never be granted: an undeclared pool, a kind clash, a request that
+    /// would deadlock. Recorded like a runner's start failure.
+    PoolRefused,
 }
 
 impl FailureReason {
-    pub const ALL: [FailureReason; 25] = [
+    pub const ALL: [FailureReason; 26] = [
         Self::NodeOutputInvalid,
         Self::AgentExitedNonzero,
         Self::ProgramExitedNonzero,
@@ -86,6 +89,7 @@ impl FailureReason {
         Self::CheckNoVerdict,
         Self::SandboxRequired,
         Self::SandboxRefused,
+        Self::PoolRefused,
     ];
 
     /// The text the run view and the run record show.
@@ -116,6 +120,7 @@ impl FailureReason {
             Self::CheckNoVerdict => "check had no verdict",
             Self::SandboxRequired => "needs an answer: no OS sandbox",
             Self::SandboxRefused => crate::unsandboxed::REFUSED_TEXT,
+            Self::PoolRefused => "pool request refused",
         }
     }
 
@@ -133,7 +138,8 @@ impl FailureReason {
             | Self::OutcomePromisedNotDelivered
             | Self::ProgramResultInvalid
             | Self::NoRouteForResult
-            | Self::BranchLimitExceeded => FailureClass::Definition,
+            | Self::BranchLimitExceeded
+            | Self::PoolRefused => FailureClass::Definition,
             Self::AgentExitedNonzero
             | Self::ProgramExitedNonzero
             | Self::TurnCapHit

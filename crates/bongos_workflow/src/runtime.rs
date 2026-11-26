@@ -24,6 +24,14 @@
 //! - Checks: a key of a `use = "checks"` program node holds no session slot (pools govern checks)
 //!   and gets no time or output cap.
 //!
+//! Admission ([`NodeAdmission`], set with [`Runtime::set_admission`]): every start of a key asks
+//! it first. `Go` starts it; `Wait` appends nothing, keeps the key in the run's `pool_waiting` (no
+//! session slot, and a run with nothing else to do now is parked) and asks again at its next start
+//! command, so a waiting key never has a `NodeStarted` and its try's time cap begins with its
+//! process; `Refused` fails the try `pool request refused` like a runner's start failure. Every
+//! end or stop of a try it let go, every wait the scheduler stops offering, and every hold of the
+//! run for a person or its end is told to it. With none set every start goes.
+//!
 //! Built-ins: a key of a program node whose `use` is registered in [`BuiltinNodes`] is started,
 //! polled and stopped through that built-in instead of the [`Runner`]; it is recorded with pid 0.
 //!
@@ -58,6 +66,7 @@ use futures::channel::oneshot;
 use serde_json::Value;
 
 use crate::WorkflowsSettings;
+use crate::admission::{Admission, NodeAdmission, NodeWait};
 use crate::builtin_nodes::{BuiltinNode, BuiltinNodes, BuiltinStart};
 use crate::consent::{self, ConsentScope, Grant, RunConsentStore, RunConsents};
 use crate::process::{OrphanOutcome, ProcessRecord, kill_orphans};
@@ -383,6 +392,17 @@ struct LiveRun {
     loop_bound: u32,
     /// Who started the run ([`Runtime::set_started_by`]); a person until told otherwise.
     started_by: StartedBy,
+    /// Keys whose start the admission answered `Wait`: nothing was appended for them and they hold
+    /// no session slot.
+    pool_waiting: BTreeMap<NodeKey, PoolWait>,
+}
+
+/// A key waiting for its admission.
+struct PoolWait {
+    wait: NodeWait,
+    /// Started by a resume or a retry step, which the scheduler does not offer again: the runtime
+    /// asks it again each round itself.
+    forced: bool,
 }
 
 impl LiveRun {
@@ -438,6 +458,34 @@ impl LiveRun {
                 Event::NodeStarted { .. } | Event::GateOpened { .. } | Event::BranchMerged { .. }
             )
         })
+    }
+
+    /// Whether `key` waits for its admission after a resume or a retry step.
+    fn forced(&self, key: &NodeKey) -> bool {
+        self.pool_waiting.get(key).is_some_and(|wait| wait.forced)
+    }
+
+    /// [`LiveRun::is_held`], less a run whose resume or retry step only waits for its keys'
+    /// admission: what holds it (interrupted keys, a failed end) goes once those keys start.
+    fn held(&self, state: &RunState) -> bool {
+        if !Self::is_held(state) {
+            return false;
+        }
+        if !self.pool_waiting.values().any(|wait| wait.forced)
+            || state.cancelled
+            || state.halted
+            || !state.held.is_empty()
+            || state.is_over()
+        {
+            return true;
+        }
+        !state.interrupted.keys().all(|key| self.forced(key))
+    }
+
+    /// Whether nothing of the run runs: no try in flight, and no key recorded running but the
+    /// ones a resume is still waiting to start.
+    fn idle(&self, state: &RunState) -> bool {
+        self.in_flight.is_empty() && state.running.keys().all(|key| self.forced(key))
     }
 
     /// Whether the run waits for Kyle or is done, so it gets no command and holds no run slot.
@@ -528,6 +576,9 @@ pub struct Runtime<R: Runner> {
     drain_waiters: Vec<oneshot::Sender<()>>,
     /// The grants of the live runs, per run and scope, in memory only.
     consents: Arc<dyn RunConsentStore>,
+    /// What decides whether a key may start now ([`Runtime::set_admission`]); every start goes
+    /// with none.
+    admission: Option<Box<dyn NodeAdmission>>,
 }
 
 /// The most rounds one [`Runtime::tick`] runs; a round that changes nothing ends it sooner.
@@ -548,6 +599,60 @@ impl<R: Runner> Runtime<R> {
             draining: false,
             drain_waiters: Vec::new(),
             consents: RunConsents::store(),
+            admission: None,
+        }
+    }
+
+    /// Asks `admission` before every start of a key from now on ([`NodeAdmission`]).
+    pub fn set_admission(&mut self, admission: Box<dyn NodeAdmission>) {
+        self.admission = Some(admission);
+    }
+
+    /// Whether an admission is set.
+    pub fn has_admission(&self) -> bool {
+        self.admission.is_some()
+    }
+
+    /// The keys of run `id` waiting for their admission, with why.
+    pub fn pool_waiting(&self, id: &str) -> Vec<(NodeKey, NodeWait)> {
+        self.find(id)
+            .map(|index| {
+                self.runs[index]
+                    .pool_waiting
+                    .iter()
+                    .map(|(key, wait)| (key.clone(), wait.wait.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The admission's answer for `key` of run `index`: `Go` with none set.
+    fn admit(&mut self, index: usize, key: &NodeKey) -> Admission {
+        let run = &self.runs[index];
+        match self.admission.as_mut() {
+            Some(admission) => admission.admit(&run.id, &run.definition, key),
+            None => Admission::Go,
+        }
+    }
+
+    /// Tells the admission that `key` of run `id` ended or no longer waits.
+    fn admission_finished(&mut self, id: &str, key: &NodeKey) {
+        if let Some(admission) = self.admission.as_mut() {
+            admission.finished(id, key);
+        }
+    }
+
+    /// Drops the waiting keys of run `index` and tells the admission: the run is over (`ended`)
+    /// or waits for a person.
+    fn release_run(&mut self, index: usize, ended: bool) {
+        let run = &mut self.runs[index];
+        run.pool_waiting.clear();
+        if let Some(admission) = self.admission.as_mut() {
+            if ended {
+                admission.run_ended(&run.id);
+            } else {
+                admission.run_waiting(&run.id);
+            }
         }
     }
 
@@ -743,8 +848,17 @@ impl<R: Runner> Runtime<R> {
     }
 
     /// What [`scheduler::step`] gives run `index` now, less every start while draining.
+    /// The keys waiting for their admission hold no session slot, so the scheduler gets room for
+    /// them on top of the free slots; the step starts no more than the free slots
+    /// ([`Runtime::step_runs`]).
     fn commands(&self, index: usize, state: &RunState) -> Vec<Command> {
-        let free = self.limits.free_sessions(self.sessions_in_flight());
+        let run = &self.runs[index];
+        let waiting = run
+            .pool_waiting
+            .keys()
+            .filter(|key| holds_session(&run.definition, key))
+            .count();
+        let free = self.limits.free_sessions(self.sessions_in_flight()) + waiting;
         let mut commands = scheduler::step(
             &self.runs[index].definition,
             state,
@@ -1103,7 +1217,7 @@ impl<R: Runner> Runtime<R> {
             .filter(|key| !self.runs[index].in_flight.contains(key))
             .collect();
         for key in &keys {
-            self.start(index, key.clone());
+            self.start(index, key.clone(), true);
         }
         self.requeue(index);
         Ok(keys)
@@ -1125,7 +1239,7 @@ impl<R: Runner> Runtime<R> {
                 cost,
             });
         }
-        self.start(index, key);
+        self.start(index, key, true);
         self.requeue(index);
         Ok(())
     }
@@ -1191,6 +1305,8 @@ impl<R: Runner> Runtime<R> {
 
     /// Drops run `index` from every list, and its binding from the runner.
     fn forget(&mut self, index: usize) {
+        // What the run asked for or holds in this process goes with it.
+        self.release_run(index, true);
         let run = self.runs.remove(index);
         self.queue.retain(|queued| *queued != run.id);
         self.settling.retain(|settling| *settling != run.id);
@@ -1252,11 +1368,15 @@ impl<R: Runner> Runtime<R> {
         let id = run.id.clone();
         // An ended or cancelled run's grant ends with it: a retry step asks again.
         let state = run.state();
-        if state.cancelled || state.ended.is_some() {
+        let ended = state.cancelled || state.ended.is_some();
+        if ended {
             self.consents.forget(&id);
         }
         self.queue.retain(|queued| *queued != id);
         self.held_back.remove(&id);
+        // A run held for a person holds no step pools and waits for none; one that ended holds
+        // nothing at all.
+        self.release_run(index, ended);
     }
 
     /// Stops the tries in flight of the runs at `indices` with one [`Runner::stop`], so they share
@@ -1275,6 +1395,9 @@ impl<R: Runner> Runtime<R> {
     /// Stops `tries` (already taken out of their runs' `in_flight`): each built-in's through it,
     /// the rest with one [`Runner::stop`].
     fn stop_tries(&mut self, tries: Vec<(String, NodeKey)>) {
+        for (id, key) in &tries {
+            self.admission_finished(id, key);
+        }
         let mut by_runner = Vec::new();
         let mut by_builtin: Vec<(Arc<dyn BuiltinNode>, Vec<(String, NodeKey)>)> = Vec::new();
         for (id, key) in tries {
@@ -1339,6 +1462,9 @@ impl<R: Runner> Runtime<R> {
                 continue;
             }
             run.builtins.remove(&finish.key);
+            if let Some(admission) = self.admission.as_mut() {
+                admission.finished(&run.id, &finish.key);
+            }
             let (result, failure) = match finish.outcome {
                 Ok(value) => (Some(value), None),
                 Err(failure) => (None, Some(failure)),
@@ -1411,6 +1537,10 @@ impl<R: Runner> Runtime<R> {
         for index in indices {
             let state = self.runs[index].state();
             if state.running.is_empty() || state.halted || state.is_over() {
+                // Its waiting keys drop their requests; the scheduler offers them again.
+                if !self.runs[index].pool_waiting.is_empty() {
+                    self.release_run(index, false);
+                }
                 continue;
             }
             let keys: Vec<NodeKey> = state.running.keys().cloned().collect();
@@ -1480,12 +1610,12 @@ impl<R: Runner> Runtime<R> {
                 continue;
             }
             let state = self.runs[index].state();
-            if LiveRun::is_held(&state) {
+            if self.runs[index].held(&state) {
                 self.hold(index);
                 changed = true;
                 continue;
             }
-            if !self.commands(index, &state).is_empty() {
+            if self.has_work(index, &state) {
                 let run = &mut self.runs[index];
                 run.status = Status::Queued;
                 self.queue.push_back(run.id.clone());
@@ -1495,8 +1625,92 @@ impl<R: Runner> Runtime<R> {
         changed
     }
 
+    /// Whether parked run `index` can do something now: a command other than a start of a key
+    /// still waiting for its admission, or a start that has a session slot. A key waiting for its
+    /// admission is asked again here, so a grant wakes the run.
+    fn has_work(&mut self, index: usize, state: &RunState) -> bool {
+        if !self.draining {
+            let forced: Vec<NodeKey> = self.runs[index]
+                .pool_waiting
+                .iter()
+                .filter(|(_, wait)| wait.forced)
+                .map(|(key, _)| key.clone())
+                .collect();
+            for key in forced {
+                if !matches!(self.admit(index, &key), Admission::Wait(_)) {
+                    return true;
+                }
+            }
+        }
+        let free = self.limits.free_sessions(self.sessions_in_flight());
+        for command in self.commands(index, state) {
+            let Command::Start(key) = command else {
+                return true;
+            };
+            if holds_session(&self.runs[index].definition, &key) && free == 0 {
+                continue;
+            }
+            if !self.runs[index].pool_waiting.contains_key(&key)
+                || !matches!(self.admit(index, &key), Admission::Wait(_))
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Drops the waits of run `index` the scheduler no longer offers (another branch failed, a
+    /// join `any` took another branch, the run paused, a drain), telling the admission. A wait
+    /// started by a resume or a retry step stays: the runtime asks it itself.
+    fn drop_stale_waits(&mut self, index: usize, state: &RunState) {
+        if self.runs[index].pool_waiting.is_empty() {
+            return;
+        }
+        let ready: BTreeSet<NodeKey> = if self.draining || state.paused {
+            BTreeSet::new()
+        } else {
+            let plan = scheduler::plan(&self.runs[index].definition, state, &self.limits_for(index));
+            if plan.failure().is_some() {
+                BTreeSet::new()
+            } else {
+                plan.ready.into_iter().collect()
+            }
+        };
+        let stale: Vec<NodeKey> = self.runs[index]
+            .pool_waiting
+            .iter()
+            .filter(|(key, wait)| !wait.forced && !ready.contains(*key))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in stale {
+            self.runs[index].pool_waiting.remove(&key);
+            let id = self.runs[index].id.clone();
+            self.admission_finished(&id, &key);
+        }
+    }
+
+    /// Asks again the keys a resume or a retry step started that wait for their admission;
+    /// whether any of them started (or failed).
+    fn start_forced(&mut self, index: usize) -> bool {
+        if self.draining {
+            return false;
+        }
+        let forced: Vec<NodeKey> = self.runs[index]
+            .pool_waiting
+            .iter()
+            .filter(|(_, wait)| wait.forced)
+            .map(|(key, _)| key.clone())
+            .collect();
+        let mut started = false;
+        for key in forced {
+            started |= self.start(index, key, true);
+        }
+        started
+    }
+
     /// Carries out one [`scheduler::step`] for each executing run, in start order. A run with
-    /// nothing running and nothing to do is parked and frees its slot.
+    /// nothing running and nothing to do now (its only work waits for an admission) is parked and
+    /// frees its slot.
     fn step_runs(&mut self) -> bool {
         let mut changed = false;
         for index in 0..self.runs.len() {
@@ -1504,19 +1718,25 @@ impl<R: Runner> Runtime<R> {
                 continue;
             }
             let state = self.runs[index].state();
-            if LiveRun::is_held(&state) {
+            if self.runs[index].held(&state) {
                 self.hold(index);
                 changed = true;
                 continue;
             }
-            let commands = self.commands(index, &state);
-            if commands.is_empty() {
-                if state.running.is_empty() && self.runs[index].in_flight.is_empty() {
-                    self.runs[index].status = Status::Parked;
-                    changed = true;
-                }
-                continue;
-            }
+            self.drop_stale_waits(index, &state);
+            let mut stepped = self.start_forced(index);
+            let state = if stepped {
+                self.runs[index].state()
+            } else {
+                state
+            };
+            let commands = if self.runs[index].held(&state) {
+                Vec::new()
+            } else {
+                self.commands(index, &state)
+            };
+            // The scheduler had room for the waiting keys too; no more than the free slots start.
+            let mut free = self.limits.free_sessions(self.sessions_in_flight());
             let mut held = false;
             for command in commands {
                 if held {
@@ -1528,25 +1748,46 @@ impl<R: Runner> Runtime<R> {
                         break;
                     }
                 }
-                changed = true;
-                if !self.apply(index, command) {
+                let session = match &command {
+                    Command::Start(key) => {
+                        holds_session(&self.runs[index].definition, key).then(|| key.clone())
+                    }
+                    _ => None,
+                };
+                if session.is_some() && free == 0 {
+                    continue;
+                }
+                let (go_on, did) = self.apply(index, command);
+                stepped |= did;
+                if let Some(key) = session
+                    && self.runs[index].in_flight.contains(&key)
+                {
+                    free = free.saturating_sub(1);
+                }
+                if !go_on {
                     // A merge failed: the rest of this step (more merges, starts) was planned
                     // before it, so it is dropped; the next round asks the scheduler again.
                     break;
                 }
-                held = LiveRun::is_held(&self.runs[index].state());
+                held = self.runs[index].held(&self.runs[index].state());
             }
-            if LiveRun::is_held(&self.runs[index].state()) {
+            if self.runs[index].held(&self.runs[index].state()) {
                 self.hold(index);
+                stepped = true;
+            } else if !stepped && self.runs[index].idle(&self.runs[index].state()) {
+                self.runs[index].status = Status::Parked;
+                stepped = true;
             }
+            changed |= stepped;
         }
         changed
     }
 
-    /// Carries out one command; whether the rest of the step may still be carried out.
-    fn apply(&mut self, index: usize, command: Command) -> bool {
+    /// Carries out one command; whether the rest of the step may still be carried out, and
+    /// whether it changed anything (a start that waits for its admission changes nothing).
+    fn apply(&mut self, index: usize, command: Command) -> (bool, bool) {
         match command {
-            Command::Start(key) => self.start(index, key),
+            Command::Start(key) => return (true, self.start(index, key, false)),
             Command::OpenGate(key) => {
                 // The gate surfaces (toast, card, needs-you count) come with the gates step; the
                 // event alone sets the branch waiting on Kyle.
@@ -1591,7 +1832,7 @@ impl<R: Runner> Runtime<R> {
                             session_id: None,
                             confinement_refusals: Vec::new(),
                         });
-                        return false;
+                        return (false, true);
                     }
                 }
             }
@@ -1608,13 +1849,13 @@ impl<R: Runner> Runtime<R> {
                     self.settling.push(id);
                 }
                 self.hold(index);
-                return false;
+                return (false, true);
             }
             Command::End { state, failure } => {
                 self.runs[index].append(Event::Ended { state, failure });
             }
         }
-        true
+        (true, true)
     }
 
     /// Starts a try of `key`. The process is spawned before its `NodeStarted` is appended, since
@@ -1625,7 +1866,49 @@ impl<R: Runner> Runtime<R> {
     ///
     /// A key of a registered built-in is started through it, with no process of its own: it is
     /// recorded with pid 0.
-    fn start(&mut self, index: usize, key: NodeKey) {
+    ///
+    /// The admission is asked first: a key it makes wait appends nothing and is kept in
+    /// `pool_waiting` (`forced` for a resume or a retry step, which the scheduler does not offer
+    /// again); a refused one fails like a start failure, `pool request refused`. Whether anything
+    /// was appended.
+    fn start(&mut self, index: usize, key: NodeKey, forced: bool) -> bool {
+        match self.admit(index, &key) {
+            Admission::Go => {
+                self.runs[index].pool_waiting.remove(&key);
+            }
+            Admission::Wait(wait) => {
+                let run = &mut self.runs[index];
+                let forced = forced || run.forced(&key);
+                run.pool_waiting.insert(key, PoolWait { wait, forced });
+                return false;
+            }
+            Admission::Refused(text) => {
+                let run = &mut self.runs[index];
+                run.pool_waiting.remove(&key);
+                let try_number = run.next_try(&key);
+                let failure = Failure::new(FailureReason::PoolRefused, Some(key.clone()), text);
+                run.append(Event::NodeStarted {
+                    key: key.clone(),
+                    try_number,
+                    pid: 0,
+                    pid_start_time: 0,
+                });
+                run.append(Event::NodeFinished {
+                    key: key.clone(),
+                    try_number,
+                    result: None,
+                    failure: Some(failure),
+                    cost_usd: 0.0,
+                    turns: None,
+                    elapsed_ms: 0,
+                    session_id: None,
+                    confinement_refusals: Vec::new(),
+                });
+                let id = run.id.clone();
+                self.admission_finished(&id, &key);
+                return true;
+            }
+        }
         let grant = self.sandbox_grant(&self.runs[index].id);
         let run = &mut self.runs[index];
         let try_number = run.next_try(&key);
@@ -1704,6 +1987,10 @@ impl<R: Runner> Runtime<R> {
                     "workflows: run {} asks to run {key} without the OS sandbox: {reason}",
                     run.id
                 );
+                // What the admission let go is given back; the key is asked again once answered.
+                if let Some(admission) = self.admission.as_mut() {
+                    admission.finished(&run.id, &key);
+                }
                 run.append(Event::ConsentAsked { key, reason });
             }
             Ok(process) => {
@@ -1716,9 +2003,16 @@ impl<R: Runner> Runtime<R> {
                     pid: process.pid,
                     pid_start_time: process.start_time,
                 });
+                if let Some(admission) = self.admission.as_mut() {
+                    admission.started(&run.id, &key, process);
+                }
                 run.in_flight.insert(key);
             }
             Err(failure) => {
+                // The start failed after the admission let it go: what it holds goes now.
+                if let Some(admission) = self.admission.as_mut() {
+                    admission.finished(&run.id, &key);
+                }
                 run.append(Event::NodeStarted {
                     key: key.clone(),
                     try_number,
@@ -1738,6 +2032,7 @@ impl<R: Runner> Runtime<R> {
                 });
             }
         }
+        true
     }
 
     /// A join `any` took another branch: stops the branch's tries and records each as
@@ -1757,6 +2052,18 @@ impl<R: Runner> Runtime<R> {
             .map(|(key, _)| (run.id.clone(), key.clone()))
             .collect();
         self.stop_tries(tries);
+        // Its keys still waiting for their admission drop their requests.
+        let waiting: Vec<NodeKey> = self.runs[index]
+            .pool_waiting
+            .keys()
+            .filter(|key| key.branch.starts_with(branch))
+            .cloned()
+            .collect();
+        for key in waiting {
+            self.runs[index].pool_waiting.remove(&key);
+            let id = self.runs[index].id.clone();
+            self.admission_finished(&id, &key);
+        }
         for (key, try_number) in stopped {
             let failure = Failure::new(
                 FailureReason::InterruptedNotResumed,
@@ -1831,6 +2138,7 @@ fn open_run(spec: RunSpec) -> Result<LiveRun, RuntimeError> {
         binding: None,
         loop_bound: spec.loop_bound,
         started_by: StartedBy::Person,
+        pool_waiting: BTreeMap::new(),
     })
 }
 
@@ -1842,7 +2150,7 @@ pub fn holds_session(definition: &Definition, key: &NodeKey) -> bool {
         .is_some_and(bongos_workflow_model::definition::Node::is_checks)
 }
 
-/// The scripted runner of the tests.
-#[cfg(test)]
+/// The scripted runner of the tests, for other crates' tests too with the `test-support` feature.
+#[cfg(any(test, feature = "test-support"))]
 #[path = "runtime_fake.rs"]
-pub(crate) mod fake;
+pub mod fake;

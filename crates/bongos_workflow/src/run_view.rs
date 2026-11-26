@@ -126,8 +126,19 @@ impl RunData {
         cx: &App,
     ) -> Option<Self> {
         let mut data = Self::of(engine, run, session_limit)?;
-        let in_flight = engine.lifecycle().runtime().in_flight(run);
+        let (in_flight, waiting) = {
+            let lifecycle = engine.lifecycle();
+            let runtime = lifecycle.runtime();
+            let waiting: Vec<NodeKey> = runtime
+                .pool_waiting(run)
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect();
+            (runtime.in_flight(run), waiting)
+        };
         data.node_status = NodeStatusSources::running(&data.definition, &data.run, &in_flight, cx);
+        data.node_status
+            .extend(NodeStatusSources::waiting(&data.run, &waiting, cx));
         Some(data)
     }
 }
@@ -448,7 +459,9 @@ fn rows(
         .iter()
         .map(|finished| &finished.key)
         .chain(state.running.keys())
-        .chain(state.open_gates.keys());
+        .chain(state.open_gates.keys())
+        // A key waiting for its pools has a status line and no try yet.
+        .chain(statuses.keys());
     for key in keys {
         let entry = (key.node.clone(), key.branch.clone());
         if !order.contains(&entry) {

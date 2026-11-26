@@ -7,7 +7,7 @@ use FailureClass::{Definition, Task};
 use FailureReason::*;
 
 /// Every reason with its class when not every retry hit it, from the product's closed list.
-const EXPECTED: [(FailureReason, &str, FailureClass); 25] = [
+const EXPECTED: [(FailureReason, &str, FailureClass); 26] = [
     (NodeOutputInvalid, "node output invalid", Definition),
     (AgentExitedNonzero, "agent exited nonzero", Task),
     (ProgramExitedNonzero, "program exited nonzero", Task),
@@ -45,6 +45,7 @@ const EXPECTED: [(FailureReason, &str, FailureClass); 25] = [
     (CheckNoVerdict, "check had no verdict", Task),
     (SandboxRequired, "needs an answer: no OS sandbox", Task),
     (SandboxRefused, "refused: no OS sandbox", Task),
+    (PoolRefused, "pool request refused", Definition),
 ];
 
 #[test]
@@ -75,7 +76,7 @@ fn a_cap_is_a_definition_failure_only_when_every_retry_hit_it() {
 
 #[test]
 fn serde_names_are_stable_and_distinct() {
-    assert_eq!(FailureReason::ALL.len(), 25);
+    assert_eq!(FailureReason::ALL.len(), 26);
     let mut names = HashSet::new();
     for reason in FailureReason::ALL {
         let name = serde_json::to_value(reason).unwrap();
@@ -97,6 +98,7 @@ fn serde_names_are_stable_and_distinct() {
         (CheckNoVerdict, "check_no_verdict"),
         (SandboxRequired, "sandbox_required"),
         (SandboxRefused, "sandbox_refused"),
+        (PoolRefused, "pool_refused"),
     ] {
         assert_eq!(serde_json::to_value(reason).unwrap(), name);
     }

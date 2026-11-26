@@ -419,6 +419,12 @@ pub fn check_parsed_in(
     adjust(&definition, &mut context);
     report.warnings = definition.warnings();
     report.diagnostics = validate(&definition, &context);
+    // A node's `needs` is judged by whoever reads it, or refused when nothing does.
+    let needs = crate::admission::NodeNeeds::check(&definition);
+    if !needs.is_empty() {
+        report.diagnostics.extend(needs);
+        report.diagnostics.sort_by_key(|diagnostic| diagnostic.line);
+    }
     // Fields the loader took from a schema file are not a second declaration beside it.
     report.diagnostics.retain(|diagnostic| {
         !(diagnostic

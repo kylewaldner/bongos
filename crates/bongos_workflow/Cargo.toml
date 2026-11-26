@@ -12,6 +12,9 @@ workspace = true
 path = "src/bongos_workflow.rs"
 doctest = false
 
+[features]
+test-support = []
+
 [dependencies]
 anyhow.workspace = true
 bongos_chat.workspace = true

@@ -2,6 +2,10 @@
 //! `use` name answers, for a running key of such a node, the line the run view shows under it
 //! ("waiting: test-slots, place 2, 4m", "running part 5 of 8, 4 kept") and an optional longer
 //! detail. With no source registered a node shows no line.
+//!
+//! A key waiting for its admission (its pools, [`crate::admission`]) has no try yet; the source
+//! registered with [`NodeStatusSources::register_waiting`] answers for those keys, whatever kind
+//! of node they are ("waiting: gpu, place 2, held by run 42, 4m").
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -23,9 +27,13 @@ pub trait NodeStatusSource: 'static {
     fn status(&self, run_id: &str, key: &NodeKey, cx: &App) -> Option<NodeStatus>;
 }
 
-/// The registered [`NodeStatusSource`]s, by the `use` name of their program nodes.
+/// The registered [`NodeStatusSource`]s, by the `use` name of their program nodes, and the one
+/// for keys waiting for their admission.
 #[derive(Default, Clone)]
-pub struct NodeStatusSources(BTreeMap<String, Rc<dyn NodeStatusSource>>);
+pub struct NodeStatusSources {
+    by_use: BTreeMap<String, Rc<dyn NodeStatusSource>>,
+    waiting: Option<Rc<dyn NodeStatusSource>>,
+}
 
 impl Global for NodeStatusSources {}
 
@@ -33,8 +41,34 @@ impl NodeStatusSources {
     /// Registers `source` for program nodes with `use = use_name`, for the life of the app.
     pub fn register(use_name: impl Into<String>, source: Rc<dyn NodeStatusSource>, cx: &mut App) {
         cx.default_global::<Self>()
-            .0
+            .by_use
             .insert(use_name.into(), source);
+    }
+
+    /// Registers `source` for the keys waiting for their admission, for the life of the app.
+    pub fn register_waiting(source: Rc<dyn NodeStatusSource>, cx: &mut App) {
+        cx.default_global::<Self>().waiting = Some(source);
+    }
+
+    /// The status of each of `keys` (the run's keys waiting for their admission) that has one.
+    pub fn waiting<'a>(
+        run_id: &str,
+        keys: impl IntoIterator<Item = &'a NodeKey>,
+        cx: &App,
+    ) -> BTreeMap<NodeKey, NodeStatus> {
+        let Some(source) = cx
+            .try_global::<Self>()
+            .and_then(|sources| sources.waiting.clone())
+        else {
+            return BTreeMap::new();
+        };
+        keys.into_iter()
+            .filter_map(|key| {
+                source
+                    .status(run_id, key, cx)
+                    .map(|status| (key.clone(), status))
+            })
+            .collect()
     }
 
     /// The status of `key` of run `run_id`, when its node has a source and the source answers.
@@ -49,7 +83,7 @@ impl NodeStatusSources {
             return None;
         }
         let use_name = &node.use_node.as_ref()?.value;
-        let source = cx.try_global::<Self>()?.0.get(use_name)?.clone();
+        let source = cx.try_global::<Self>()?.by_use.get(use_name)?.clone();
         source.status(run_id, key, cx)
     }
 
