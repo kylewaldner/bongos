@@ -982,7 +982,10 @@ fn a_mixed_waiter_whose_project_half_is_free_is_granted_not_moved_back(cx: &mut 
         vec![],
         vec![pool("gpu", PoolKind::Mutex, 1)],
     );
-    let db = watch(cx, a.broker.acquire(ask("db-only", &[need("db")])));
+    // db is held through another broker of the project, which has no machine store: its release
+    // is a transaction of the project store alone, granting nothing to the mixed request.
+    let project_only = Rc::new(world.bare_broker(cx, &a));
+    let db = watch(cx, project_only.acquire(ask("db-only", &[need("db")])));
     cx.run_until_parked();
     let db = lease(&db);
     let mixed = watch(
@@ -998,7 +1001,9 @@ fn a_mixed_waiter_whose_project_half_is_free_is_granted_not_moved_back(cx: &mut 
     cx.run_until_parked();
     drop(db);
     cx.run_until_parked();
-    world.advance(cx, POLL * 2);
+    assert!(holds(&read(&a).0, "db").is_empty());
+    assert!(mixed.borrow().is_none(), "nothing granted it yet");
+    world.advance(cx, POLL);
 
     let mixed = lease(&mixed);
     assert_eq!(mixed.hold_ids().len(), 2, "granted whole");
