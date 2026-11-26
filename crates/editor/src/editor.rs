@@ -9408,6 +9408,21 @@ impl Editor {
         self.display_map.read(cx).text_highlights(key)
     }
 
+    /// Where the character at `offset` was drawn at the last paint, as x from the start of its
+    /// line, with fold placeholders at their drawn width; `None` when its row was not drawn.
+    pub fn painted_x(&self, offset: MultiBufferOffset) -> Option<Pixels> {
+        let position_map = self.last_position_map.as_ref()?;
+        let point = offset.to_display_point(&position_map.snapshot);
+        let visible = &position_map.visible_row_range;
+        if !visible.contains(&point.row()) {
+            return None;
+        }
+        let line = position_map
+            .line_layouts
+            .get(point.row().minus(visible.start) as usize)?;
+        Some(line.x_for_index(point.column() as usize))
+    }
+
     /// Text layout from the last paint, or `None` before the first paint.
     pub fn visible_text_layout(&self) -> Option<VisibleTextLayout> {
         let position_map = self.last_position_map.as_ref()?;

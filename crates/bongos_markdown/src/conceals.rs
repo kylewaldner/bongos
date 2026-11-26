@@ -1,6 +1,7 @@
 //! The conceal layer: hidden markup with reveal at point. Over the window it hides the markup the
 //! selections do not reveal, and draws list markers, task boxes, quote markers, rules, fence lines
-//! and table delimiter rows as glyphs. Conceals are display-only folds tagged [`MarkdownConceal`]:
+//! and table delimiter rows as glyphs, and the pipes of table rows off point as rules as wide as
+//! the table layer's [`TablePads`] say. Conceals are display-only folds tagged [`MarkdownConceal`]:
 //! the buffer's text never changes, and every refresh replaces all of the editor's conceals in one
 //! [`Editor::set_conceals`] call, so a conceal removed by something else comes back at the next
 //! refresh.
@@ -23,6 +24,7 @@ use gpui::{
 use theme::ActiveTheme as _;
 
 use crate::layers::{LiveContext, LiveLayer};
+use crate::tables::{PIPE_GAP, PIPE_WIDTH, TablePads};
 
 /// The fold type tag of the markdown conceals.
 pub enum MarkdownConceal {}
@@ -86,10 +88,12 @@ impl Look {
 /// The conceal layer of one editor.
 pub struct ConcealLayer {
     images: LoadedImages,
+    pads: TablePads,
     /// The buffer text at a version, kept so a selection change does not copy it again.
     text: Option<(clock::Global, Arc<str>)>,
-    /// The conceals put on the editor, as anchors.
-    applied: Vec<(Range<Anchor>, ConcealKind)>,
+    /// The conceals put on the editor, as anchors, with each one's drawn width (as `f32` bits;
+    /// 0 when it is not a table pipe).
+    applied: Vec<(Range<Anchor>, ConcealKind, u32)>,
     look: Option<Look>,
     /// The text area width in pixels (as `f32` bits), read by rules when they draw.
     width: Arc<AtomicU32>,
@@ -97,14 +101,16 @@ pub struct ConcealLayer {
 
 impl Default for ConcealLayer {
     fn default() -> Self {
-        Self::new(LoadedImages::default())
+        Self::new(LoadedImages::default(), TablePads::default())
     }
 }
 
 impl ConcealLayer {
-    pub fn new(images: LoadedImages) -> Self {
+    /// A layer that hides the images of `images` and draws table pipes as wide as `pads` say.
+    pub fn new(images: LoadedImages, pads: TablePads) -> Self {
         Self {
             images,
+            pads,
             text: None,
             applied: Vec::new(),
             look: None,
@@ -151,9 +157,24 @@ fn present(editor: &mut Editor, cx: &mut Context<Editor>) -> Vec<Range<usize>> {
 
 type Render = Arc<dyn Send + Sync + Fn(FoldId, Range<Anchor>, &mut App) -> AnyElement>;
 
-fn placeholder(kind: ConcealKind, look: Look, width: &Arc<AtomicU32>) -> FoldPlaceholder {
+fn placeholder(
+    kind: ConcealKind,
+    look: Look,
+    width: &Arc<AtomicU32>,
+    pipe_width: f32,
+) -> FoldPlaceholder {
     let width = width.clone();
     let draw: Render = match kind {
+        ConcealKind::TablePipe => render(move || {
+            div()
+                .h_full()
+                .w(px(pipe_width))
+                .flex()
+                .justify_end()
+                .pr(px(PIPE_GAP))
+                .child(div().h_full().w(px(1.0)).bg(look.border_variant))
+                .into_any_element()
+        }),
         ConcealKind::Hide | ConcealKind::FenceLine => render(|| gpui::Empty.into_any_element()),
         ConcealKind::Bullet => glyph(BULLET, look.text),
         ConcealKind::Checkbox(false) => glyph(UNCHECKED, look.text),
@@ -235,14 +256,30 @@ impl LiveLayer for ConcealLayer {
         let applied: Vec<Conceal> = self
             .applied
             .iter()
-            .map(|(range, kind)| Conceal {
+            .map(|(range, kind, _)| Conceal {
                 range: offsets(&snapshot, range),
                 kind: *kind,
+            })
+            .collect();
+        let widths: Vec<u32> = wanted
+            .iter()
+            .map(|conceal| match conceal.kind {
+                ConcealKind::TablePipe => self
+                    .pads
+                    .width(conceal.range.start)
+                    .unwrap_or(PIPE_WIDTH)
+                    .to_bits(),
+                _ => 0,
             })
             .collect();
         let unchanged = !live.force
             && self.look == Some(look)
             && applied == wanted
+            && self
+                .applied
+                .iter()
+                .map(|(_, _, width)| *width)
+                .eq(widths.iter().copied())
             && present(editor, cx)
                 == applied
                     .iter()
@@ -254,14 +291,14 @@ impl LiveLayer for ConcealLayer {
 
         let mut creases = Vec::with_capacity(wanted.len());
         let mut kept = Vec::with_capacity(wanted.len());
-        for conceal in &wanted {
+        for (conceal, width) in wanted.iter().zip(widths) {
             let range = snapshot.anchor_after(MultiBufferOffset(conceal.range.start))
                 ..snapshot.anchor_before(MultiBufferOffset(conceal.range.end));
             creases.push(Crease::simple(
                 range.clone(),
-                placeholder(conceal.kind, look, &self.width),
+                placeholder(conceal.kind, look, &self.width, f32::from_bits(width)),
             ));
-            kept.push((range, conceal.kind));
+            kept.push((range, conceal.kind, width));
         }
         editor.set_conceals(conceal_tag(), whole(&snapshot), creases, cx);
         self.applied = kept;

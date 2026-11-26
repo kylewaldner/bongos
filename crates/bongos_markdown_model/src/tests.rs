@@ -2,8 +2,8 @@ use std::ops::Range;
 
 use crate::{
     BlockKind, CellDirection, Conceal, ConcealKind, Edit, Element, ElementKind, LABELS,
-    MarkdownIndex, RevealSelection, diff, insert_block, parse, plan, revealed, table_cell,
-    toggle_checkbox,
+    MarkdownIndex, RevealSelection, diff, has_leading_pipe, insert_block, parse, plan, revealed,
+    row_pipes, table_cell, toggle_checkbox,
 };
 
 fn apply(text: &str, edit: &Edit) -> String {
@@ -633,4 +633,57 @@ fn previous_before_the_first_cell_is_none() {
     assert_eq!(previous(6), Some(2));
     assert_eq!(previous(22), Some(6));
     assert_eq!(previous(26), Some(22));
+}
+
+#[test]
+fn table_row_pipes_skip_escaped_pipes() {
+    assert_eq!(row_pipes("| a | b |"), vec![0, 4, 8]);
+    assert_eq!(row_pipes("a \\| b | c"), vec![7]);
+    assert_eq!(row_pipes("no pipes"), Vec::<usize>::new());
+    assert!(has_leading_pipe("  | a |"));
+    assert!(!has_leading_pipe("a | b"));
+}
+
+#[test]
+fn pipes_off_point_rows_become_table_pipes() {
+    let text = "x\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+    let header = text.find("| a").unwrap();
+    let body = text.find("| 1").unwrap();
+    let delimiter = text.find("|---").unwrap();
+    let pipes = |plan: &[Conceal], row: usize| -> Vec<usize> {
+        plan.iter()
+            .filter(|c| c.kind == ConcealKind::TablePipe)
+            .filter(|c| (row..row + 9).contains(&c.range.start))
+            .inspect(|c| assert_eq!(c.range.len(), 1))
+            .map(|c| c.range.start - row)
+            .collect()
+    };
+
+    let off = plan_at(text, &[0]);
+    assert_eq!(pipes(&off, header), vec![0, 4, 8], "{off:?}");
+    assert_eq!(pipes(&off, body), vec![0, 4, 8], "{off:?}");
+    assert!(pipes(&off, delimiter).is_empty(), "{off:?}");
+
+    // The row under point keeps its pipes, either end of it included; the others do not.
+    for head in [body, body + 4, body + 9] {
+        let on = plan_at(text, &[head]);
+        assert!(pipes(&on, body).is_empty(), "head {head}: {on:?}");
+        assert_eq!(pipes(&on, header), vec![0, 4, 8], "head {head}: {on:?}");
+    }
+
+    // Only pipes inside the window are planned.
+    let window = plan_for(text, &[RevealSelection::cursor(0)], 0..body + 5, &|_| true);
+    assert_eq!(pipes(&window, body), vec![0, 4], "{window:?}");
+}
+
+#[test]
+fn an_escaped_pipe_stays_text_in_a_table() {
+    let text = "x\n\n| a \\| b | c |\n|---|---|\n| 1 | 2 |\n";
+    let escaped = text.find("\\|").unwrap() + 1;
+    let off = plan_at(text, &[0]);
+    assert!(!conceals(&off, escaped..escaped + 1), "{off:?}");
+    assert!(
+        has(&off, escaped + 4..escaped + 5, ConcealKind::TablePipe),
+        "{off:?}"
+    );
 }
