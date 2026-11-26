@@ -4,7 +4,7 @@ use component::{Component, ComponentScope, example_group_with_title, single_exam
 use gpui::{AnyElement, AnyView, ClickEvent, MouseButton, MouseDownEvent, Pixels, Role, px};
 use smallvec::SmallVec;
 
-use crate::{Disclosure, prelude::*};
+use crate::{CORNER_RADIUS, Disclosure, LIST_ROW_HEIGHT, prelude::*};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy, Default)]
 pub enum ListItemSpacing {
@@ -269,11 +269,17 @@ impl ParentElement for ListItem {
 
 impl RenderOnce for ListItem {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let selector_id = self.id.clone();
         h_flex()
             .id(self.id)
+            .debug_selector(|| format!("LIST-ITEM-{}", selector_id))
             .when_some(self.group_name, |this, group| this.group(group))
             .w_full()
-            .when_some(self.height, |this, height| this.h(height))
+            // An explicit height wins over the shared row height.
+            .map(|this| match self.height {
+                Some(height) => this.h(height),
+                None => this.min_h(LIST_ROW_HEIGHT),
+            })
             .relative()
             // When an item is inset draw the indent spacing outside of the item
             .when(self.inset, |this| {
@@ -293,17 +299,18 @@ impl RenderOnce for ListItem {
                 .when(self.selectable && !self.disabled, |this| {
                     this.hover(|style| style.bg(cx.theme().colors().ghost_element_hover))
                         .active(|style| style.bg(cx.theme().colors().ghost_element_active))
-                        .when(self.outlined, |this| this.rounded_sm())
+                        .when(self.outlined, |this| this.rounded(CORNER_RADIUS))
                         .when(self.selected, |this| {
                             this.bg(cx.theme().colors().ghost_element_selected)
                         })
                 })
             })
-            .when(self.rounded, |this| this.rounded_sm())
+            .when(self.rounded, |this| this.rounded(CORNER_RADIUS))
             .when_some(self.on_hover, |this, on_hover| this.on_hover(on_hover))
             .child(
                 h_flex()
                     .id("inner_list_item")
+                    .debug_selector(|| format!("LIST-ITEM-INNER-{}", selector_id))
                     // The accessible role/label live here, alongside the click
                     // handler, so assistive technology reports one actionable
                     // node (e.g. a menu item) rather than an inert container.
@@ -334,21 +341,24 @@ impl RenderOnce for ListItem {
                         ListItemSpacing::Sparse => this.py_1(),
                     })
                     .when(self.inset, |this| {
-                        this.when_some(self.focused, |this, focused| {
-                            if focused && !self.disabled {
-                                this.border_1()
-                                    .border_color(cx.theme().colors().border_focused)
-                            } else {
-                                this.border_1()
-                            }
-                        })
-                        .when(self.selectable && !self.disabled, |this| {
-                            this.hover(|style| style.bg(cx.theme().colors().ghost_element_hover))
+                        this.when(self.height.is_none(), |this| this.min_h(LIST_ROW_HEIGHT))
+                            .when_some(self.focused, |this, focused| {
+                                if focused && !self.disabled {
+                                    this.border_1()
+                                        .border_color(cx.theme().colors().border_focused)
+                                } else {
+                                    this.border_1()
+                                }
+                            })
+                            .when(self.selectable && !self.disabled, |this| {
+                                this.hover(|style| {
+                                    style.bg(cx.theme().colors().ghost_element_hover)
+                                })
                                 .active(|style| style.bg(cx.theme().colors().ghost_element_active))
                                 .when(self.selected, |this| {
                                     this.bg(cx.theme().colors().ghost_element_selected)
                                 })
-                        })
+                            })
                     })
                     .when_some(
                         self.on_click.filter(|_| !self.disabled),
@@ -357,7 +367,7 @@ impl RenderOnce for ListItem {
                     .when(self.outlined, |this| {
                         this.border_1()
                             .border_color(cx.theme().colors().border)
-                            .rounded_sm()
+                            .rounded(CORNER_RADIUS)
                             .overflow_hidden()
                     })
                     .when_some(self.on_secondary_mouse_down, |this, on_mouse_down| {
@@ -368,7 +378,7 @@ impl RenderOnce for ListItem {
                     .when_some(self.tooltip, |this, tooltip| this.tooltip(tooltip))
                     .map(|this| {
                         if self.inset {
-                            this.rounded_sm()
+                            this.rounded(CORNER_RADIUS)
                         } else {
                             // When an item is not inset draw the indent spacing inside of the item
                             this.ml(self.indent_level as f32 * self.indent_step_size)
@@ -545,5 +555,87 @@ impl Component for ListItem {
                 ),
             ])
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Render, TestAppContext};
+
+    use super::*;
+    use crate::styles::shape::test_support::init_test_theme;
+
+    struct Rows;
+
+    impl Render for Rows {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            v_flex()
+                .child(ListItem::new("plain").child(Label::new("Plain")))
+                .child(
+                    ListItem::new("inset-selected")
+                        .inset(true)
+                        .toggle_state(true)
+                        .child(Label::new("Inset selected")),
+                )
+                .child(
+                    ListItem::new("explicit")
+                        .height(px(20.))
+                        .child(Label::new("Explicit height")),
+                )
+                .child(
+                    ListItem::new("extra-dense")
+                        .spacing(ListItemSpacing::ExtraDense)
+                        .child(Label::new("Extra dense")),
+                )
+                .child(
+                    ListItem::new("inset-explicit")
+                        .inset(true)
+                        .height(px(40.))
+                        .child(Label::new("Inset explicit height")),
+                )
+        }
+    }
+
+    fn row_height(cx: &mut gpui::VisualTestContext, selector: &'static str) -> Pixels {
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is drawn"))
+            .size
+            .height
+    }
+
+    #[gpui::test]
+    fn rows_are_at_least_the_shared_row_height(cx: &mut TestAppContext) {
+        cx.update(init_test_theme);
+        let (_rows, cx) = cx.add_window_view(|_, _| Rows);
+
+        assert_eq!(row_height(cx, "LIST-ITEM-plain"), LIST_ROW_HEIGHT);
+        assert_eq!(
+            row_height(cx, "LIST-ITEM-inset-selected"),
+            LIST_ROW_HEIGHT,
+            "the outer row of an inset item"
+        );
+        assert_eq!(
+            row_height(cx, "LIST-ITEM-INNER-inset-selected"),
+            LIST_ROW_HEIGHT,
+            "the inner row that paints the selected background"
+        );
+        assert_eq!(
+            row_height(cx, "LIST-ITEM-extra-dense"),
+            LIST_ROW_HEIGHT,
+            "extra dense spacing is also 28 px"
+        );
+    }
+
+    #[gpui::test]
+    fn an_explicit_height_wins(cx: &mut TestAppContext) {
+        cx.update(init_test_theme);
+        let (_rows, cx) = cx.add_window_view(|_, _| Rows);
+
+        assert_eq!(row_height(cx, "LIST-ITEM-explicit"), px(20.));
+        assert_eq!(row_height(cx, "LIST-ITEM-inset-explicit"), px(40.));
+        assert!(
+            row_height(cx, "LIST-ITEM-INNER-inset-explicit") < LIST_ROW_HEIGHT,
+            "the inner row of an explicit height item has no minimum"
+        );
     }
 }
