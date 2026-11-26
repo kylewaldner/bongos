@@ -366,6 +366,9 @@ impl PoolTable {
 
 /// The requests of `host` to convert now. Requests of other hosts are judged in ticket order and
 /// count against the size, but are left for their own host to convert.
+///
+/// A reading recorded in the table has no age limit: the broker must pass fresh readings in
+/// `guards`, or a stale passing reading keeps admitting once per `settle_seconds`.
 pub fn grant(
     table: &PoolTable,
     guards: &GuardReadings,
@@ -402,11 +405,16 @@ pub fn grant(
 
 /// Whether the request could be admitted at once without queuing: only when every pool it names
 /// has no waiter at all and the grant rule would admit it now. Nothing is queued either way.
+///
+/// On success it returns, per need in order, the pool name and the guard reading that admits it.
+/// It does not spend that reading: use [`admit_now`] to admit and spend it, or a second caller on
+/// the same reading would be admitted too.
 pub fn try_now(
     table: &PoolTable,
     request: &Request,
     guards: &GuardReadings,
-) -> Result<(), Blocked> {
+) -> Result<Vec<(String, Option<GuardReading>)>, Blocked> {
+    let mut admitted = Vec::new();
     for need in &request.needs {
         let Some(pool) = table.pools.get(&need.pool) else {
             return Err(Blocked::UnknownPool {
@@ -419,16 +427,60 @@ pub fn try_now(
                 waiters: pool.waiters.len(),
             });
         }
-        if let Gate::Closed(blocked) = gate(&need.pool, pool, guards) {
-            return Err(blocked);
-        }
+        let reading = match gate(&need.pool, pool, guards) {
+            Gate::Closed(blocked) => return Err(blocked),
+            Gate::Open(reading) => reading,
+        };
         if !Usage::of(pool).fits(pool, need) {
             return Err(Blocked::Busy {
                 pool: need.pool.clone(),
             });
         }
+        admitted.push((need.pool.clone(), reading));
     }
-    Ok(())
+    Ok(admitted)
+}
+
+/// Admits the request at once when [`try_now`] would, taking its holds (none in a `guard` pool)
+/// and spending each guard's reading, so a second admission on the same reading is refused as
+/// settling. Nothing changes when the request is blocked.
+pub fn admit_now(
+    table: &mut PoolTable,
+    request: &Request,
+    guards: &GuardReadings,
+    now: Timestamp,
+) -> Result<Grant, Blocked> {
+    let admitted = try_now(table, request, guards)?;
+    let mut pools = Vec::new();
+    for (need, (name, reading)) in request.needs.iter().zip(admitted) {
+        let ticket = table.issue_ticket();
+        if let Some(pool) = table.pools.get_mut(&name) {
+            if let (Some(guard), Some(reading)) = (pool.guard.as_mut(), reading) {
+                guard.reading = Some(reading);
+                guard.spent = Some(reading.at);
+            }
+            if pool.kind != PoolKind::Guard {
+                pool.holds.push(Hold {
+                    ticket,
+                    request: request.id,
+                    holder: request.holder.clone(),
+                    need: need.clone(),
+                    since: now,
+                });
+            }
+        }
+        pools.push(GrantedPool {
+            pool: name,
+            ticket,
+            reading,
+        });
+    }
+    Ok(Grant {
+        request: request.id,
+        host: request.holder.host,
+        at: now,
+        pools,
+    })
 }
 
 /// Where the request waits and why, judged as its own host would judge it, with the readings

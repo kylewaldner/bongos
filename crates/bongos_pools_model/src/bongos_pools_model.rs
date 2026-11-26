@@ -21,7 +21,7 @@ pub use decl::{
 pub use grant::{
     Blocked, Grant, GrantedPool, GuardReading, GuardReadings, GuardState, GuardValue, Hold,
     PoolState, PoolTable, PoolWait, QueueError, Request, RequestId, Timestamp, WaitStatus, Waiter,
-    grant, try_now, wait_status,
+    admit_now, grant, try_now, wait_status,
 };
 pub use holder::{
     Holder, HolderLabel, HolderPath, HostRef, Level, OwnerKey, Probe, ProcRef, Pruned, alive,

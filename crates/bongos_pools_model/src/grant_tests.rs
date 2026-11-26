@@ -1,7 +1,7 @@
 use crate::decl::{GuardCheck, PoolKind};
 use crate::grant::{
     Blocked, Grant, GuardReadings, GuardValue, PoolState, PoolTable, PoolWait, Request, RequestId,
-    Timestamp, WaitStatus, grant, try_now, wait_status,
+    Timestamp, WaitStatus, admit_now, grant, try_now, wait_status,
 };
 use crate::holder::{Holder, HolderLabel, HolderPath, HostRef, Level, OwnerKey};
 use crate::needs::{Need, NeedMode};
@@ -186,7 +186,7 @@ fn an_empty_pool_grants_at_once_and_no_pool_needs_no_ticket() {
     assert_eq!(t.next_ticket, 0);
     assert_eq!(
         try_now(&t, &request(1, vec![]), &GuardReadings::default()),
-        Ok(())
+        Ok(vec![])
     );
     t.enqueue(&request(2, vec![need("jobs")]), at(0)).unwrap();
     assert_eq!(step(&mut t), vec![2]);
@@ -269,7 +269,10 @@ fn a_slots_pool_with_a_guard_needs_room_and_a_passing_reading() {
 fn try_now_refuses_while_any_waiter_is_queued() {
     let mut t = table(&[("jobs", PoolState::new(PoolKind::Slots, 2))]);
     let probe = request(9, vec![need("jobs")]);
-    assert_eq!(try_now(&t, &probe, &GuardReadings::default()), Ok(()));
+    assert_eq!(
+        try_now(&t, &probe, &GuardReadings::default()),
+        Ok(vec![("jobs".to_string(), None)])
+    );
     let big = Need {
         count: Some(2),
         ..need("jobs")
@@ -301,6 +304,32 @@ fn try_now_refuses_while_any_waiter_is_queued() {
             pool: "nope".to_string()
         })
     );
+}
+
+#[test]
+fn an_immediate_admission_spends_the_guard_reading() {
+    let pool = PoolState::new(PoolKind::Guard, 0).with_guard(GuardCheck::FreeMemoryGb(12.0), 5);
+    let mut t = table(&[("mem", pool)]);
+    let first = GuardReadings::default().with("mem", GuardValue::FreeMemoryGb(20.0), at(1000));
+    let a = request(1, vec![need("mem")]);
+    let b = request(2, vec![need("mem")]);
+    let grant_a = admit_now(&mut t, &a, &first, at(1000)).unwrap();
+    assert_eq!(grant_a.pools.len(), 1);
+    assert!(
+        t.pools["mem"].holds.is_empty(),
+        "a guard pool records no hold"
+    );
+    assert_eq!(
+        admit_now(&mut t, &b, &first, at(1000)),
+        Err(Blocked::GuardSettling {
+            pool: "mem".to_string(),
+            next: at(6000)
+        }),
+        "a second waiter is not admitted on the same reading"
+    );
+    assert!(try_now(&t, &b, &first).is_err(), "try_now agrees");
+    let later = GuardReadings::default().with("mem", GuardValue::FreeMemoryGb(20.0), at(6000));
+    assert!(admit_now(&mut t, &b, &later, at(6000)).is_ok());
 }
 
 #[test]
