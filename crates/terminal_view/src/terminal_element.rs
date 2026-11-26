@@ -985,6 +985,7 @@ impl Element for TerminalElement {
                     }),
                     strikethrough: None,
                     fade_out: None,
+                    monospace: None,
                 };
 
                 let text_style = TextStyle {

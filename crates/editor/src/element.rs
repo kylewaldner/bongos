@@ -6993,7 +6993,7 @@ impl fmt::Debug for LineFragment {
 }
 
 impl LineWithInvisibles {
-    fn from_chunks<'a>(
+    pub(crate) fn from_chunks<'a>(
         chunks: impl Iterator<Item = HighlightedChunk<'a>>,
         editor_style: &EditorStyle,
         max_line_len: usize,
@@ -7112,7 +7112,8 @@ impl LineWithInvisibles {
 
                         let run = TextRun {
                             len: x.len(),
-                            font: text_style.font(),
+                            font: editor_style
+                                .run_font(&text_style, highlighted_chunk.style.as_ref()),
                             color: text_style.color,
                             background_color: text_style.background_color,
                             underline: text_style.underline,
@@ -7189,7 +7190,8 @@ impl LineWithInvisibles {
 
                         styles.push(TextRun {
                             len: line_chunk.len(),
-                            font: text_style.font(),
+                            font: editor_style
+                                .run_font(&text_style, highlighted_chunk.style.as_ref()),
                             color: text_style.color,
                             background_color: text_style.background_color,
                             underline: text_style.underline,
@@ -10692,7 +10694,7 @@ mod tests {
         display_map::{BlockPlacement, BlockProperties},
         editor_tests::{init_test, update_test_language_settings},
     };
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui::{HighlightStyle, TestAppContext, VisualTestContext};
     use language::{Buffer, language_settings, tree_sitter_python};
     use log::info;
     use rand::{RngCore, rngs::StdRng};
@@ -11751,6 +11753,164 @@ mod tests {
                 line_start_offset: 4,
                 line_end_offset: 5,
             }]
+        );
+    }
+
+    fn style_with_code_font() -> EditorStyle {
+        let mut style = EditorStyle::default();
+        style.text.font_family = "Text Family".into();
+        style.text.font_weight = FontWeight::NORMAL;
+        style.code_font = Some(Font {
+            family: "Code Family".into(),
+            ..Font::default()
+        });
+        style
+    }
+
+    fn monospace() -> HighlightStyle {
+        HighlightStyle {
+            monospace: Some(true),
+            ..Default::default()
+        }
+    }
+
+    fn highlight_monospace(
+        editor: &Entity<Editor>,
+        range: Range<usize>,
+        cx: &mut VisualTestContext,
+    ) {
+        editor.update(cx, |editor, cx| {
+            let buffer = editor.buffer().read(cx).snapshot(cx);
+            let range = buffer.anchor_after(MultiBufferOffset(range.start))
+                ..buffer.anchor_before(MultiBufferOffset(range.end));
+            editor.highlight_text(HighlightKey::MarkdownLive(0), vec![range], monospace(), cx);
+        });
+    }
+
+    #[test]
+    fn test_a_monospace_highlight_shapes_its_run_in_the_code_font() {
+        let style = style_with_code_font();
+        let highlight = HighlightStyle {
+            font_weight: Some(FontWeight::BOLD),
+            ..monospace()
+        };
+        let styled = style.text.clone().highlight(highlight);
+        let font = style.run_font(&styled, Some(&highlight));
+        assert_eq!(font.family, "Code Family");
+        assert_eq!(font.weight, FontWeight::BOLD);
+    }
+
+    #[test]
+    fn test_other_runs_keep_the_editor_font() {
+        let style = style_with_code_font();
+        let color = HighlightStyle::color(Hsla::black());
+        let not_monospace = HighlightStyle {
+            monospace: Some(false),
+            ..Default::default()
+        };
+        for highlight in [None, Some(&color), Some(&not_monospace)] {
+            let font = style.run_font(&style.text, highlight);
+            assert_eq!(font, style.text.font());
+            assert_eq!(font.family, "Text Family");
+        }
+
+        let without_code_font = EditorStyle {
+            code_font: None,
+            ..style.clone()
+        };
+        assert_eq!(
+            without_code_font.run_font(&style.text, Some(&monospace())),
+            style.text.font()
+        );
+    }
+
+    #[gpui::test]
+    fn test_a_code_span_highlight_reaches_its_chunks_in_the_code_font(cx: &mut TestAppContext) {
+        init_test(cx, |_| {});
+        let window = cx.add_window(|window, cx| {
+            let buffer = MultiBuffer::build_simple("ab `code` cd", cx);
+            Editor::new(EditorMode::full(), buffer, None, window, cx)
+        });
+        let cx = &mut VisualTestContext::from_window(*window, cx);
+        let editor = window.root(cx).unwrap();
+        let mut style = cx.update(|_, cx| editor.update(cx, |editor, cx| editor.style(cx).clone()));
+        style.text.font_family = "Text Family".into();
+        style.code_font = Some(Font {
+            family: "Code Family".into(),
+            ..Font::default()
+        });
+        highlight_monospace(&editor, 4..8, cx);
+
+        let snapshot = editor.update_in(cx, |editor, window, cx| editor.snapshot(window, cx));
+        let families: Vec<_> = snapshot
+            .highlighted_chunks(
+                DisplayRow(0)..DisplayRow(1),
+                LanguageAwareStyling {
+                    tree_sitter: false,
+                    diagnostics: false,
+                },
+                &style,
+            )
+            .map(|chunk| {
+                let styled = match chunk.style {
+                    Some(highlight) => style.text.clone().highlight(highlight),
+                    None => style.text.clone(),
+                };
+                (
+                    chunk.text.to_string(),
+                    style.run_font(&styled, chunk.style.as_ref()).family,
+                )
+            })
+            .collect();
+        let code: Vec<_> = families
+            .iter()
+            .filter(|(_, family)| family == "Code Family")
+            .map(|(text, _)| text.as_str())
+            .collect();
+        assert_eq!(code, ["code"]);
+        assert!(
+            families
+                .iter()
+                .any(|(text, family)| text.contains("ab") && family == "Text Family")
+        );
+    }
+
+    #[gpui::test]
+    async fn test_a_long_code_span_wraps_within_the_text_width(cx: &mut TestAppContext) {
+        init_test(cx, |_| {});
+        let text = format!("some words `{}` after", "code".repeat(40));
+        let span = 11..11 + 160;
+        let window = cx.add_window(|window, cx| {
+            let buffer = MultiBuffer::build_simple(&text, cx);
+            let mut editor = Editor::new(EditorMode::full(), buffer, None, window, cx);
+            editor.set_soft_wrap_mode(language_settings::SoftWrap::EditorWidth, cx);
+            editor
+        });
+        let cx = &mut VisualTestContext::from_window(*window, cx);
+        let editor = window.root(cx).unwrap();
+        let style = cx.update(|_, cx| editor.update(cx, |editor, cx| editor.style(cx).clone()));
+        assert!(style.code_font.is_some());
+        highlight_monospace(&editor, span, cx);
+
+        let (_, state) = cx.draw(Default::default(), size(px(300.), px(500.)), |_, _| {
+            EditorElement::new(&editor, style.clone())
+        });
+        let position_map = &state.position_map;
+        assert!(
+            position_map.line_layouts.len() > 2,
+            "the code span wraps onto several rows"
+        );
+        let text_width = position_map.text_hitbox.size.width;
+        for layout in &position_map.line_layouts {
+            assert!(
+                layout.width <= text_width,
+                "a row of {:?} is wider than the text width {text_width:?}",
+                layout.width
+            );
+        }
+        assert!(
+            position_map.scroll_max.x == 0.,
+            "a wrapped line has no horizontal scrolling"
         );
     }
 

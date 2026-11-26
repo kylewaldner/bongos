@@ -3,11 +3,14 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use editor::{Editor, ToOffset as _};
-use gpui::{AppContext as _, Entity, FontWeight, TestAppContext, VisualTestContext, point};
+use editor::{Editor, MultiBufferOffset, ToOffset as _};
+use gpui::{
+    AppContext as _, Entity, FontWeight, HighlightStyle, TestAppContext, VisualTestContext, point,
+};
 use language::{Buffer, Language, LanguageConfig, LanguageMatcher};
 use theme::ActiveTheme as _;
 use workspace::AppState;
+use zed_actions::editor::{MoveDown, MoveUp};
 
 use crate::{
     FALLBACK_SCREEN_ROWS, MarkdownCodeBlock, Mode, ParseStats, Style, fresh_index, parse_stats,
@@ -315,4 +318,99 @@ async fn the_buffer_text_is_unchanged_by_the_live_view(cx: &mut TestAppContext) 
         assert_eq!(buffer.version(), version);
         assert!(!buffer.is_dirty());
     });
+}
+
+/// The look and the ranges of `style`'s highlight on `editor`.
+fn look(
+    editor: &Entity<Editor>,
+    style: Style,
+    cx: &mut VisualTestContext,
+) -> Option<HighlightStyle> {
+    editor.read_with(cx, |editor, cx| {
+        editor
+            .text_highlights(style.key(), cx)
+            .map(|(look, _)| look)
+    })
+}
+
+#[gpui::test]
+async fn a_code_span_and_a_code_block_are_highlighted_in_the_code_font(cx: &mut TestAppContext) {
+    init(cx);
+    let (_, editor, vcx) = live_editor(SAMPLE, cx);
+    let text = SAMPLE;
+    assert_eq!(
+        styled(&editor, Style::Code, vcx),
+        vec![inner(text, "`code`", 1, 1)]
+    );
+    for style in [Style::Code, Style::CodeBlockText] {
+        let look = look(&editor, style, vcx).expect("highlighted");
+        assert_eq!(look.monospace, Some(true), "{style:?}");
+    }
+    let block = styled(&editor, Style::CodeBlockText, vcx);
+    assert_eq!(block.len(), 1);
+    assert!(text[block[0].clone()].contains("let x;"));
+    for style in [
+        Style::Strong,
+        Style::Emphasis,
+        Style::Link,
+        Style::HeadingMajor,
+    ] {
+        assert_eq!(
+            look(&editor, style, vcx).and_then(|look| look.monospace),
+            None
+        );
+    }
+}
+
+#[gpui::test]
+async fn source_mode_has_no_code_font_highlight(cx: &mut TestAppContext) {
+    init(cx);
+    let (buffer, editor, vcx) = live_editor(SAMPLE, cx);
+    assert!(look(&editor, Style::Code, vcx).is_some());
+    vcx.update(|_, cx| set_mode(&buffer, Mode::Source, cx));
+    vcx.run_until_parked();
+    for style in [Style::Code, Style::CodeBlockText] {
+        assert!(look(&editor, style, vcx).is_none(), "{style:?}");
+    }
+}
+
+#[gpui::test]
+async fn moving_down_and_up_from_a_line_with_a_code_span_keeps_the_goal_column(
+    cx: &mut TestAppContext,
+) {
+    init(cx);
+    let text = "plain text line\nab `code` cd\nplain text line\n";
+    let (_, editor, vcx) = live_editor(text, cx);
+    let line = "plain text line\n".len();
+    let column = "ab `code` c".len();
+    let cursor = |editor: &Entity<Editor>, vcx: &mut VisualTestContext| {
+        editor.update(vcx, |editor, cx| {
+            let snapshot = editor.display_snapshot(cx);
+            editor
+                .selections
+                .newest::<MultiBufferOffset>(&snapshot)
+                .head()
+                .0
+        })
+    };
+    let place = |editor: &Entity<Editor>, offset: usize, vcx: &mut VisualTestContext| {
+        editor.update_in(vcx, |editor, window, cx| {
+            editor.change_selections(Default::default(), window, cx, |selections| {
+                selections.select_ranges([MultiBufferOffset(offset)..MultiBufferOffset(offset)])
+            });
+        });
+        vcx.run_until_parked();
+    };
+
+    place(&editor, line + column, vcx);
+    editor.update_in(vcx, |editor, window, cx| {
+        editor.move_down(&MoveDown, window, cx)
+    });
+    assert_eq!(cursor(&editor, vcx), line + "ab `code` cd\n".len() + column);
+
+    place(&editor, line + column, vcx);
+    editor.update_in(vcx, |editor, window, cx| {
+        editor.move_up(&MoveUp, window, cx)
+    });
+    assert_eq!(cursor(&editor, vcx), column);
 }
