@@ -2062,6 +2062,7 @@ dependencies = [
  "bongos_language_status",
  "bongos_languages",
  "bongos_linear",
+ "bongos_markdown",
  "bongos_minibuffer",
  "bongos_navigation",
  "bongos_net",
@@ -2782,6 +2783,25 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.17",
  "uuid",
+]
+
+[[package]]
+name = "bongos_markdown"
+version = "0.1.0"
+dependencies = [
+ "bongos_emacs",
+ "bongos_minibuffer",
+ "bongos_prompts",
+ "collections",
+ "command_palette_hooks",
+ "editor",
+ "gpui",
+ "language",
+ "multi_buffer",
+ "project",
+ "settings",
+ "theme_settings",
+ "workspace",
 ]
 
 [[package]]
