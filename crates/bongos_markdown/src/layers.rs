@@ -1,5 +1,5 @@
 //! The live view's layers and the window they work on (design D8). A layer draws one kind of
-//! decoration (styles now; conceals, images and tables later) from the index over the window: the
+//! decoration (styles and conceals now; images and tables later) from the index over the window: the
 //! buffer rows on screen plus one screen above and one below. The addon refreshes every layer on a
 //! scroll, a selection change, a new index and a resize, and clears every layer in source mode and
 //! on detach.
@@ -11,6 +11,7 @@ use editor::display_map::DisplayRow;
 use editor::{Bias, DisplayPoint, Editor};
 use gpui::Context;
 
+use crate::conceals::ConcealLayer;
 use crate::styles::StyleLayer;
 
 /// The screen height, in rows, used before the editor's first layout tells the real one.
@@ -41,7 +42,10 @@ pub trait LiveLayer {
 
 /// The layers a new addon starts with, in refresh order.
 pub fn default_layers() -> Vec<Box<dyn LiveLayer>> {
-    vec![Box::new(StyleLayer::default())]
+    vec![
+        Box::new(StyleLayer::default()),
+        Box::new(ConcealLayer::default()),
+    ]
 }
 
 /// The window of `editor`: the buffer rows on screen plus one screen above and one below, as

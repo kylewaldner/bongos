@@ -1,12 +1,13 @@
 //! The app side of the bongos markdown editor: the `markdown` settings, the per-buffer mode
 //! (live view or source), the addon that carries it on markdown editors and gives them the live
-//! typography, the background parse of the buffer's index, the live layers (inline styles for
-//! now), and the `markdown` actions (block moves, insert block, checkbox toggle and table cell
-//! moves), hidden from the command palette for now. The pure parsing and block logic lives in
-//! `bongos_markdown_model`.
+//! typography, the background parse of the buffer's index, the live layers (inline styles and
+//! hidden markup with reveal at point), and the `markdown` actions (block moves, insert block,
+//! checkbox toggle and table cell moves), hidden from the command palette for now. The pure
+//! parsing and block logic lives in `bongos_markdown_model`.
 
 mod actions;
 mod commands;
+mod conceals;
 mod index;
 mod layers;
 mod mode;
@@ -20,6 +21,7 @@ pub use actions::{COMMANDS_VISIBLE, action_types, init_palette, markdown};
 pub use commands::{
     END_OF_TABLE, HOST, INSERT_PROMPT, NO_BLOCK_ABOVE, NO_BLOCK_BELOW, NOT_A_TASK, NOT_MARKDOWN,
 };
+pub use conceals::{ConcealLayer, LoadedImages, MarkdownConceal, conceal_tag};
 pub use index::{IndexState, ParseStats};
 pub use layers::{FALLBACK_SCREEN_ROWS, LiveContext, LiveLayer, default_layers, window};
 pub use mode::{
@@ -40,6 +42,8 @@ pub fn init(cx: &mut App) {
 
 #[cfg(test)]
 mod commands_tests;
+#[cfg(test)]
+mod conceal_tests;
 #[cfg(test)]
 mod live_tests;
 #[cfg(test)]

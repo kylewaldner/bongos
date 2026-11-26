@@ -200,6 +200,7 @@ fn is_live(editor: &Editor, cx: &App) -> bool {
 /// Watches every new full editor on a single buffer: it gets the addon while its buffer's
 /// language is Markdown and the prompts mode is not on it.
 pub(crate) fn init(cx: &mut App) {
+    editor::register_conceal_tag(crate::conceals::conceal_tag(), cx);
     cx.observe_new(|editor: &mut Editor, window, cx: &mut Context<Editor>| {
         if !editor.mode().is_full() || !editor.buffer().read(cx).is_singleton() {
             return;
