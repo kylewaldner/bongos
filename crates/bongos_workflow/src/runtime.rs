@@ -1809,7 +1809,6 @@ fn open_run(spec: RunSpec) -> Result<LiveRun, RuntimeError> {
     let path = spec.attempt_dir.join(EVENTS_FILE);
     let mut log = OpenOptions::new()
         .read(true)
-        .write(true)
         .append(true)
         .create(true)
         .open(&path)
