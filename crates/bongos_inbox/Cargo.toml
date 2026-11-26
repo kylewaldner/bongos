@@ -1,0 +1,30 @@
+[package]
+name = "bongos_inbox"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/bongos_inbox.rs"
+doctest = false
+
+[dependencies]
+bongos_inbox_model.workspace = true
+fs.workspace = true
+futures.workspace = true
+gpui.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+settings.workspace = true
+util.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+fs = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
