@@ -249,7 +249,7 @@ async fn world(summaries: &[&str], cx: &mut TestAppContext) -> World {
     let workspace = multi_workspace
         .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
         .unwrap();
-    let mut vcx = VisualTestContext::from_window(multi_workspace.into(), cx);
+    let vcx = VisualTestContext::from_window(multi_workspace.into(), cx);
     vcx.run_until_parked();
     World {
         workspace,
