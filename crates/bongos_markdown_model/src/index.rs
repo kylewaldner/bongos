@@ -91,6 +91,58 @@ impl MarkdownIndex {
             })
     }
 
+    /// The same index with every offset moved: each range's start through `start` and its end
+    /// through `end`. Both must be monotonic, so the order of the elements is kept; a range whose
+    /// mapped end falls before its mapped start becomes empty at the start.
+    pub fn map_offsets(
+        &self,
+        start: impl Fn(usize) -> usize,
+        end: impl Fn(usize) -> usize,
+    ) -> MarkdownIndex {
+        let range = |range: &Range<usize>| {
+            let new_start = start(range.start);
+            new_start..end(range.end).max(new_start)
+        };
+        let elements = self
+            .elements
+            .iter()
+            .map(|element| {
+                let kind = match &element.kind {
+                    ElementKind::ListItem { marker, task } => ElementKind::ListItem {
+                        marker: range(marker),
+                        task: *task,
+                    },
+                    ElementKind::CodeBlock { fences, lang } => ElementKind::CodeBlock {
+                        fences: CodeFences {
+                            open: range(&fences.open),
+                            close: fences.close.as_ref().map(&range),
+                        },
+                        lang: lang.clone(),
+                    },
+                    ElementKind::Table { rows } => ElementKind::Table {
+                        rows: rows
+                            .iter()
+                            .map(|row| TableRow {
+                                range: range(&row.range),
+                                cells: row.cells.iter().map(&range).collect(),
+                                is_header: row.is_header,
+                                is_delimiter: row.is_delimiter,
+                            })
+                            .collect(),
+                    },
+                    kind => kind.clone(),
+                };
+                Element {
+                    kind,
+                    range: range(&element.range),
+                    markup: element.markup.iter().map(&range).collect(),
+                    line_level: element.line_level,
+                }
+            })
+            .collect();
+        MarkdownIndex { elements }
+    }
+
     /// The innermost element whose range contains `offset`, ends inclusive.
     pub fn element_at(&self, offset: usize) -> Option<&Element> {
         let mut best: Option<&Element> = None;
