@@ -534,8 +534,8 @@ impl PoolBroker {
         self.shared.listeners.borrow_mut().push(Rc::new(listener));
     }
 
-    /// Calls `listener` after every [`PoolBroker::drain`], [`PoolBroker::undrain`] and
-    /// [`PoolBroker::started`] from now on.
+    /// Calls `listener` after every [`PoolBroker::drain`] (when it begins and when it has removed
+    /// the holds), [`PoolBroker::undrain`] and [`PoolBroker::started`] from now on.
     pub fn on_writer(&self, listener: impl Fn() + 'static) {
         self.shared
             .writer_listeners
@@ -837,9 +837,17 @@ struct LeaseInner {
     holds: RefCell<Vec<HoldId>>,
     satisfied: Vec<String>,
     process: Cell<Option<ProcRef>>,
+    /// A drain removed its holds and they are not granted again yet.
+    given_up: Cell<bool>,
 }
 
 impl Lease {
+    /// Whether a drain removed this lease's holds and they are not granted again yet: the lease
+    /// holds nothing of what it asked for meanwhile.
+    pub fn is_given_up(&self) -> bool {
+        self.inner.given_up.get()
+    }
+
     /// The holder's own process now holds the pools: the hold lives as long as it does.
     pub fn bind_process(&self, record: ProcessRecord) {
         let process = ProcRef {
@@ -1640,6 +1648,7 @@ impl Shared {
             Answer::Lease(weak) => match weak.upgrade() {
                 Some(lease) => {
                     *lease.holds.borrow_mut() = pending.partial;
+                    lease.given_up.set(false);
                     self.state
                         .borrow_mut()
                         .leases
@@ -1700,6 +1709,7 @@ impl Shared {
             holds: RefCell::new(holds),
             satisfied,
             process: Cell::new(None),
+            given_up: Cell::new(false),
         });
         self.state
             .borrow_mut()
@@ -2321,6 +2331,7 @@ impl Shared {
                     continue;
                 }
                 lease.holds.borrow_mut().clear();
+                lease.given_up.set(true);
                 self.state.borrow_mut().given_up.push((
                     lease.request.clone(),
                     Answer::Lease(Rc::downgrade(&lease)),
@@ -2402,6 +2413,14 @@ impl Shared {
         state
             .retry
             .retain(|op| !matches!(op, Op::Enqueue(_) | Op::Poll));
+        drop(state);
+        // The drain gave up holds of leases: whoever handed them out takes them back.
+        if holds {
+            let listeners: Vec<_> = self.writer_listeners.borrow().clone();
+            for listener in listeners {
+                listener();
+            }
+        }
     }
 
     fn status(&self, request: RequestId) -> Option<WaitStatus51> {

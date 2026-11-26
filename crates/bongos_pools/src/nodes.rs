@@ -11,10 +11,12 @@
 //!   broker drains or closes, keeps waiting with no request, and is asked again when a broker is
 //!   opened or its broker undrains or starts. A key whose store failed keeps waiting too and is
 //!   asked again at its next start (the engine's next tick), or when a broker opens or starts;
-//!   nothing wakes the engine for it, so a failing store is not asked in a loop.
+//!   nothing wakes the engine for it, so a failing store is not asked in a loop, and its failure
+//!   is logged once until the key gets another answer.
 //! - A drain takes back the holds of a granted key not started yet: the key waits again with no
-//!   request and is asked again once its broker undrains or starts. The run's own holds
-//!   (`Level::Run`) are asked again by the broker itself when it starts.
+//!   request and is asked again once its broker undrains or starts. So does a grant that lands
+//!   while the broker drains, or whose holds the drain removed after it landed. The run's own
+//!   holds (`Level::Run`) are asked again by the broker itself when it starts.
 //! - The runtime is locked while it asks, so [`PoolsNodeAdmission`] only reads and writes the
 //!   slots it shares with [`PoolsNodes`] and sends it a message; [`PoolsNodes`] owns the waits and
 //!   the leases on the foreground and handles the messages in order.
@@ -99,6 +101,8 @@ struct Slot {
     wait: NodeWait,
     /// Its store failed: the next start of the key asks again.
     retry: bool,
+    /// Its store's failure was logged; logged again only after an answer of another kind.
+    store_warned: bool,
 }
 
 #[derive(Default)]
@@ -204,6 +208,7 @@ impl NodeAdmission for PoolsNodeAdmission {
                 state: SlotState::Asked,
                 wait: wait.clone(),
                 retry: false,
+                store_warned: false,
             },
         );
         drop(slots);
@@ -308,6 +313,8 @@ struct Worker {
     parked: BTreeMap<u64, Parked>,
     /// The holds each run keeps until it ends (`hold_while_waiting`).
     run_holds: BTreeMap<String, Vec<Lease>>,
+    /// How many store failures were logged as warnings.
+    store_warnings: usize,
 }
 
 /// The waits and leases of the workflow nodes, on the foreground; also the status source of the
@@ -357,6 +364,7 @@ impl PoolsNodes {
                 entries: BTreeMap::new(),
                 parked: BTreeMap::new(),
                 run_holds: BTreeMap::new(),
+                store_warnings: 0,
             })
         });
         // A broker opened, drained, undrained or started: the keys waiting with no request may be
@@ -431,6 +439,12 @@ impl PoolsNodes {
         pools.sort();
         pools.dedup();
         pools
+    }
+
+    /// How many store failures were logged as warnings (once per key until another answer).
+    #[cfg(test)]
+    pub(crate) fn store_warnings(&self) -> usize {
+        self.worker.borrow().store_warnings
     }
 
     /// The line the run view shows under a waiting key.
@@ -617,7 +631,21 @@ impl Worker {
             }
             entry.status = None;
             let mut slots = worker.slots.lock().unwrap_or_else(PoisonError::into_inner);
+            let store_failed = matches!(answer, Err(Refused::Store { .. }));
+            let warn = slots.by_id(id).is_none_or(|slot| {
+                let first = !slot.store_warned;
+                slot.store_warned = store_failed;
+                first
+            });
             match answer {
+                // Granted while the broker drains (the grant was in flight when the drain began):
+                // the drain removes its holds, so the key waits again with no request and is
+                // asked again once its broker undrains or starts.
+                Ok(lease) if entry.broker.is_draining() => {
+                    drop(lease);
+                    worker.parked.insert(id, Parked::of(entry));
+                    None
+                }
                 Ok(lease) => {
                     let keep: BTreeSet<String> = lease
                         .hold_ids()
@@ -640,13 +668,23 @@ impl Worker {
                     worker.parked.insert(id, Parked::of(entry));
                     moved.then(|| worker.poke.clone())
                 }
-                // Nothing to do with the request: asked again at the key's next start.
+                // Nothing to do with the request: asked again at the key's next start. Logged
+                // once until the key gets another answer, not at every tick.
                 Err(refused @ Refused::Store { .. }) => {
-                    log::warn!(
-                        "pools: node {} of run {}: {refused}; asking again at its next start",
-                        entry.key,
-                        entry.run
-                    );
+                    if warn {
+                        worker.store_warnings += 1;
+                        log::warn!(
+                            "pools: node {} of run {}: {refused}; asking again at its next start",
+                            entry.key,
+                            entry.run
+                        );
+                    } else {
+                        log::debug!(
+                            "pools: node {} of run {}: {refused}; asking again at its next start",
+                            entry.key,
+                            entry.run
+                        );
+                    }
                     if let Some(slot) = slots.by_id(id) {
                         slot.retry = true;
                     }
@@ -664,8 +702,9 @@ impl Worker {
         }
     }
 
-    /// Takes back the granted keys not started yet whose broker drains (its drain removed their
-    /// holds), and asks again every key waiting with no request whose broker is open and not
+    /// Takes back the granted keys not started yet whose broker drains, or whose holds a drain
+    /// removed and the broker has not granted again (a grant that landed after the drain's own
+    /// resync), and asks again every key waiting with no request whose broker is open and not
     /// draining.
     fn resync(this: &Rc<RefCell<Worker>>) {
         let parked = {
@@ -676,8 +715,13 @@ impl Worker {
                 .entries
                 .iter()
                 .filter(|(id, entry)| {
+                    let given_up = entry
+                        .lease
+                        .iter()
+                        .chain(entry.keep.iter())
+                        .any(Lease::is_given_up);
                     entry.lease.is_some()
-                        && entry.broker.is_draining()
+                        && (entry.broker.is_draining() || given_up)
                         && slots
                             .by_id(**id)
                             .is_some_and(|slot| slot.state == SlotState::Granted)

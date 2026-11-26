@@ -800,6 +800,91 @@ fn a_drain_takes_back_a_granted_key_not_started_yet_and_asks_again_after(cx: &mu
 }
 
 #[gpui::test]
+fn a_grant_that_lands_after_a_drain_began_does_not_let_the_key_go(cx: &mut TestAppContext) {
+    let mut bench = Bench::new(cx, vec![pool("m", PoolKind::Mutex, 1)]);
+    let holder = watch(cx, bench.project.broker.acquire(ask("x", &[need("m")])));
+    cx.run_until_parked();
+    let holder = lease(&holder);
+    bench.add(1, SINGLE);
+    bench.settle(cx);
+    assert_eq!(bench.waiters("m"), [run_id(1)]);
+    // The release that grants the key is in flight when the writer starts moving: the grant is
+    // delivered after the drain began (and after the drain's resync ran), then the drain empties
+    // it.
+    drop(holder);
+    let drained = bench.project.broker.drain();
+    cx.run_until_parked();
+    cx.foreground_executor().block_on(drained);
+    assert!(bench.holders("m").is_empty(), "the drain removed the hold");
+    assert!(bench.nodes.node_pools(&run_id(1), &key("work")).is_empty());
+    bench.settle(cx);
+    assert_eq!(
+        bench.started(1, "work"),
+        0,
+        "no start while the broker drains"
+    );
+
+    // The writer stays; a stranger asks before the broker asks again.
+    bench.project.broker.undrain();
+    let stranger = watch(cx, bench.project.broker.acquire(ask("z", &[need("m")])));
+    bench.project.broker.started();
+    cx.run_until_parked();
+    assert_eq!(bench.holders("m"), [("z".to_string(), Level::Job)]);
+    bench.settle(cx);
+    assert_eq!(
+        bench.started(1, "work"),
+        0,
+        "the key waits again: no start without its hold"
+    );
+    assert_eq!(bench.runtime.pool_waiting(&run_id(1)).len(), 1);
+    assert_eq!(bench.waiters("m"), [run_id(1)]);
+
+    drop(lease(&stranger));
+    bench.settle(cx);
+    assert_eq!(bench.started(1, "work"), 1);
+    assert_eq!(bench.holders("m"), [(run_id(1), step("work"))]);
+}
+
+#[gpui::test]
+fn a_grant_emptied_by_a_drain_undrained_at_once_is_taken_back(cx: &mut TestAppContext) {
+    let mut bench = Bench::new(cx, vec![pool("m", PoolKind::Mutex, 1)]);
+    let holder = watch(cx, bench.project.broker.acquire(ask("x", &[need("m")])));
+    cx.run_until_parked();
+    let holder = lease(&holder);
+    bench.add(1, SINGLE);
+    bench.settle(cx);
+    assert_eq!(bench.waiters("m"), [run_id(1)]);
+    // The grant is in flight while the writer drains and stays at once: it lands while the
+    // broker no longer drains, then the drain empties it.
+    drop(holder);
+    let drained = bench.project.broker.drain();
+    bench.project.broker.undrain();
+    let stranger = watch(cx, bench.project.broker.acquire(ask("z", &[need("m")])));
+    cx.run_until_parked();
+    cx.foreground_executor().block_on(drained);
+    bench.settle(cx);
+    // The drain's end took the emptied grant back and asked again, ahead of the stranger.
+    assert_eq!(bench.holders("m"), [(run_id(1), step("work"))]);
+    assert_eq!(bench.started(1, "work"), 1);
+    // The drain gave up the stranger's request too, and nothing of the key's.
+    let given_up: Vec<String> = bench
+        .project
+        .broker
+        .given_up()
+        .into_iter()
+        .map(|given| given.holder.path.owner.0)
+        .collect();
+    assert_eq!(given_up, ["z"]);
+
+    bench.project.broker.started();
+    bench.settle(cx);
+    assert_eq!(bench.waiters("m"), ["z"]);
+    assert!(stranger.borrow().is_none(), "the stranger still waits");
+    assert_eq!(bench.started(1, "work"), 1);
+    assert_eq!(bench.holders("m"), [(run_id(1), step("work"))]);
+}
+
+#[gpui::test]
 fn a_runs_own_holds_are_asked_again_after_a_drain(cx: &mut TestAppContext) {
     let mut bench = Bench::new(cx, vec![keeping("h"), pool("q", PoolKind::Mutex, 1)]);
     bench.add(1, KEEPING);
@@ -861,6 +946,11 @@ fn a_node_whose_store_failed_waits_and_is_asked_again_at_its_next_start(cx: &mut
         bench.wakes.get(),
         0,
         "a failing store is not asked in a loop"
+    );
+    assert_eq!(
+        bench.nodes.store_warnings(),
+        1,
+        "asked again at every tick, warned once"
     );
     assert!(
         bench.nodes.waiting_node(&run_id(1), &key("work")).is_none(),
