@@ -2186,8 +2186,16 @@ impl DisplaySnapshot {
     }
 
     fn row_has_non_conceal_fold(&self, buffer_row: MultiBufferRow) -> bool {
-        let row_range = MultiBufferPoint::new(buffer_row.0, 0)
-            ..MultiBufferPoint::new(buffer_row.0, self.buffer_snapshot().line_len(buffer_row));
+        // Fold queries are exclusive at both ends, and indent creases start at
+        // the end of their header line, so the range runs to the start of the
+        // next row. A fold starting exactly there is still excluded.
+        let buffer = self.buffer_snapshot();
+        let row_end = if buffer_row.0 < buffer.max_row().0 {
+            MultiBufferPoint::new(buffer_row.0 + 1, 0)
+        } else {
+            MultiBufferPoint::new(buffer_row.0, buffer.line_len(buffer_row))
+        };
+        let row_range = MultiBufferPoint::new(buffer_row.0, 0)..row_end;
         self.folds_in_range(row_range).any(|fold| {
             !fold
                 .placeholder

@@ -40022,6 +40022,85 @@ fn test_toggle_fold_ignores_conceals(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn test_toggle_fold_recursive_ignores_conceals(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let text = "**a** {\n    b\n}\n";
+    let editor =
+        cx.add_window(|window, cx| build_editor(MultiBuffer::build_simple(text, cx), window, cx));
+
+    _ = editor.update(cx, |editor, window, cx| {
+        let tag = register_test_conceal_tag(cx);
+        let conceal = Point::new(0, 0)..Point::new(0, 2);
+        set_test_conceals(
+            editor,
+            tag,
+            Point::new(0, 0)..Point::new(3, 0),
+            std::slice::from_ref(&conceal),
+            cx,
+        );
+        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
+            s.select_ranges([Point::new(0, 3)..Point::new(0, 3)])
+        });
+
+        // The row holds only a conceal, so the row gets folded and the conceal stays.
+        editor.toggle_fold_recursive(&ToggleFoldRecursive, window, cx);
+        assert_eq!(editor.display_text(cx), "⋯a** {⋯\n}\n");
+        let folds = folds_with_tags(editor, cx);
+        assert_eq!(folds.len(), 2);
+        assert_eq!(folds[0], (conceal.clone(), Some(tag)));
+        assert_eq!(folds[1].1, None);
+
+        editor.toggle_fold_recursive(&ToggleFoldRecursive, window, cx);
+        assert_eq!(editor.display_text(cx), "⋯a** {\n    b\n}\n");
+        assert_eq!(folds_with_tags(editor, cx), vec![(conceal, Some(tag))]);
+    });
+}
+
+#[gpui::test]
+fn test_is_line_folded_with_conceals(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let text = "**a** {\n    b\n}\nc {\n    d\n}\n";
+    let editor =
+        cx.add_window(|window, cx| build_editor(MultiBuffer::build_simple(text, cx), window, cx));
+
+    _ = editor.update(cx, |editor, window, cx| {
+        let tag = register_test_conceal_tag(cx);
+        set_test_conceals(
+            editor,
+            tag,
+            Point::new(0, 0)..Point::new(6, 0),
+            &[Point::new(0, 0)..Point::new(0, 2)],
+            cx,
+        );
+        let folded_rows = |editor: &mut Editor, cx: &mut Context<Editor>| {
+            let snapshot = editor.display_snapshot(cx);
+            (0..6)
+                .filter(|row| snapshot.is_line_folded(MultiBufferRow(*row)))
+                .collect::<Vec<_>>()
+        };
+
+        // A row holding only a conceal is not folded.
+        assert_eq!(folded_rows(editor, cx), Vec::<u32>::new());
+
+        // An indent crease fold starts at the end of its header row.
+        editor.fold_at(MultiBufferRow(3), window, cx);
+        assert_eq!(editor.display_text(cx), "⋯a** {\n    b\n}\nc {⋯\n}\n");
+        assert_eq!(folds_with_tags(editor, cx)[1].0.start, Point::new(3, 3));
+        // The header row and the hidden row inside the fold count as folded,
+        // as they do with no conceal tag registered; the closing row does not.
+        assert_eq!(folded_rows(editor, cx), vec![3, 4]);
+
+        // A row holding both a conceal and a user fold is folded.
+        editor.fold_at(MultiBufferRow(0), window, cx);
+        assert_eq!(editor.display_text(cx), "⋯a** {⋯\n}\nc {⋯\n}\n");
+        assert_eq!(folded_rows(editor, cx), vec![0, 1, 3, 4]);
+
+        editor.unfold_at(MultiBufferRow(3), window, cx);
+        assert_eq!(folded_rows(editor, cx), vec![0, 1]);
+    });
+}
+
+#[gpui::test]
 fn test_move_down_across_conceals_keeps_one_row_per_press(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
     let editor = cx.add_window(|window, cx| {

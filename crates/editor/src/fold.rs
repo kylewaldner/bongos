@@ -190,7 +190,10 @@ impl Editor {
         } else {
             selection.range()
         };
-        if display_map.folds_in_range(range).next().is_some() {
+        let has_user_fold = display_map
+            .folds_in_range(range)
+            .any(|fold| !is_conceal_tag(fold.placeholder.type_tag, cx));
+        if has_user_fold {
             self.unfold_recursive(&Default::default(), window, cx)
         } else {
             self.fold_recursive(&Default::default(), window, cx)
