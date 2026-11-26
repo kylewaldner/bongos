@@ -1,6 +1,6 @@
 use crate::definition::{
-    AgentKind, Condition, EndKind, FieldType, GateWhen, ItemType, JoinWait, NodeKind, Outcome,
-    Target, parse,
+    AgentKind, Condition, EndKind, FieldType, GateWhen, ItemType, JoinWait, LandAt, NodeKind,
+    Outcome, Scope, Target, parse,
 };
 
 const FULL: &str = include_str!("../test-fixtures/full.toml");
@@ -329,4 +329,115 @@ fn choice_without_values_and_list_without_of_are_errors() {
     let error = parse(list).unwrap_err();
     assert_eq!(error.line, 7);
     assert!(error.message.contains("of"));
+}
+
+const BASE_TEXT: &str = "schema = 1\nname = \"x\"\nstart = \"a\"\n";
+
+fn with_graph_edits(table: &str) -> String {
+    format!("{BASE_TEXT}\n{table}\n[nodes.a]\nkind = \"agent\"\n")
+}
+
+#[test]
+fn definitions_without_graph_edits_have_none() {
+    assert_eq!(parse(FULL).unwrap().graph_edits, None);
+    assert_eq!(parse(MINIMAL).unwrap().graph_edits, None);
+}
+
+#[test]
+fn every_graph_edits_scope_parses() {
+    for (written, scope) in [
+        ("none", Scope::None),
+        ("own-subtree", Scope::OwnSubtree),
+        ("own-project", Scope::OwnProject),
+        ("projects", Scope::Projects),
+    ] {
+        let projects = if scope == Scope::Projects {
+            "projects = [\"website\", \"app\"]\n"
+        } else {
+            ""
+        };
+        let text = with_graph_edits(&format!("[graph_edits]\nscope = \"{written}\"\n{projects}"));
+        let decl = parse(&text).unwrap().graph_edits.unwrap();
+        assert_eq!(decl.scope.value, scope);
+        assert_eq!(decl.scope.line, line_of(&text, "scope = "));
+        assert_eq!(decl.line, line_of(&text, "[graph_edits]"));
+        assert_eq!(decl.land_at, LandAt::Step);
+        assert_eq!(decl.projects.len(), if projects.is_empty() { 0 } else { 2 });
+    }
+}
+
+#[test]
+fn graph_edits_projects_and_land_at_parse_with_lines() {
+    let text = with_graph_edits(
+        "[graph_edits]\nscope = \"projects\"\nprojects = [\"website\"]\nland_at = \"run-end\"\n",
+    );
+    let decl = parse(&text).unwrap().graph_edits.unwrap();
+    assert_eq!(decl.land_at, LandAt::RunEnd);
+    assert_eq!(decl.projects[0].value, "website");
+    assert_eq!(decl.projects[0].line, line_of(&text, "projects = "));
+}
+
+#[test]
+fn graph_edits_default_scope_is_none() {
+    let decl = parse(&with_graph_edits("[graph_edits]\n"))
+        .unwrap()
+        .graph_edits
+        .unwrap();
+    assert_eq!(decl.scope.value, Scope::None);
+}
+
+#[test]
+fn graph_edits_digest_ignores_layout_and_tracks_content() {
+    let a = parse(&with_graph_edits(
+        "[graph_edits]\nscope = \"own-subtree\"\nland_at = \"step\"\n",
+    ))
+    .unwrap()
+    .graph_edits
+    .unwrap();
+    let b = parse(&with_graph_edits(
+        "# note\n[graph_edits]\nscope   = \"own-subtree\"\n",
+    ))
+    .unwrap()
+    .graph_edits
+    .unwrap();
+    let c = parse(&with_graph_edits(
+        "[graph_edits]\nscope = \"own-project\"\n",
+    ))
+    .unwrap()
+    .graph_edits
+    .unwrap();
+    assert_eq!(a.digest(), b.digest());
+    assert_ne!(a.digest(), c.digest());
+    assert_eq!(a.digest().len(), 64);
+}
+
+#[test]
+fn graph_edits_errors_name_their_line() {
+    let text = with_graph_edits("[graph_edits]\nscope = \"everything\"\n");
+    let error = parse(&text).unwrap_err();
+    assert_eq!(error.line, line_of(&text, "scope = "));
+    assert!(error.message.contains("everything"), "{}", error.message);
+
+    let text = with_graph_edits("[graph_edits]\nscope = \"own-project\"\nprojects = [\"web\"]\n");
+    let error = parse(&text).unwrap_err();
+    assert_eq!(error.line, line_of(&text, "projects = "));
+    assert!(error.message.contains("projects"), "{}", error.message);
+
+    let text = with_graph_edits("[graph_edits]\nscope = \"projects\"\nprojects = []\n");
+    let error = parse(&text).unwrap_err();
+    assert_eq!(error.line, line_of(&text, "scope = "));
+    assert!(error.message.contains("non-empty"), "{}", error.message);
+
+    let text = with_graph_edits("[graph_edits]\nscope = \"own-subtree\"\nland_at = \"later\"\n");
+    let error = parse(&text).unwrap_err();
+    assert_eq!(error.line, line_of(&text, "land_at = "));
+}
+
+#[test]
+fn graph_edits_is_a_known_top_level_key() {
+    let definition = parse(&with_graph_edits(
+        "[graph_edits]\nscope = \"own-subtree\"\n",
+    ))
+    .unwrap();
+    assert!(definition.unknown_keys.is_empty());
 }
