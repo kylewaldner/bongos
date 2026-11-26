@@ -12,13 +12,18 @@
 //! layout, move focus to the item pane; `inbox: focus list` (`←`) and `menu: cancel` (Esc) move it
 //! back. In the sidebar layout they open the modal. `inbox: open file` opens the item's file in a
 //! read-only editor tab.
+//!
+//! On a group row RET expands the group, showing its members as rows under it, or collapses it.
+//! `inbox: dismiss` (`d`) archives the item under the cursor, or every member of the group under
+//! it as the list showed them at the keypress (an item delivered meanwhile stays), one operation
+//! each through the inbox's queue, and then says "<n> archived". The rows go at once.
 
 use crate::item::{self, ItemDetail};
 use crate::modal::ItemModal;
 use crate::rows::{self, PILL_FILL_OPACITY, Pill, RowKey, ViewRow};
 use crate::{
-    FocusItem, FocusList, Inbox, InboxEvent, InboxSettings, InboxState, MarkUnread, Next, OpenFile,
-    OpenItem, Previous,
+    Dismiss, FocusItem, FocusList, Inbox, InboxEvent, InboxSettings, InboxState, MarkUnread, Next,
+    OpOutcome, OpenFile, OpenItem, Previous,
 };
 use chrono::{DateTime, Utc};
 use gpui::{
@@ -29,7 +34,7 @@ use gpui::{
 };
 use language::Buffer;
 use settings::Settings as _;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use ui::{Label, LabelSize, prelude::*, rems_from_px};
 use util::ResultExt as _;
@@ -46,6 +51,9 @@ const DOT: f32 = 7.;
 const NARROW_EMS: f32 = 60.;
 /// How far `inbox: next` and `inbox: previous` scroll the item pane while it has focus.
 const SCROLL_STEP: f32 = 48.;
+/// How far a group's member rows sit in from the left: the dot and the gap after it, so the
+/// member's dot is under the group's summary.
+const MEMBER_INDENT: f32 = DOT + 10.;
 
 /// Where the view shows the item under the cursor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,6 +96,10 @@ pub struct InboxView {
     /// Items with an operation queued and the state it asks for (`true` for read), which their
     /// rows show until the operation is done.
     pending: HashMap<String, bool>,
+    /// Items with an archive queued, whose rows are gone until it is done.
+    dismissing: HashSet<String>,
+    /// The keys of the groups shown with their members under them.
+    expanded: HashSet<String>,
     /// The row under the cursor, kept across rescans.
     selected: Option<RowKey>,
     _subscriptions: Vec<Subscription>,
@@ -117,6 +129,8 @@ impl InboxView {
             unread: None,
             cursor: 0,
             pending: HashMap::new(),
+            dismissing: HashSet::new(),
+            expanded: HashSet::new(),
             selected: None,
             _subscriptions: subscriptions,
         };
@@ -176,13 +190,29 @@ impl InboxView {
     /// Reads the rows from the inbox's latest snapshot and puts the cursor back on its row, or on
     /// the row that followed it when it went away.
     fn rebuild(&mut self, cx: &mut Context<Self>) {
-        let (unread, mut rows) = match self.inbox.as_ref().map(|inbox| inbox.read(cx)) {
+        let (unread, rows) = match self.inbox.as_ref().map(|inbox| inbox.read(cx)) {
             Some(inbox) if inbox.is_enabled() => match inbox.snapshot() {
-                Some(snapshot) => (Some(snapshot.unread_count()), rows::view_rows(&snapshot)),
+                Some(snapshot) => (
+                    Some(snapshot.unread_count()),
+                    rows::view_rows_hiding(&snapshot, &self.dismissing),
+                ),
                 None => (Some(0), Vec::new()),
             },
             _ => (None, Vec::new()),
         };
+        // A group that went away forgets it was expanded.
+        self.expanded
+            .retain(|key| rows.iter().any(|row| row.key == RowKey::Group(key.clone())));
+        let mut rows: Vec<ViewRow> = rows
+            .into_iter()
+            .flat_map(|row| {
+                let members = match &row.key {
+                    RowKey::Group(key) if self.expanded.contains(key) => row.members.clone(),
+                    _ => Vec::new(),
+                };
+                std::iter::once(row).chain(members)
+            })
+            .collect();
         for row in &mut rows {
             if let Some(read) = self
                 .pending
@@ -235,15 +265,108 @@ impl InboxView {
     }
 
     /// RET and `→`: marks the item under the cursor read and shows it, in the item pane (which
-    /// takes the focus) or in the modal. Does nothing on a group row.
+    /// takes the focus) or in the modal. On a group row it expands or collapses the group.
     pub fn focus_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected().is_none_or(|row| row.item.is_none()) {
+        let Some(row) = self.selected() else {
+            return;
+        };
+        if let RowKey::Group(key) = &row.key {
+            let key = key.clone();
+            self.toggle_group(key, cx);
             return;
         }
         self.operate(true, cx);
         match self.layout {
             Layout::Split => window.focus(&self.item_focus, cx),
             Layout::Sidebar => self.show_modal(window, cx),
+        }
+    }
+
+    /// Expands the group `key` or collapses it; the cursor stays on the group row.
+    pub fn toggle_group(&mut self, key: String, cx: &mut Context<Self>) {
+        if !self.expanded.remove(&key) {
+            self.expanded.insert(key);
+        }
+        self.rebuild(cx);
+    }
+
+    /// Whether an archive asked by `d` is still outstanding.
+    pub fn is_dismissing(&self) -> bool {
+        !self.dismissing.is_empty()
+    }
+
+    /// Whether the group `key` shows its members.
+    pub fn is_expanded(&self, key: &str) -> bool {
+        self.expanded.contains(key)
+    }
+
+    /// `d`: archives the item under the cursor, or every member of the group under it, one
+    /// operation each through the inbox's queue. Only the members the list shows now are
+    /// archived. Their rows go at once; a group then says "<n> archived" in the echo area.
+    pub fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(inbox), Some(row)) = (self.inbox.clone(), self.selected()) else {
+            return;
+        };
+        let group = row.item.is_none();
+        let items: Vec<(String, u64)> = row
+            .items()
+            .into_iter()
+            .filter(|(unique, _)| !self.dismissing.contains(unique))
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        let tasks: Vec<_> = inbox.update(cx, |inbox, cx| {
+            items
+                .iter()
+                .map(|(unique, inode)| inbox.archive(unique, *inode, cx))
+                .collect()
+        });
+        let uniques: Vec<String> = items.into_iter().map(|(unique, _)| unique).collect();
+        self.dismissing.extend(uniques.iter().cloned());
+        self.rebuild(cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let outcomes = futures::future::join_all(tasks).await;
+            let archived = outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, OpOutcome::Done(_)))
+                .count();
+            this.update_in(cx, |this, window, cx| {
+                for unique in &uniques {
+                    this.dismissing.remove(unique);
+                }
+                this.rebuild(cx);
+                if group {
+                    bongos_minibuffer::message(window, cx, format!("{archived} archived"));
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// `d` in the modal: archives the item shown and moves on to the next item row (group rows are
+    /// passed over; the previous item row when none follows) and marks it read, as `n` does. Does
+    /// nothing when the cursor is on a group row, so a group is never archived unseen.
+    pub fn dismiss_in_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(cursor) = self.cursor() else {
+            return;
+        };
+        if self.rows[cursor].item.is_none() {
+            return;
+        }
+        let is_item = |index: &usize| self.rows[*index].item.is_some();
+        let next = (cursor + 1..self.rows.len())
+            .find(is_item)
+            .or_else(|| (0..cursor).rev().find(is_item))
+            .map(|index| self.rows[index].key.clone());
+        self.dismiss(window, cx);
+        let Some(key) = next else {
+            return;
+        };
+        if let Some(index) = self.rows.iter().position(|row| row.key == key) {
+            self.set_cursor(index, cx);
+            self.operate(true, cx);
         }
     }
 
@@ -261,11 +384,23 @@ impl InboxView {
             .log_err();
     }
 
-    /// Moves the cursor by `offset` rows and marks the item there read: what `n` and `p` do in the
-    /// modal.
+    /// Moves the cursor to the next item row in the direction of `offset` (group rows are passed
+    /// over) and marks the item there read: what `n` and `p` do in the modal. Stays put when there
+    /// is no item row that way.
     pub fn step_item(&mut self, offset: isize, cx: &mut Context<Self>) {
-        self.move_cursor(offset, cx);
-        self.operate(true, cx);
+        let Some(cursor) = self.cursor() else {
+            return;
+        };
+        let is_item = |index: &usize| self.rows[*index].item.is_some();
+        let target = if offset >= 0 {
+            (cursor + 1..self.rows.len()).find(is_item)
+        } else {
+            (0..cursor).rev().find(is_item)
+        };
+        if let Some(index) = target {
+            self.set_cursor(index, cx);
+            self.operate(true, cx);
+        }
     }
 
     /// Opens the file of the item under the cursor in a read-only editor tab, markdown
@@ -407,7 +542,7 @@ impl InboxView {
             .w_full()
             .items_start()
             .gap(px(10.))
-            .pl(px(12.))
+            .pl(px(12. + if row.member { MEMBER_INDENT } else { 0. }))
             .pr(px(14.))
             .py(px(7.))
             .when(cursor, |row| row.bg(tint))
@@ -678,6 +813,7 @@ impl Render for InboxView {
             }))
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| this.open_file(window, cx)))
             .on_action(cx.listener(|this, _: &MarkUnread, _, cx| this.mark_unread(cx)))
+            .on_action(cx.listener(|this, _: &Dismiss, window, cx| this.dismiss(window, cx)))
             .on_action(cx.listener(|this, _: &crate::Refresh, _, cx| this.refresh(cx)))
             .size_full()
             .overflow_hidden()

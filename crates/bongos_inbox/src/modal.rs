@@ -1,12 +1,12 @@
 //! The item in a modal over the whole window, for the sidebar layout: 640 px wide (never wider
 //! than the window less 40 px), a 2 px accent line along its top edge, the elevated surface with
 //! the border outline, rounded corners and a shadow, over a dim scrim. `inbox: next` and
-//! `inbox: previous` (`n` and `p`) show the next or previous item, which is then read; Esc, or a
-//! click outside, closes it.
+//! `inbox: previous` (`n` and `p`) show the next or previous item, which is then read, passing
+//! over group rows; `inbox: dismiss` archives the item shown; Esc, or a click outside, closes it.
 
 use crate::item::{self, ItemDetail};
 use crate::view::InboxView;
-use crate::{Next, OpenFile, Previous};
+use crate::{Dismiss, Next, OpenFile, Previous};
 use gpui::{
     App, BoxShadow, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
     IntoElement, MouseButton, Render, ScrollHandle, Subscription, Window, black, div, point, px,
@@ -97,6 +97,10 @@ impl Render for ItemModal {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &Next, _, cx| this.step(1, cx)))
             .on_action(cx.listener(|this, _: &Previous, _, cx| this.step(-1, cx)))
+            .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
+                this.view
+                    .update(cx, |view, cx| view.dismiss_in_modal(window, cx));
+            }))
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| {
                 this.view.update(cx, |view, cx| view.open_file(window, cx));
             }))

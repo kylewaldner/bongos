@@ -1398,6 +1398,10 @@ async fn inbox_commands_dispatch_by_name(cx: &mut TestAppContext) {
             ("inbox::Refresh", "inbox: refresh"),
             ("inbox::OpenItem", "inbox: open item"),
             ("inbox::MarkUnread", "inbox: mark unread"),
+            ("inbox::FocusItem", "inbox: focus item"),
+            ("inbox::FocusList", "inbox: focus list"),
+            ("inbox::OpenFile", "inbox: open file"),
+            ("inbox::Dismiss", "inbox: dismiss"),
         ];
         #[cfg(debug_assertions)]
         names.push(("inbox::DumpView", "inbox: dump view"));
