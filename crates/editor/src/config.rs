@@ -29,6 +29,26 @@ impl Editor {
         self.text_style_refinement = Some(style);
     }
 
+    /// The per-editor text style refinement, when one is set.
+    pub fn text_style_refinement(&self) -> Option<&TextStyleRefinement> {
+        self.text_style_refinement.as_ref()
+    }
+
+    /// Removes the per-editor text style refinement.
+    pub fn clear_text_style_refinement(&mut self) {
+        self.text_style_refinement = None;
+    }
+
+    /// The cursor shape forced on this editor, when there is one.
+    pub fn cursor_shape_override(&self) -> Option<CursorShape> {
+        self.cursor_shape_override
+    }
+
+    /// Whether the gutter is shown.
+    pub fn show_gutter(&self) -> bool {
+        self.show_gutter
+    }
+
     /// called by the Element so we know what style we were most recently rendered with.
     pub fn set_style(&mut self, style: EditorStyle, window: &mut Window, cx: &mut Context<Self>) {
         // We intentionally do not inform the display map about the minimap style

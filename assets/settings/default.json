@@ -2698,7 +2698,8 @@
     // "command_palette", "file_finder", "tab_switcher", "work", "messages", "key_hint",
     // "goto_line", "zap", "isearch", "kill_ring", "query_replace", "set_keybindings", "outline",
     // "project_symbols", "xref_history", "string_rectangle", "language_extensions",
-    // "switch_buffer", "go_to_file", "find_in_files", "search_buffer_lines", "find_directory".
+    // "switch_buffer", "go_to_file", "find_in_files", "search_buffer_lines", "find_directory",
+    // "markdown_block".
     // Remove a name to bring that prompt back as a centered modal. While the list is empty
     // there is no minibuffer, nothing is routed to it and its commands are hidden.
     "enabled_for": [
@@ -2723,7 +2724,8 @@
       "go_to_file",
       "find_in_files",
       "search_buffer_lines",
-      "find_directory"
+      "find_directory",
+      "markdown_block"
     ],
     // The most candidate rows the minibuffer shows at once.
     "max_rows": 15,
@@ -2862,6 +2864,15 @@
     "marker_open": "=== prompt",
     // The text a marker line ends with.
     "marker_close": "===",
+  },
+  // Settings for the markdown editor.
+  "markdown": {
+    // Whether markdown buffers start in the live view: markup is hidden and styled, and the
+    // text is set in the UI font. A buffer can be switched with `markdown: toggle live view`.
+    "live_view": false,
+    // The largest markdown file, in bytes, that starts in the live view; a larger one starts
+    // as source. 0 means no limit.
+    "live_view_max_file_size": 5000000,
   },
   "task_builder": {
     // Whether the task builder is on. It gives each new task a plan todo and adds the

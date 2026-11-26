@@ -237,6 +237,7 @@ members = [
     "crates/bongos_project_repo_model",
     "crates/bongos_prompts",
     "crates/bongos_prompts_model",
+    "crates/bongos_markdown",
     "crates/bongos_markdown_model",
     "crates/bongos_terraform",
     "crates/bongos_undo_tree",
@@ -522,6 +523,7 @@ bongos_project_repo = { path = "crates/bongos_project_repo" }
 bongos_project_repo_model = { path = "crates/bongos_project_repo_model" }
 bongos_prompts = { path = "crates/bongos_prompts" }
 bongos_prompts_model = { path = "crates/bongos_prompts_model" }
+bongos_markdown = { path = "crates/bongos_markdown" }
 bongos_markdown_model = { path = "crates/bongos_markdown_model" }
 bongos_terraform = { path = "crates/bongos_terraform" }
 bongos_undo_tree = { path = "crates/bongos_undo_tree" }
