@@ -419,6 +419,13 @@ impl<'c, 'a> Work<'c, 'a> {
         taken
     }
 
+    /// A slug for a new child of `parent`, `base` or `base-2` and on (03's rules).
+    fn free_slug(&self, base: &str, parent: &DefinitionNode) -> String {
+        let taken = self.taken_slugs(parent);
+        let taken: Vec<&str> = taken.iter().map(String::as_str).collect();
+        free_slug(base, &taken)
+    }
+
     fn attach(&mut self, parent: &str, child: DefinitionNode) -> Result<(), EditRefusal> {
         let parent = self.node_mut(parent)?;
         parent.children.push(child);
@@ -494,7 +501,7 @@ impl<'c, 'a> Work<'c, 'a> {
         }
         let goal = goal.trim().to_string();
         let parent_node = self.node(&parent)?;
-        let slug = free_slug(&slugify(&goal), &self.taken_slugs(parent_node));
+        let slug = self.free_slug(&slugify(&goal), parent_node);
         let folder = child_folder(&parent_node.folder, &slug);
         let todos = if todos.is_empty() {
             default_todos(Kind::PrShip)
@@ -637,7 +644,7 @@ impl<'c, 'a> Work<'c, 'a> {
         node.definition.after.clear();
         node.definition.stacked_on = None;
         let parent_node = self.node(&new_parent)?;
-        let slug = free_slug(&node.slug, &self.taken_slugs(parent_node));
+        let slug = self.free_slug(&node.slug, parent_node);
         let from = node.folder.clone();
         let to = child_folder(&parent_node.folder, &slug);
         refolder(&mut node, to.clone());

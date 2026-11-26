@@ -624,7 +624,7 @@ fn under_tasks(path: &str) -> bool {
 fn generated_batches_only_change_task_files_under_tasks() {
     let mut rng = Lcg(0x5eed_0052);
     let mut applied_count = 0;
-    for _ in 0..400 {
+    for _ in 0..2000 {
         let value = generated_batch(&mut rng);
         let Ok(applied) = run_with(
             &fixture(),
@@ -661,9 +661,22 @@ fn generated_batches_only_change_task_files_under_tasks() {
             .iter()
             .map(|node| node.definition.id.clone())
             .collect();
-        for (_, id) in &applied.created {
-            assert!(landed_ids.contains(id), "{id} landed in {value}");
+        let original: BTreeSet<String> = fixture()
+            .nodes()
+            .iter()
+            .map(|node| node.definition.id.clone())
+            .collect();
+        for id in &original {
+            if !applied.touched.contains(id) {
+                assert!(landed_ids.contains(id), "{id} kept in {value}");
+            }
+        }
+        for id in &landed_ids {
+            assert!(
+                original.contains(id) || applied.touched.contains(id),
+                "{id} is new but not touched in {value}"
+            );
         }
     }
-    assert!(applied_count >= 100, "only {applied_count} batches applied");
+    assert!(applied_count >= 250,"only {applied_count} batches applied");
 }
