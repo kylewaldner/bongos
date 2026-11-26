@@ -116,7 +116,10 @@ fn error(batch: Value, known: &[(&str, &str)]) -> String {
 #[test]
 fn validate_batch_refuses_unknown_ops() {
     assert_eq!(
-        error(json!({ "ops": [{"op":"remove","task":"t"}, {"op":"rename","task":"t"}] }), &[]),
+        error(
+            json!({ "ops": [{"op":"remove","task":"t"}, {"op":"rename","task":"t"}] }),
+            &[]
+        ),
         "op 2: unknown op `rename`; use one of create, set, move, remove, add_edge, remove_edge"
     );
 }
@@ -176,7 +179,10 @@ fn validate_batch_refuses_unknown_fields() {
         json!({ "ops": [{"op":"remove","task":"t","why":"old"}] }),
         &[],
     );
-    assert!(message.starts_with("op 1: unknown field `why`"), "{message}");
+    assert!(
+        message.starts_with("op 1: unknown field `why`"),
+        "{message}"
+    );
 }
 
 #[test]

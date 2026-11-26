@@ -7,8 +7,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use bongos_work_model::{TaskId, UnblockPoint};
 use bongos_work_model::rules;
+use bongos_work_model::{TaskId, UnblockPoint};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -233,8 +233,8 @@ pub fn validate_batch(
             }
             Some(_) => {}
         }
-        let op: GraphOp = serde_json::from_value(op)
-            .map_err(|error| BatchError::at(index, error.to_string()))?;
+        let op: GraphOp =
+            serde_json::from_value(op).map_err(|error| BatchError::at(index, error.to_string()))?;
         ops.push(op);
     }
     let batch = GraphEditBatch {
@@ -271,10 +271,7 @@ pub fn check_batch(
                 }
                 if let Some(name) = reference {
                     if name.is_empty() || name.starts_with('@') {
-                        return Err(BatchError::at(
-                            index,
-                            format!("`{name}` is not a ref name"),
-                        ));
+                        return Err(BatchError::at(index, format!("`{name}` is not a ref name")));
                     }
                     if !created.insert(name) {
                         return Err(BatchError::at(index, format!("duplicate ref `{name}`")));

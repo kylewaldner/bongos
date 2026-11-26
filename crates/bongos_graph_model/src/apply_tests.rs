@@ -6,9 +6,7 @@ use bongos_workflow_model::definition::Scope;
 use serde_json::{Value, json};
 
 use crate::apply::Applied;
-use crate::test_support::{
-    Facts, fixture, fixture_files, nth_id, parse, refusal, run, run_with,
-};
+use crate::test_support::{Facts, fixture, fixture_files, nth_id, parse, refusal, run, run_with};
 
 /// One line per op: `move <from> -> <to>`, `delete <path>`, `write <path>`.
 fn summary(applied: &Applied) -> Vec<String> {
@@ -86,7 +84,10 @@ fn create_writes_a_new_task_file() {
 
 #[test]
 fn create_without_todos_gets_the_default_todos_with_ids() {
-    let applied = run(batch(json!([{ "op": "create", "parent": "run", "goal": "Plain" }]))).unwrap();
+    let applied = run(batch(
+        json!([{ "op": "create", "parent": "run", "goal": "Plain" }]),
+    ))
+    .unwrap();
     let task = written(&applied, "tasks/run/tasks/plain/task.toml");
     let names: Vec<&str> = task.todos.iter().map(|todo| todo.name.as_str()).collect();
     assert_eq!(names, ["implement", "review", "ship"]);
@@ -131,7 +132,10 @@ fn set_rewrites_the_task_file() {
 
 #[test]
 fn set_with_unchanged_values_writes_nothing() {
-    let applied = run(batch(json!([{ "op": "set", "task": "a", "goal": "Goal a" }]))).unwrap();
+    let applied = run(batch(
+        json!([{ "op": "set", "task": "a", "goal": "Goal a" }]),
+    ))
+    .unwrap();
     assert!(applied.ops.is_empty());
     assert!(applied.touched.is_empty());
 }
@@ -146,7 +150,11 @@ fn move_moves_the_folder_and_drops_the_edges_to_it() {
             "write tasks/run/tasks/b/task.toml",
         ]
     );
-    assert!(written(&applied, "tasks/run/tasks/b/task.toml").after.is_empty());
+    assert!(
+        written(&applied, "tasks/run/tasks/b/task.toml")
+            .after
+            .is_empty()
+    );
     assert_eq!(applied.touched, ids(&["a", "b"]));
 }
 
@@ -175,7 +183,11 @@ fn move_drops_the_moved_tasks_own_edges_and_renames_on_a_clash() {
             "write tasks/run/tasks/c/tasks/b-2/task.toml",
         ]
     );
-    assert!(written(&applied, "tasks/run/tasks/c/tasks/b-2/task.toml").after.is_empty());
+    assert!(
+        written(&applied, "tasks/run/tasks/c/tasks/b-2/task.toml")
+            .after
+            .is_empty()
+    );
 }
 
 #[test]
@@ -188,7 +200,11 @@ fn remove_deletes_the_subtree_and_drops_the_edges_to_it() {
             "write tasks/run/tasks/b/task.toml",
         ]
     );
-    assert!(written(&applied, "tasks/run/tasks/b/task.toml").after.is_empty());
+    assert!(
+        written(&applied, "tasks/run/tasks/b/task.toml")
+            .after
+            .is_empty()
+    );
 
     let applied = run_with(
         &fixture(),
@@ -250,7 +266,11 @@ fn remove_edge_writes_the_holder() {
     ])))
     .unwrap();
     assert_eq!(summary(&applied), ["write tasks/run/tasks/b/task.toml"]);
-    assert!(written(&applied, "tasks/run/tasks/b/task.toml").after.is_empty());
+    assert!(
+        written(&applied, "tasks/run/tasks/b/task.toml")
+            .after
+            .is_empty()
+    );
     assert_eq!(
         refusal(
             batch(json!([{ "op": "remove_edge", "from": "b", "to": "a", "kind": "stacked_on" }])),
@@ -286,7 +306,11 @@ fn refs_resolve_across_ops() {
     assert_eq!(kid.size, Some(5));
     let next = written(&applied, "tasks/run/tasks/next/task.toml");
     assert_eq!(next.after[0].task, "parent");
-    let created: Vec<&str> = applied.created.iter().map(|(name, _)| name.as_str()).collect();
+    let created: Vec<&str> = applied
+        .created
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
     assert_eq!(created, ["p", "k", "q"]);
 }
 
@@ -322,7 +346,10 @@ fn retitling_a_started_task_is_allowed() {
         &BTreeMap::new(),
     )
     .unwrap();
-    assert_eq!(written(&applied, "tasks/run/tasks/a/task.toml").goal, "Renamed");
+    assert_eq!(
+        written(&applied, "tasks/run/tasks/a/task.toml").goal,
+        "Renamed"
+    );
 }
 
 #[test]
@@ -551,7 +578,15 @@ fn generated_batch(rng: &mut Lcg) -> Value {
         .iter()
         .map(|id| id.to_string())
         .collect();
-    let goals = ["A", "B", "Documents", "Runs", "New work", "Tasks", "Project"];
+    let goals = [
+        "A",
+        "B",
+        "Documents",
+        "Runs",
+        "New work",
+        "Tasks",
+        "Project",
+    ];
     let mut ops = Vec::new();
     let mut made = 0;
     for _ in 0..(1 + rng.next() % 6) {
@@ -615,9 +650,9 @@ fn land(files: &mut BTreeMap<String, String>, ops: &[DefinitionOp]) {
 
 fn under_tasks(path: &str) -> bool {
     path.starts_with("tasks/")
-        && !path.split('/').any(|part| {
-            ["project.toml", "workflows", "lanes", "checks", "..", "."].contains(&part)
-        })
+        && !path
+            .split('/')
+            .any(|part| ["project.toml", "workflows", "lanes", "checks", "..", "."].contains(&part))
 }
 
 #[test]
@@ -645,7 +680,10 @@ fn generated_batches_only_change_task_files_under_tasks() {
                     );
                 }
                 DefinitionOp::Move { from, to } => {
-                    assert!(under_tasks(from) && under_tasks(to), "{from} -> {to} in {value}");
+                    assert!(
+                        under_tasks(from) && under_tasks(to),
+                        "{from} -> {to} in {value}"
+                    );
                     assert!(!from.ends_with(".toml") && !to.ends_with(".toml"));
                 }
             }
@@ -653,7 +691,10 @@ fn generated_batches_only_change_task_files_under_tasks() {
         // The landed files parse, and hold exactly the tasks the batch left.
         let mut files = fixture_files();
         land(&mut files, &applied.ops);
-        assert_eq!(files.get("project.toml"), fixture_files().get("project.toml"));
+        assert_eq!(
+            files.get("project.toml"),
+            fixture_files().get("project.toml")
+        );
         assert_eq!(files.get("task.toml"), fixture_files().get("task.toml"));
         let landed = parse(&files);
         let landed_ids: BTreeSet<String> = landed
@@ -678,5 +719,5 @@ fn generated_batches_only_change_task_files_under_tasks() {
             );
         }
     }
-    assert!(applied_count >= 250,"only {applied_count} batches applied");
+    assert!(applied_count >= 250, "only {applied_count} batches applied");
 }

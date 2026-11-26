@@ -179,7 +179,9 @@ impl fmt::Display for EditRefusal {
                 ),
             },
             EditRefusal::UnknownTask(task) => write!(f, "unknown task {task}"),
-            EditRefusal::SiblingsOnly { a, b } => write!(f, "edges join siblings only: {a} and {b}"),
+            EditRefusal::SiblingsOnly { a, b } => {
+                write!(f, "edges join siblings only: {a} and {b}")
+            }
             EditRefusal::Cycle(path) => write!(f, "cycle: {}", path.join(" -> ")),
             EditRefusal::Started { goal, change } => {
                 write!(f, "started task `{goal}` cannot be {}", change.words())
@@ -605,7 +607,11 @@ impl<'c, 'a> Work<'c, 'a> {
     }
 
     /// Refuses when any task of the subtree of `id` is held, or is started.
-    fn subtree_unstarted(&self, id: &str, change: StartedChange) -> Result<Vec<TaskId>, EditRefusal> {
+    fn subtree_unstarted(
+        &self,
+        id: &str,
+        change: StartedChange,
+    ) -> Result<Vec<TaskId>, EditRefusal> {
         let mut ids = Vec::new();
         collect_ids(self.node(id)?, &mut ids);
         for task in &ids {
@@ -754,7 +760,12 @@ impl<'c, 'a> Work<'c, 'a> {
         Ok(())
     }
 
-    fn remove_edge(&mut self, from: &TaskRef, to: &TaskRef, kind: EdgeKind) -> Result<(), EditRefusal> {
+    fn remove_edge(
+        &mut self,
+        from: &TaskRef,
+        to: &TaskRef,
+        kind: EdgeKind,
+    ) -> Result<(), EditRefusal> {
         let a = self.resolve(from)?;
         let b = self.resolve(to)?;
         self.edge_ends(&a, &b)?;
@@ -837,7 +848,11 @@ impl<'c, 'a> Work<'c, 'a> {
             }
         }
         deletes.sort();
-        ops.extend(deletes.into_iter().map(|path| DefinitionOp::Delete { path }));
+        ops.extend(
+            deletes
+                .into_iter()
+                .map(|path| DefinitionOp::Delete { path }),
+        );
         ops.extend(
             writes
                 .into_iter()
@@ -868,9 +883,7 @@ fn detach(node: &mut DefinitionNode, id: &str) -> Option<DefinitionNode> {
     {
         return Some(node.children.remove(position));
     }
-    node.children
-        .iter_mut()
-        .find_map(|child| detach(child, id))
+    node.children.iter_mut().find_map(|child| detach(child, id))
 }
 
 fn refolder(node: &mut DefinitionNode, folder: String) {
@@ -929,9 +942,7 @@ fn sibling_cycle(parent: &DefinitionNode, from: &str, target: &str) -> Option<Ve
             children: Vec::new(),
         })
         .collect();
-    let task = siblings
-        .iter()
-        .find(|task| task.id() == Some(from))?;
+    let task = siblings.iter().find(|task| task.id() == Some(from))?;
     let place = Place {
         task,
         siblings: &siblings,
