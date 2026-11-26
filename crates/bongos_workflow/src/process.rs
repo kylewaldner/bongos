@@ -4,10 +4,12 @@
 //! children die too), so halt and cancel end every process within 5 s even when it ignores
 //! SIGTERM.
 //!
-//! A started process is recorded with its pid and its start time (field 22 of `/proc/<pid>/stat`,
-//! in clock ticks since boot). A crash leaves processes running, since `setsid` detaches them; at
-//! the next load [`kill_orphans`] stops a recorded process only when the pid is alive with the same
-//! start time, so a reused pid is never killed.
+//! A started process is recorded with its pid and its start time (on Linux field 22 of
+//! `/proc/<pid>/stat`, in clock ticks since boot; elsewhere `sysinfo`'s start time, in seconds
+//! since the epoch). A crash leaves processes running, since `setsid` detaches them; at the next
+//! load [`kill_orphans`] stops a recorded process only when the pid is alive with the same start
+//! time, so a reused pid is never killed. [`record_alive`] is that check, which pools also use to
+//! tell whether a holder still runs.
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -150,7 +152,7 @@ pub fn kill_orphans(records: &[ProcessRecord]) -> Vec<OrphanOutcome> {
         .map(|record| {
             if record.pid == 0 || record.start_time == 0 {
                 OrphanOutcome::Unknown
-            } else if matches_record(*record) {
+            } else if record_alive(*record) {
                 OrphanOutcome::Killed
             } else {
                 if group_alive(record.pid) {
@@ -236,22 +238,33 @@ fn probe_group(pgid: u32) -> bool {
     pgid > 1 && unsafe { libc::killpg(pgid, 0) } == 0
 }
 
-/// Whether `record.pid` is a live (not zombie) process with `record.start_time`.
-fn matches_record(record: ProcessRecord) -> bool {
-    match stat(record.pid) {
-        Some(stat) => stat.start_time == record.start_time && stat.state != 'Z',
+/// Whether `record.pid` is a live process started at `record.start_time`. A zombie (exited, not
+/// yet reaped) is not alive, and neither is a pid now held by a process started at another time
+/// (a reused pid). A start time of 0 (unknown) matches no process.
+pub fn record_alive(record: ProcessRecord) -> bool {
+    matches(stat(record.pid), record)
+}
+
+fn matches(stat: Option<Stat>, record: ProcessRecord) -> bool {
+    match stat {
+        Some(stat) => {
+            record.start_time != 0 && stat.start_time == record.start_time && stat.state != 'Z'
+        }
         None => false,
     }
 }
 
-/// The start time of process `pid`, in clock ticks since boot; `None` when it does not exist or
-/// the platform has no `/proc`.
+/// The start time of process `pid` as [`ProcessRecord::start_time`] keeps it: on Linux in clock
+/// ticks since boot (from `/proc`), elsewhere in seconds since the epoch (from `sysinfo`). `None`
+/// when no such process exists.
 pub fn start_time(pid: u32) -> Option<u64> {
     stat(pid).map(|stat| stat.start_time)
 }
 
 struct Stat {
     state: char,
+    /// Read only where `/proc` gives it; elsewhere [`group_alive`] asks `killpg`.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pgrp: u32,
     start_time: u64,
 }
@@ -263,8 +276,33 @@ fn stat(pid: u32) -> Option<Stat> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn stat(_pid: u32) -> Option<Stat> {
-    None
+fn stat(pid: u32) -> Option<Stat> {
+    sysinfo_stat(pid)
+}
+
+/// The state and start time of `pid` from `sysinfo`, for platforms without `/proc`: the start
+/// time in seconds since the epoch, the state `Z` for a zombie. The process group is not known
+/// (0). Built on Linux only for its tests.
+#[cfg(any(not(target_os = "linux"), test))]
+fn sysinfo_stat(pid: u32) -> Option<Stat> {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System};
+    let pid = Pid::from_u32(pid);
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    let process = system.process(pid)?;
+    Some(Stat {
+        state: if process.status() == ProcessStatus::Zombie {
+            'Z'
+        } else {
+            'R'
+        },
+        pgrp: 0,
+        start_time: process.start_time(),
+    })
 }
 
 /// Parses `/proc/<pid>/stat`. The command name (field 2) is in parentheses and may hold spaces

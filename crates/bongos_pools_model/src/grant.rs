@@ -20,13 +20,18 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::{Deserialize, Serialize};
+
 use crate::decl::{GuardCheck, PoolKind};
 use crate::holder::{Holder, HostRef};
 use crate::needs::{Need, NeedMode};
 use crate::wait_for::Refused;
 
 /// Milliseconds since the Unix epoch, as given by the caller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+#[serde(transparent)]
 pub struct Timestamp(pub u64);
 
 impl Timestamp {
@@ -36,7 +41,8 @@ impl Timestamp {
 }
 
 /// The caller's id for one request; all its waiters and holds carry it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct RequestId(pub u64);
 
 /// What a request asks for: one need per pool, at most once per pool. A request naming no pool
@@ -51,19 +57,22 @@ pub struct Request {
 }
 
 /// One store's pools and its ticket counter.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct PoolTable {
     pub pools: BTreeMap<String, PoolState>,
     pub next_ticket: u64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PoolState {
     pub kind: PoolKind,
     /// The number of slots of a `slots` pool; 1 for a mutex; unused by `rw` and `guard`.
     pub size: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<GuardState>,
+    #[serde(default)]
     pub holds: Vec<Hold>,
+    #[serde(default)]
     pub waiters: Vec<Waiter>,
 }
 
@@ -92,22 +101,25 @@ impl PoolState {
 
 /// A pool's guard: its check, the time a reading must wait after the one that admitted the last
 /// grant, the last reading recorded and the time of the reading that admitted the last grant.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GuardState {
     pub check: GuardCheck,
     pub settle_seconds: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reading: Option<GuardReading>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spent: Option<Timestamp>,
 }
 
 /// One reading of a guard and when it was taken.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct GuardReading {
     pub value: GuardValue,
     pub at: Timestamp,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum GuardValue {
     FreeMemoryGb(f64),
     FreeDiskGb(f64),
@@ -143,7 +155,7 @@ impl GuardReadings {
 }
 
 /// A granted need. Its ticket is its id, which a release names.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Hold {
     pub ticket: u64,
     pub request: RequestId,
@@ -153,7 +165,7 @@ pub struct Hold {
 }
 
 /// A need waiting for its turn in one pool.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Waiter {
     pub ticket: u64,
     pub request: RequestId,

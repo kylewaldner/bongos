@@ -5,17 +5,21 @@
 //! by pid and start time, so a reused pid never keeps a hold. Whether a process lives is an input
 //! (a [`Probe`]); nothing here reads the system.
 
+use serde::{Deserialize, Serialize};
+
 use crate::grant::{Hold, PoolTable, Waiter};
 
 /// The key every level of one owner shares: the run id for anything inside a workflow run,
 /// `check/<task id>/<check>` for a check started by hand or by landing, and `tree/<lane>` for a
 /// hook outside any job.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct OwnerKey(pub String);
 
 /// Where inside its owner a holder sits. `Job` and `Run` enclose every other level of the same
 /// owner and `Step { key }` encloses `Part { key, .. }` (see [`HolderPath::encloses`]).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Level {
     Job,
     Run,
@@ -24,7 +28,7 @@ pub enum Level {
     Hook { point: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct HolderPath {
     pub owner: OwnerKey,
     pub level: Level,
@@ -48,31 +52,33 @@ impl HolderPath {
 }
 
 /// The text the views show for a holder ("lane build-2, job on Invoice export").
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct HolderLabel(pub String);
 
 /// The writer process that asked for a pool. `start` is the process start time as the platform
 /// reports it (the `/proc` start time on Linux, seconds since the epoch elsewhere).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct HostRef {
     pub pid: u32,
     pub start: u64,
 }
 
 /// The holder's own process, once it exists, named like [`HostRef`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ProcRef {
     pub pid: u32,
     pub start: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Holder {
     /// The id of the project the holder belongs to.
     pub project: String,
     pub path: HolderPath,
     pub label: HolderLabel,
     pub host: HostRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process: Option<ProcRef>,
 }
 

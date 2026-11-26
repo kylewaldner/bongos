@@ -5,6 +5,8 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::schedule::{Schedule, parse_timer};
 use crate::source::{
     Diagnostic, LineIndex, Located, ParseError, RawEntry, check_nested_keys, children, read_file,
@@ -44,7 +46,8 @@ pub struct Parsed<T> {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum PoolKind {
     Slots,
     Rw,
@@ -70,10 +73,15 @@ pub enum PoolScope {
     Machine,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum GuardCheck {
     FreeMemoryGb(f64),
-    FreeDiskGb { gb: f64, path: Option<String> },
+    FreeDiskGb {
+        gb: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
     Script(String),
 }
 
