@@ -3005,6 +3005,8 @@ dependencies = [
  "bongos_minibuffer",
  "bongos_slack_model",
  "bongos_work",
+ "bongos_workflow",
+ "bongos_workflow_model",
  "chrono",
  "command_palette_hooks",
  "credentials_provider",

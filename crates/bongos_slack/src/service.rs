@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -329,6 +330,17 @@ struct GlobalSlackService(Entity<SlackService>);
 
 impl Global for GlobalSlackService {}
 
+/// `slack.enabled` as a process with no window last read it from the user settings file.
+#[derive(Debug, PartialEq, Eq)]
+struct EnabledFromFile(bool);
+
+impl Global for EnabledFromFile {}
+
+/// Checks again, right before every send of a post (also after a rate-limit wait and before the
+/// send that repeats a limited post), that the post may still go out; an error fails the post
+/// with nothing sent. A process with no window reads its files here.
+pub type PostCheck = Rc<dyn Fn(&mut AsyncApp) -> Result<(), SlackError>>;
+
 /// Checks that a post's text (as sent, after escaping) fits Slack's limit; a longer text is never
 /// sent.
 fn check_post_text(text: &str) -> Result<(), SlackError> {
@@ -395,9 +407,25 @@ impl SlackService {
         }
     }
 
-    /// Whether `slack.enabled` is true.
+    /// Whether `slack.enabled` is true: in a process with no window, as the user settings file
+    /// read it last ([`Self::set_enabled_from_file`]), else as the loaded settings say.
     pub fn is_enabled(cx: &App) -> bool {
+        if let Some(EnabledFromFile(enabled)) = cx.try_global::<EnabledFromFile>() {
+            return *enabled;
+        }
         SlackSettings::try_get(cx).is_some_and(|settings| settings.enabled)
+    }
+
+    /// In a process with no window, which loads the user settings only once: `slack.enabled` as
+    /// the user settings file reads now, which [`Self::is_enabled`] answers from here on.
+    pub fn set_enabled_from_file(enabled: bool, cx: &mut App) {
+        if cx.try_global::<EnabledFromFile>() == Some(&EnabledFromFile(enabled)) {
+            return;
+        }
+        cx.set_global(EnabledFromFile(enabled));
+        if let Some(service) = Self::global(cx) {
+            service.update(cx, |_, cx| cx.notify());
+        }
     }
 
     /// How long the shared rate-limit wait has left, or `None` when there is none.
@@ -584,7 +612,7 @@ impl SlackService {
                     .spawn(async move |this, cx| {
                         // The running read is measured from its first caller's start; a caller
                         // that joined later checks the five-minute rule from its own start below.
-                        let result = run(this.clone(), now, &operation, cx).await;
+                        let result = run(this.clone(), now, &operation, None, cx).await;
                         let result = result.map(|done| match done {
                             Done::Answer(answer) => answer,
                             Done::Posted(_) => unreachable!("a read answers a read"),
@@ -736,6 +764,18 @@ impl SlackService {
         origin: Origin,
         cx: &mut Context<Self>,
     ) -> Task<Result<PostedMessage, SlackError>> {
+        self.post_checked(destination, text, origin, None, cx)
+    }
+
+    /// [`Self::post`], calling `post_check` before every send.
+    pub fn post_checked(
+        &mut self,
+        destination: Destination,
+        text: String,
+        origin: Origin,
+        post_check: Option<PostCheck>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<PostedMessage, SlackError>> {
         if let Err(error) = self.check(cx).and_then(|()| check_post_text(&text)) {
             return Task::ready(Err(error));
         }
@@ -755,7 +795,7 @@ impl SlackService {
             let began = this
                 .read_with(cx, |this, _| this.clock.now())
                 .map_err(|_| SlackError::NotConnected)?;
-            let result = run(this, began, &operation, cx).await;
+            let result = run(this, began, &operation, post_check.as_ref(), cx).await;
             drop(finished);
             result.map(|done| match done {
                 Done::Posted(posted) => posted,
@@ -767,11 +807,12 @@ impl SlackService {
 
 /// Sends `operation`, waiting behind the shared rate-limit wait and repeating after a rate
 /// limit, until it is answered, fails, or its wait would end more than [`MAX_WAIT`] after
-/// `began`.
+/// `began`. `post_check`, when given, runs right before every send.
 async fn run(
     this: WeakEntity<SlackService>,
     began: Instant,
     operation: &Operation,
+    post_check: Option<&PostCheck>,
     cx: &mut AsyncApp,
 ) -> Result<Done, SlackError> {
     let gone = |_| SlackError::NotConnected;
@@ -790,6 +831,18 @@ async fn run(
         }
         let (generation, client) = this.update(cx, |this, cx| this.client(cx)).map_err(gone)?;
         let client = client.await?;
+        if let Some(post_check) = post_check {
+            post_check(cx)?;
+            let current = this
+                .update(cx, |this, cx| {
+                    this.check(cx).map(|()| connection::generation(cx))
+                })
+                .map_err(gone)??;
+            if current != generation {
+                // The check found another connection: send with its client.
+                continue;
+            }
+        }
         match operation.send(&*client).await {
             Ok(done) => return Ok(done),
             Err(ApiError::RateLimited { retry_after }) => {

@@ -23,7 +23,7 @@ use agent_ui::AgentPanel;
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use cli::FORCE_CLI_MODE_ENV_VAR_NAME;
-use client::{Client, ProxySettings, UserStore};
+use client::{Client, UserStore};
 use collections::HashMap;
 use db::kvp::{GlobalKeyValueStore, KeyValueStore};
 use editor::Editor;
@@ -35,12 +35,10 @@ use git_ui::clone::clone_and_open;
 use gpui::{App, AppContext, Application, AsyncApp, QuitMode, Task, TaskExt, UpdateGlobal as _};
 use gpui_platform;
 
-use gpui_tokio::Tokio;
 use language::LanguageRegistry;
 use project_panel::ProjectPanel;
 use prompt_store::PromptBuilder;
 use remote::RemoteConnectionOptions;
-use reqwest_client::ReqwestClient;
 
 use assets::Assets;
 use node_runtime::{NodeBinaryOptions, NodeRuntime};
@@ -495,14 +493,9 @@ fn main() {
         handle_keymap_file_changes(user_keymap_file_rx, user_keymap_watcher, cx);
 
         let user_agent = bongos_version::user_agent(std::env::consts::OS, std::env::consts::ARCH);
-        let proxy_url = ProxySettings::get_global(cx).proxy_url();
-        let http = {
-            let _guard = Tokio::handle(cx).enter();
-
-            ReqwestClient::proxy_and_user_agent(proxy_url, &user_agent)
-                .expect("could not start HTTP client")
-        };
-        cx.set_http_client(Arc::new(bongos_net::GuardedHttpClient::new(Arc::new(http))));
+        let http =
+            engine_host::guarded_http_client(&user_agent, cx).expect("could not start HTTP client");
+        cx.set_http_client(http);
 
         <dyn Fs>::set_global(fs.clone(), cx);
 
