@@ -966,6 +966,49 @@ fn a_mixed_waiter_first_too_long_moves_back_behind_a_waiter_it_blocks(cx: &mut T
 }
 
 #[gpui::test]
+fn a_mixed_waiter_whose_project_half_is_free_is_granted_not_moved_back(cx: &mut TestAppContext) {
+    let world = World::new();
+    let a = world.project(
+        cx,
+        "a",
+        host(1),
+        vec![pool("db", PoolKind::Mutex, 1)],
+        vec![pool("gpu", PoolKind::Mutex, 1)],
+    );
+    let b = world.project(
+        cx,
+        "b",
+        host(2),
+        vec![],
+        vec![pool("gpu", PoolKind::Mutex, 1)],
+    );
+    let db = watch(cx, a.broker.acquire(ask("db-only", &[need("db")])));
+    cx.run_until_parked();
+    let db = lease(&db);
+    let mixed = watch(
+        cx,
+        a.broker.acquire(ask("mixed", &[need("gpu"), need("db")])),
+    );
+    cx.run_until_parked();
+
+    // It is first in gpu past the interval, another host's request queues behind it, and db is
+    // released before the next poll: its project half no longer blocks it.
+    world.advance(cx, MIXED_HEAD * 2);
+    let other = watch(cx, b.broker.acquire(ask("b-job", &[need("gpu")])));
+    cx.run_until_parked();
+    drop(db);
+    cx.run_until_parked();
+    world.advance(cx, POLL * 2);
+
+    let mixed = lease(&mixed);
+    assert_eq!(mixed.hold_ids().len(), 2, "granted whole");
+    let machine = read(&a).1;
+    assert_eq!(holds(&machine, "gpu"), vec!["mixed"]);
+    assert_eq!(waiters(&machine, "gpu"), vec!["b-job"]);
+    assert!(other.borrow().is_none(), "the later waiter still waits");
+}
+
+#[gpui::test]
 fn a_failing_guard_keeps_a_request_waiting_and_a_passing_one_admits_it(cx: &mut TestAppContext) {
     let world = World::new();
     let a = world.project(
