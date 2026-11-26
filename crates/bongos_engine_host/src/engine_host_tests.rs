@@ -1220,7 +1220,8 @@ fn a_stop_is_signaled_only_after_its_reply_was_flushed() {
     let (server_side, client_side) = UnixStream::pair().unwrap();
     let peer = bongos_project_repo::peer_identity(&server_side, ClientKind::Cli).unwrap();
     let (outbox, lines) = std::sync::mpsc::sync_channel(crate::server::OUTBOX_LINES);
-    let connection = crate::server::Connection::new(0, peer, server_side.try_clone().unwrap(), outbox);
+    let connection =
+        crate::server::Connection::new(0, peer, server_side.try_clone().unwrap(), outbox);
 
     let written = Arc::new(AtomicBool::new(false));
     let stopped_early = Arc::new(AtomicBool::new(false));
