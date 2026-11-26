@@ -472,3 +472,342 @@ async fn overlapping_rescans_coalesce_and_an_identical_scan_emits_nothing(cx: &m
     });
     assert_eq!(*changes.lock(), 0);
 }
+
+/// Waits for an operation to finish, failing after [`HANG_GUARD`].
+async fn outcome_of(cx: &mut TestAppContext, task: Task<OpOutcome>) -> OpOutcome {
+    let mut guard = cx.executor().timer(HANG_GUARD).fuse();
+    let mut task = task.fuse();
+    select_biased! {
+        outcome = task => outcome,
+        _ = guard => panic!("timed out waiting for an operation"),
+    }
+}
+
+/// The unique and inode of the item with `summary` in the snapshot.
+fn key_of(inbox: &InboxState, summary: &str) -> (String, u64) {
+    let snapshot = inbox.snapshot().unwrap();
+    let index = (0..snapshot.len())
+        .find(|index| {
+            snapshot
+                .item(*index)
+                .is_some_and(|item| item.summary == summary)
+        })
+        .unwrap_or_else(|| panic!("no item {summary}"));
+    let entry = &snapshot.items()[index].0;
+    (entry.unique.clone(), entry.inode)
+}
+
+/// The file names in `dir`, sorted, without probe files.
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.starts_with('.'))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Counts the `InboxEvent`s the inbox emits.
+fn count_changes(
+    cx: &mut TestAppContext,
+    inbox: &Entity<InboxState>,
+) -> (Arc<Mutex<usize>>, Subscription) {
+    let changes = Arc::new(Mutex::new(0usize));
+    let subscription = cx.update(|cx| {
+        let changes = changes.clone();
+        cx.subscribe(inbox, move |_, _: &InboxEvent, _| *changes.lock() += 1)
+    });
+    (changes, subscription)
+}
+
+/// Collects what the inbox reports instead of showing it.
+fn capture_reports(cx: &mut TestAppContext, inbox: &Entity<InboxState>) -> Arc<Mutex<Vec<String>>> {
+    let reports = Arc::new(Mutex::new(Vec::new()));
+    inbox.update(cx, |inbox, _| {
+        let reports = reports.clone();
+        inbox.set_reporter(move |text, _| reports.lock().push(text.to_string()));
+    });
+    reports
+}
+
+#[gpui::test]
+async fn two_quick_archives_of_different_items_both_succeed(cx: &mut TestAppContext) {
+    let temp = TempDir::new().unwrap();
+    let root = canonical(&temp).join("inbox");
+    maildir::ensure_layout(&root).unwrap();
+    std::fs::write(root.join(NEW).join("1700000010.a.host"), item_text("A")).unwrap();
+    std::fs::write(root.join(CUR).join("1700000011.b.host:2,S"), item_text("B")).unwrap();
+    init_settings(cx, true);
+    let inbox = real_inbox(cx, &root);
+    wait_for(cx, &inbox, "both items", |inbox| {
+        has_summaries(inbox, &["B", "A"])
+    })
+    .await;
+    let reports = capture_reports(cx, &inbox);
+
+    let (a, b) = inbox.update(cx, |inbox, cx| {
+        let (a_unique, a_inode) = key_of(inbox, "A");
+        let (b_unique, b_inode) = key_of(inbox, "B");
+        (
+            inbox.archive(&a_unique, a_inode, cx),
+            inbox.archive(&b_unique, b_inode, cx),
+        )
+    });
+    let a = outcome_of(cx, a).await;
+    let b = outcome_of(cx, b).await;
+    assert_eq!(
+        a,
+        OpOutcome::Done(root.join(ARCHIVE).join("1700000010.a.host:2,"))
+    );
+    assert_eq!(
+        b,
+        OpOutcome::Done(root.join(ARCHIVE).join("1700000011.b.host:2,S"))
+    );
+    assert_eq!(
+        names_in(&root.join(ARCHIVE)),
+        ["1700000010.a.host:2,", "1700000011.b.host:2,S"]
+    );
+    assert!(names_in(&root.join(NEW)).is_empty() && names_in(&root.join(CUR)).is_empty());
+    inbox.read_with(cx, |inbox, _| {
+        assert!(inbox.snapshot().unwrap().is_empty());
+        assert_eq!(inbox.stats().operations, 2);
+    });
+    assert!(reports.lock().is_empty());
+}
+
+#[gpui::test]
+async fn two_reads_of_one_item_leave_one_read_name(cx: &mut TestAppContext) {
+    let temp = TempDir::new().unwrap();
+    let root = canonical(&temp).join("inbox");
+    maildir::ensure_layout(&root).unwrap();
+    std::fs::write(root.join(NEW).join("1700000012.c.host"), item_text("C")).unwrap();
+    init_settings(cx, true);
+    let inbox = real_inbox(cx, &root);
+    wait_for(cx, &inbox, "the item", |inbox| has_summaries(inbox, &["C"])).await;
+    let reports = capture_reports(cx, &inbox);
+    let (unique, inode) = inbox.read_with(cx, |inbox, _| key_of(inbox, "C"));
+
+    // Two callers, each asking on its own.
+    let first = inbox.update(cx, |inbox, cx| inbox.mark_read(&unique, inode, cx));
+    let second = inbox.update(cx, |inbox, cx| inbox.mark_read(&unique, inode, cx));
+    let read = root.join(CUR).join("1700000012.c.host:2,S");
+    assert_eq!(outcome_of(cx, first).await, OpOutcome::Done(read.clone()));
+    assert_eq!(outcome_of(cx, second).await, OpOutcome::Done(read));
+    assert_eq!(names_in(&root.join(CUR)), ["1700000012.c.host:2,S"]);
+    assert!(names_in(&root.join(NEW)).is_empty());
+    inbox.read_with(cx, |inbox, _| {
+        assert_eq!(inbox.snapshot().unwrap().unread_count(), 0);
+    });
+    assert!(reports.lock().is_empty());
+}
+
+#[gpui::test]
+async fn an_operation_on_an_item_moved_by_hand_reports_and_does_nothing(cx: &mut TestAppContext) {
+    let temp = TempDir::new().unwrap();
+    let root = canonical(&temp).join("inbox");
+    maildir::ensure_layout(&root).unwrap();
+    std::fs::write(root.join(NEW).join("1700000013.d.host"), item_text("D")).unwrap();
+    init_settings(cx, true);
+    // `FakeFs` reports nothing, so the snapshot still shows the item where it was.
+    let fs: Arc<dyn Fs> = FakeFs::new(cx.executor());
+    let inbox = new_inbox(cx, fs, &root, no_rescan());
+    cx.run_until_parked();
+    let reports = capture_reports(cx, &inbox);
+    let (changes, _subscription) = count_changes(cx, &inbox);
+    let (unique, inode) = inbox.read_with(cx, |inbox, _| key_of(inbox, "D"));
+
+    let by_hand = root.join(CUR).join("1700000013.d.host:2,F");
+    std::fs::rename(root.join(NEW).join("1700000013.d.host"), &by_hand).unwrap();
+    let task = inbox.update(cx, |inbox, cx| inbox.archive(&unique, inode, cx));
+    cx.run_until_parked();
+    assert_eq!(outcome_of(cx, task).await, OpOutcome::Moved);
+    assert_eq!(*reports.lock(), [MOVED_MESSAGE]);
+    assert!(names_in(&root.join(ARCHIVE)).is_empty());
+    assert_eq!(names_in(&root.join(CUR)), ["1700000013.d.host:2,F"]);
+    // The rescan shows the item where it went.
+    assert_eq!(*changes.lock(), 1);
+    inbox.read_with(cx, |inbox, _| {
+        let snapshot = inbox.snapshot().unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot.items()[0].0.path, by_hand);
+    });
+
+    // An item removed by hand is the same.
+    std::fs::remove_file(&by_hand).unwrap();
+    let task = inbox.update(cx, |inbox, cx| inbox.mark_read(&unique, inode, cx));
+    cx.run_until_parked();
+    assert_eq!(outcome_of(cx, task).await, OpOutcome::Moved);
+    assert_eq!(*reports.lock(), [MOVED_MESSAGE, MOVED_MESSAGE]);
+    assert!(names_in(&root.join(CUR)).is_empty());
+}
+
+#[gpui::test]
+async fn the_row_turns_read_before_the_watcher_event_which_changes_nothing(
+    cx: &mut TestAppContext,
+) {
+    let temp = TempDir::new().unwrap();
+    let root = canonical(&temp).join("inbox");
+    maildir::ensure_layout(&root).unwrap();
+    std::fs::write(root.join(NEW).join("1700000014.e.host"), item_text("E")).unwrap();
+    init_settings(cx, true);
+    let inbox = real_inbox(cx, &root);
+    wait_for(cx, &inbox, "the item", |inbox| {
+        has_summaries(inbox, &["E"]) && inbox.stats().watches == 1
+    })
+    .await;
+    let (changes, _subscription) = count_changes(cx, &inbox);
+    let (unique, inode) = inbox.read_with(cx, |inbox, _| key_of(inbox, "E"));
+
+    let task = inbox.update(cx, |inbox, cx| inbox.mark_read(&unique, inode, cx));
+    assert!(matches!(outcome_of(cx, task).await, OpOutcome::Done(_)));
+    // Read as soon as the operation is done, without waiting for the watcher.
+    let scans = inbox.read_with(cx, |inbox, _| {
+        let snapshot = inbox.snapshot().unwrap();
+        assert_eq!(snapshot.unread_count(), 0);
+        assert_eq!(snapshot.read().count(), 1);
+        inbox.stats().scans
+    });
+    assert_eq!(*changes.lock(), 1);
+
+    // The watcher reports the link and the unlink; the rescan finds the same names.
+    wait_for(cx, &inbox, "the rescan after the watcher event", |inbox| {
+        inbox.stats().scans > scans
+    })
+    .await;
+    probe_events(cx, &root.join(CUR)).await;
+    assert_eq!(*changes.lock(), 1);
+    inbox.read_with(cx, |inbox, _| {
+        assert_eq!(inbox.snapshot().unwrap().read().count(), 1);
+    });
+}
+
+fn item_with_target(summary: &str, target: &str) -> String {
+    let mut item = item(summary);
+    item.target = Some(target.to_string());
+    format::render(&item)
+}
+
+#[gpui::test]
+async fn targets_resolve_to_live_stale_or_unresolved(cx: &mut TestAppContext) {
+    use bongos_work_model::Status;
+    use bongos_work_model::fixtures;
+
+    let temp = TempDir::new().unwrap();
+    let base = canonical(&temp);
+    let root = base.join("inbox");
+    maildir::ensure_layout(&root).unwrap();
+    let present = base.join("present.md");
+    std::fs::write(&present, "here").unwrap();
+    let task_dir = base.join("task-a");
+    std::fs::create_dir_all(task_dir.join("runs").join("run-1")).unwrap();
+    let mut tree = fixtures::tree(vec![fixtures::leaf("a", Status::Open)]);
+    tree.projects[0].task.children[0].dir = task_dir;
+    let task_id = fixtures::id_of(&tree, "a");
+    let tree = Arc::new(tree);
+
+    let targets = [
+        ("path live", present.display().to_string()),
+        ("path stale", base.join("missing.md").display().to_string()),
+        ("task live", format!("task:{task_id}")),
+        ("task stale", "task:no-such-task".to_string()),
+        ("run live", "run:run-1".to_string()),
+        ("run stale", "run:run-2".to_string()),
+        ("scheme unresolved", "linear:SEQ-1".to_string()),
+        ("relative unresolved", "plan.md".to_string()),
+    ];
+    for (index, (summary, target)) in targets.iter().enumerate() {
+        std::fs::write(
+            root.join(NEW).join(format!("17000001{index:02}.t.host")),
+            item_with_target(summary, target),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        root.join(NEW).join("1700000200.n.host"),
+        item_text("no target"),
+    )
+    .unwrap();
+    init_settings(cx, true);
+    let fs: Arc<dyn Fs> = FakeFs::new(cx.executor());
+    let inbox = new_inbox(cx, fs, &root, no_rescan());
+    inbox.update(cx, |inbox, _| {
+        inbox
+            .resolvers_mut()
+            .set_work_tree(move |_| Some(tree.clone()));
+    });
+    cx.run_until_parked();
+
+    let states = inbox.read_with(cx, |inbox, _| {
+        let snapshot = inbox.snapshot().unwrap();
+        (0..snapshot.len())
+            .map(|index| {
+                (
+                    snapshot.item(index).unwrap().summary.clone(),
+                    snapshot.target(index),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    use TargetState::*;
+    assert_eq!(
+        states,
+        [
+            ("path live".to_string(), Some(Live)),
+            ("path stale".to_string(), Some(Stale)),
+            ("task live".to_string(), Some(Live)),
+            ("task stale".to_string(), Some(Stale)),
+            ("run live".to_string(), Some(Live)),
+            ("run stale".to_string(), Some(Stale)),
+            ("scheme unresolved".to_string(), Some(Unresolved)),
+            ("relative unresolved".to_string(), Some(Unresolved)),
+            ("no target".to_string(), None),
+        ]
+    );
+
+    // The rows mark exactly the stale items, which keep open and dismiss.
+    let rows = inbox.read_with(cx, |inbox, _| {
+        inbox.snapshot().unwrap().rows(&Filter::All, &|_| false)
+    });
+    let mut stale: Vec<String> = Vec::new();
+    for row in &rows {
+        let items = match row {
+            Row::Item(item) => std::slice::from_ref(item),
+            Row::Group(group) => group.members.as_slice(),
+        };
+        for item in items {
+            assert_eq!(item.actions, [view_model::OPEN, view_model::DISMISS]);
+            if item.stale {
+                stale.push(item.summary.clone());
+            }
+        }
+    }
+    stale.sort();
+    assert_eq!(stale, ["path stale", "run stale", "task stale"]);
+}
+
+#[gpui::test]
+async fn without_a_work_tree_task_and_run_targets_are_unresolved(cx: &mut TestAppContext) {
+    let temp = TempDir::new().unwrap();
+    let root = canonical(&temp).join("inbox");
+    maildir::ensure_layout(&root).unwrap();
+    std::fs::write(
+        root.join(NEW).join("1700000300.a.host"),
+        item_with_target("task", "task:x"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join(NEW).join("1700000301.b.host"),
+        item_with_target("run", "run:y"),
+    )
+    .unwrap();
+    init_settings(cx, true);
+    let fs: Arc<dyn Fs> = FakeFs::new(cx.executor());
+    let inbox = new_inbox(cx, fs, &root, no_rescan());
+    cx.run_until_parked();
+    inbox.read_with(cx, |inbox, _| {
+        let snapshot = inbox.snapshot().unwrap();
+        assert_eq!(snapshot.target(0), Some(TargetState::Unresolved));
+        assert_eq!(snapshot.target(1), Some(TargetState::Unresolved));
+    });
+}

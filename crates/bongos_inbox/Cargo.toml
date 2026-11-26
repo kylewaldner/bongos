@@ -14,6 +14,8 @@ doctest = false
 
 [dependencies]
 bongos_inbox_model.workspace = true
+bongos_minibuffer.workspace = true
+bongos_work_model.workspace = true
 fs.workspace = true
 futures.workspace = true
 gpui.workspace = true
@@ -21,8 +23,10 @@ log.workspace = true
 parking_lot.workspace = true
 settings.workspace = true
 util.workspace = true
+workspace.workspace = true
 
 [dev-dependencies]
+bongos_work_model = { workspace = true, features = ["test-support"] }
 chrono.workspace = true
 fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
