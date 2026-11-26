@@ -83,6 +83,22 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// Builds an entry without touching the file system, for tests.
+    #[cfg(test)]
+    pub(crate) fn for_test(dir: Dir, file_name: &str, inode: u64, mtime: SystemTime) -> Entry {
+        let parsed = name::parse_name(file_name).expect("valid test name");
+        Entry {
+            dir,
+            unique: parsed.unique,
+            flags: parsed.flags,
+            path: PathBuf::from(dir.name()).join(file_name),
+            inode,
+            mtime,
+            len: 0,
+            dev: 0,
+        }
+    }
+
     pub fn parsed_name(&self) -> ParsedName {
         ParsedName {
             unique: self.unique.clone(),
