@@ -1047,7 +1047,8 @@ impl Disk {
     }
 
     /// Whether `events` name anything other than temporary files, journals, echoes of the
-    /// store's own writes, and anything under a `.git`.
+    /// store's own writes, and anything under a `.git` or under the root's `inbox` directory.
+    /// A rescan always reloads.
     fn needs_reload(&self, events: &[PathEvent]) -> bool {
         events.iter().any(|event| {
             if event.kind == Some(PathEventKind::Rescan) {
@@ -1056,11 +1057,15 @@ impl Disk {
             if !event.path.starts_with(&self.root) {
                 return false;
             }
-            let in_git = event
-                .path
-                .strip_prefix(&self.root)
-                .is_ok_and(|rel| rel.components().any(|c| c.as_os_str() == ".git"));
-            if in_git {
+            let Ok(rel) = event.path.strip_prefix(&self.root) else {
+                return false;
+            };
+            let in_git = rel.components().any(|c| c.as_os_str() == ".git");
+            let in_inbox = rel
+                .components()
+                .next()
+                .is_some_and(|c| c.as_os_str() == "inbox");
+            if in_git || in_inbox {
                 return false;
             }
             let ignored_name = event
@@ -1469,5 +1474,73 @@ pub(crate) fn reply_for_test(
     Reply {
         sender: Some(sender),
         result: Some(result),
+    }
+}
+
+#[cfg(test)]
+mod needs_reload_tests {
+    use super::*;
+
+    struct NoWatcher;
+
+    impl Watcher for NoWatcher {
+        fn add(&self, _: &Path) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn remove(&self, _: &Path) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn disk(root: &Path) -> Disk {
+        Disk {
+            root: root.to_path_buf(),
+            watcher: Arc::new(NoWatcher),
+            lock: Arc::new(Mutex::new(())),
+            alive: Arc::new(AtomicBool::new(true)),
+            seams: Seams {
+                sources: ProjectSources::default(),
+                writers: DefinitionWriters::default(),
+                needs_conversion: Arc::new(AtomicBool::new(false)),
+                locations: None,
+                done_holds: Arc::default(),
+                done_hold_refreshers: DoneHoldRefreshers::default(),
+            },
+            tree: None,
+            converted: Vec::new(),
+            echoes: Echoes::default(),
+            watched: BTreeSet::new(),
+        }
+    }
+
+    fn reloads(disk: &Disk, path: PathBuf, kind: Option<PathEventKind>) -> bool {
+        disk.needs_reload(&[PathEvent { path, kind }])
+    }
+
+    #[test]
+    fn the_inbox_directory_never_reloads() {
+        let root = PathBuf::from("/work-root");
+        let disk = disk(&root);
+        assert!(!reloads(&disk, root.join("inbox/new/x"), None));
+        assert!(!reloads(&disk, root.join("inbox"), None));
+    }
+
+    #[test]
+    fn siblings_of_the_inbox_and_task_files_reload() {
+        let root = PathBuf::from("/work-root");
+        let disk = disk(&root);
+        assert!(reloads(&disk, root.join("inbox-other/x"), None));
+        assert!(reloads(&disk, root.join("projects/p/task.toml"), None));
+    }
+
+    #[test]
+    fn a_rescan_reloads_even_under_the_inbox() {
+        let root = PathBuf::from("/work-root");
+        let disk = disk(&root);
+        assert!(reloads(
+            &disk,
+            root.join("inbox"),
+            Some(PathEventKind::Rescan)
+        ));
     }
 }
