@@ -171,6 +171,7 @@ bongos_checks.workspace = true
 bongos_emacs.workspace = true
 bongos_engine_host.workspace = true
 bongos_extensions.workspace = true
+bongos_inbox.workspace = true
 bongos_isearch.workspace = true
 bongos_java.workspace = true
 bongos_kotlin.workspace = true
@@ -282,6 +283,7 @@ workspace = { workspace = true, features = ["test-support"] }
 image.workspace = true
 agent_ui = { workspace = true, features = ["test-support"] }
 search = { workspace = true, features = ["test-support"] }
+bongos_inbox_model.workspace = true
 repl = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 

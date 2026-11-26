@@ -400,7 +400,25 @@
       "ctrl-c f L j": "lanes::Pick",
       "ctrl-c f L o": "lanes::Adopt",
       "ctrl-c f L a": "lanes::AcceptGraph",
+      "ctrl-c i": "inbox::Open",
       "ctrl-g": "emacs::KeyboardQuit", // keyboard-quit
+    },
+  },
+  {
+    // Inbox view: move with the Emacs keys; C-f and C-b move between the list and the item.
+    "context": "InboxView",
+    "bindings": {
+      "ctrl-n": "inbox::Next",
+      "ctrl-p": "inbox::Previous",
+      "ctrl-f": "inbox::FocusItem",
+      "ctrl-b": "inbox::FocusList",
+    },
+  },
+  {
+    "context": "InboxItemModal",
+    "bindings": {
+      "ctrl-n": "inbox::Next",
+      "ctrl-p": "inbox::Previous",
     },
   },
   {

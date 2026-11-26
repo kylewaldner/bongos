@@ -1,0 +1,22 @@
+[package]
+name = "bongos_inbox_model"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/bongos_inbox_model.rs"
+doctest = false
+
+[dependencies]
+chrono.workspace = true
+libc.workspace = true
+log.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

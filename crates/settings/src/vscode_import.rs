@@ -227,6 +227,7 @@ impl VsCodeSettings {
             navigation: None,
             undo_tree: None,
             work: None,
+            inbox: None,
             chats: None,
             prompts: None,
             task_builder: None,

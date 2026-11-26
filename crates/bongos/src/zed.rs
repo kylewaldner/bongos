@@ -11,6 +11,8 @@ pub mod edit_prediction_registry;
 #[cfg(test)]
 mod emacs_keymap_tests;
 #[cfg(test)]
+mod inbox_keymap_tests;
+#[cfg(test)]
 mod isearch_keymap_tests;
 #[cfg(test)]
 mod keybinding_page_tests;
@@ -789,6 +791,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         let work_focus = cx.new(bongos_work::FocusStatus::new);
         let workflow_status = cx.new(bongos_workflow::WorkflowStatus::new);
         let prompts_mode_line = cx.new(|_| bongos_prompts::PromptsModeLine::new());
+        let inbox_badge = cx.new(bongos_inbox::InboxBadge::new);
 
         let cursor_position =
             cx.new(|_| go_to_line::cursor_position::CursorPosition::new(workspace));
@@ -810,6 +813,8 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             status_bar.add_left_item(active_file_name, window, cx);
             status_bar.add_left_item(merge_conflict_indicator, window, cx);
             status_bar.add_left_item(activity_indicator, window, cx);
+            // First, so that it is the rightmost item: right items are laid out in reverse.
+            status_bar.add_right_item(inbox_badge, window, cx);
             status_bar.add_right_item(edit_prediction_ui, window, cx);
             status_bar.add_right_item(active_buffer_encoding, window, cx);
             status_bar.add_right_item(active_buffer_language, window, cx);
@@ -5683,6 +5688,7 @@ mod tests {
                 "highlights_tree_view",
                 "icon_theme_selector",
                 "image_viewer",
+                "inbox",
                 "inline_assistant",
                 "isearch",
                 "java",
