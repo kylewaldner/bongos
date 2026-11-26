@@ -4,7 +4,7 @@ use crate::decl::{
     Action, AllDone, ExhaustedAction, FieldType, GuardCheck, On, PoolKind, PoolScope, RunResult,
     lane_fields, parse_pools, parse_queues, parse_triggers,
 };
-use crate::schedule::{Schedule, TimeOfDay, Weekday};
+use crate::schedule::{Schedule, TimeOfDay};
 
 const POOLS: &str = r#"schema = 1
 [[pool]]
