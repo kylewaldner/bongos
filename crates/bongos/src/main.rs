@@ -594,9 +594,35 @@ fn main() {
             },
             cx,
         );
-        bongos_work::init(
+        let work_dirs = bongos_work::WorkDirs::new(util::paths::home_dir(), paths::data_dir());
+        bongos_inbox::init(
+            bongos_inbox::InboxDirs::new(&work_dirs.root),
             fs.clone(),
-            bongos_work::WorkDirs::new(util::paths::home_dir(), paths::data_dir()),
+            cx,
+        );
+        bongos_work::init(fs.clone(), work_dirs, cx);
+        bongos_inbox::set_work_tree(
+            |cx| bongos_work::WorkStore::global(cx).and_then(|store| store.read(cx).snapshot()),
+            cx,
+        );
+        bongos_inbox::InboxActions::set_task_focus(
+            |id, workspace, window, cx| {
+                workspace
+                    .update(cx, |workspace, cx| {
+                        bongos_work::focus_task(id, workspace, window, cx)
+                    })
+                    .ok();
+            },
+            cx,
+        );
+        bongos_inbox::InboxActions::set_run_focus(
+            |id, workspace, window, cx| {
+                workspace
+                    .update(cx, |workspace, cx| {
+                        bongos_workflow::run_view::focus_run(id, workspace, window, cx)
+                    })
+                    .ok();
+            },
             cx,
         );
         bongos_chat::init(
@@ -710,6 +736,7 @@ fn main() {
         );
         command_palette::init(cx);
         bongos_work::init_palette(cx);
+        bongos_inbox::init_palette(cx);
         bongos_chat::init_palette(cx);
         bongos_prompts::init_palette(cx);
         bongos_builder::init_palette(cx);

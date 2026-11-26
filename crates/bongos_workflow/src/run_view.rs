@@ -33,7 +33,8 @@ use ui::{
 use workspace::item::{Item, ItemEvent};
 use workspace::{MultiWorkspace, OpenOptions, OpenVisible, Workspace};
 
-use crate::actions::{show_toast, workflow};
+use crate::WorkflowsSettings;
+use crate::actions::{OFF_MESSAGE, show_toast, workflow};
 use crate::commands::{on, on_run, open_report, open_worktree};
 use crate::engine::WorkflowEngine;
 use crate::lifecycle::{RunId, RunStatus, definition_copy_dir};
@@ -1328,6 +1329,34 @@ pub fn show(
     let view = cx.new(|cx| RunView::new(engine, run, cx));
     cx.default_global::<RunViews>().0.push(view.downgrade());
     workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
+}
+
+/// The toast when no run has the id `focus_run` was given.
+pub fn no_such_run(id: &str) -> String {
+    format!("No workflow run {id}")
+}
+
+/// Shows the run `id` in `workspace`, as `workflow: show run` shows the run in front. Says so in
+/// a toast when workflows are off or the engine has no run with that id.
+pub fn focus_run(
+    id: &str,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if !WorkflowsSettings::get_global(cx).enabled {
+        show_toast(workspace, OFF_MESSAGE.to_string(), cx);
+        return;
+    }
+    let Some(engine) = WorkflowEngine::ensure(cx) else {
+        return;
+    };
+    let known = engine.lifecycle().shown_state(id).is_some();
+    if known {
+        show(engine, id.to_string(), workspace, window, cx);
+    } else {
+        show_toast(workspace, no_such_run(id), cx);
+    }
 }
 
 /// The run of the active run view of `workspace`, if it is showing one.

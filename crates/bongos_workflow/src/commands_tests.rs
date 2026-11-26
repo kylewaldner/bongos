@@ -780,6 +780,25 @@ async fn the_run_view_buttons_send_the_sandbox_verbs_through_a_remote(cx: &mut T
     cx.update(|_, cx| assert_eq!(cx.global::<LastToast>().0, "the host is gone"));
 }
 
+#[gpui::test]
+async fn focus_run_by_an_unknown_id_says_so_and_shows_no_run_view(cx: &mut TestAppContext) {
+    let (env, cx) = env(cx, true).await;
+    env.workspace.update_in(cx, |workspace, window, cx| {
+        crate::run_view::focus_run("no-such-run", workspace, window, cx)
+    });
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        assert_eq!(
+            cx.global::<LastToast>().0,
+            crate::run_view::no_such_run("no-such-run")
+        )
+    });
+    let shown = env.workspace.read_with(cx, |workspace, cx| {
+        crate::run_view::active_run(workspace, cx)
+    });
+    assert_eq!(shown, None);
+}
+
 /// A remote that records the verb and run of every send.
 struct RunRecordingRemote {
     sent: std::rc::Rc<std::cell::RefCell<Vec<(WorkflowVerb, Option<String>)>>>,

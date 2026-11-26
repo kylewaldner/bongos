@@ -2055,6 +2055,8 @@ dependencies = [
  "bongos_emacs",
  "bongos_engine_host",
  "bongos_extensions",
+ "bongos_inbox",
+ "bongos_inbox_model",
  "bongos_isearch",
  "bongos_java",
  "bongos_kotlin",
@@ -2547,6 +2549,46 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.17",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "bongos_inbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bongos_inbox_model",
+ "bongos_minibuffer",
+ "bongos_work_model",
+ "chrono",
+ "command_palette_hooks",
+ "db",
+ "editor",
+ "fs",
+ "futures 0.3.32",
+ "gpui",
+ "language",
+ "log",
+ "menu",
+ "parking_lot",
+ "paths",
+ "project",
+ "settings",
+ "tempfile",
+ "ui",
+ "util",
+ "workspace",
+ "zed_actions",
+]
+
+[[package]]
+name = "bongos_inbox_model"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "libc",
+ "log",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]

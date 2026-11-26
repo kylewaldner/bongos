@@ -1916,6 +1916,41 @@ mod tests {
         })
     }
 
+    /// Adds a display-only terminal (no PTY, no shell) to `pane` and activates it.
+    fn add_display_only_terminal(
+        workspace: &Entity<Workspace>,
+        pane: &Entity<Pane>,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        workspace.update_in(cx, |workspace, window, cx| {
+            let project = workspace.project().clone();
+            let terminal = cx.new(|cx| {
+                terminal::TerminalBuilder::new_display_only(
+                    Default::default(),
+                    terminal::terminal_settings::AlternateScroll::On,
+                    None,
+                    0,
+                    cx.background_executor(),
+                    util::paths::PathStyle::local(),
+                )
+                .subscribe(cx)
+            });
+            let view = cx.new(|cx| {
+                TerminalView::new(
+                    terminal,
+                    workspace.weak_handle(),
+                    None,
+                    project.downgrade(),
+                    window,
+                    cx,
+                )
+            });
+            pane.update(cx, |pane, cx| {
+                pane.add_item(Box::new(view), true, false, None, window, cx)
+            });
+        });
+    }
+
     #[gpui::test]
     async fn test_terminal_panes_stamp_on_the_workspace_clock(cx: &mut TestAppContext) {
         let (workspace, panel, cx) = workspace_with_terminal_panel(cx).await;
@@ -1926,33 +1961,7 @@ mod tests {
 
         for pane in [&first, &second] {
             let before = load();
-            workspace.update_in(cx, |workspace, window, cx| {
-                let project = workspace.project().clone();
-                let terminal = cx.new(|cx| {
-                    terminal::TerminalBuilder::new_display_only(
-                        Default::default(),
-                        terminal::terminal_settings::AlternateScroll::On,
-                        None,
-                        0,
-                        cx.background_executor(),
-                        util::paths::PathStyle::local(),
-                    )
-                    .subscribe(cx)
-                });
-                let view = cx.new(|cx| {
-                    TerminalView::new(
-                        terminal,
-                        workspace.weak_handle(),
-                        None,
-                        project.downgrade(),
-                        window,
-                        cx,
-                    )
-                });
-                pane.update(cx, |pane, cx| {
-                    pane.add_item(Box::new(view), true, false, None, window, cx)
-                });
-            });
+            add_display_only_terminal(&workspace, pane, cx);
             assert!(load() > before, "adding an item stamps the workspace clock");
             let stamped = pane.read_with(cx, |pane, _| {
                 pane.last_activation_timestamp().expect("an activation")
@@ -2000,6 +2009,9 @@ mod tests {
     async fn test_reveal_pane_opens_the_dock_holding_it(cx: &mut TestAppContext) {
         let (workspace, panel, cx) = workspace_with_terminal_panel(cx).await;
         let second = split_terminal_panel(&workspace, &panel, cx);
+        // An empty panel spawns a real shell when its dock opens, so give it a terminal.
+        let first = panel.read_with(cx, |panel, _| panel.active_pane.clone());
+        add_display_only_terminal(&workspace, &first, cx);
         let center = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
 
         let visible = |pane: &Entity<Pane>, cx: &mut gpui::VisualTestContext| {

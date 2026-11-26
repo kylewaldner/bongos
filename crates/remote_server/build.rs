@@ -17,11 +17,13 @@ fn main() {
 
     // Populate git sha environment variable if git is available
     watch_git_head();
-    if let Some(output) = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
+    // A dev build embeds no sha (see `skip_git_head_watch`).
+    if !skip_git_head_watch()
+        && let Some(output) = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
     {
         let git_sha = String::from_utf8_lossy(&output.stdout);
         let git_sha = git_sha.trim();
@@ -31,6 +33,13 @@ fn main() {
     if let Some(build_identifier) = option_env!("GITHUB_RUN_NUMBER") {
         println!("cargo:rustc-env=ZED_BUILD_ID={build_identifier}");
     }
+}
+
+/// Development scripts set `BONGOS_SKIP_GIT_HEAD_WATCH` so a commit does not rebuild this crate;
+/// release builds leave it unset. Such a build embeds no commit sha: a sha would be as of the last
+/// time this script ran, which differs from the one the app's build script embeds.
+fn skip_git_head_watch() -> bool {
+    std::env::var("BONGOS_SKIP_GIT_HEAD_WATCH").is_ok_and(|value| !value.is_empty() && value != "0")
 }
 
 /// Tells cargo to rerun this script when the checked-out commit changes, so the
@@ -64,11 +73,7 @@ fn watch_git_head() {
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=BONGOS_SKIP_GIT_HEAD_WATCH");
-    // Development scripts set this so a commit does not rebuild this crate; the embedded sha
-    // then stays as of the last time this script ran. Release builds leave it unset.
-    if std::env::var("BONGOS_SKIP_GIT_HEAD_WATCH")
-        .is_ok_and(|value| !value.is_empty() && value != "0")
-    {
+    if skip_git_head_watch() {
         return;
     }
     let Some(output) = Command::new("git")

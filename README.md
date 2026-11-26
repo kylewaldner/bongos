@@ -1204,6 +1204,100 @@ the `minibuffer` settings are `max_rows` (candidate rows shown, 15), `show_count
 before the prompt, true), `message_timeout` (how long a message stays, 4000 ms) and
 `key_hint_delay` (how long a pending key sequence waits before its keys are shown, 500 ms).
 
+## Inbox items
+
+The inbox is a list of items that agents, workflows and scripts leave for you. An item is a file;
+anything that can write a file can post one. Open the inbox with `C-c i` (Emacs keys) or the
+`inbox: open` command. The unread count shows in the status bar and nothing else interrupts you: no
+toast, no sound, no window.
+
+It is on by default. `"inbox": { "enabled": false }` turns it off: bongos then neither creates,
+reads nor watches `~/.bongos/inbox`.
+
+### Layout
+
+```
+~/.bongos/inbox/
+  tmp/       files being written; bongos never looks here
+  new/       delivered, not yet read
+  cur/       items bongos has marked: <name>:2,<flags>
+  archive/   dismissed items, kept for good (bongos never deletes one)
+```
+
+This is Maildir. Bongos creates the four directories (mode `0700`) when it starts.
+
+**Delivery contract.** Write the whole file under a name that is not yet used in `tmp/`, then `mv`
+it into `new/` (same file system, so the move is atomic). Bongos ignores `tmp/`, so it never sees a
+half-written item. A file written straight into `new/` can be read before it is complete and show
+as unreadable. The name is any text that does not start with `.` and has no `:`; the suggested
+form is `<YYYYMMDDTHHMMSSZ>-<source>-<random>.md`, which sorts by time and opens with markdown
+highlighting.
+
+**Read state** is in the name, as in Maildir. Everything in `new/` is unread. `RET` on an item
+renames it to `cur/<name>:2,S`; `u` renames it to `cur/<name>:2,` (an item never goes back to
+`new/`). An item is read when it is in `cur/` and its flags (the letters after `:2,`) include `S`;
+bongos sets and clears only `S` and leaves any other letter alone. `d` moves the item to
+`archive/<name>:2,<flags>`. Bongos renames files and never rewrites one, so the bytes you delivered
+are the bytes in the archive.
+
+### File format
+
+```
+---
+inbox-version: 1
+kind: decision-default
+created: 2026-11-26T09:30:00Z
+source: myproject/overnight-refactor
+group: overnight-refactor
+target: src/cache.rs:42
+summary: Chose a SQLite cache over plain files
+actions: [accept, overturn]
+---
+The unattended run took the default without asking. The record names the step
+and the alternatives it rejected.
+```
+
+The header is the lines between the first `---` (which must be the first line) and the next `---`.
+Each line is `key: value`; the value is everything after the first colon, trimmed. What follows the
+second `---` is the body, free text shown as written (a fenced diff is drawn as a diff).
+
+| Field | Required | Meaning |
+|---|---|---|
+| `inbox-version` | yes | `1`. A higher number makes the item unreadable ("newer item format") instead of guessed at. |
+| `kind` | yes | What sort of item this is, for example `decision-default`, `workflow-healed`, `manual-check`, `run-finished`, `run-failed`, `run-waiting`, `rebase-needed`. Any other word is shown as it is written. |
+| `created` | yes | When it happened, RFC 3339 (`2026-11-26T09:30:00Z`). Rows are ordered newest first by it and show its age. |
+| `source` | yes | Who posted it, `<project>/<what>`. The part before the first `/` is the project shown on the row. |
+| `summary` | yes | One line, the row's title. |
+| `actions` | yes | The actions you offer, as a list: `[accept, overturn]`, or `[]` for none. They are names, not commands: bongos runs only actions it has registered (`open`, `dismiss`, `accept`, `done`, `overturn`, `open-task`, `open-run`) and shows the others as `open` and `dismiss`. |
+| `group` | no | Items that share a `group` (or, without one, a `source`) collapse into one row, `<source>: <n> items (<u> unread)`; `d` on it archives them all. |
+| `target` | no | What `o` opens: a path (absolute, `~/`, or relative to an open project) with an optional `:<line>`, `task:<id>` or `run:<id>`. A target that no longer exists marks the row `stale`. |
+| any other key | no | Kept and ignored, so the format can grow. `approval: unverified` on a `decision-default` item marks its row `unverified`. |
+
+A file that does not parse (no header, a missing required field, a bad `created` or `actions`)
+still shows as an unreadable row that names the problem; `open` shows the file and `d` archives it.
+A file over 1 MiB shows its header only. Item text is never logged.
+
+### Posting from a shell
+
+```sh
+inbox="$HOME/.bongos/inbox"
+name="$(date -u +%Y%m%dT%H%M%SZ)-myproject-$$.md"
+printf '%s\n' \
+  '---' \
+  'inbox-version: 1' \
+  'kind: run-finished' \
+  "created: $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  'source: myproject/nightly' \
+  'summary: Finished in 14 minutes' \
+  'actions: [open]' \
+  '---' \
+  'The nightly index finished without problems.' \
+  >"$inbox/tmp/$name"
+mv "$inbox/tmp/$name" "$inbox/new/$name"
+```
+
+Bongos ships no helper program for posting: the file format above is the interface.
+
 ## Languages
 
 Each language below gets highlighting, a language server and formatting with no setup. A server

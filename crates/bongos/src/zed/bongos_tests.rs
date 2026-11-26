@@ -1386,6 +1386,46 @@ async fn chat_commands_dispatch_by_name(cx: &mut TestAppContext) {
     });
 }
 
+#[gpui::test]
+async fn inbox_commands_dispatch_by_name(cx: &mut TestAppContext) {
+    init_keymap_test(cx);
+    cx.update(|cx| {
+        #[allow(unused_mut)]
+        let mut names = vec![
+            ("inbox::Open", "inbox: open"),
+            ("inbox::Next", "inbox: next"),
+            ("inbox::Previous", "inbox: previous"),
+            ("inbox::Refresh", "inbox: refresh"),
+            ("inbox::OpenItem", "inbox: open item"),
+            ("inbox::MarkUnread", "inbox: mark unread"),
+            ("inbox::FocusItem", "inbox: focus item"),
+            ("inbox::FocusList", "inbox: focus list"),
+            ("inbox::OpenFile", "inbox: open file"),
+            ("inbox::Dismiss", "inbox: dismiss"),
+            ("inbox::Accept", "inbox: accept"),
+            ("inbox::OpenTarget", "inbox: open target"),
+            ("inbox::Filter", "inbox: filter"),
+        ];
+        #[cfg(debug_assertions)]
+        {
+            names.push(("inbox::DumpView", "inbox: dump view"));
+            names.push(("inbox::OpenAsSidebar", "inbox: open as sidebar"));
+        }
+        for (name, humanized) in names {
+            let action = cx
+                .build_action(name, None)
+                .unwrap_or_else(|_| panic!("{name} is registered"));
+            assert_eq!(action.name(), name);
+            assert_eq!(command_palette::humanize_action_name(name), humanized);
+        }
+        assert!(
+            cx.build_action("inbox::OpenItem", None)
+                .unwrap()
+                .partial_eq(&bongos_inbox::OpenItem)
+        );
+    });
+}
+
 /// `task: mode` -> Chat finds `chat::New` by name (the Work crate does not depend on chats) and
 /// dispatches it: in the app that is the real command, which answers in its own toast (here that
 /// chats are off), not the Work view's "arrives with feature 04".

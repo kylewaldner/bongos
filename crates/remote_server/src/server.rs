@@ -3,6 +3,18 @@ mod headless_project;
 #[cfg(test)]
 mod remote_editing_tests;
 
+#[cfg(test)]
+mod tests {
+    /// Dev builds (`BONGOS_SKIP_GIT_HEAD_WATCH` set) embed no commit sha, as the cli and app
+    /// build scripts do, so a stale sha cannot mislabel the remote server.
+    #[test]
+    fn a_dev_build_embeds_no_commit_sha() {
+        if option_env!("BONGOS_SKIP_GIT_HEAD_WATCH").is_some_and(|v| !v.is_empty() && v != "0") {
+            assert_eq!(option_env!("ZED_COMMIT_SHA"), None);
+        }
+    }
+}
+
 #[cfg(windows)]
 pub mod windows;
 
