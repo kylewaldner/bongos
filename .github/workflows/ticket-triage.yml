@@ -6,7 +6,7 @@
 #
 # Started by: workflow_dispatch (the final step of every other workflow runs `gh workflow run ticket-triage.yml --ref
 # main`, no inputs); repository_dispatch of type `triage`, sent only by the trigger workflow of the coordination
-# repository on a push that changes a claim or a queue file; a schedule every 10 minutes, at minutes 3, 13, 23, 33, 43 and 53 (off the busy :00 and :30 marks).
+# repository on a push that changes a claim or a queue file; the 10 minute schedule (minutes 3, 13, 23, 33, 43 and 53) is switched off for now: to turn it back on add `schedule:` with `- cron: '3,13,23,33,43,53 * * * *'` under `on:`.
 # `schedule` and `repository_dispatch` run only from the default branch, so until this file reaches main nothing starts it: that is intended (the workflow files reach main with every switch off: nothing dispatches or writes until the owner turns the switches on).
 #
 # Concurrency: one run at a time, a waiting run is replaced by the newest one, and a running one is never cancelled.
@@ -48,8 +48,6 @@ on:
         type: string
   repository_dispatch:
     types: [triage]
-  schedule:
-    - cron: '3,13,23,33,43,53 * * * *'
 
 permissions:
   contents: read
