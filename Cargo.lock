@@ -3000,6 +3000,8 @@ name = "bongos_slack"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bongos_chat",
+ "bongos_chat_model",
  "bongos_minibuffer",
  "bongos_slack_model",
  "bongos_work",

@@ -3,7 +3,7 @@
 //! have handlers (see `token_prompt`), as does `slack: status` (see `status_item`), the three
 //! read commands (see `read_commands`), `slack: post` and `slack: reply` (see `post`) and
 //! `slack: allow channel` and `slack: disallow channel` (see `allowed`); while `slack.enabled` is
-//! false they only say Slack is off. `slack: review pending posts` has no handler yet.
+//! false they only say Slack is off. `slack: review pending posts` is `bridge_handler`'s.
 
 use std::any::TypeId;
 
@@ -14,6 +14,7 @@ use workspace::Workspace;
 
 use crate::SlackSettings;
 use crate::allowed;
+use crate::bridge_handler;
 use crate::post;
 use crate::read_commands;
 use crate::status_item;
@@ -118,4 +119,5 @@ pub fn register(workspace: &mut Workspace) {
     register_direct::<slack::Reply>(workspace, post::reply);
     register_direct::<slack::AllowChannel>(workspace, allowed::allow_channel);
     register_direct::<slack::DisallowChannel>(workspace, allowed::disallow_channel);
+    register_direct::<slack::ReviewPendingPosts>(workspace, bridge_handler::review_pending_posts);
 }

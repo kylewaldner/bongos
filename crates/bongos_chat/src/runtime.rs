@@ -726,7 +726,7 @@ impl ChatRuntime {
         }
     }
 
-    pub(crate) fn store(&self) -> &Entity<ChatStore> {
+    pub fn store(&self) -> &Entity<ChatStore> {
         &self.store
     }
 
