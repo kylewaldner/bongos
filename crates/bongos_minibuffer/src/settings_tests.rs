@@ -14,7 +14,7 @@ use workspace::{
 use crate::MinibufferSettings;
 
 /// The default of `minibuffer.enabled_for`: every surface the minibuffer hosts.
-const DEFAULT_ROUTES: [&str; 22] = [
+const DEFAULT_ROUTES: [&str; 23] = [
     "command_palette",
     "file_finder",
     "tab_switcher",
@@ -37,6 +37,7 @@ const DEFAULT_ROUTES: [&str; 22] = [
     "find_in_files",
     "search_buffer_lines",
     "find_directory",
+    "markdown_block",
 ];
 
 fn use_default_settings(cx: &mut TestAppContext) {
