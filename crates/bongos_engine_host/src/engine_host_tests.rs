@@ -1212,3 +1212,57 @@ fn the_engine_host_log_is_named_for_the_project() {
         PathBuf::from(format!("/hosts/{hex}.sock"))
     );
 }
+
+#[test]
+fn a_stop_is_signaled_only_after_its_reply_was_flushed() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let (server_side, client_side) = UnixStream::pair().unwrap();
+    let peer = bongos_project_repo::peer_identity(&server_side, ClientKind::Cli).unwrap();
+    let (outbox, lines) = std::sync::mpsc::sync_channel(crate::server::OUTBOX_LINES);
+    let connection = crate::server::Connection::new(0, peer, server_side.try_clone().unwrap(), outbox);
+
+    let written = Arc::new(AtomicBool::new(false));
+    let stopped_early = Arc::new(AtomicBool::new(false));
+    let (done, finished) = std::sync::mpsc::channel();
+    let request = std::thread::spawn({
+        let written = written.clone();
+        let stopped_early = stopped_early.clone();
+        move || {
+            let signal = move |_at_job_boundary: bool| {
+                if !written.load(Ordering::SeqCst) {
+                    stopped_early.store(true, Ordering::SeqCst);
+                }
+            };
+            crate::server::reply_then_stop(
+                &connection,
+                7,
+                crate::protocol::HostResult::Ok(json!(null)),
+                Some((signal, false)),
+            );
+            done.send(()).ok();
+        }
+    });
+
+    // This test is the connection's writing thread, held until the reply is queued.
+    let (line, flushed) = lines.recv_timeout(Duration::from_secs(30)).unwrap();
+    let mut server_side = server_side;
+    server_side.write_all(&line).unwrap();
+    server_side.flush().unwrap();
+    let mut reply = String::new();
+    BufReader::new(client_side).read_line(&mut reply).unwrap();
+    assert!(matches!(
+        serde_json::from_str::<ServerMessage>(&reply).unwrap(),
+        ServerMessage::Reply { id: 7, .. }
+    ));
+    written.store(true, Ordering::SeqCst);
+    if let Some(flushed) = flushed {
+        flushed.send(()).unwrap();
+    }
+    finished.recv_timeout(Duration::from_secs(30)).unwrap();
+    request.join().unwrap();
+    assert!(
+        !stopped_early.load(Ordering::SeqCst),
+        "the stop was signaled before the reply was written"
+    );
+}

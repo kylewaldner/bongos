@@ -33,25 +33,57 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const OUTBOX_LINES: usize = 256;
 
 /// One accepted connection after its `Hello`.
-struct Connection {
+pub(crate) struct Connection {
     id: u64,
     peer: PeerIdentity,
     /// Shut down to end the connection's threads.
     stream: UnixStream,
-    /// The lines the connection's writing thread sends, so no caller ever blocks on a client.
-    outbox: SyncSender<Vec<u8>>,
+    /// The lines the connection's writing thread sends, so no caller ever blocks on a client. A
+    /// line's sender, when it has one, is signaled once the line was written and flushed.
+    outbox: SyncSender<Outgoing>,
     /// `None` until the client subscribes; an empty set is every topic.
     topics: Mutex<Option<HashSet<HostTopic>>>,
 }
 
+/// A queued line and the signal that it was flushed to the socket.
+pub(crate) type Outgoing = (Vec<u8>, Option<std::sync::mpsc::Sender<()>>);
+
+/// How long a flushed send waits for the writing thread; only a guard against a hang.
+const FLUSH_TIMEOUT: Duration = Duration::from_secs(10);
+
 impl Connection {
+    pub(crate) fn new(
+        id: u64,
+        peer: PeerIdentity,
+        stream: UnixStream,
+        outbox: SyncSender<Outgoing>,
+    ) -> Self {
+        Self {
+            id,
+            peer,
+            stream,
+            outbox,
+            topics: Mutex::new(None),
+        }
+    }
+
     /// Queues `message` without blocking; false when the connection is gone. A client whose
     /// queue is full is not reading, so its connection is ended.
     fn send(&self, message: &ServerMessage) -> bool {
+        self.queue(message, None)
+    }
+
+    /// Queues `message` and waits until the writing thread flushed it; false when it could not be.
+    pub(crate) fn send_flushed(&self, message: &ServerMessage) -> bool {
+        let (ack, flushed) = std::sync::mpsc::channel();
+        self.queue(message, Some(ack)) && flushed.recv_timeout(FLUSH_TIMEOUT).is_ok()
+    }
+
+    fn queue(&self, message: &ServerMessage, ack: Option<std::sync::mpsc::Sender<()>>) -> bool {
         let Ok(line) = encode_line(message) else {
             return false;
         };
-        match self.outbox.try_send(line) {
+        match self.outbox.try_send((line, ack)) {
             Ok(()) => true,
             Err(TrySendError::Full(_)) => {
                 log::warn!(
@@ -175,11 +207,15 @@ impl EngineServer {
                             Ok(value) => HostResult::Ok(value),
                             Err(error) => HostResult::Refused(format!("{error:#}")),
                         };
-                        let accepted = matches!(result, HostResult::Ok(_));
-                        connection.send(&ServerMessage::Reply { id, result });
-                        if let (true, Some((sender, at_job_boundary))) = (accepted, stop) {
-                            sender.unbounded_send(at_job_boundary).ok();
-                        }
+                        let stop = stop.map(|(sender, at_job_boundary)| {
+                            (
+                                move |at_job_boundary| {
+                                    sender.unbounded_send(at_job_boundary).ok();
+                                },
+                                at_job_boundary,
+                            )
+                        });
+                        reply_then_stop(&connection, id, result, stop);
                     })
                     .detach();
             }
@@ -361,14 +397,13 @@ fn serve_connection(
     };
     let peer = peer_identity(&stream, client).context("reading the peer's identity")?;
     stream.set_read_timeout(None)?;
-    let (outbox, lines) = std::sync::mpsc::sync_channel::<Vec<u8>>(OUTBOX_LINES);
-    let connection = Arc::new(Connection {
-        id: shared.next_connection.fetch_add(1, Ordering::SeqCst),
+    let (outbox, lines) = std::sync::mpsc::sync_channel::<Outgoing>(OUTBOX_LINES);
+    let connection = Arc::new(Connection::new(
+        shared.next_connection.fetch_add(1, Ordering::SeqCst),
         peer,
-        stream: stream.try_clone()?,
+        stream.try_clone()?,
         outbox,
-        topics: Mutex::new(None),
-    });
+    ));
     let closer = stream.try_clone()?;
     std::thread::Builder::new()
         .name("engine-host-writer".to_string())
@@ -395,8 +430,8 @@ fn serve_connection(
 
 /// Writes a connection's queued lines until every sender is gone; a failed write ends the
 /// connection.
-fn write_lines(mut writer: UnixStream, closer: UnixStream, lines: Receiver<Vec<u8>>) {
-    for line in lines {
+fn write_lines(mut writer: UnixStream, closer: UnixStream, lines: Receiver<Outgoing>) {
+    for (line, flushed) in lines {
         if writer
             .write_all(&line)
             .and_then(|()| writer.flush())
@@ -405,6 +440,27 @@ fn write_lines(mut writer: UnixStream, closer: UnixStream, lines: Receiver<Vec<u
             closer.shutdown(std::net::Shutdown::Both).ok();
             return;
         }
+        if let Some(flushed) = flushed {
+            flushed.send(()).ok();
+        }
+    }
+}
+
+/// Answers a request and, when it was accepted and asked to stop the host, signals the stop.
+pub(crate) fn reply_then_stop(
+    connection: &Connection,
+    id: u64,
+    result: HostResult,
+    stop: Option<(impl FnOnce(bool), bool)>,
+) {
+    let accepted = matches!(result, HostResult::Ok(_));
+    let message = ServerMessage::Reply { id, result };
+    if let (true, Some((signal, at_job_boundary))) = (accepted, stop) {
+        // The stop closes the sockets, so the reply must be on the wire first.
+        connection.send_flushed(&message);
+        signal(at_job_boundary);
+    } else {
+        connection.send(&message);
     }
 }
 
