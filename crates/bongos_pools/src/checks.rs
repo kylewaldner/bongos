@@ -56,6 +56,16 @@ impl PoolsForChecks {
         self.brokers.borrow().get(project).cloned()
     }
 
+    /// The broker, when exactly one project's is open.
+    pub fn only(&self) -> Option<Rc<PoolBroker>> {
+        let brokers = self.brokers.borrow();
+        if brokers.len() == 1 {
+            brokers.values().next().cloned()
+        } else {
+            None
+        }
+    }
+
     /// How a task's goal is found for the labels ("check build of Invoice export, part 2").
     pub fn set_task_goals(&self, goals: impl Fn(&str) -> Option<String> + 'static) {
         *self.goals.borrow_mut() = Some(Box::new(goals));

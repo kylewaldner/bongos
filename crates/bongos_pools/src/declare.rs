@@ -41,6 +41,9 @@ pub struct PoolConfig {
     pub size: u32,
     pub guard: Option<GuardCheck>,
     pub settle_seconds: u32,
+    /// A workflow node's hold of the pool passes to its run when the node finishes, and is kept
+    /// until the run ends (`hold_while_waiting`).
+    pub hold_while_waiting: bool,
 }
 
 impl PoolConfig {
@@ -61,6 +64,7 @@ impl PoolConfig {
             size,
             guard: decl.guard.as_ref().map(|guard| guard.check.clone()),
             settle_seconds: decl.settle_seconds.unwrap_or(defaults.settle_seconds),
+            hold_while_waiting: decl.hold_while_waiting,
         }
     }
 

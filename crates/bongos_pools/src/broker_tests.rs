@@ -252,6 +252,7 @@ pub(crate) fn pool(name: &str, kind: PoolKind, size: u32) -> PoolConfig {
         size,
         guard: None,
         settle_seconds: 5,
+        hold_while_waiting: false,
     }
 }
 

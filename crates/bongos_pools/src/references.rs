@@ -630,9 +630,9 @@ pub fn reference_problems(inputs: &ReferenceInputs) -> Vec<Problem> {
         let Some(definition) = definition else {
             continue;
         };
-        for unknown in &definition.unknown_keys {
-            if unknown.key == "needs" && unknown.node.is_some() {
-                pools.check_all(label, unknown.line, &unknown.value, &mut out);
+        for node in &definition.nodes {
+            if let Some(needs) = &node.needs {
+                pools.check_all(label, needs.line, &needs.value, &mut out);
             }
         }
     }

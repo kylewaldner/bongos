@@ -21,6 +21,10 @@
 //!   this process's waiters and its holds not bound to a live process, keeping a list of what it
 //!   gave up; [`PoolBroker::undrain`] accepts requests again and [`PoolBroker::started`] asks the
 //!   listed requests again under new tickets.
+//! - A lease's holds can move to another lease of the same owner without being released
+//!   ([`Lease::split_off`], [`Lease::into_level`]): a workflow node keeps the holds of its
+//!   `hold_while_waiting` pools apart from its process and hands them to its run when it
+//!   finishes.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -32,7 +36,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use bongos_pools_model::{
-    CycleLink, Grant, GuardCheck, GuardReadings, Hold, Holder, HolderLabel, HostRef, Need,
+    CycleLink, Grant, GuardCheck, GuardReadings, Hold, Holder, HolderLabel, HostRef, Level, Need,
     NeedMode, OwnerKey, PoolKind, PoolScope, PoolState, PoolTable, ProcRef,
     Refused as ModelRefused, Request as ModelRequest, RequestId, Timestamp,
     WaitStatus as ModelWaitStatus, admit_now, judge, wait_status,
@@ -430,6 +434,12 @@ enum Op {
         holds: Vec<HoldId>,
         process: ProcRef,
     },
+    /// The holds move to request `request` with no process, at another level when `change` says.
+    Rehold {
+        holds: Vec<HoldId>,
+        request: RequestId,
+        change: Option<(Level, HolderLabel)>,
+    },
     Poll,
     Drain {
         /// Whether holds not bound to a live process go too (a drain) or only waiters (closing).
@@ -442,6 +452,8 @@ enum Op {
 struct State {
     scopes: BTreeMap<String, PoolScope>,
     clashes: BTreeMap<String, KindClash>,
+    /// The declared pools with `hold_while_waiting`.
+    hold_while_waiting: BTreeSet<String>,
     pending: BTreeMap<RequestId, Pending>,
     leases: BTreeMap<RequestId, Weak<LeaseInner>>,
     ops: VecDeque<Op>,
@@ -554,6 +566,13 @@ impl PoolBroker {
                 for config in &machine {
                     state.scopes.insert(config.name.clone(), PoolScope::Machine);
                 }
+                for config in project.iter().chain(&machine) {
+                    if config.hold_while_waiting {
+                        state.hold_while_waiting.insert(config.name.clone());
+                    } else {
+                        state.hold_while_waiting.remove(&config.name);
+                    }
+                }
                 for clash in &outcome.refused {
                     state.scopes.remove(&clash.pool);
                     state.clashes.insert(clash.pool.clone(), clash.clone());
@@ -568,6 +587,15 @@ impl PoolBroker {
             shared.push(Op::Poll);
             Ok(outcome)
         })
+    }
+
+    /// Whether pool `pool` was declared with `hold_while_waiting`.
+    pub fn holds_while_waiting(&self, pool: &str) -> bool {
+        self.shared
+            .state
+            .borrow()
+            .hold_while_waiting
+            .contains(pool)
     }
 
     /// Queues the request; the wait resolves to the lease or to why it is never granted.
@@ -816,6 +844,33 @@ impl Lease {
     /// The pools an enclosing holder's hold covers.
     pub fn satisfied(&self) -> &[String] {
         &self.inner.satisfied
+    }
+
+    /// Moves this lease's holds in `pools` to a new lease of the same holder, never released in
+    /// between. The new lease's holds have no process: they live as long as this host, until the
+    /// lease is dropped. `None` when this lease holds none of them.
+    pub fn split_off(&self, pools: &BTreeSet<String>) -> Option<Lease> {
+        let moved: Vec<HoldId> = {
+            let mut holds = self.inner.holds.borrow_mut();
+            let (moved, kept) = std::mem::take(&mut *holds)
+                .into_iter()
+                .partition(|hold| pools.contains(&hold.pool));
+            *holds = kept;
+            moved
+        };
+        if moved.is_empty() {
+            return None;
+        }
+        Some(self.inner.shared.moved(&self.inner.request, moved, None))
+    }
+
+    /// This lease's holds, held from now on at `level` of the same owner under `label`, with no
+    /// process (they live as long as this host), never released in between.
+    pub fn into_level(self, level: Level, label: HolderLabel) -> Lease {
+        let holds = std::mem::take(&mut *self.inner.holds.borrow_mut());
+        self.inner
+            .shared
+            .moved(&self.inner.request, holds, Some((level, label)))
     }
 }
 
@@ -1584,6 +1639,34 @@ impl Shared {
         }
     }
 
+    /// A new lease of `holds`, taken from a lease of `request`: the same owner with no process,
+    /// at the level `change` names, asking only for the pools it holds.
+    fn moved(
+        self: &Rc<Self>,
+        request: &ModelRequest,
+        holds: Vec<HoldId>,
+        change: Option<(Level, HolderLabel)>,
+    ) -> Lease {
+        let id = next_request();
+        let pools: BTreeSet<&str> = holds.iter().map(|hold| hold.pool.as_str()).collect();
+        let mut request = request.clone();
+        request.id = id;
+        request.needs.retain(|need| pools.contains(need.pool.as_str()));
+        request.holder.process = None;
+        if let Some((level, label)) = &change {
+            request.holder.path.level = level.clone();
+            request.holder.label = label.clone();
+        }
+        if !holds.is_empty() {
+            self.push(Op::Rehold {
+                holds: holds.clone(),
+                request: id,
+                change,
+            });
+        }
+        self.lease(request, holds, Vec::new())
+    }
+
     fn lease(
         self: &Rc<Self>,
         request: ModelRequest,
@@ -1826,6 +1909,63 @@ impl Shared {
                     log::info!("pools: process {} bound to no hold", process.pid);
                 }
                 self.after(result, Op::Bind { holds, process });
+            }
+            Op::Rehold {
+                holds,
+                request,
+                change,
+            } => {
+                let host = self.context.host;
+                let project_id = self.parts.project.id.clone();
+                let tickets = holds.clone();
+                let moving = change.clone();
+                let result = self
+                    .tx(
+                        Stores::of_holds(&holds),
+                        BTreeSet::new(),
+                        Box::new(move |mut machine, mut project| {
+                            let mut moved = 0;
+                            for hold in &tickets {
+                                let table = match hold.store {
+                                    StoreKind::Machine => machine.as_deref_mut(),
+                                    StoreKind::Project => project.as_deref_mut(),
+                                };
+                                let Some(pool) =
+                                    table.and_then(|table| table.pools.get_mut(&hold.pool))
+                                else {
+                                    continue;
+                                };
+                                for held in &mut pool.holds {
+                                    if held.ticket != hold.ticket
+                                        || held.holder.host != host
+                                        || held.holder.project != project_id
+                                    {
+                                        continue;
+                                    }
+                                    held.request = request;
+                                    held.holder.process = None;
+                                    if let Some((level, label)) = &moving {
+                                        held.holder.path.level = level.clone();
+                                        held.holder.label = label.clone();
+                                    }
+                                    moved += 1;
+                                }
+                            }
+                            Ok(moved)
+                        }),
+                    )
+                    .await;
+                if let Ok(Done { value: Some(0), .. }) = &result {
+                    log::info!("pools: no hold left to move to request {}", request.0);
+                }
+                self.after(
+                    result,
+                    Op::Rehold {
+                        holds,
+                        request,
+                        change,
+                    },
+                );
             }
             Op::Poll => self.run_poll().await,
             Op::Drain { holds, done } => {

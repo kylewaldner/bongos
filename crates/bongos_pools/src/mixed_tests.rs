@@ -342,6 +342,7 @@ async fn mixed_transactions_and_declarations_run_on_the_background_executor(
         size: 2,
         guard: None,
         settle_seconds: DeclDefaults { settle_seconds: 5 }.settle_seconds,
+        hold_while_waiting: false,
     };
     let declared = stores
         .machine

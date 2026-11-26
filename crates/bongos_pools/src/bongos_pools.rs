@@ -10,7 +10,9 @@
 //! The pool stores ([`ProjectStore`], [`MachineStore`], [`transact_mixed`]) keep the tables the
 //! grant rule works on. The [`PoolBroker`] of each project this process is the writer of drives
 //! them; it is opened, drained and restarted by the [`PoolsParticipant`] and served to the task
-//! checks as [`PoolsForChecks`], both registered once `pools.enabled` is on.
+//! checks as [`PoolsForChecks`], both registered once `pools.enabled` is on. The same brokers
+//! serve the workflow nodes' `needs` ([`PoolsNodes`], set as the engine's node admission, with the
+//! validator of a node's `needs` and the status source of its waiting keys).
 
 pub mod broker;
 pub mod checks;
@@ -18,6 +20,7 @@ mod declare;
 mod guards;
 mod machine_store;
 mod mixed;
+pub mod nodes;
 mod participant;
 mod project_store;
 mod references;
@@ -38,7 +41,7 @@ use bongos_project_repo::{
 };
 use bongos_project_repo_model::Problem as FolderProblem;
 use bongos_project_repo_model::layout::{DEFINITIONS_DIR, PROJECT_FILE, WORKFLOWS_DIR};
-use bongos_workflow::ValidationHooks;
+use bongos_workflow::{NodeNeeds, NodeStatusSources, ValidationHooks, WorkflowEngine};
 use bongos_workflow_model::{Definition, Diagnostic, Severity};
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
@@ -60,6 +63,7 @@ pub use machine_store::{
 pub use mixed::{
     MachineHalfUnwritten, MixedTransacted, transact_mixed, transact_mixed_in_background,
 };
+pub use nodes::{PoolsNodeAdmission, PoolsNodes, node_needs, validate_node_needs, wait_line};
 pub use participant::PoolsParticipant;
 pub use project_store::{
     POOL_KEY_PREFIX, POOLS_NAMESPACE, ProjectPoolsReader, ProjectStore, TABLE_KEY,
@@ -92,6 +96,8 @@ struct Registration {
     registered: bool,
     /// The pools served to the checks, one broker per project this process is the writer of.
     checks: Option<Rc<PoolsForChecks>>,
+    /// The workflow nodes' waits and leases over the same brokers.
+    nodes: Option<Rc<PoolsNodes>>,
 }
 
 impl Global for Registration {}
@@ -136,7 +142,42 @@ fn sync_registration(cx: &mut App) {
     let checks = PoolsForChecks::new();
     CheckPoolsRegistry::set(checks.clone(), cx);
     WriterParticipants::register(Rc::new(PoolsParticipant::new(checks.clone())), cx);
-    cx.default_global::<Registration>().checks = Some(checks);
+    NodeNeeds::set(validate_node_needs);
+    let nodes = register_nodes(checks.clone(), cx);
+    let registration = cx.default_global::<Registration>();
+    registration.checks = Some(checks);
+    registration.nodes = Some(nodes);
+}
+
+/// Serves the workflow nodes' `needs` from `brokers`: the engine's node admission (a grant wakes
+/// the engine), and the status line of a key waiting for its pools.
+fn register_nodes(brokers: Rc<PoolsForChecks>, cx: &mut App) -> Rc<PoolsNodes> {
+    let projects = cx.to_async();
+    let project_of = Box::new(move |run: &str| {
+        projects.update(|cx| {
+            cx.try_global::<WorkflowEngine>()
+                .and_then(|engine| engine.run_project_id(run))
+        })
+    });
+    let (nodes, admission) = PoolsNodes::new(brokers, project_of, cx.foreground_executor().clone());
+    let engine = cx.to_async();
+    nodes.set_wake(move || {
+        engine.update(|cx| {
+            if let Some(engine) = cx.try_global::<WorkflowEngine>().cloned() {
+                engine.wake(cx);
+            }
+            NodeStatusSources::changed(cx);
+        });
+    });
+    bongos_workflow::register_admission(Box::new(admission), cx);
+    NodeStatusSources::register_waiting(nodes.clone(), cx);
+    nodes
+}
+
+/// The workflow nodes' side of the pools, once `pools.enabled` registered it.
+pub fn pools_nodes(cx: &App) -> Option<Rc<PoolsNodes>> {
+    cx.try_global::<Registration>()
+        .and_then(|registration| registration.nodes.clone())
 }
 
 /// The pools served to the checks, once `pools.enabled` registered them.
@@ -268,6 +309,8 @@ mod checks_tests;
 mod machine_store_tests;
 #[cfg(test)]
 mod mixed_tests;
+#[cfg(test)]
+mod nodes_tests;
 #[cfg(test)]
 mod pools_tests;
 #[cfg(test)]

@@ -371,6 +371,7 @@ fn config(name: &str, kind: PoolKind, size: u32) -> PoolConfig {
         size,
         guard: None,
         settle_seconds: DeclDefaults { settle_seconds: 5 }.settle_seconds,
+        hold_while_waiting: false,
     }
 }
 
