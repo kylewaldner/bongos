@@ -413,7 +413,7 @@ fn clear_layers(editor: &mut Editor, cx: &mut Context<Editor>) {
 }
 
 /// The live font family: the system UI font on macOS, the `ui_font_family` setting elsewhere.
-fn live_font_family(cx: &App) -> SharedString {
+pub(crate) fn live_font_family(cx: &App) -> SharedString {
     if cfg!(target_os = "macos") {
         SharedString::from(".SystemUIFont")
     } else {
@@ -431,9 +431,14 @@ fn zoom_ratio(cx: &App) -> f32 {
     f32::from(settings.buffer_font_size(cx)) / base
 }
 
+/// The live font size in pixels, the buffer font zoom applied.
+pub(crate) fn live_font_size(cx: &App) -> Pixels {
+    px(LIVE_FONT_SIZE * zoom_ratio(cx))
+}
+
 /// The live line height in pixels, as the editor lays it out (rounded).
 pub(crate) fn live_line_height(cx: &App) -> Pixels {
-    (px(LIVE_FONT_SIZE * zoom_ratio(cx)) * LIVE_LINE_HEIGHT).round()
+    (live_font_size(cx) * LIVE_LINE_HEIGHT).round()
 }
 
 fn apply_live(editor: &mut Editor, cx: &mut Context<Editor>) {
@@ -456,7 +461,7 @@ fn apply_live(editor: &mut Editor, cx: &mut Context<Editor>) {
     };
     let mut refinement = base;
     refinement.font_family = Some(live_font_family(cx));
-    refinement.font_size = Some(px(LIVE_FONT_SIZE * zoom_ratio(cx)).into());
+    refinement.font_size = Some(live_font_size(cx).into());
     refinement.line_height = Some(relative(LIVE_LINE_HEIGHT));
     editor.set_text_style_refinement(refinement);
     editor.set_cursor_shape_override(Some(language::CursorShape::Bar), cx);

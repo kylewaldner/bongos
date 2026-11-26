@@ -1,5 +1,5 @@
 //! The live view's layers and the window they work on (design D8). A layer draws one kind of
-//! decoration (styles, images and conceals now; tables later) from the index over the window: the
+//! decoration (styles, images, table grids and conceals) from the index over the window: the
 //! buffer rows on screen plus one screen above and one below. The addon refreshes every layer on a
 //! scroll, a selection change, a new index and a resize, and clears every layer in source mode and
 //! on detach.
@@ -14,6 +14,7 @@ use gpui::Context;
 use crate::conceals::{ConcealLayer, LoadedImages};
 use crate::images::ImageLayer;
 use crate::styles::StyleLayer;
+use crate::tables::{TableLayer, TablePads};
 
 /// The screen height, in rows, used before the editor's first layout tells the real one.
 pub const FALLBACK_SCREEN_ROWS: u32 = 40;
@@ -41,15 +42,18 @@ pub trait LiveLayer {
     fn clear(&mut self, editor: &mut Editor, cx: &mut Context<Editor>);
 }
 
-/// The layers a new addon starts with, in refresh order. The image layer and the conceal layer
+/// The layers a new addon starts with, in refresh order. The image, table and conceal layers
 /// share one [`LoadedImages`] set, and the image layer comes first so a refresh that places an
-/// image's block hides its link in the same pass.
+/// image's block hides its link in the same pass. The table layer comes before the conceal layer,
+/// which draws the table pipes as wide as the table layer measured them in the same pass.
 pub fn default_layers() -> Vec<Box<dyn LiveLayer>> {
     let images = LoadedImages::default();
+    let pads = TablePads::default();
     vec![
         Box::new(StyleLayer::default()),
         Box::new(ImageLayer::new(images.clone())),
-        Box::new(ConcealLayer::new(images)),
+        Box::new(TableLayer::new(images.clone(), pads.clone())),
+        Box::new(ConcealLayer::new(images, pads)),
     ]
 }
 

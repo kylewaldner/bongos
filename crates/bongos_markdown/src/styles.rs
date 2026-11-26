@@ -4,7 +4,7 @@
 
 use std::ops::Range;
 
-use bongos_markdown_model::{Element, ElementKind};
+use bongos_markdown_model::{Element, ElementKind, TableRow, row_pipes};
 use editor::{
     Anchor, Editor, HighlightKey, MultiBufferOffset, MultiBufferSnapshot, RowHighlightOptions,
     ToOffset as _,
@@ -36,10 +36,14 @@ pub enum Style {
     HeadingMinor,
     CheckedTask,
     Quote,
+    /// A table's header row, at weight 600.
+    TableHeader,
+    /// The pipes of a table row, muted.
+    TablePipe,
 }
 
 impl Style {
-    pub const ALL: [Style; 9] = [
+    pub const ALL: [Style; 11] = [
         Style::Strong,
         Style::Emphasis,
         Style::Strike,
@@ -49,6 +53,8 @@ impl Style {
         Style::HeadingMinor,
         Style::CheckedTask,
         Style::Quote,
+        Style::TableHeader,
+        Style::TablePipe,
     ];
 
     /// The highlight key of the style.
@@ -105,8 +111,12 @@ impl Style {
                 strikethrough,
                 ..HighlightStyle::default()
             },
-            Style::Quote => HighlightStyle {
+            Style::Quote | Style::TablePipe => HighlightStyle {
                 color: Some(colors.text_muted),
+                ..HighlightStyle::default()
+            },
+            Style::TableHeader => HighlightStyle {
+                font_weight: Some(FontWeight::SEMIBOLD),
                 ..HighlightStyle::default()
             },
         }
@@ -153,6 +163,10 @@ pub fn plan(live: &LiveContext<'_>) -> Plan {
                 }
                 None
             }
+            ElementKind::Table { rows } => {
+                table(rows, live, &mut plan);
+                None
+            }
             _ => None,
         };
         if let Some((style, range)) = styled
@@ -165,6 +179,25 @@ pub fn plan(live: &LiveContext<'_>) -> Plan {
         ranges.sort_by_key(|range| (range.start, range.end));
     }
     plan
+}
+
+/// The header row and the pipes of the rows of a table in the window (not its delimiter row).
+fn table(rows: &[TableRow], live: &LiveContext<'_>, plan: &mut Plan) {
+    let window = &live.window;
+    for row in rows {
+        let in_window = row.range.start < window.end && window.start < row.range.end;
+        if row.is_delimiter || !in_window {
+            continue;
+        }
+        if row.is_header {
+            plan.styles[Style::TableHeader as usize].push(row.range.clone());
+        }
+        let line: String = live.snapshot.text_for_range(row.range.clone()).collect();
+        for pipe in row_pipes(&line) {
+            let start = row.range.start + pipe;
+            plan.styles[Style::TablePipe as usize].push(start..start + 1);
+        }
+    }
 }
 
 /// An inline element's text between its opening and closing markup (`**b**` gives `b`, and a

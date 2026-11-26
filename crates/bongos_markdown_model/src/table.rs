@@ -6,6 +6,28 @@ pub enum CellDirection {
     Previous,
 }
 
+/// The byte offsets of the unescaped pipes of a table row's text `line`, in order. A pipe after a
+/// backslash is text.
+pub fn row_pipes(line: &str) -> Vec<usize> {
+    let bytes = line.as_bytes();
+    let mut pipes = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 1,
+            b'|' => pipes.push(i),
+            _ => {}
+        }
+        i += 1;
+    }
+    pipes
+}
+
+/// Whether a table row's text `line` starts with a pipe (after any spaces).
+pub fn has_leading_pipe(line: &str) -> bool {
+    line.trim_start_matches([' ', '\t']).starts_with('|')
+}
+
 /// The byte offset where the text of the cell `cell` of `row` starts: the first non-space byte
 /// of the cell, or, for an empty cell, the byte after the pipe and one space.
 fn cell_start(text: &str, row: &TableRow, cell: usize) -> usize {
@@ -17,19 +39,14 @@ fn cell_start(text: &str, row: &TableRow, cell: usize) -> usize {
     // unescaped pipe (the leading one, when present, is the first).
     let bytes = text.as_bytes();
     let row_end = row.range.end.min(text.len());
-    let mut pipes = Vec::new();
-    let mut i = row.range.start;
-    while i < row_end {
-        match bytes[i] {
-            b'\\' => i += 1,
-            b'|' => pipes.push(i),
-            _ => {}
-        }
-        i += 1;
-    }
-    let leading = bytes
-        .get(row.range.start..row_end)
-        .is_some_and(|line| line.trim_ascii_start().starts_with(b"|"));
+    let line = text
+        .get(row.range.start.min(row_end)..row_end)
+        .unwrap_or("");
+    let pipes: Vec<usize> = row_pipes(line)
+        .into_iter()
+        .map(|pipe| row.range.start + pipe)
+        .collect();
+    let leading = has_leading_pipe(line);
     let pipe = if leading { cell } else { cell.wrapping_sub(1) };
     let Some(&pipe) = pipes.get(pipe) else {
         return range.start.min(row_end);
