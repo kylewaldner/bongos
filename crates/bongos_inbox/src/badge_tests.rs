@@ -237,7 +237,7 @@ async fn the_badge_is_hidden_at_zero_and_shows_three_after_three_deliveries(
 #[gpui::test]
 async fn the_badge_says_99_plus_above_99(cx: &mut TestAppContext) {
     let env = env(cx).await;
-    let mut win = window(cx, &env, false).await;
+    let win = window(cx, &env, false).await;
     for number in 0..100 {
         env.deliver(&format!("item {number}"));
     }
@@ -264,8 +264,8 @@ async fn the_badge_hides_when_the_inbox_is_turned_off(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn two_windows_show_the_same_count_after_a_read_in_one(cx: &mut TestAppContext) {
     let env = env(cx).await;
-    let mut first = window(cx, &env, false).await;
-    let mut second = window(cx, &env, false).await;
+    let first = window(cx, &env, false).await;
+    let second = window(cx, &env, false).await;
     for summary in ["one", "two", "three"] {
         env.deliver(summary);
     }
