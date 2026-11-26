@@ -23,9 +23,10 @@ use gpui::TestAppContext;
 use serde_json::Value;
 use tempfile::TempDir;
 
-use crate::allowed;
+use crate::service::{NOT_CONNECTED_MESSAGE, OFF_MESSAGE};
 use crate::service_tests::{Fixture, setup};
-use crate::workflow_node::{ProjectOf, SlackNodes, previous_try_warning};
+use crate::workflow_node::{HostFiles, ProjectOf, SlackNodes, previous_try_warning};
+use crate::{allowed, connection};
 
 const RUN: &str = "01890a5d-ac96-774b-bcce-b30200000001";
 const PROJECT: &str = "project-1";
@@ -179,11 +180,29 @@ impl World {
 /// A connected Slack over the fake, the built-ins with `project` as every run's project, and a
 /// runtime they are registered with.
 fn world(project: Option<&str>, cx: &mut TestAppContext) -> World {
+    world_with(project, None, cx)
+}
+
+/// [`world`] as in a process with no window: the built-ins read `connection.toml` and a user
+/// settings file of `settings` again before every try.
+fn host_world(settings: &str, cx: &mut TestAppContext) -> World {
+    world_with(None, Some(settings), cx)
+}
+
+fn world_with(project: Option<&str>, settings: Option<&str>, cx: &mut TestAppContext) -> World {
     let fixture = setup(true, cx);
     let project = project.map(str::to_string);
     let project_of: ProjectOf = Arc::new(move |_: Option<&RunBinding>| project.clone());
     let dir = fixture.dir.clone();
-    let nodes = cx.update(|cx| SlackNodes::new(&fixture.service, dir, project_of, cx));
+    let host = settings.map(|settings| {
+        let settings_file = fixture.dir.parent().unwrap().join("settings.json");
+        std::fs::write(&settings_file, settings).unwrap();
+        HostFiles {
+            dir: dir.clone(),
+            settings_file,
+        }
+    });
+    let nodes = cx.update(|cx| SlackNodes::new(&fixture.service, dir, project_of, host, cx));
     let builtins = BuiltinNodes::default();
     builtins.insert("slack-read", nodes.read.clone());
     builtins.insert("slack-post", nodes.post.clone());
@@ -469,5 +488,136 @@ async fn a_slack_post_that_fails_fails_post_not_sent_and_is_not_retried(cx: &mut
     assert!(
         failure.detail.contains("may not have been sent"),
         "{failure:?}"
+    );
+}
+
+const ON: &str = r#"{ "slack": { "enabled": true } }"#;
+
+/// The start of try 1 of `key` in an attended run of `definition`.
+fn attended_start<'a>(
+    definition: &'a Definition,
+    state: &'a RunState,
+    key: &'a NodeKey,
+) -> BuiltinStart<'a> {
+    BuiltinStart {
+        run: RUN,
+        definition,
+        state,
+        key,
+        try_number: 1,
+        binding: None,
+        facts: RunFacts {
+            unattended: false,
+            started_by: StartedBy::Person,
+        },
+    }
+}
+
+fn remove_connection(world: &World) {
+    std::fs::remove_file(connection::connection_path(&world.fixture.dir)).unwrap();
+}
+
+/// The failure of an attended post run in `world`, which must send nothing.
+fn refused_post(mut world: World, cx: &mut TestAppContext) -> Failure {
+    push_posted(world.fake());
+    world.add(&post_only("C0REL", GREEN), false);
+    world.drive(cx);
+    assert!(
+        world.fake().calls().is_empty(),
+        "{:?}",
+        world.fake().calls()
+    );
+    let (end, failure) = world.state().ended.unwrap();
+    assert_eq!(end, EndState::Failed);
+    failure.unwrap()
+}
+
+#[gpui::test]
+async fn a_slack_post_in_a_host_fails_at_once_when_the_settings_file_turns_slack_off(
+    cx: &mut TestAppContext,
+) {
+    let world = host_world(r#"{ "slack": { "enabled": false } }"#, cx);
+    let failure = refused_post(world, cx);
+    assert_eq!(failure.reason, FailureReason::PostNotSent);
+    assert_eq!(failure.detail, OFF_MESSAGE);
+}
+
+#[gpui::test]
+async fn a_slack_post_in_a_host_fails_at_once_when_another_process_disconnected(
+    cx: &mut TestAppContext,
+) {
+    let world = host_world(ON, cx);
+    remove_connection(&world);
+    let failure = refused_post(world, cx);
+    assert_eq!(failure.reason, FailureReason::PostNotSent);
+    assert_eq!(failure.detail, NOT_CONNECTED_MESSAGE);
+}
+
+#[gpui::test]
+async fn a_slack_read_in_a_host_fails_service_unavailable_when_not_connected(
+    cx: &mut TestAppContext,
+) {
+    let world = host_world(ON, cx);
+    remove_connection(&world);
+    let definition = parse(&read_then_post("C0REL", GREEN)).unwrap();
+    let state = RunState::default();
+    let key = NodeKey::new("read", 1);
+    let failure = world
+        .nodes
+        .read
+        .start(attended_start(&definition, &state, &key))
+        .unwrap_err();
+    assert_eq!(failure.reason, FailureReason::ServiceUnavailable);
+    assert_eq!(failure.detail, NOT_CONNECTED_MESSAGE);
+    assert!(world.fake().calls().is_empty());
+}
+
+#[gpui::test]
+async fn a_slack_post_in_a_host_refuses_when_the_connection_goes_after_its_start(
+    cx: &mut TestAppContext,
+) {
+    let world = host_world(ON, cx);
+    push_posted(world.fake());
+    let definition = parse(&post_only("C0REL", GREEN)).unwrap();
+    let state = RunState::default();
+    let key = NodeKey::new("post", 1);
+    let post = &world.nodes.post;
+    post.start(attended_start(&definition, &state, &key))
+        .unwrap();
+    // Another process disconnects before the worker sends.
+    remove_connection(&world);
+    cx.run_until_parked();
+
+    let finishes = post.poll();
+    assert_eq!(finishes.len(), 1);
+    let failure = finishes[0].outcome.clone().unwrap_err();
+    assert_eq!(failure.reason, FailureReason::PostNotSent);
+    assert_eq!(failure.detail, NOT_CONNECTED_MESSAGE);
+    assert!(world.fake().calls().is_empty());
+    assert_eq!(cx.update(|cx| connection::current(cx)), None);
+}
+
+#[gpui::test]
+async fn a_slack_reply_links_to_the_message_in_its_thread(cx: &mut TestAppContext) {
+    let mut world = world(None, cx);
+    push_posted(world.fake());
+    let definition = post_only("C0REL", GREEN).replace(
+        "text = \"",
+        &format!("thread = \"{}\", text = \"", ts(5).as_str()),
+    );
+    world.add(&definition, false);
+    world.drive(cx);
+
+    assert_eq!(
+        posts(world.fake()),
+        [PostRequest {
+            thread_ts: Some(ts(5)),
+            ..post_of(GREEN)
+        }]
+    );
+    assert_eq!(
+        world.result("post")["link"],
+        "https://acme.slack.com/archives/C0REL/p1730000009000100\
+         ?thread_ts=1730000005.000100&cid=C0REL"
     );
 }

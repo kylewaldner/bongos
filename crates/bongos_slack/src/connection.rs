@@ -349,6 +349,18 @@ pub fn current(cx: &App) -> Option<Connection> {
         .and_then(|state| state.connection.clone())
 }
 
+/// Sets the connection to `found`, what `connection.toml` reads now (another process may have
+/// connected or disconnected), unless a connect or a disconnect runs here. A change bumps the
+/// generation, so the service drops the client and the caches of the earlier connection.
+pub fn reload(found: Option<Connection>, cx: &mut App) {
+    let state = state_mut(cx);
+    if state.busy || state.connection == found {
+        return;
+    }
+    state.connection = found;
+    state.generation = next_generation();
+}
+
 /// Changes whenever the connection changes (a connect, a disconnect, a new install); 0 before
 /// [`install`].
 pub fn generation(cx: &App) -> u64 {

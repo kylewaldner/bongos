@@ -39,23 +39,30 @@ pub use status_item::SlackStatusItem;
 /// HTTP client is set and before [`init_palette`].
 pub fn init(cx: &mut App) {
     let service = init_service(connection::default_dir(), cx);
-    workflow_node::register(&service, cx);
+    workflow_node::register(&service, None, cx);
     cx.observe_new(|workspace: &mut Workspace, _, _| register(workspace))
         .detach();
 }
 
 /// The Slack of an engine host (a process with no window): the `slack` settings, the connection
 /// from `connection.toml`, the client over the process's HTTP client, a service of its own and
-/// the workflow steps `slack-read` and `slack-post`. No status item and no actions. Nothing here
-/// sends a request. Call once the user settings are loaded and the HTTP client is set.
+/// the workflow steps `slack-read` and `slack-post`, which read `connection.toml` and the user
+/// settings file again before every try (the window may disconnect or turn Slack off meanwhile).
+/// No status item and no actions. Nothing here sends a request. Call once the user settings are
+/// loaded and the HTTP client is set.
 pub fn init_engine_host(cx: &mut App) {
-    init_engine_host_in(connection::default_dir(), cx);
+    init_engine_host_in(
+        connection::default_dir(),
+        paths::settings_file().clone(),
+        cx,
+    );
 }
 
-/// [`init_engine_host`] with the Slack directory `dir`.
-pub fn init_engine_host_in(dir: PathBuf, cx: &mut App) {
+/// [`init_engine_host`] with the Slack directory `dir` and the user settings file
+/// `settings_file`.
+pub fn init_engine_host_in(dir: PathBuf, settings_file: PathBuf, cx: &mut App) {
     let service = init_service(dir, cx);
-    workflow_node::register(&service, cx);
+    workflow_node::register(&service, Some(settings_file), cx);
 }
 
 fn init_service(dir: PathBuf, cx: &mut App) -> gpui::Entity<SlackService> {

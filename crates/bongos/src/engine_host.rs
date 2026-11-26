@@ -145,13 +145,14 @@ pub(crate) fn guarded_http_client(
 
 /// Gives the engine host the window's HTTP client, built with `user_agent` (a client without
 /// one is gpui's placeholder, over which Slack makes no request), and the Slack of an engine
-/// host with its files in `slack_dir`: the `slack-read` and `slack-post` workflow steps. Call
-/// once the user settings are loaded.
+/// host with its files in `slack_dir`: the `slack-read` and `slack-post` workflow steps, which
+/// read `connection.toml` and the user settings file again before every try. Call once the user
+/// settings are loaded.
 pub(crate) fn init_network(user_agent: &str, slack_dir: PathBuf, cx: &mut App) -> Result<(), Exit> {
     let http = guarded_http_client(user_agent, cx)
         .map_err(|error| Exit::new(1, format!("could not start the HTTP client: {error:#}")))?;
     cx.set_http_client(http);
-    bongos_slack::init_engine_host_in(slack_dir, cx);
+    bongos_slack::init_engine_host_in(slack_dir, paths::settings_file().clone(), cx);
     Ok(())
 }
 

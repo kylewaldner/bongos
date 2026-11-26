@@ -90,6 +90,57 @@ pub fn task_project(cx: &mut App) -> ProjectOf {
     })
 }
 
+/// The files a process with no window reads again before every try, since the window may
+/// disconnect Slack or turn `slack.enabled` off while it runs: the Slack directory (with
+/// `connection.toml`) and the user settings file.
+#[derive(Clone, Debug)]
+pub struct HostFiles {
+    pub dir: PathBuf,
+    pub settings_file: PathBuf,
+}
+
+impl HostFiles {
+    /// Whether the settings file turns `slack.enabled` on (a missing or invalid file does not),
+    /// and the connection `connection.toml` holds.
+    fn read(&self) -> (bool, Option<Connection>) {
+        let enabled = std::fs::read_to_string(&self.settings_file)
+            .ok()
+            .and_then(|text| ::settings::parse_json_with_comments::<Value>(&text).ok())
+            .and_then(|content| content.get("slack")?.get("enabled")?.as_bool())
+            .unwrap_or(false);
+        (enabled, connection::read_connection(&self.dir))
+    }
+
+    /// Why Slack cannot be asked now, by the files alone.
+    fn ready(&self) -> Result<(), String> {
+        ready_of(self.read())
+    }
+
+    /// [`Self::ready`], first setting the app's connection to the file's, so a connection that
+    /// changed drops the client and the caches of the earlier one.
+    fn refresh(&self, cx: &mut AsyncApp) -> Result<(), String> {
+        let (enabled, found) = self.read();
+        let connected = found.is_some();
+        cx.update(|cx| connection::reload(found, cx));
+        ready_of((enabled, connected.then_some(())))
+    }
+}
+
+fn ready_of<T>((enabled, connection): (bool, Option<T>)) -> Result<(), String> {
+    if !enabled {
+        Err(OFF_MESSAGE.to_string())
+    } else if connection.is_none() {
+        Err(NOT_CONNECTED_MESSAGE.to_string())
+    } else {
+        Ok(())
+    }
+}
+
+/// [`HostFiles::refresh`] of a process with no window; the window's state is live already.
+fn refresh(host: Option<&HostFiles>, cx: &mut AsyncApp) -> Result<(), String> {
+    host.map_or(Ok(()), |host| host.refresh(cx))
+}
+
 /// How a node's `channel` names its conversation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Channel {
@@ -412,11 +463,27 @@ struct Core {
     /// The Slack directory, holding `allowed.toml`.
     dir: PathBuf,
     project_of: ProjectOf,
+    /// The files to read again before every try, in a process with no window.
+    host: Option<HostFiles>,
 }
 
 impl Core {
     fn shared(&self) -> MutexGuard<'_, Shared> {
         lock(&self.shared)
+    }
+
+    /// Why Slack cannot be asked now: by the files first in a process with no window, then by the
+    /// app's state.
+    fn ready(&self, shared: &Shared) -> Result<(), String> {
+        if let Some(host) = &self.host {
+            host.ready()?;
+        }
+        shared
+            .facts
+            .ready
+            .as_ref()
+            .map(|_| ())
+            .map_err(Clone::clone)
     }
 
     /// Records the try as in flight with `line` and hands `job` to the worker.
@@ -455,11 +522,13 @@ pub struct SlackNodes {
 
 impl SlackNodes {
     /// The built-ins over `service`, with their worker on the main thread; `dir` holds
-    /// `allowed.toml` and `project_of` names a run's project. Nothing is registered.
+    /// `allowed.toml` and `project_of` names a run's project. `host`, in a process with no window,
+    /// names the files read again before every try. Nothing is registered.
     pub fn new(
         service: &Entity<SlackService>,
         dir: PathBuf,
         project_of: ProjectOf,
+        host: Option<HostFiles>,
         cx: &mut App,
     ) -> Self {
         let shared = Arc::new(Mutex::new(Shared {
@@ -484,14 +553,16 @@ impl SlackNodes {
         let (posts, mut post_receiver) = mpsc::unbounded::<PostJob>();
         let weak = service.downgrade();
         let reads = shared.clone();
+        let read_host = host.clone();
         cx.spawn(async move |cx| {
             while let Some(job) = receiver.next().await {
                 match job {
                     Job::Read(job) => {
                         let (service, shared) = (weak.clone(), reads.clone());
+                        let host = read_host.clone();
                         cx.spawn(async move |cx| {
                             let outcome = match service.upgrade() {
-                                Some(service) => run_read(&service, &job, cx).await,
+                                Some(service) => run_read(&service, &job, host.as_ref(), cx).await,
                                 None => Err(NOT_CONNECTED_MESSAGE.to_string()),
                             };
                             let outcome = outcome.map_err(|detail| {
@@ -515,10 +586,11 @@ impl SlackNodes {
         // Posts run one at a time, in the order their tries started.
         let weak = service.downgrade();
         let posted = shared.clone();
+        let post_host = host.clone();
         cx.spawn(async move |cx| {
             while let Some(job) = post_receiver.next().await {
                 let outcome = match weak.upgrade() {
-                    Some(service) => run_post(&service, &job, cx).await,
+                    Some(service) => run_post(&service, &job, post_host.as_ref(), cx).await,
                     None => Err(NOT_CONNECTED_MESSAGE.to_string()),
                 };
                 let outcome = outcome.map_err(|detail| {
@@ -533,6 +605,7 @@ impl SlackNodes {
             jobs,
             dir,
             project_of,
+            host,
         });
         Self {
             read: Arc::new(SlackReadNode(core.clone())),
@@ -554,11 +627,16 @@ impl SlackNodes {
 }
 
 /// Registers `slack-read` and `slack-post` over `service`, with the installed Slack directory and
-/// the project of each run's task.
-pub fn register(service: &Entity<SlackService>, cx: &mut App) {
+/// the project of each run's task. A process with no window passes `settings_file`, the user
+/// settings file read again (with `connection.toml`) before every try.
+pub fn register(service: &Entity<SlackService>, settings_file: Option<PathBuf>, cx: &mut App) {
     let dir = connection::installed_dir(cx);
     let project_of = task_project(cx);
-    SlackNodes::new(service, dir, project_of, cx).register(cx);
+    let host = settings_file.map(|settings_file| HostFiles {
+        dir: dir.clone(),
+        settings_file,
+    });
+    SlackNodes::new(service, dir, project_of, host, cx).register(cx);
 }
 
 fn report(
@@ -585,8 +663,8 @@ impl BuiltinNode for SlackReadNode {
             .map_err(|detail| failure(FailureReason::ProgramResultInvalid, detail))?;
         let line = {
             let shared = self.0.shared();
-            if let Err(message) = &shared.facts.ready {
-                return Err(failure(FailureReason::ServiceUnavailable, message.clone()));
+            if let Err(message) = self.0.ready(&shared) {
+                return Err(failure(FailureReason::ServiceUnavailable, message));
             }
             format!("reading {}", job.channel.label())
         };
@@ -655,8 +733,8 @@ impl BuiltinNode for SlackPostNode {
         let slot = (job.run.clone(), job.key.clone());
         let line = {
             let mut shared = self.0.shared();
-            if let Err(message) = &shared.facts.ready {
-                return Err(failure(message.clone()));
+            if let Err(message) = self.0.ready(&shared) {
+                return Err(failure(message));
             }
             shared.interrupted.remove(&slot);
             format!("posting to {}", job.channel.label())
@@ -809,8 +887,10 @@ fn author(message: &Message, users: &UserNames) -> String {
 async fn run_read(
     service: &Entity<SlackService>,
     job: &ReadJob,
+    host: Option<&HostFiles>,
     cx: &mut AsyncApp,
 ) -> Result<Value, String> {
+    refresh(host, cx)?;
     let conversation = resolve(service, &job.channel, cx).await?;
     let (messages, older) = read_messages(service, &conversation.id, job, cx)
         .await
@@ -853,8 +933,10 @@ async fn run_read(
 async fn run_post(
     service: &Entity<SlackService>,
     job: &PostJob,
+    host: Option<&HostFiles>,
     cx: &mut AsyncApp,
 ) -> Result<Value, String> {
+    refresh(host, cx)?;
     if let Some(intent) = &job.intent {
         if intent.exists() {
             // This try started before, in a process that ended before it recorded the start.
@@ -878,6 +960,13 @@ async fn run_post(
     };
     let text = render::escape_for_post(&job.text);
     let origin = job.origin;
+    // Resolving a name may have waited; the files are read again right before the post.
+    if let Err(message) = refresh(host, cx) {
+        if let Some(intent) = &job.intent {
+            std::fs::remove_file(intent).ok();
+        }
+        return Err(message);
+    }
     let posted = service
         .update(cx, |service, cx| {
             service.post(destination, text, origin, cx)
