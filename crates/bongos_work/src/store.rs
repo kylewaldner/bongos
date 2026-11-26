@@ -1047,8 +1047,9 @@ impl Disk {
     }
 
     /// Whether `events` name anything other than temporary files, journals, echoes of the
-    /// store's own writes, and anything under a `.git`.
-    fn needs_reload(&self, events: &[PathEvent]) -> bool {
+    /// store's own writes, and anything under a `.git` or under the root's `inbox` directory.
+    /// A rescan always reloads.
+    pub(crate) fn needs_reload(&self, events: &[PathEvent]) -> bool {
         events.iter().any(|event| {
             if event.kind == Some(PathEventKind::Rescan) {
                 return true;
@@ -1056,11 +1057,15 @@ impl Disk {
             if !event.path.starts_with(&self.root) {
                 return false;
             }
-            let in_git = event
-                .path
-                .strip_prefix(&self.root)
-                .is_ok_and(|rel| rel.components().any(|c| c.as_os_str() == ".git"));
-            if in_git {
+            let Ok(rel) = event.path.strip_prefix(&self.root) else {
+                return false;
+            };
+            let in_git = rel.components().any(|c| c.as_os_str() == ".git");
+            let in_inbox = rel
+                .components()
+                .next()
+                .is_some_and(|c| c.as_os_str() == "inbox");
+            if in_git || in_inbox {
                 return false;
             }
             let ignored_name = event

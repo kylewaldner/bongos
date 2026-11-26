@@ -458,6 +458,29 @@ async fn a_users_own_git_directory_never_reloads(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn inbox_events_never_reload_but_siblings_and_rescans_do(cx: &mut TestAppContext) {
+    use fs::{PathEvent, PathEventKind};
+    let temp = TempDir::new().unwrap();
+    let root = canonical(&temp);
+    let backfill = seed(&root);
+    let store = new_store(cx, &root, true);
+    wait_loaded(cx, &store).await;
+
+    let event = |path: PathBuf, kind| PathEvent { path, kind };
+    let reloads = |cx: &mut TestAppContext, event: PathEvent| {
+        store.read_with(cx, |store, _| store.needs_reload(&[event]))
+    };
+    assert!(!reloads(cx, event(root.join("inbox/new/x"), None)));
+    assert!(!reloads(cx, event(root.join("inbox"), None)));
+    assert!(reloads(cx, event(root.join("inbox-other/x"), None)));
+    assert!(reloads(cx, event(backfill.join("task.toml"), None)));
+    assert!(reloads(
+        cx,
+        event(root.join("inbox"), Some(PathEventKind::Rescan))
+    ));
+}
+
+#[gpui::test]
 async fn creating_a_git_directory_in_a_task_never_reloads(cx: &mut TestAppContext) {
     let temp = TempDir::new().unwrap();
     let root = canonical(&temp);
