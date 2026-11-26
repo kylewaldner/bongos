@@ -5686,6 +5686,7 @@ mod tests {
                 "highlights_tree_view",
                 "icon_theme_selector",
                 "image_viewer",
+                "inbox",
                 "inline_assistant",
                 "isearch",
                 "java",
