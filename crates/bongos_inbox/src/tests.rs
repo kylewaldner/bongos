@@ -767,7 +767,10 @@ async fn targets_resolve_to_live_stale_or_unresolved(cx: &mut TestAppContext) {
 
     // The rows mark exactly the stale items, which keep open and dismiss.
     let rows = inbox.read_with(cx, |inbox, _| {
-        inbox.snapshot().unwrap().rows(&view_model::Filter::All, &|_| false)
+        inbox
+            .snapshot()
+            .unwrap()
+            .rows(&view_model::Filter::All, &|_| false)
     });
     let mut stale: Vec<String> = Vec::new();
     for row in &rows {
