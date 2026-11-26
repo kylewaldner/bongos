@@ -9,7 +9,7 @@ use std::cmp::Ordering;
 use std::ops::Range;
 
 use crate::table::row_pipes;
-use crate::{Element, ElementKind, MarkdownIndex, RevealSet, TableRow};
+use crate::{Element, ElementKind, MarkdownIndex, RevealSet, TableRow, TextSource};
 
 /// How a concealed range is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -70,20 +70,24 @@ impl Conceal {
 ///   `revealed` strictly inside it, so point never rests on hidden text.
 /// - Every range lies inside `window`: a [`ConcealKind::Hide`] is clipped
 ///   to it, any other kind that is not wholly inside is dropped.
-pub fn plan(
+///
+/// `text` needs to hold only the window's lines (see [`TextSource`]): a
+/// conceal whose text is not held is left out.
+pub fn plan<T: TextSource + ?Sized>(
     index: &MarkdownIndex,
-    text: &str,
+    text: &T,
     window: Range<usize>,
     revealed: &RevealSet,
     image_ok: &dyn Fn(&str) -> bool,
 ) -> Vec<Conceal> {
-    let window = window.start.min(text.len())..window.end.min(text.len());
+    let len = text.total_len();
+    let window = window.start.min(len)..window.end.min(len);
     if window.is_empty() {
         return Vec::new();
     }
     let mut candidates = Vec::new();
     for element in index.elements_in(window.clone()) {
-        candidates_for(element, text, revealed, image_ok, &mut candidates);
+        candidates_for(element, text, &window, revealed, image_ok, &mut candidates);
     }
     // Outer before inner on equal starts, so a whole hidden image wins over
     // the markup inside it.
@@ -103,7 +107,9 @@ pub fn plan(
         let Some(conceal) = clip(candidate, &window, text) else {
             continue;
         };
-        if text[conceal.range.clone()].contains(['\n', '\r'])
+        if text
+            .get(conceal.range.clone())
+            .is_none_or(|hidden| hidden.contains(['\n', '\r']))
             || revealed.has_head_strictly_inside(&conceal.range)
         {
             continue;
@@ -141,9 +147,10 @@ pub fn diff(old: &[Conceal], new: &[Conceal]) -> (Vec<Conceal>, Vec<Conceal>) {
     (remove, add)
 }
 
-fn candidates_for(
+fn candidates_for<T: TextSource + ?Sized>(
     element: &Element,
-    text: &str,
+    text: &T,
+    window: &Range<usize>,
     revealed: &RevealSet,
     image_ok: &dyn Fn(&str) -> bool,
     out: &mut Vec<Conceal>,
@@ -153,7 +160,12 @@ fn candidates_for(
             let shown = element.markup.iter().any(|m| revealed.is_revealed(m))
                 || revealed.has_head_within(&element.range);
             if image_ok(url) && !shown {
-                push_lines(element.range.clone(), text, out);
+                // Only the part in the window can be concealed, and only it is held.
+                let start = element.range.start.max(window.start);
+                let end = element.range.end.min(window.end);
+                if start < end {
+                    push_lines(start..end, text, out);
+                }
             }
             return;
         }
@@ -187,11 +199,11 @@ fn candidates_for(
     }
 }
 
-fn list_item(
+fn list_item<T: TextSource + ?Sized>(
     element: &Element,
     marker: &Range<usize>,
     task: Option<bool>,
-    text: &str,
+    text: &T,
     revealed: &RevealSet,
     out: &mut Vec<Conceal>,
 ) {
@@ -210,8 +222,11 @@ fn list_item(
         let mut range = m.clone();
         // An ordered marker stays as text: conceal only what follows it.
         if !unordered && range.start <= marker.start && marker.end <= range.end {
-            let rest = text.as_bytes()[marker.end..range.end]
-                .iter()
+            let Some(after) = text.get(marker.end..range.end) else {
+                continue;
+            };
+            let rest = after
+                .bytes()
                 .take_while(|b| matches!(b, b' ' | b'\t'))
                 .count();
             range.start = marker.end + rest;
@@ -224,7 +239,12 @@ fn list_item(
 
 /// Pushes the pipes of the table rows (not the delimiter row) that hold no
 /// head.
-fn table_pipes(rows: &[TableRow], text: &str, revealed: &RevealSet, out: &mut Vec<Conceal>) {
+fn table_pipes<T: TextSource + ?Sized>(
+    rows: &[TableRow],
+    text: &T,
+    revealed: &RevealSet,
+    out: &mut Vec<Conceal>,
+) {
     for row in rows {
         if row.is_delimiter || revealed.has_head_within(&row.range) {
             continue;
@@ -242,11 +262,16 @@ fn table_pipes(rows: &[TableRow], text: &str, revealed: &RevealSet, out: &mut Ve
     }
 }
 
-/// Pushes `range` as hidden pieces split at newlines.
-fn push_lines(range: Range<usize>, text: &str, out: &mut Vec<Conceal>) {
+/// Pushes `range` as hidden pieces split at newlines; nothing when its
+/// text is not held.
+fn push_lines<T: TextSource + ?Sized>(range: Range<usize>, text: &T, out: &mut Vec<Conceal>) {
+    let Some(bytes) = text.get(range.clone()).map(str::as_bytes) else {
+        return;
+    };
     let mut start = range.start;
     for pos in range.start..=range.end {
-        let at_break = pos == range.end || matches!(text.as_bytes().get(pos), Some(b'\n' | b'\r'));
+        let at_break =
+            pos == range.end || matches!(bytes.get(pos - range.start), Some(b'\n' | b'\r'));
         if at_break {
             if pos > start {
                 out.push(Conceal {
@@ -261,7 +286,11 @@ fn push_lines(range: Range<usize>, text: &str, out: &mut Vec<Conceal>) {
 
 /// Clips a hidden range to `window` on char boundaries; drops any other
 /// kind that is not wholly inside it.
-fn clip(conceal: Conceal, window: &Range<usize>, text: &str) -> Option<Conceal> {
+fn clip<T: TextSource + ?Sized>(
+    conceal: Conceal,
+    window: &Range<usize>,
+    text: &T,
+) -> Option<Conceal> {
     let Conceal { range, kind } = conceal;
     let inside = window.start <= range.start && range.end <= window.end;
     if !inside && kind != ConcealKind::Hide {

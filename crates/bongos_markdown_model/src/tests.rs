@@ -2,8 +2,8 @@ use std::ops::Range;
 
 use crate::{
     BlockKind, CellDirection, Conceal, ConcealKind, Edit, Element, ElementKind, LABELS,
-    MarkdownIndex, RevealSelection, diff, has_leading_pipe, insert_block, parse, plan, revealed,
-    row_pipes, table_cell, toggle_checkbox,
+    MarkdownIndex, RevealSelection, TextSlices, TextSource as _, diff, has_leading_pipe,
+    insert_block, parse, plan, revealed, row_pipes, table_cell, toggle_checkbox,
 };
 
 fn apply(text: &str, edit: &Edit) -> String {
@@ -686,4 +686,48 @@ fn an_escaped_pipe_stays_text_in_a_table() {
         has(&off, escaped + 4..escaped + 5, ConcealKind::TablePipe),
         "{off:?}"
     );
+}
+
+/// The start of the line holding `offset`, and the end of the line holding `end`.
+fn whole_lines(text: &str, range: Range<usize>) -> Range<usize> {
+    let start = text[..range.start].rfind('\n').map_or(0, |i| i + 1);
+    let end = text[range.end..]
+        .find('\n')
+        .map_or(text.len(), |i| range.end + i);
+    start..end
+}
+
+#[test]
+fn slices_of_the_window_and_head_lines_plan_as_the_whole_text_does() {
+    let text = "intro line\n\n# Title **bold**\n\n- [ ] task *it*\n- item\n1. one\n\n\
+        > quote [l](http://x.y)\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```\ncode\n```\n\
+        ![img](p.png) tail\n\n---\nlast **b** line\n";
+    let index = parse(text);
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(text.match_indices('\n').map(|(i, _)| i + 1))
+        .filter(|i| *i <= text.len())
+        .collect();
+    for (a, window_start) in starts.iter().enumerate() {
+        for window_end in starts[a..].iter().copied().chain([text.len()]) {
+            let window = *window_start..window_end;
+            for head in [0, 20, 40, 75, text.len() - 3] {
+                let selections = [RevealSelection::cursor(head)];
+                let whole_set = revealed(&index, text, &selections);
+                let whole = plan(&index, text, window.clone(), &whole_set, &|_| true);
+                let slices = TextSlices::new(
+                    text.len(),
+                    [
+                        whole_lines(text, window.clone()),
+                        whole_lines(text, head..head),
+                    ],
+                    |range| text[range].to_string(),
+                );
+                assert_eq!(slices.total_len(), text.len());
+                let sliced_set = revealed(&index, &slices, &selections);
+                assert_eq!(sliced_set, whole_set, "head {head}");
+                let sliced = plan(&index, &slices, window.clone(), &sliced_set, &|_| true);
+                assert_eq!(sliced, whole, "window {window:?}, head {head}");
+            }
+        }
+    }
 }

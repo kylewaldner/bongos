@@ -17,7 +17,7 @@
 
 use std::ops::Range;
 
-use crate::{Element, ElementKind, MarkdownIndex};
+use crate::{Element, ElementKind, MarkdownIndex, TextSource};
 
 /// A selection as the reveal rules see it: the selected byte range plus the
 /// head, the end the cursor sits at. A plain cursor has an empty `range` at
@@ -85,40 +85,28 @@ impl RevealSet {
 }
 
 /// The markup revealed by `selections` (see the module docs for the rules).
-pub fn revealed(index: &MarkdownIndex, text: &str, selections: &[RevealSelection]) -> RevealSet {
+/// `text` needs to hold only the lines of the selections' heads (see
+/// [`TextSource`]).
+pub fn revealed<T: TextSource + ?Sized>(
+    index: &MarkdownIndex,
+    text: &T,
+    selections: &[RevealSelection],
+) -> RevealSet {
+    let len = text.total_len();
     let mut markup: Vec<Range<usize>> = Vec::new();
     let mut heads = Vec::with_capacity(selections.len());
     for selection in selections {
-        let head = selection.head.min(text.len());
+        let head = selection.head.min(len);
         heads.push(head);
-        let line = line_around(text, head);
-        for element in index.elements() {
-            if element.range.start > line.end {
-                break;
-            }
-            if element.range.end < line.start {
-                continue;
-            }
+        let line = text.line_around(head);
+        for element in index.elements_touching(line.clone()) {
             reveal_at_head(element, head, &line, &mut markup);
         }
-        let start = selection
-            .range
-            .start
-            .min(selection.range.end)
-            .min(text.len());
-        let end = selection
-            .range
-            .start
-            .max(selection.range.end)
-            .min(text.len());
+        let start = selection.range.start.min(selection.range.end).min(len);
+        let end = selection.range.start.max(selection.range.end).min(len);
         if start < end {
-            for element in index.elements() {
-                if element.range.start > end {
-                    break;
-                }
-                if element.range.end >= start {
-                    markup.extend(element.markup.iter().cloned());
-                }
+            for element in index.elements_touching(start..end) {
+                markup.extend(element.markup.iter().cloned());
             }
         }
     }
@@ -162,18 +150,4 @@ fn reveal_at_head(
                 .cloned(),
         );
     }
-}
-
-/// The line holding `offset`, between newlines, without them.
-fn line_around(text: &str, offset: usize) -> Range<usize> {
-    let bytes = text.as_bytes();
-    let start = bytes[..offset]
-        .iter()
-        .rposition(|b| *b == b'\n')
-        .map_or(0, |i| i + 1);
-    let end = bytes[offset..]
-        .iter()
-        .position(|b| *b == b'\n')
-        .map_or(text.len(), |i| offset + i);
-    start..end
 }
