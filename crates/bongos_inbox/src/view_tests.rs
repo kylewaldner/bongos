@@ -453,6 +453,64 @@ async fn in_the_sidebar_ret_opens_the_modal_and_n_and_p_move_inside_it(cx: &mut 
     assert!(is_focused(&mut win, &view), "the focus is back on the list");
 }
 
+/// The sidebar host: a panel of the right dock shows the list alone, and RET opens the modal.
+#[cfg(debug_assertions)]
+#[gpui::test]
+async fn the_sidebar_panel_shows_the_list_and_ret_opens_the_modal(cx: &mut TestAppContext) {
+    let (env, mut win) = setup(cx).await;
+    deliver(&env, "older", 10);
+    deliver(&env, "newer", 5);
+    env.wait_unread(cx, 2).await;
+
+    win.cx.dispatch_action(OpenAsSidebar);
+    win.cx.run_until_parked();
+    let (panel_view, open) = win.workspace.read_with(&win.cx, |workspace, cx| {
+        let panel = workspace
+            .panel::<InboxSidebar>(cx)
+            .expect("the right dock has the sidebar panel");
+        (
+            panel.read(cx).view().clone(),
+            workspace
+                .dock_at_position(workspace::dock::DockPosition::Right)
+                .read(cx)
+                .is_open(),
+        )
+    });
+    assert!(open, "the right dock is open");
+    assert_eq!(
+        panel_view.read_with(&win.cx, |view, _| view.layout()),
+        Layout::Sidebar
+    );
+    assert_eq!(summaries(&win, &panel_view), ["newer", "older"]);
+    assert!(
+        views(&win).is_empty(),
+        "the panel's view is not a center tab"
+    );
+    assert!(is_focused(&mut win, &panel_view), "the list has the focus");
+    assert!(!win.has_modal());
+
+    win.cx.dispatch_action(OpenItem);
+    env.wait_unread(cx, 1).await;
+    win.cx.run_until_parked();
+    assert!(win.has_modal(), "RET opens the modal");
+    assert_eq!(unread_flags(&win, &panel_view), [false, true]);
+
+    win.cx.dispatch_action(menu::Cancel);
+    win.cx.run_until_parked();
+    assert!(!win.has_modal(), "Esc closes the modal");
+    assert!(is_focused(&mut win, &panel_view), "back on the list");
+
+    // A second `open as sidebar` reuses the panel.
+    win.cx.dispatch_action(OpenAsSidebar);
+    win.cx.run_until_parked();
+    let same = win.workspace.read_with(&win.cx, |workspace, cx| {
+        workspace
+            .panel::<InboxSidebar>(cx)
+            .map(|panel| panel.read(cx).view().clone())
+    });
+    assert_eq!(same, Some(panel_view));
+}
+
 #[gpui::test]
 async fn ret_then_u_at_once_leaves_the_item_unread(cx: &mut TestAppContext) {
     let (env, mut win) = setup(cx).await;

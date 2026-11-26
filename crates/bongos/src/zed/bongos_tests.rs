@@ -1407,7 +1407,10 @@ async fn inbox_commands_dispatch_by_name(cx: &mut TestAppContext) {
             ("inbox::Filter", "inbox: filter"),
         ];
         #[cfg(debug_assertions)]
-        names.push(("inbox::DumpView", "inbox: dump view"));
+        {
+            names.push(("inbox::DumpView", "inbox: dump view"));
+            names.push(("inbox::OpenAsSidebar", "inbox: open as sidebar"));
+        }
         for (name, humanized) in names {
             let action = cx
                 .build_action(name, None)

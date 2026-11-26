@@ -25,11 +25,14 @@
 #      and at 640x720 (8:9, half screen), each in One Dark and One Light, in two states: the list with
 #      the first row under the cursor and the list focused, and RET on the first row (focus in the
 #      item pane). `u` then puts the first row back to unread for the next capture.
+#   8. The sidebar captures (see Deviations) on the same twelve items, in One Dark and One Light: the
+#      list with the first row under the cursor, and RET on it (the modal).
 # Deviations:
-# - The sidebar captures (design-sidebar-list-* and design-sidebar-modal-*) are not taken: the sidebar
-#   layout (the list alone, the item in a modal) exists in the view, but nothing in the app hosts the
-#   view in a dock panel or narrow pane or switches it to that layout, so no key or command reaches it
-#   from the real window. Nothing here fakes it.
+# - The sidebar captures (design-sidebar-list-* and design-sidebar-modal-*): nothing in the app yet
+#   hosts the list as a sidebar, so the debug action `inbox: open as sidebar` puts an inbox view in
+#   the sidebar layout into a right dock panel (320 px) beside an ordinary editor (a Kotlin file
+#   opened from the command line) in place of the design's custom screen; RET on the first row opens
+#   the item modal and Esc closes it. The window is 1280x720.
 # - `open-run` is not covered: a `run:` target is live only while a workflow engine run of that id
 #   exists, and this scenario starts no workflow.
 # - The first row of the design's list is the item aged 1h, above the one aged 4m, which a list
@@ -37,7 +40,9 @@
 #   the design's order. Ages are read from the clock when each capture is taken, so the minute rows
 #   can read a few minutes more than the design's.
 # - Stage 1 does not enforce five seconds itself: it polls `inbox: dump view` (each dump takes a few
-#   seconds) with a generous guard and prints how long the item took to show.
+#   seconds) and fails when the item has not shown in 15 s, under the 30 s of the inbox's periodic
+#   rescan, so a dead watcher fails it unless a rescan happens to fall in those 15 s; it prints how
+#   long the item took to show. The other stages use a 90 s guard.
 # - RET in the item-focus captures reads the first row (the design's picture keeps it unread); `u`
 #   restores it before the next capture.
 # The scenario leaves the app quit and restores settings.json.
@@ -129,20 +134,23 @@ dump() {
   wait_for_settled
 }
 
-# dump_until <what> <command...>: dumps until the command (which reads $DUMP_FILE) succeeds, with a
-# generous guard.
-dump_until() {
-  local what=$1 deadline=$((SECONDS + 90))
-  shift
+# dump_until_within <seconds> <what> <command...>: dumps until the command (which reads $DUMP_FILE)
+# succeeds, and fails when it has not by then (checked after each dump, so a little later).
+dump_until_within() {
+  local limit=$1 what=$2 deadline=$((SECONDS + $1))
+  shift 2
   while :; do
     dump
     if "$@"; then
       return 0
     fi
-    [ "$SECONDS" -lt "$deadline" ] || fail "$what; the dump reads: $(cat "$DUMP_FILE")"
+    [ "$SECONDS" -lt "$deadline" ] || fail "$what within ${limit}s; the dump reads: $(cat "$DUMP_FILE")"
     sleep 1
   done
 }
+
+# dump_until <what> <command...>: the same with a generous guard.
+dump_until() { dump_until_within 90 "$@"; }
 
 dump_unread() { [ "$(head -n1 "$DUMP_FILE")" = "unread: $1" ]; }
 
@@ -216,9 +224,12 @@ LEFT_IN_TMP=20261126T000002Z-bongos-partial-0002.md
 post "$LEFT_IN_TMP" tmp run-finished "$(ago '2 minutes')" bongos/partial "Left in tmp and never moved" "open"
 post "$SINGLE" new run-finished "$(ago '2 minutes')" bongos/nightly "Nightly index finished" "open" "" \
   "$RUN/inbox-target.txt:1" "The nightly index finished without problems."
+STAGE1_LIMIT=15
 STARTED=$SECONDS
-dump_until "the delivered item does not show with no view open" unread_is_and_has 1 "Nightly index finished"
-say "smoke: inbox 1: the item showed $((SECONDS - STARTED)) seconds after it was moved into new/"
+# The watcher delivers it in a fraction of a second; the periodic rescan, the safety net, runs every
+# 30 s. Showing within STAGE1_LIMIT (under that) means the watcher did it, not the rescan.
+dump_until_within "$STAGE1_LIMIT" "the delivered item does not show with no view open" unread_is_and_has 1 "Nightly index finished"
+say "smoke: inbox 1: the item showed $((SECONDS - STARTED)) seconds after it was moved into new/ (limit ${STAGE1_LIMIT}s)"
 grep -qF "Left in tmp and never moved" "$DUMP_FILE" && fail "an item left in tmp/ shows: $(cat "$DUMP_FILE")"
 grep -qF "bongos · run finished · nightly" "$DUMP_FILE" || fail "the row has no project, type and source: $(cat "$DUMP_FILE")"
 [ -f "$INBOX/new/$SINGLE" ] || fail "the item left new/ by itself"
@@ -400,7 +411,51 @@ capture fullscreen 1280 720 dark "One Dark"
 capture fullscreen 1280 720 light "One Light"
 capture halfscreen 640 720 dark "One Dark"
 capture halfscreen 640 720 light "One Light"
-say "smoke: inbox 7: design-sidebar-* not captured: nothing in the app hosts the inbox list as a sidebar"
+quit_app
+
+# --- 8. The sidebar captures ---------------------------------------------------------------------------------------------
+step "inbox 8: the list alone in a dock panel beside an ordinary editor, and the item in a modal"
+cat >"$RUN/inbox-project/Rectangle.kt" <<'KOTLIN'
+package bongos.edit
+
+data class Rectangle(
+    val top: Int, val left: Int,
+    val bottom: Int,
+)
+
+// a custom screen with the inbox sidebar added
+KOTLIN
+THEME="One Dark"
+write_settings "One Dark"
+launch_drawn "$RUN/inbox-project/Rectangle.kt"
+palette "workspace: close all docks"
+resize 1280 720
+palette "inbox: open as sidebar"
+
+# capture_sidebar <tone> <theme>: the list in the sidebar with the first row under the cursor, then
+# RET on it for the modal.
+capture_sidebar() {
+  local tone=$1 theme=$2
+  use_theme "$theme"
+  dump_until "the sidebar is not the design's: three unread and the first row under the cursor" \
+    unread_is_and_has 3 ">* Chose a SQLite cache over plain files"
+  [ "$(grep -c '^[> ][* ] ' "$DUMP_FILE")" = 12 ] || fail "the sidebar should list twelve rows: $(cat "$DUMP_FILE")"
+  quiet_shot "design-sidebar-list-$tone"
+  say "smoke: screenshot $RUN/design-sidebar-list-$tone.png"
+  act keys Return
+  poll 30 "the first design item read" test -n "$(file_of cur design-01.md)"
+  wait_for_settled
+  shot "design-sidebar-modal-$tone"
+  say "smoke: screenshot $RUN/design-sidebar-modal-$tone.png"
+  # Esc closes the modal and the list has the focus again; the first row goes back to unread.
+  act keys Escape
+  act keys u
+  poll 30 "the first design item unread" test -f "$INBOX/cur/design-01.md:2,"
+  dump_until "the first design row is not unread again" unread_is 3
+}
+
+capture_sidebar dark "One Dark"
+capture_sidebar light "One Light"
 
 quit_app
 cp "$RUN/config-backup/settings-32.json" "$SETTINGS_FILE"
