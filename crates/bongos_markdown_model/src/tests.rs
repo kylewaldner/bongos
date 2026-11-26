@@ -299,6 +299,15 @@ fn non_empty_selection_reveals_every_element_it_touches() {
     // The same head alone does not reveal the strong text.
     let plan = plan_at(text, &[11]);
     assert!(has(&plan, 0..2, ConcealKind::Hide), "{plan:?}");
+
+    // A selection that only touches an element's end reveals it.
+    let text = "a **b** c";
+    let plan = plan_for(text, &[RevealSelection::new(7..9, 9)], 0..text.len(), &|_| true);
+    assert!(!conceals(&plan, 2..7), "{plan:?}");
+
+    // A reversed range reveals the same as the range it denotes.
+    let plan = plan_for(text, &[RevealSelection::new(9..7, 9)], 0..text.len(), &|_| true);
+    assert!(!conceals(&plan, 2..7), "{plan:?}");
 }
 
 #[test]

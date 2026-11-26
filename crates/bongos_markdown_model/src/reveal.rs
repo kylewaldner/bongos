@@ -101,10 +101,16 @@ pub fn revealed(index: &MarkdownIndex, text: &str, selections: &[RevealSelection
             }
             reveal_at_head(element, head, &line, &mut markup);
         }
-        let range = selection.range.start.min(text.len())..selection.range.end.min(text.len());
-        if !range.is_empty() {
-            for element in index.elements_in(range) {
-                markup.extend(element.markup.iter().cloned());
+        let start = selection.range.start.min(selection.range.end).min(text.len());
+        let end = selection.range.start.max(selection.range.end).min(text.len());
+        if start < end {
+            for element in index.elements() {
+                if element.range.start > end {
+                    break;
+                }
+                if element.range.end >= start {
+                    markup.extend(element.markup.iter().cloned());
+                }
             }
         }
     }
