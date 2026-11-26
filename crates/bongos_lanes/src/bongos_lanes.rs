@@ -81,7 +81,10 @@ pub use adopt::{AdoptRequest, Adopted, LeftWork};
 pub use bongos_engine_host::{WriterParticipant, WriterParticipants};
 pub use bongos_lanes_model::{AssignedWork, Assignment, EnvEdit, Problem, StopCause};
 pub use create::{CreateError, check_root, create_below_existing, lexical};
-pub use definitions::{LANES_FILE, LANES_FOLDER, prompt_lane_diagnostics, validate_folder};
+pub use definitions::{
+    LANES_FILE, LANES_FOLDER, LaneTableFields, prompt_lane_diagnostics, validate_folder,
+    validate_folder_accepting,
+};
 pub use dispatch_job::{DROPPED_BEFORE_START, HISTORY_BY};
 pub use dispatcher::{
     AheadLanding, DEFAULT_DISPATCHER, DISPATCHER_KEY, Dispatcher, DispatcherConfig,

@@ -3007,6 +3007,52 @@
       "log_max_bytes": 1048576,
     },
   },
+  // Pools, queues and triggers are declared by a project in definitions/pools, queues and
+  // triggers; with nothing declared nothing waits.
+  "pools": {
+    // Whether pools, queues, triggers and lane job hooks are on. While it is off, nothing
+    // waits on a pool and the pools, queues and triggers folders are not read.
+    "enabled": false,
+    // The directory of the machine-wide pool store. Null means `pools` in the state
+    // directory.
+    "machine_store_dir": null,
+    // Milliseconds between two looks at a pool a request waits on.
+    "poll_interval_ms": 1000,
+    // Seconds to wait for the lock of the machine-wide pool store.
+    "lock_timeout_seconds": 10,
+    // Seconds a waiter from another host may stay at the head of a machine pool's queue.
+    "mixed_head_seconds": 60,
+    // Seconds between two readings of a pool's guard.
+    "guard_interval_seconds": 5,
+    // Seconds a guard must keep passing before a request is granted, unless the pool says.
+    "guard_settle_seconds": 5,
+    // Seconds a guard script may run before it counts as failed.
+    "guard_script_timeout_seconds": 30,
+    // Minutes a hold may last when its pool sets no `max_hold`. Null means no limit.
+    "max_hold": null,
+  },
+  "queues": {
+    // Attempts at an item when its queue sets no `max_attempts`.
+    "max_attempts": 3,
+    // Failures kept with each item.
+    "failures_kept": 10,
+  },
+  "triggers": {
+    // Whether the engine host keeps running while a trigger may still fire.
+    "keep_host_alive": false,
+    // Minutes after its time a missed timer still fires.
+    "scheduled_tolerance_minutes": 30,
+    // Firings kept in each trigger's history.
+    "history_limit": 50,
+    // Seconds the checks before a scheduled firing may take.
+    "preflight_timeout_seconds": 120,
+  },
+  "hooks": {
+    // Seconds a lane job hook may run when it sets no `timeout`.
+    "timeout_seconds": 900,
+    // Kilobytes of a hook's output kept at its end.
+    "output_tail_kb": 16,
+  },
   "task_checks": {
     // Whether task checks are on. It is on by default; set it to false and no check runs,
     // no record is written and every task check command is hidden and only says "Task

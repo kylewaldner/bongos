@@ -285,6 +285,18 @@ pub struct SettingsContent {
     /// Settings for lanes: background workflow runs hosted by a headless engine process.
     pub lanes: Option<LanesSettingsContent>,
 
+    /// Settings for pools: named limits on how much work runs at once.
+    pub pools: Option<PoolsSettingsContent>,
+
+    /// Settings for queues: lists of work items that lanes and triggers take from.
+    pub queues: Option<QueuesSettingsContent>,
+
+    /// Settings for triggers: workflows started by a timer or an event.
+    pub triggers: Option<TriggersSettingsContent>,
+
+    /// Settings for the lane job hooks: scripts run around a lane's jobs.
+    pub hooks: Option<HooksSettingsContent>,
+
     /// Settings for task checks: scripts and commands that must pass before a task is done.
     pub task_checks: Option<TaskChecksSettingsContent>,
 
@@ -1752,6 +1764,100 @@ pub struct LanesHostSettingsContent {
     ///
     /// Default: 1048576
     pub log_max_bytes: Option<u64>,
+}
+
+/// Settings for pools. Pools, their sizes and their guards are declared by a project in
+/// `pools/pools.toml`; these settings only say how bongos waits on them.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct PoolsSettingsContent {
+    /// Whether pools, queues, triggers and lane job hooks are on. While it is off, nothing waits
+    /// on a pool and the `pools`, `queues` and `triggers` folders are not read.
+    ///
+    /// Default: false
+    pub enabled: Option<bool>,
+    /// The directory of the machine-wide pool store. Null means `pools` in the state directory.
+    ///
+    /// Default: null
+    pub machine_store_dir: Option<String>,
+    /// Milliseconds between two looks at a pool a request waits on.
+    ///
+    /// Default: 1000
+    pub poll_interval_ms: Option<u64>,
+    /// Seconds to wait for the lock of the machine-wide pool store.
+    ///
+    /// Default: 10
+    pub lock_timeout_seconds: Option<u64>,
+    /// Seconds a waiter from another host may stay at the head of a machine pool's queue.
+    ///
+    /// Default: 60
+    pub mixed_head_seconds: Option<u64>,
+    /// Seconds between two readings of a pool's guard.
+    ///
+    /// Default: 5
+    pub guard_interval_seconds: Option<u64>,
+    /// Seconds a guard must keep passing before a request is granted, unless the pool says.
+    ///
+    /// Default: 5
+    pub guard_settle_seconds: Option<u64>,
+    /// Seconds a guard script may run before it counts as failed.
+    ///
+    /// Default: 30
+    pub guard_script_timeout_seconds: Option<u64>,
+    /// Minutes a hold may last when its pool sets no `max_hold`. Null means no limit.
+    ///
+    /// Default: null
+    pub max_hold: Option<u64>,
+}
+
+/// Settings for queues.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct QueuesSettingsContent {
+    /// Attempts at an item when its queue sets no `max_attempts`.
+    ///
+    /// Default: 3
+    pub max_attempts: Option<u32>,
+    /// Failures kept with each item.
+    ///
+    /// Default: 10
+    pub failures_kept: Option<u32>,
+}
+
+/// Settings for triggers.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct TriggersSettingsContent {
+    /// Whether the engine host keeps running while a trigger may still fire.
+    ///
+    /// Default: false
+    pub keep_host_alive: Option<bool>,
+    /// Minutes after its time a missed timer still fires.
+    ///
+    /// Default: 30
+    pub scheduled_tolerance_minutes: Option<u32>,
+    /// Firings kept in each trigger's history.
+    ///
+    /// Default: 50
+    pub history_limit: Option<u32>,
+    /// Seconds the checks before a scheduled firing may take.
+    ///
+    /// Default: 120
+    pub preflight_timeout_seconds: Option<u64>,
+}
+
+/// Settings for the lane job hooks.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct HooksSettingsContent {
+    /// Seconds a hook may run when it sets no `timeout`.
+    ///
+    /// Default: 900
+    pub timeout_seconds: Option<u64>,
+    /// Kilobytes of a hook's output kept at its end.
+    ///
+    /// Default: 16
+    pub output_tail_kb: Option<u64>,
 }
 
 /// Settings for workflows.

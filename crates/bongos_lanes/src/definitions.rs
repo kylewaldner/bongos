@@ -6,7 +6,9 @@
 use std::path::Path;
 
 use bongos_lanes_model::validate_lane_table;
-use bongos_lanes_model::{LaneTable, ValidationContext, parse, prompt_lane_problems};
+use bongos_lanes_model::{
+    LaneTable, ValidationContext, parse, parse_accepting, prompt_lane_problems,
+};
 use bongos_project_repo::DefinitionFolders;
 use bongos_project_repo_model::Problem;
 use bongos_workflow::ValidationHooks;
@@ -58,9 +60,52 @@ fn names_taken_as_known(table: &LaneTable) -> ValidationContext {
     context
 }
 
+static LANE_TABLE_FIELDS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// The lane table keys other features define (`kind.pulls`, `kind.binding.pools`,
+/// `kind.binding.hooks`). The table refuses such a key ("pulls are not available yet") until the
+/// feature that reads it registers it; its value is kept raw on the kind or binding either way.
+pub struct LaneTableFields;
+
+impl LaneTableFields {
+    /// Accepts `key` in the lane table; registering it twice keeps it once.
+    pub fn register(key: &str) {
+        let mut keys = LANE_TABLE_FIELDS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !keys.iter().any(|known| known == key) {
+            keys.push(key.to_string());
+        }
+    }
+
+    /// Refuses `key` again, as when the feature that reads it is turned off.
+    pub fn unregister(key: &str) {
+        LANE_TABLE_FIELDS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|known| known != key);
+    }
+
+    /// The keys registered now.
+    pub fn registered() -> Vec<String> {
+        LANE_TABLE_FIELDS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
 /// The problems of one file of the `lanes` folder: `path` is relative to `definitions/`. Only
-/// `lanes/lanes.toml` is read; each problem names its line.
+/// `lanes/lanes.toml` is read; each problem names its line. The keys registered with
+/// [`LaneTableFields`] are accepted.
 pub fn validate_folder(path: &Path, text: &str) -> Vec<Problem> {
+    let registered = LaneTableFields::registered();
+    let accepted: Vec<&str> = registered.iter().map(String::as_str).collect();
+    validate_folder_accepting(path, text, &accepted)
+}
+
+/// [`validate_folder`] with the lane table keys `accepted` (key paths such as `kind.pulls`).
+pub fn validate_folder_accepting(path: &Path, text: &str, accepted: &[&str]) -> Vec<Problem> {
     if !is_lane_table(path) {
         return Vec::new();
     }
@@ -69,7 +114,7 @@ pub fn validate_folder(path: &Path, text: &str) -> Vec<Problem> {
         path: shown.clone(),
         reason: format!("line {line}: {message}"),
     };
-    match parse(text) {
+    match parse_accepting(text, accepted) {
         Err(error) => vec![problem(error.line, &error.message)],
         Ok(table) => validate_lane_table(&table, &names_taken_as_known(&table))
             .iter()
