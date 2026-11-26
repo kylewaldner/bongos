@@ -63,11 +63,13 @@ pub enum ActionOutcome {
 
 pub type ActionHandler = Rc<dyn Fn(&ItemRef, &mut Window, &mut App) -> ActionOutcome>;
 type FocusTask = Rc<dyn Fn(&str, &WeakEntity<Workspace>, &mut Window, &mut App)>;
+type FocusRun = Rc<dyn Fn(&str, &WeakEntity<Workspace>, &mut Window, &mut App)>;
 
 /// The registry of action names and their handlers, a global.
 pub struct InboxActions {
     handlers: HashMap<String, ActionHandler>,
     focus_task: Option<FocusTask>,
+    focus_run: Option<FocusRun>,
 }
 
 impl Global for InboxActions {}
@@ -77,6 +79,7 @@ impl Default for InboxActions {
         let mut actions = Self {
             handlers: HashMap::new(),
             focus_task: None,
+            focus_run: None,
         };
         actions.insert(OPEN, open);
         actions.insert(DISMISS, |_, _, _| ActionOutcome::Archive);
@@ -113,6 +116,14 @@ impl InboxActions {
         cx: &mut App,
     ) {
         cx.default_global::<Self>().focus_task = Some(Rc::new(focus));
+    }
+
+    /// Tells `open-run` how to show a run by its id (the app has the workflow crate do it).
+    pub fn set_run_focus(
+        focus: impl Fn(&str, &WeakEntity<Workspace>, &mut Window, &mut App) + 'static,
+        cx: &mut App,
+    ) {
+        cx.default_global::<Self>().focus_run = Some(Rc::new(focus));
     }
 
     /// Whether `name` has a handler.
@@ -181,17 +192,26 @@ fn open_task(item: &ItemRef, window: &mut Window, cx: &mut App) -> ActionOutcome
     }
 }
 
-/// What `open-run` says for a `run:<id>` target: the work crate shows only the run of the current
-/// run or task context, so showing the run an id names is not possible yet.
-pub const RUN_BY_ID_UNAVAILABLE: &str = "cannot show the run by id yet";
+/// What `open-run` says when the app has not told it how to show a run.
+pub const RUN_BY_ID_UNAVAILABLE: &str = "runs are not available here";
 
-/// `open-run`: for a `run:<id>` target, says the run cannot be shown by id yet and leaves the item
-/// unread, rather than showing some other run.
+/// `open-run`: shows the run of a `run:<id>` target by its id and marks the item read.
 fn open_run(item: &ItemRef, window: &mut Window, cx: &mut App) -> ActionOutcome {
     match locate(item, cx) {
-        Ok(Located::Run(_)) => {
-            bongos_minibuffer::message(window, cx, RUN_BY_ID_UNAVAILABLE);
-            ActionOutcome::Keep
+        Ok(Located::Run(id)) => {
+            let focus = cx
+                .try_global::<InboxActions>()
+                .and_then(|actions| actions.focus_run.clone());
+            match focus {
+                Some(focus) => {
+                    focus(&id, &item.workspace, window, cx);
+                    ActionOutcome::MarkRead
+                }
+                None => {
+                    bongos_minibuffer::message(window, cx, RUN_BY_ID_UNAVAILABLE);
+                    ActionOutcome::Keep
+                }
+            }
         }
         Ok(_) => {
             bongos_minibuffer::message(window, cx, "open-run needs a run: target");
