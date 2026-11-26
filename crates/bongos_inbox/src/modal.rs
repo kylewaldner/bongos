@@ -111,7 +111,7 @@ impl Render for ItemModal {
             .border_color(colors.border)
             .rounded(px(RADIUS))
             .shadow(vec![BoxShadow {
-                color: black().opacity(SHADOW_OPACITY).into(),
+                color: black().opacity(SHADOW_OPACITY),
                 offset: point(px(0.), px(12.)),
                 blur_radius: px(32.),
                 spread_radius: px(0.),

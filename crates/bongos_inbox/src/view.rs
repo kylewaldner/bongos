@@ -297,7 +297,7 @@ impl InboxView {
                         let Some(editor) = item.downcast::<editor::Editor>() else {
                             return;
                         };
-                        editor.update(cx, |editor, cx| editor.set_read_only(true));
+                        editor.update(cx, |editor, _| editor.set_read_only(true));
                         let buffer = editor.read(cx).buffer().read(cx).as_singleton();
                         let languages = workspace.project().read(cx).languages().clone();
                         if let Some(buffer) = buffer {
