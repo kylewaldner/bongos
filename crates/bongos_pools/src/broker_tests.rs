@@ -23,9 +23,9 @@ use gpui::TestAppContext;
 
 use crate::store_test_support::{Liveness, host, writer};
 use crate::{
-    BrokerParts, BrokerTiming, DeclareOutcome, GuardReaders, LOCK_FILE, Lease, LockWait, MachineStore,
-    MachineStores, PoolBroker, PoolConfig, PoolsEvent, ProjectRef, ProjectStore, Refused,
-    ReleaseWhy, Request, ScriptOutput, ScriptRun, StoreContext, Waiting,
+    BrokerParts, BrokerTiming, DeclareOutcome, GuardReaders, LOCK_FILE, Lease, LockWait,
+    MachineStore, MachineStores, PoolBroker, PoolConfig, PoolsEvent, ProjectRef, ProjectStore,
+    Refused, ReleaseWhy, Request, ScriptOutput, ScriptRun, StoreContext, Waiting,
 };
 
 pub(crate) const START: u64 = 1_700_000_000_000;
@@ -571,7 +571,10 @@ fn acquire_answers_at_once_while_another_process_holds_the_machine_lock(cx: &mut
     let status = waiting.status_source();
     let outcome = watch(cx, waiting);
     cx.run_until_parked();
-    assert!(outcome.borrow().is_none(), "nothing resolves while the lock is busy");
+    assert!(
+        outcome.borrow().is_none(),
+        "nothing resolves while the lock is busy"
+    );
     assert_eq!(status.status().position, 0, "not written yet");
     assert!(waiters(&read(&a).1, "gpu").is_empty());
     drop(lock);
@@ -915,7 +918,13 @@ fn a_mixed_waiter_first_too_long_moves_back_behind_a_waiter_it_blocks(cx: &mut T
         vec![pool("db", PoolKind::Mutex, 1)],
         vec![pool("gpu", PoolKind::Mutex, 1)],
     );
-    let b = world.project(cx, "b", host(2), vec![], vec![pool("gpu", PoolKind::Mutex, 1)]);
+    let b = world.project(
+        cx,
+        "b",
+        host(2),
+        vec![],
+        vec![pool("gpu", PoolKind::Mutex, 1)],
+    );
     let db = watch(cx, a.broker.acquire(ask("db-only", &[need("db")])));
     cx.run_until_parked();
     let db = lease(&db);
@@ -942,7 +951,10 @@ fn a_mixed_waiter_first_too_long_moves_back_behind_a_waiter_it_blocks(cx: &mut T
     let machine = read(&a).1;
     assert_eq!(holds(&machine, "gpu"), vec!["b-job"]);
     assert_eq!(waiters(&machine, "gpu"), vec!["mixed"]);
-    assert!(ticket(&machine) > first_ticket, "queued again with a new ticket");
+    assert!(
+        ticket(&machine) > first_ticket,
+        "queued again with a new ticket"
+    );
     assert!(mixed.borrow().is_none(), "the mixed request still waits");
 
     // Both its halves are granted once both pools are free.
@@ -1222,9 +1234,16 @@ fn a_drain_keeps_the_hold_of_a_live_lease_whose_bind_waits_for_a_retry(cx: &mut 
     cx.run_until_parked();
     cx.foreground_executor().block_on(drained);
     let machine = read(&a).1;
-    assert_eq!(holds(&machine, "gpu"), vec!["job"], "the live lease keeps its hold");
     assert_eq!(
-        machine.pools["gpu"].holds[0].holder.process.map(|process| process.pid),
+        holds(&machine, "gpu"),
+        vec!["job"],
+        "the live lease keeps its hold"
+    );
+    assert_eq!(
+        machine.pools["gpu"].holds[0]
+            .holder
+            .process
+            .map(|process| process.pid),
         Some(600),
         "bound to its process by the drain"
     );

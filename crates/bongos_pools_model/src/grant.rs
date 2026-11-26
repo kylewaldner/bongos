@@ -413,9 +413,10 @@ impl PoolTable {
 
     /// Whether the request of `host` has a waiter in this table.
     pub fn is_waiting(&self, host: &HostRef, request: RequestId) -> bool {
-        self.pools.values().flat_map(|pool| &pool.waiters).any(|waiter| {
-            waiter.request == request && waiter.holder.host == *host
-        })
+        self.pools
+            .values()
+            .flat_map(|pool| &pool.waiters)
+            .any(|waiter| waiter.request == request && waiter.holder.host == *host)
     }
 
     /// Drops the wait-for edges whose mixed request no longer waits here.

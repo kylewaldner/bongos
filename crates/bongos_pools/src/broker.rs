@@ -1945,7 +1945,10 @@ impl Shared {
                     pending.needs_stores
                 };
                 log::warn!("pools: queuing again after machine.toml could not be written");
-                self.push(Op::Withdraw { request: id, stores });
+                self.push(Op::Withdraw {
+                    request: id,
+                    stores,
+                });
                 self.push(Op::Enqueue(id));
             }
             Err(TxError::Busy(reason)) => {
@@ -2411,7 +2414,11 @@ fn move_back(
         let Some(pool) = machine.pools.get_mut(pool_name) else {
             continue;
         };
-        let Some(index) = pool.waiters.iter().position(|waiter| waiter.ticket == ticket) else {
+        let Some(index) = pool
+            .waiters
+            .iter()
+            .position(|waiter| waiter.ticket == ticket)
+        else {
             continue;
         };
         let mut waiter = pool.waiters.remove(index);

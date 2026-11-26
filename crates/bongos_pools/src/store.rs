@@ -193,7 +193,8 @@ pub(crate) fn grant_holding_back(
     held: impl Fn(&Waiter) -> bool,
 ) -> Vec<Grant> {
     let foreign = |waiter: &Waiter| {
-        waiter.holder.host == *host && project.is_some_and(|project| waiter.holder.project != project)
+        waiter.holder.host == *host
+            && project.is_some_and(|project| waiter.holder.project != project)
     };
     let is_held = |waiter: &Waiter| waiter.holder.host == *host && held(waiter);
     let any_held = table

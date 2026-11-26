@@ -166,10 +166,8 @@ fn joint_grant(
     loop {
         let is_held =
             |waiter: &bongos_pools_model::Waiter| waiter.mixed && held.contains(&waiter.request);
-        let machine_grants =
-            crate::store::grant_holding_back(machine, now, &host, own, is_held);
-        let project_grants =
-            crate::store::grant_holding_back(project, now, &host, own, is_held);
+        let machine_grants = crate::store::grant_holding_back(machine, now, &host, own, is_held);
+        let project_grants = crate::store::grant_holding_back(project, now, &host, own, is_held);
         let granted = |grants: &[Grant]| -> BTreeSet<RequestId> {
             grants.iter().map(|grant| grant.request).collect()
         };

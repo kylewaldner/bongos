@@ -347,7 +347,11 @@ pub fn project_side_edges(
                         .push((path_node(&hold.holder), Some(name.as_str())));
                 }
             }
-            for older in pool.waiters.iter().filter(|older| older.ticket < waiter.ticket) {
+            for older in pool
+                .waiters
+                .iter()
+                .filter(|older| older.ticket < waiter.ticket)
+            {
                 edges.entry(node.clone()).or_default().push((
                     request_node(&older.holder, older.request),
                     Some(name.as_str()),
@@ -366,7 +370,10 @@ pub fn project_side_edges(
         holders.insert(path.clone(), *holder);
         for (node, waiter) in &waiting {
             if holder.is_or_encloses(waiter) {
-                edges.entry(path.clone()).or_default().push((node.clone(), None));
+                edges
+                    .entry(path.clone())
+                    .or_default()
+                    .push((node.clone(), None));
             }
         }
     }
@@ -374,14 +381,11 @@ pub fn project_side_edges(
         .pools
         .values()
         .flat_map(|pool| {
-            pool.holds
-                .iter()
-                .map(|hold| path_node(&hold.holder))
-                .chain(
-                    pool.waiters
-                        .iter()
-                        .map(|waiter| request_node(&waiter.holder, waiter.request)),
-                )
+            pool.holds.iter().map(|hold| path_node(&hold.holder)).chain(
+                pool.waiters
+                    .iter()
+                    .map(|waiter| request_node(&waiter.holder, waiter.request)),
+            )
         })
         .collect();
     let end = |node: &Node| -> Option<EdgeEnd> {
