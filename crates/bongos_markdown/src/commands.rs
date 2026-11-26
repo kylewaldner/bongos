@@ -12,7 +12,7 @@ use bongos_markdown_model::{
     move_block, parse, table_cell, toggle_checkbox,
 };
 use bongos_minibuffer::{Candidate, Outcome, Session, Source};
-use editor::{Editor, MultiBufferOffset, SelectionEffects};
+use editor::{Anchor, Editor, MultiBufferOffset, SelectionEffects, ToOffset as _};
 use gpui::{App, Context, Entity, Window};
 use language::Buffer;
 use workspace::Workspace;
@@ -189,15 +189,31 @@ fn move_blocks(
 /// Checks or unchecks the task item at the newest selection's head (multiple cursors: only the
 /// newest), in one transaction; off a task item echoes [`NOT_A_TASK`].
 fn toggle(editor: &mut Editor, window: &mut Window, cx: &mut Context<Editor>) {
+    let head = newest(editor, cx).head;
+    toggle_at(editor, head, window, cx);
+}
+
+/// Checks or unchecks the task item whose first line holds `at` (a click on its box), as the
+/// checkbox toggle does at point; point does not move.
+pub(crate) fn toggle_task_at(
+    editor: &mut Editor,
+    at: Anchor,
+    window: &mut Window,
+    cx: &mut Context<Editor>,
+) {
+    let offset = at.to_offset(&editor.buffer().read(cx).snapshot(cx)).0;
+    toggle_at(editor, offset, window, cx);
+}
+
+fn toggle_at(editor: &mut Editor, offset: usize, window: &mut Window, cx: &mut Context<Editor>) {
     let Some(buffer) = buffer_of(editor, cx) else {
         return;
     };
     if editor.read_only(cx) {
         return;
     }
-    let head = newest(editor, cx).head;
     let text = buffer.read(cx).text();
-    let Some(edit) = toggle_checkbox(&text, head) else {
+    let Some(edit) = toggle_checkbox(&text, offset) else {
         bongos_minibuffer::message(window, cx, NOT_A_TASK);
         return;
     };

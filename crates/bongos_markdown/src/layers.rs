@@ -6,10 +6,11 @@
 
 use std::ops::Range;
 
-use bongos_markdown_model::MarkdownIndex;
+use bongos_markdown_model::{MarkdownIndex, TextSlices};
 use editor::display_map::DisplayRow;
 use editor::{Bias, DisplayPoint, Editor};
 use gpui::Context;
+use language::Point;
 
 use crate::conceals::{ConcealLayer, LoadedImages};
 use crate::images::ImageLayer;
@@ -80,4 +81,22 @@ pub fn window(editor: &mut Editor, cx: &mut Context<Editor>) -> Range<usize> {
         buffer.point_to_offset(end).0
     };
     start..end.max(start)
+}
+
+/// The whole lines of `snapshot` that `ranges` touch, read once each, for the model's planning.
+pub fn held_text(
+    snapshot: &language::BufferSnapshot,
+    ranges: impl IntoIterator<Item = Range<usize>>,
+) -> TextSlices {
+    let len = snapshot.len();
+    let lines: Vec<Range<usize>> = ranges
+        .into_iter()
+        .map(|range| {
+            let start = snapshot.offset_to_point(range.start.min(len));
+            let end = snapshot.offset_to_point(range.end.min(len).max(range.start.min(len)));
+            snapshot.point_to_offset(Point::new(start.row, 0))
+                ..snapshot.point_to_offset(Point::new(end.row, snapshot.line_len(end.row)))
+        })
+        .collect();
+    TextSlices::new(len, lines, |range| snapshot.text_for_range(range).collect())
 }

@@ -14,14 +14,15 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use bongos_markdown_model::{
-    ConcealKind, Element, ElementKind, RevealSet, TableRow, has_leading_pipe, plan, row_pipes,
+    ConcealKind, Element, ElementKind, RevealSet, TableRow, TextSlices, TextSource as _,
+    has_leading_pipe, plan, row_pipes,
 };
 use collections::HashMap;
 use editor::Editor;
 use gpui::{Context, Font, FontId, FontStyle, FontWeight, Pixels, SharedString, TextSystem};
 
 use crate::conceals::LoadedImages;
-use crate::layers::{LiveContext, LiveLayer};
+use crate::layers::{LiveContext, LiveLayer, held_text};
 
 /// The room on each side of a pipe's rule.
 pub const PIPE_GAP: f32 = 4.0;
@@ -53,8 +54,6 @@ type Key = (u64, clock::Global, Range<usize>, u32, SharedString);
 pub struct TableLayer {
     images: LoadedImages,
     pads: TablePads,
-    /// The buffer text at a version, kept so a scroll does not copy it again.
-    text: Option<(clock::Global, Arc<str>)>,
     last: Option<Key>,
 }
 
@@ -70,19 +69,7 @@ impl TableLayer {
         Self {
             images,
             pads,
-            text: None,
             last: None,
-        }
-    }
-
-    fn text(&mut self, snapshot: &language::BufferSnapshot) -> Arc<str> {
-        match &self.text {
-            Some((version, text)) if version == snapshot.version() => text.clone(),
-            _ => {
-                let text: Arc<str> = snapshot.text().into();
-                self.text = Some((snapshot.version().clone(), text.clone()));
-                text
-            }
         }
     }
 }
@@ -110,7 +97,8 @@ impl LiveLayer for TableLayer {
             .collect();
         let mut pads = HashMap::default();
         if !tables.is_empty() {
-            let text = self.text(live.snapshot);
+            // Only the window's lines are measured, so only they are read.
+            let text = held_text(live.snapshot, [live.window.clone()]);
             let mut base = editor.style(cx).text.font();
             base.family = family;
             let mut measure = Measure {
@@ -128,7 +116,6 @@ impl LiveLayer for TableLayer {
 
     fn clear(&mut self, _: &mut Editor, _: &mut Context<Editor>) {
         self.pads.set(HashMap::default());
-        self.text = None;
         self.last = None;
     }
 }
@@ -160,7 +147,13 @@ impl Measure {
 
     /// The drawn width of `text[range]` with the `hidden` ranges left out, `bold` ranges at bold,
     /// `italic` ranges italic, and the rest at weight 600 when `header` is set.
-    fn width(&mut self, text: &str, range: Range<usize>, spans: &Spans, header: bool) -> f32 {
+    fn width(
+        &mut self,
+        text: &TextSlices,
+        range: Range<usize>,
+        spans: &Spans,
+        header: bool,
+    ) -> f32 {
         let Some(cell) = text.get(range.clone()) else {
             return 0.0;
         };
@@ -214,7 +207,7 @@ struct Row {
 /// Puts the width of every pipe of the rows of `table` in the window into `pads`.
 fn pad_table(
     table: &Element,
-    text: &str,
+    text: &TextSlices,
     live: &LiveContext<'_>,
     images: &LoadedImages,
     measure: &mut Measure,
@@ -291,7 +284,12 @@ fn pad_table(
     }
 }
 
-fn measure_row(row: &TableRow, text: &str, spans: &Spans, measure: &mut Measure) -> Option<Row> {
+fn measure_row(
+    row: &TableRow,
+    text: &TextSlices,
+    spans: &Spans,
+    measure: &mut Measure,
+) -> Option<Row> {
     let line = text.get(row.range.clone())?;
     let pipes: Vec<usize> = row_pipes(line)
         .into_iter()

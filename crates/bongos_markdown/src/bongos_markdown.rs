@@ -1,8 +1,9 @@
 //! The app side of the bongos markdown editor: the `markdown` settings, the per-buffer mode
 //! (live view or source), the addon that carries it on markdown editors and gives them the live
 //! typography, the background parse of the buffer's index, the live layers (inline styles and
-//! hidden markup with reveal at point, images below their links, tables as grids), and the `markdown` actions (block
-//! moves, insert block, checkbox toggle and table cell moves), hidden from the command palette for now.
+//! hidden markup with reveal at point, images below their links, tables as grids), and the `markdown` actions (the
+//! live view toggle, block moves, insert block, checkbox toggle and table cell moves), hidden from
+//! the command palette for now.
 //! The pure parsing and block logic lives in `bongos_markdown_model`.
 
 mod actions;
@@ -15,6 +16,7 @@ mod mode;
 mod settings;
 mod styles;
 mod tables;
+mod toggle;
 
 use ::settings::Settings as _;
 use gpui::App;
@@ -26,10 +28,10 @@ pub use commands::{
 pub use conceals::{ConcealLayer, LoadedImages, MarkdownConceal, conceal_tag};
 pub use images::{ImageLayer, ImageSize, MAX_IMAGE_ROWS, image_rows, resolve_image_path};
 pub use index::{IndexState, ParseStats};
-pub use layers::{FALLBACK_SCREEN_ROWS, LiveContext, LiveLayer, default_layers, window};
+pub use layers::{FALLBACK_SCREEN_ROWS, LiveContext, LiveLayer, default_layers, held_text, window};
 pub use mode::{
-    KEY_CONTEXT, LIVE_FONT_SIZE, LIVE_LINE_HEIGHT, Live, MarkdownAddon, MarkdownModes, Mode,
-    TABLE_KEY_CONTEXT, fresh_index, is_attached, mode_for_buffer, parse_stats, set_mode,
+    KEY_CONTEXT, LARGE_FILE, LIVE_FONT_SIZE, LIVE_LINE_HEIGHT, Live, MarkdownAddon, MarkdownModes,
+    Mode, TABLE_KEY_CONTEXT, fresh_index, is_attached, mode_for_buffer, parse_stats, set_mode,
 };
 pub use settings::MarkdownSettings;
 pub use styles::{MarkdownCodeBlock, Style, StyleLayer};
@@ -55,4 +57,8 @@ mod live_tests;
 #[cfg(test)]
 mod markdown_tests;
 #[cfg(test)]
+mod perf_tests;
+#[cfg(test)]
 mod tables_tests;
+#[cfg(test)]
+mod toggle_tests;
