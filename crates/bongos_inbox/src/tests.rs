@@ -14,13 +14,13 @@ use tempfile::TempDir;
 
 /// How long a test waits for something it expects before failing, well past the watcher latency
 /// and a scan on a loaded machine.
-const HANG_GUARD: Duration = Duration::from_secs(10);
+pub(crate) const HANG_GUARD: Duration = Duration::from_secs(10);
 
-fn item_text(summary: &str) -> String {
+pub(crate) fn item_text(summary: &str) -> String {
     format::render(&item(summary))
 }
 
-fn item(summary: &str) -> Item {
+pub(crate) fn item(summary: &str) -> Item {
     Item {
         version: 1,
         kind: "note".into(),
@@ -62,7 +62,7 @@ fn init_settings(cx: &mut TestAppContext, enabled: bool) {
     set_enabled(cx, enabled);
 }
 
-fn set_enabled(cx: &mut TestAppContext, enabled: bool) {
+pub(crate) fn set_enabled(cx: &mut TestAppContext, enabled: bool) {
     cx.update(|cx| {
         SettingsStore::update_global(cx, |store, cx| {
             store.update_user_settings(cx, |content| {
@@ -97,7 +97,7 @@ fn new_inbox(
     cx.new(|cx| InboxState::new(fs, InboxDirs::at(root.to_path_buf()), timer, cx))
 }
 
-fn real_inbox(cx: &mut TestAppContext, root: &Path) -> Entity<InboxState> {
+pub(crate) fn real_inbox(cx: &mut TestAppContext, root: &Path) -> Entity<InboxState> {
     cx.executor().allow_parking();
     let fs: Arc<dyn Fs> = Arc::new(RealFs::new(None, cx.executor()));
     new_inbox(cx, fs, root, no_rescan())
@@ -105,7 +105,7 @@ fn real_inbox(cx: &mut TestAppContext, root: &Path) -> Entity<InboxState> {
 
 /// Waits for `check` to hold, looking again after every `InboxEvent` (and every stats change,
 /// which notifies), and fails after [`HANG_GUARD`].
-async fn wait_for(
+pub(crate) async fn wait_for(
     cx: &mut TestAppContext,
     inbox: &Entity<InboxState>,
     what: &str,
@@ -474,7 +474,7 @@ async fn overlapping_rescans_coalesce_and_an_identical_scan_emits_nothing(cx: &m
 }
 
 /// Waits for an operation to finish, failing after [`HANG_GUARD`].
-async fn outcome_of(cx: &mut TestAppContext, task: Task<OpOutcome>) -> OpOutcome {
+pub(crate) async fn outcome_of(cx: &mut TestAppContext, task: Task<OpOutcome>) -> OpOutcome {
     let mut guard = cx.executor().timer(HANG_GUARD).fuse();
     let mut task = task.fuse();
     select_biased! {
@@ -484,7 +484,7 @@ async fn outcome_of(cx: &mut TestAppContext, task: Task<OpOutcome>) -> OpOutcome
 }
 
 /// The unique and inode of the item with `summary` in the snapshot.
-fn key_of(inbox: &InboxState, summary: &str) -> (String, u64) {
+pub(crate) fn key_of(inbox: &InboxState, summary: &str) -> (String, u64) {
     let snapshot = inbox.snapshot().unwrap();
     let index = (0..snapshot.len())
         .find(|index| {
@@ -682,7 +682,7 @@ async fn the_row_turns_read_before_the_watcher_event_which_changes_nothing(
     });
 }
 
-fn item_with_target(summary: &str, target: &str) -> String {
+pub(crate) fn item_with_target(summary: &str, target: &str) -> String {
     let mut item = item(summary);
     item.target = Some(target.to_string());
     format::render(&item)
