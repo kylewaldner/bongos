@@ -23,6 +23,8 @@ mod badge;
 #[cfg(debug_assertions)]
 mod dump;
 mod inbox_settings;
+mod item;
+mod modal;
 pub mod rows;
 pub mod targets;
 mod view;
@@ -57,8 +59,10 @@ use workspace::Workspace;
 
 pub use badge::{InboxBadge, badge_label};
 pub use inbox_settings::InboxSettings;
+pub use item::{ActionCap, Block, ItemDetail, LineKind, Paragraph};
+pub use modal::ItemModal;
 pub use targets::{TargetResolvers, TargetState};
-pub use view::{Clock, InboxView, now, set_clock};
+pub use view::{Clock, InboxView, Layout, now, set_clock};
 
 #[cfg(debug_assertions)]
 pub use dump::{DUMP_FILE, DumpDir};
@@ -84,8 +88,15 @@ actions!(
         Previous,
         /// Scans the inbox directory again.
         Refresh,
-        /// Marks the item under the inbox cursor read.
+        /// Marks the item under the inbox cursor read and shows it: in the item pane, which takes
+        /// the focus, or in the modal.
         OpenItem,
+        /// Same as `inbox: open item`.
+        FocusItem,
+        /// Moves the focus from the item pane back to the list.
+        FocusList,
+        /// Opens the file of the item under the inbox cursor in a read-only editor tab.
+        OpenFile,
         /// Marks the item under the inbox cursor unread.
         MarkUnread,
     ]
@@ -599,6 +610,9 @@ pub fn action_types() -> Vec<TypeId> {
         TypeId::of::<Previous>(),
         TypeId::of::<Refresh>(),
         TypeId::of::<OpenItem>(),
+        TypeId::of::<FocusItem>(),
+        TypeId::of::<FocusList>(),
+        TypeId::of::<OpenFile>(),
         TypeId::of::<MarkUnread>(),
     ];
     #[cfg(debug_assertions)]

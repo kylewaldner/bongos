@@ -1,7 +1,8 @@
 //! The inbox view in a real window over a real inbox directory: `inbox: open` keeps one view per
 //! window, the cursor moves without renaming anything, `inbox: open item` and `inbox: mark unread`
 //! rename the item and move the badge, the cursor stays on its item across rescans, and
-//! `inbox: dump view` writes the count and the rows.
+//! `inbox: dump view` writes the count and the rows. The item pane and the modal show the item
+//! under the cursor, and RET moves focus into the pane or opens the modal.
 
 use super::badge_tests::{Env, Win, env, window};
 use super::tests::{item, set_enabled, wait_for};
@@ -327,4 +328,179 @@ async fn dump_view_writes_the_unread_count_and_the_rows(cx: &mut TestAppContext)
     win.cx.dispatch_action(DumpView);
     win.cx.run_until_parked();
     assert_eq!(dumped(), "unread: off\n");
+}
+
+fn item_focused(win: &mut Win, view: &Entity<InboxView>) -> bool {
+    win.cx
+        .update(|window, cx| view.read(cx).item_focused(window))
+}
+
+fn unread_flags(win: &Win, view: &Entity<InboxView>) -> Vec<bool> {
+    view.read_with(&win.cx, |view, _| {
+        view.rows().iter().map(|row| row.unread).collect()
+    })
+}
+
+#[gpui::test]
+async fn ret_in_the_split_layout_focuses_the_item_pane_and_esc_returns(cx: &mut TestAppContext) {
+    let (env, mut win) = setup(cx).await;
+    deliver(&env, "older", 10);
+    deliver(&env, "newer", 5);
+    env.wait_unread(cx, 2).await;
+    let view = open_view(&mut win);
+    assert!(is_focused(&mut win, &view));
+    assert!(!item_focused(&mut win, &view));
+
+    // The cursor alone reads nothing.
+    win.cx.dispatch_action(Next);
+    win.cx.dispatch_action(Previous);
+    win.cx.run_until_parked();
+    assert!(!item_focused(&mut win, &view));
+    assert_eq!(unread_flags(&win, &view), [true, true]);
+
+    win.cx.dispatch_action(OpenItem);
+    env.wait_unread(cx, 1).await;
+    win.cx.run_until_parked();
+    assert!(item_focused(&mut win, &view), "the item pane has the focus");
+    assert_eq!(unread_flags(&win, &view), [false, true]);
+
+    win.cx.dispatch_action(menu::Cancel);
+    win.cx.run_until_parked();
+    assert!(!item_focused(&mut win, &view));
+    assert!(is_focused(&mut win, &view), "back on the list");
+
+    // `→` and `←` do the same as RET and Esc; the second item is read by it.
+    win.cx.dispatch_action(Next);
+    win.cx.dispatch_action(FocusItem);
+    env.wait_unread(cx, 0).await;
+    win.cx.run_until_parked();
+    assert!(item_focused(&mut win, &view));
+    win.cx.dispatch_action(FocusList);
+    win.cx.run_until_parked();
+    assert!(!item_focused(&mut win, &view));
+}
+
+#[gpui::test]
+async fn the_item_pane_shows_the_parsed_header_and_body(cx: &mut TestAppContext) {
+    let (env, mut win) = setup(cx).await;
+    deliver(&env, "Chose a cache", 125);
+    env.wait_unread(cx, 1).await;
+    let view = open_view(&mut win);
+    let detail = view
+        .read_with(&win.cx, |view, cx| view.detail(cx))
+        .expect("an item under the cursor");
+    assert_eq!(detail.title, "Chose a cache");
+    assert_eq!(detail.project, "agent");
+    assert_eq!(detail.kind, "note");
+    assert_eq!(detail.source, "Chose a cache");
+    assert_eq!(detail.age, "2h ago");
+    assert_eq!(
+        detail.blocks,
+        [Block::Paragraph(Paragraph {
+            text: "Body of Chose a cache.".into(),
+            bold: Vec::new(),
+        })]
+    );
+    // `open` and `dismiss` are always there (nothing is registered yet), then `u`.
+    let names: Vec<_> = detail.actions.iter().map(|cap| cap.name.as_str()).collect();
+    assert_eq!(names, ["open", "dismiss", "mark-unread"]);
+    assert!(detail.unreadable.is_none());
+    win.cx.run_until_parked();
+}
+
+#[gpui::test]
+async fn in_the_sidebar_ret_opens_the_modal_and_n_and_p_move_inside_it(cx: &mut TestAppContext) {
+    let (env, mut win) = setup(cx).await;
+    deliver(&env, "older", 10);
+    deliver(&env, "newer", 5);
+    env.wait_unread(cx, 2).await;
+    let view = open_view(&mut win);
+    view.update(&mut win.cx, |view, cx| view.set_layout(Layout::Sidebar, cx));
+    win.cx.run_until_parked();
+    assert!(!win.has_modal());
+
+    win.cx.dispatch_action(OpenItem);
+    env.wait_unread(cx, 1).await;
+    win.cx.run_until_parked();
+    assert!(win.has_modal(), "RET opens the modal");
+    assert!(
+        !item_focused(&mut win, &view),
+        "the split's pane stays unused"
+    );
+    assert_eq!(unread_flags(&win, &view), [false, true]);
+
+    // `n` shows the next item, which is then read.
+    win.cx.dispatch_action(Next);
+    env.wait_unread(cx, 0).await;
+    win.cx.run_until_parked();
+    assert_eq!(cursor_summary(&win, &view).as_deref(), Some("older"));
+    assert!(win.has_modal());
+    let shown = win.workspace.read_with(&win.cx, |workspace, cx| {
+        let modal = workspace.active_modal::<ItemModal>(cx).unwrap();
+        modal.read(cx).detail(cx).map(|detail| detail.title)
+    });
+    assert_eq!(shown.as_deref(), Some("older"));
+
+    // `p` goes back.
+    win.cx.dispatch_action(Previous);
+    win.cx.run_until_parked();
+    assert_eq!(cursor_summary(&win, &view).as_deref(), Some("newer"));
+    assert!(win.has_modal());
+
+    win.cx.dispatch_action(menu::Cancel);
+    win.cx.run_until_parked();
+    assert!(!win.has_modal(), "Esc closes the modal");
+    assert!(is_focused(&mut win, &view), "the focus is back on the list");
+}
+
+#[gpui::test]
+async fn ret_then_u_at_once_leaves_the_item_unread(cx: &mut TestAppContext) {
+    let (env, mut win) = setup(cx).await;
+    let path = deliver(&env, "only", 5);
+    env.wait_unread(cx, 1).await;
+    let view = open_view(&mut win);
+    let unique = file_name(&path);
+
+    // Both keys arrive before the first operation has run.
+    win.cx.dispatch_action(OpenItem);
+    win.cx.dispatch_action(MarkUnread);
+    wait_for(cx, &env.inbox, "both operations", |inbox| {
+        inbox.stats().operations == 2
+    })
+    .await;
+    win.cx.run_until_parked();
+    assert!(env.root.join(CUR).join(format!("{unique}:2,")).is_file());
+    assert_eq!(unread_flags(&win, &view), [true]);
+    assert_eq!(win.text().as_deref(), Some("1"));
+}
+
+#[gpui::test]
+async fn open_file_opens_a_read_only_editor_tab(cx: &mut TestAppContext) {
+    let (env, mut win) = setup(cx).await;
+    deliver(&env, "only", 5);
+    env.wait_unread(cx, 1).await;
+    let view = open_view(&mut win);
+    let path = view
+        .read_with(&win.cx, |view, cx| view.detail(cx))
+        .unwrap()
+        .path;
+    // The window's project reads a fake file system: put the item's bytes there too.
+    let bytes = std::fs::read(&path).unwrap();
+    let fake = env.app_state.fs.as_fake();
+    fake.create_dir(path.parent().unwrap()).await.unwrap();
+    fake.insert_file(&path, bytes.clone()).await;
+
+    win.cx.dispatch_action(OpenFile);
+    win.cx.run_until_parked();
+    let read_only = win.workspace.read_with(&win.cx, |workspace, cx| {
+        workspace
+            .active_item_as::<editor::Editor>(cx)
+            .map(|editor| editor.read(cx).read_only(cx))
+    });
+    assert_eq!(read_only, Some(true), "a read-only editor tab is active");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        bytes,
+        "the file is unchanged"
+    );
 }
