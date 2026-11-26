@@ -101,20 +101,15 @@ struct Lines<'a>(&'a str);
 impl Lines<'_> {
     fn start(&self, offset: usize) -> usize {
         let offset = offset.min(self.0.len());
-        self.0[..offset].rfind('\n').map_or(0, |i| i + 1)
+        self.0[..offset].rfind(['\n', '\r']).map_or(0, |i| i + 1)
     }
 
-    /// End of the line holding `offset`, before its `\n` or `\r\n`.
+    /// End of the line holding `offset`, before its `\n`, `\r\n` or bare `\r`.
     fn end(&self, offset: usize) -> usize {
         let offset = offset.min(self.0.len());
-        let end = self.0[offset..]
-            .find('\n')
-            .map_or(self.0.len(), |i| offset + i);
-        if end > offset && self.0.as_bytes()[end - 1] == b'\r' {
-            end - 1
-        } else {
-            end
-        }
+        self.0[offset..]
+            .find(['\n', '\r'])
+            .map_or(self.0.len(), |i| offset + i)
     }
 
     fn whole(&self, range: Range<usize>) -> Range<usize> {
@@ -234,9 +229,9 @@ impl BlockTree {
                 Entry::Block(id) if self.blocks[id].kind == BlockKind::ListItem => {
                     let joins = last_item.is_some_and(|prev| {
                         markers.get(&prev) == markers.get(&id)
-                            && text[self.blocks[prev].range.end..self.blocks[id].range.start]
-                                .trim()
-                                .is_empty()
+                            && text
+                                .get(self.blocks[prev].range.end..self.blocks[id].range.start)
+                                .is_some_and(|between| between.trim().is_empty())
                     });
                     if joins && let Some(Entry::Block(list)) = grouped.last() {
                         let list = *list;
@@ -466,6 +461,9 @@ pub fn move_block(
         Direction::Up => (other, moved.clone()),
         Direction::Down => (moved.clone(), other),
     };
+    if a.end > b.start || b.end > text.len() {
+        return Err(NoNeighbor);
+    }
     let mut new_text = String::with_capacity(b.end - a.start);
     new_text.push_str(&text[b.clone()]);
     new_text.push_str(&text[a.end..b.start]);
@@ -580,7 +578,7 @@ mod tests {
         let point = text.find("words").unwrap();
         let tree = BlockTree::parse(text);
         let edit = move_block(text, &tree, BlockSelection::point(point), Direction::Up);
-        // The point is in B's body, not on a heading line: no block.
+        // The point is in B's paragraph, which is B's only child: no neighbor.
         assert_eq!(edit, Err(NoNeighbor));
         let point = text.find("# B").unwrap();
         let edit = move_block(text, &tree, BlockSelection::point(point), Direction::Up).unwrap();
@@ -653,12 +651,41 @@ mod tests {
         "",
         "",
         "    indented code",
+        "# Caf\u{e9} \u{65e5}\u{672c}",
+        "na\u{ef}ve \u{65e5}\u{672c}\u{8a9e} text",
+        "- \u{1f600} smile",
     ];
 
-    fn sorted_lines(text: &str) -> Vec<&str> {
-        let mut lines: Vec<&str> = text.split('\n').collect();
+    /// The lines of `text` split on `\r\n`, `\n` and bare `\r`, sorted.
+    fn sorted_lines(text: &str) -> Vec<String> {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let mut lines: Vec<String> = normalized.split('\n').map(str::to_string).collect();
         lines.sort_unstable();
         lines
+    }
+
+    #[test]
+    fn bare_carriage_returns_do_not_panic() {
+        let text = "- a\r- b";
+        let tree = BlockTree::parse(text);
+        for block in tree.blocks() {
+            assert!(block.range.start <= block.range.end && block.range.end <= text.len());
+        }
+        for offset in 0..=text.len() {
+            for direction in [Direction::Up, Direction::Down] {
+                let _ = move_block(text, &tree, BlockSelection::point(offset), direction);
+            }
+        }
+
+        let text = "one\r\rtwo";
+        let tree = BlockTree::parse(text);
+        let edit = move_block(text, &tree, at(text, "one"), Direction::Down).unwrap();
+        let after = edit.apply(text);
+        assert_eq!(after, "two\r\rone");
+        let tree = BlockTree::parse(&after);
+        let back = move_block(&after, &tree, edit.selection, Direction::Down).unwrap_err();
+        assert_eq!(back, NoNeighbor);
+        assert_eq!(sorted_lines(&after), sorted_lines(text));
     }
 
     #[test]
@@ -667,12 +694,13 @@ mod tests {
         let mut moves = 0;
         for _ in 0..400 {
             let count = 1 + rng.next(14);
+            let separator = ["\n", "\r\n", "\r"][rng.next(3)];
             let mut text = (0..count)
                 .map(|_| FRAGMENTS[rng.next(FRAGMENTS.len())])
                 .collect::<Vec<_>>()
-                .join("\n");
+                .join(separator);
             if rng.next(2) == 0 {
-                text.push('\n');
+                text.push_str(separator);
             }
             let tree = BlockTree::parse(&text);
             for block in tree.blocks() {
@@ -701,7 +729,7 @@ mod tests {
                     sorted_lines(&text),
                     "{text:?} {selection:?}"
                 );
-                assert_eq!(after.ends_with('\n'), text.ends_with('\n'));
+                assert_eq!(after.ends_with(['\n', '\r']), text.ends_with(['\n', '\r']));
                 assert!(edit.selection.head <= after.len());
                 let back = MoveEdit {
                     range: edit.range.start..edit.range.start + edit.new_text.len(),
