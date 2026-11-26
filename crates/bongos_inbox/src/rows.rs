@@ -7,7 +7,7 @@ use bongos_inbox_model::format::Item;
 use bongos_inbox_model::view_model::{self, Filter, GroupRow, ItemRow, Row};
 use chrono::{DateTime, Utc};
 use gpui::{App, Hsla};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use ui::prelude::ActiveTheme as _;
 
 /// The opacity of a pill's fill: its status color at 16%.
@@ -126,9 +126,26 @@ pub struct ViewRow {
     pub project: String,
     pub kind: String,
     pub source: String,
+    /// A group's members as item rows, newest first; empty for an item row.
+    pub members: Vec<ViewRow>,
+    /// Shown under its expanded group.
+    pub member: bool,
 }
 
 impl ViewRow {
+    /// The unique and inode of every item the row stands for: the item itself, or the group's
+    /// members.
+    pub fn items(&self) -> Vec<(String, u64)> {
+        match &self.item {
+            Some(item) => vec![item.clone()],
+            None => self
+                .members
+                .iter()
+                .filter_map(|member| member.item.clone())
+                .collect(),
+        }
+    }
+
     /// The second line as text: `project · type · source`.
     pub fn second_line(&self) -> String {
         [&self.project, &self.kind, &self.source]
@@ -143,17 +160,19 @@ impl ViewRow {
         view_model::age_text(self.created, now)
     }
 
-    /// The row as one line of text: `>` on the cursor row, `*` when unread, then the summary, the
-    /// pill in brackets, the age and the second line.
+    /// The row as one line of text: `>` on the cursor row, `*` when unread, then the summary
+    /// (indented two spaces under an expanded group), the pill in brackets, the age and the second
+    /// line.
     pub fn text(&self, cursor: bool, now: DateTime<Utc>) -> String {
         let pill = self
             .pill
             .map(|pill| format!(" [{}]", pill.label()))
             .unwrap_or_default();
         format!(
-            "{}{} {}{} {} | {}",
+            "{}{} {}{}{} {} | {}",
             if cursor { ">" } else { " " },
             if self.unread { "*" } else { " " },
+            if self.member { "  " } else { "" },
             self.summary,
             pill,
             self.age(now),
@@ -164,6 +183,11 @@ impl ViewRow {
 
 /// The rows of `snapshot`, newest first, a group at the position of its newest member.
 pub fn view_rows(snapshot: &Snapshot) -> Vec<ViewRow> {
+    view_rows_hiding(snapshot, &HashSet::new())
+}
+
+/// [`view_rows`] without the items whose unique is in `hidden` (being archived).
+pub fn view_rows_hiding(snapshot: &Snapshot, hidden: &HashSet<String>) -> Vec<ViewRow> {
     let items: HashMap<(&str, u64), &Item> = snapshot
         .items()
         .iter()
@@ -172,17 +196,31 @@ pub fn view_rows(snapshot: &Snapshot) -> Vec<ViewRow> {
             Some(((entry.unique.as_str(), entry.inode), item))
         })
         .collect();
+    let to_row = |row: ItemRow| {
+        let extra = items
+            .get(&(row.unique.as_str(), row.inode))
+            .map_or(&[][..], |item| item.extra.as_slice());
+        item_row(row, extra)
+    };
     snapshot
-        .rows(&Filter::All, &|_| false)
+        .rows_hiding(&Filter::All, &|_| false, &|entry| {
+            hidden.contains(&entry.unique)
+        })
         .into_iter()
         .map(|row| match row {
-            Row::Item(row) => {
-                let extra = items
-                    .get(&(row.unique.as_str(), row.inode))
-                    .map_or(&[][..], |item| item.extra.as_slice());
-                item_row(row, extra)
+            Row::Item(row) => to_row(row),
+            Row::Group(group) => {
+                let members = group
+                    .members
+                    .iter()
+                    .cloned()
+                    .map(|member| ViewRow {
+                        member: true,
+                        ..to_row(member)
+                    })
+                    .collect();
+                group_row(group, members)
             }
-            Row::Group(group) => group_row(group),
         })
         .collect()
 }
@@ -199,12 +237,16 @@ fn item_row(row: ItemRow, extra: &[(String, String)]) -> ViewRow {
         kind: kind_label(&row.kind),
         source: source.to_string(),
         item: Some((row.unique, row.inode)),
+        members: Vec::new(),
+        member: false,
     }
 }
 
 /// A group row has the same anatomy: the newest summary, then `<source>: <n> items (<u> unread)`.
-fn group_row(group: GroupRow) -> ViewRow {
+fn group_row(group: GroupRow, members: Vec<ViewRow>) -> ViewRow {
     ViewRow {
+        members,
+        member: false,
         key: RowKey::Group(group.key.clone()),
         item: None,
         unread: group.unread > 0,
@@ -311,6 +353,8 @@ mod tests {
             project: String::new(),
             kind: String::new(),
             source: String::new(),
+            members: Vec::new(),
+            member: false,
         };
         assert_eq!(row(Duration::seconds(5)).age(now), "now");
         assert_eq!(row(Duration::minutes(3)).age(now), "3m");
@@ -341,6 +385,8 @@ mod tests {
             project: "bongos".into(),
             kind: "decision by default".into(),
             source: "overnight-refactor".into(),
+            members: Vec::new(),
+            member: false,
         };
         assert_eq!(
             row.second_line(),
