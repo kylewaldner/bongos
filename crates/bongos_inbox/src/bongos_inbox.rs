@@ -616,7 +616,14 @@ impl Inbox {
 /// `inbox.enabled` is true.
 pub fn init(dirs: InboxDirs, fs: Arc<dyn Fs>, cx: &mut App) {
     InboxSettings::register(cx);
-    let state = cx.new(|cx| InboxState::new(fs, dirs, periodic_rescan(RESCAN_INTERVAL), cx));
+    // `BONGOS_INBOX_RESCAN_SECS` lengthens the periodic rescan, so a test can show that the
+    // watcher, not the rescan, delivered an item.
+    let interval = std::env::var("BONGOS_INBOX_RESCAN_SECS")
+        .ok()
+        .and_then(|secs| secs.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map_or(RESCAN_INTERVAL, Duration::from_secs);
+    let state = cx.new(|cx| InboxState::new(fs, dirs, periodic_rescan(interval), cx));
     cx.set_global(Inbox(state));
     register_actions(cx);
 }
