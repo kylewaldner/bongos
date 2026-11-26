@@ -40,10 +40,12 @@ pub enum Style {
     TableHeader,
     /// The pipes of a table row, muted.
     TablePipe,
+    /// The text of a fenced or indented code block, in the code font.
+    CodeBlockText,
 }
 
 impl Style {
-    pub const ALL: [Style; 11] = [
+    pub const ALL: [Style; 12] = [
         Style::Strong,
         Style::Emphasis,
         Style::Strike,
@@ -55,6 +57,7 @@ impl Style {
         Style::Quote,
         Style::TableHeader,
         Style::TablePipe,
+        Style::CodeBlockText,
     ];
 
     /// The highlight key of the style.
@@ -85,6 +88,7 @@ impl Style {
             Style::Code => HighlightStyle {
                 color: Some(colors.text),
                 background_color: Some(colors.element_background),
+                monospace: Some(true),
                 ..HighlightStyle::default()
             },
             Style::Link => HighlightStyle {
@@ -117,6 +121,10 @@ impl Style {
             },
             Style::TableHeader => HighlightStyle {
                 font_weight: Some(FontWeight::SEMIBOLD),
+                ..HighlightStyle::default()
+            },
+            Style::CodeBlockText => HighlightStyle {
+                monospace: Some(true),
                 ..HighlightStyle::default()
             },
         }
@@ -161,7 +169,7 @@ pub fn plan(live: &LiveContext<'_>) -> Plan {
                 if !element.range.is_empty() {
                     plan.code_blocks.push(element.range.clone());
                 }
-                None
+                Some((Style::CodeBlockText, element.range.clone()))
             }
             ElementKind::Table { rows } => {
                 table(rows, live, &mut plan);
