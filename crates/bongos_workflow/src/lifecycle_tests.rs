@@ -2741,3 +2741,19 @@ fn no_run_starts_or_restarts_under_a_project_whose_writer_moves() {
         .unwrap();
     assert_ne!(started, run);
 }
+
+#[test]
+fn load_runs_loads_a_run_whose_log_ends_in_a_torn_terminated_line() {
+    let world = World::new();
+    let torn = seed(&world, "single", mid_node);
+    let path = events_of(&world, &torn);
+    let mut text = fs::read_to_string(&path).unwrap();
+    text.push_str("{\"event\": \"Nope\"}\n");
+    fs::write(&path, text).unwrap();
+
+    let mut lifecycle = world.lifecycle();
+    let report = lifecycle.load_runs(&world.tree).unwrap();
+    assert_eq!(report.loaded, vec![torn.clone()]);
+    assert!(report.skipped.is_empty(), "{report:?}");
+    assert!(lifecycle.state(&torn).is_some());
+}
