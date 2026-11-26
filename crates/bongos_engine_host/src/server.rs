@@ -39,19 +39,40 @@ struct Connection {
     /// Shut down to end the connection's threads.
     stream: UnixStream,
     /// The lines the connection's writing thread sends, so no caller ever blocks on a client.
-    outbox: SyncSender<Vec<u8>>,
+    outbox: SyncSender<OutLine>,
     /// `None` until the client subscribes; an empty set is every topic.
     topics: Mutex<Option<HashSet<HostTopic>>>,
 }
+
+/// A queued line and, optionally, a signal fired once the writing thread has written it.
+type OutLine = (Vec<u8>, Option<futures::channel::oneshot::Sender<()>>);
 
 impl Connection {
     /// Queues `message` without blocking; false when the connection is gone. A client whose
     /// queue is full is not reading, so its connection is ended.
     fn send(&self, message: &ServerMessage) -> bool {
+        self.queue(message, None)
+    }
+
+    /// Like `send`, but also returns a receiver that resolves once the line is written and
+    /// flushed (it is cancelled if the write fails). `None` when the line was not queued.
+    fn send_flushed(
+        &self,
+        message: &ServerMessage,
+    ) -> Option<futures::channel::oneshot::Receiver<()>> {
+        let (flushed, receiver) = futures::channel::oneshot::channel();
+        self.queue(message, Some(flushed)).then_some(receiver)
+    }
+
+    fn queue(
+        &self,
+        message: &ServerMessage,
+        flushed: Option<futures::channel::oneshot::Sender<()>>,
+    ) -> bool {
         let Ok(line) = encode_line(message) else {
             return false;
         };
-        match self.outbox.try_send(line) {
+        match self.outbox.try_send((line, flushed)) {
             Ok(()) => true,
             Err(TrySendError::Full(_)) => {
                 log::warn!(
@@ -176,9 +197,16 @@ impl EngineServer {
                             Err(error) => HostResult::Refused(format!("{error:#}")),
                         };
                         let accepted = matches!(result, HostResult::Ok(_));
-                        connection.send(&ServerMessage::Reply { id, result });
+                        let message = ServerMessage::Reply { id, result };
                         if let (true, Some((sender, at_job_boundary))) = (accepted, stop) {
+                            // The stop drops the server and closes the connection, so the reply
+                            // must be on the wire first; a failed write cancels the receiver.
+                            if let Some(flushed) = connection.send_flushed(&message) {
+                                flushed.await.ok();
+                            }
                             sender.unbounded_send(at_job_boundary).ok();
+                        } else {
+                            connection.send(&message);
                         }
                     })
                     .detach();
@@ -361,7 +389,7 @@ fn serve_connection(
     };
     let peer = peer_identity(&stream, client).context("reading the peer's identity")?;
     stream.set_read_timeout(None)?;
-    let (outbox, lines) = std::sync::mpsc::sync_channel::<Vec<u8>>(OUTBOX_LINES);
+    let (outbox, lines) = std::sync::mpsc::sync_channel::<OutLine>(OUTBOX_LINES);
     let connection = Arc::new(Connection {
         id: shared.next_connection.fetch_add(1, Ordering::SeqCst),
         peer,
@@ -395,8 +423,8 @@ fn serve_connection(
 
 /// Writes a connection's queued lines until every sender is gone; a failed write ends the
 /// connection.
-fn write_lines(mut writer: UnixStream, closer: UnixStream, lines: Receiver<Vec<u8>>) {
-    for line in lines {
+fn write_lines(mut writer: UnixStream, closer: UnixStream, lines: Receiver<OutLine>) {
+    for (line, flushed) in lines {
         if writer
             .write_all(&line)
             .and_then(|()| writer.flush())
@@ -404,6 +432,9 @@ fn write_lines(mut writer: UnixStream, closer: UnixStream, lines: Receiver<Vec<u
         {
             closer.shutdown(std::net::Shutdown::Both).ok();
             return;
+        }
+        if let Some(flushed) = flushed {
+            flushed.send(()).ok();
         }
     }
 }
