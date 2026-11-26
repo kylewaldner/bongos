@@ -892,6 +892,22 @@ impl FoldSnapshot {
         })
     }
 
+    /// Like [`Self::folds_in_range`], but also yields folds that only touch
+    /// the range's endpoints, such as a fold starting at the range's end.
+    pub fn folds_touching_range<T>(&self, range: Range<T>) -> impl Iterator<Item = &Fold>
+    where
+        T: ToOffset,
+    {
+        let buffer = &self.inlay_snapshot.buffer;
+        let range = range.start.to_offset(buffer)..range.end.to_offset(buffer);
+        let mut folds = intersecting_folds(&self.inlay_snapshot, &self.folds, range, true);
+        iter::from_fn(move || {
+            let item = folds.item();
+            folds.next();
+            item
+        })
+    }
+
     #[ztracing::instrument(skip_all)]
     pub fn intersects_fold<T>(&self, offset: T) -> bool
     where

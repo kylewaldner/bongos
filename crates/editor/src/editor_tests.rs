@@ -40496,3 +40496,117 @@ async fn test_editor_clone_drops_conceals(cx: &mut TestAppContext) {
         });
     }
 }
+
+const CONCEAL_FOLD_TEST_TEXT: &str = "**a** {\n    b\n}\nplain **x**\n";
+
+/// Builds an editor over [`CONCEAL_FOLD_TEST_TEXT`] with a registered conceal
+/// on row 0 and row 3, and the cursor on row 0 after the conceal.
+fn build_conceal_fold_test_editor(cx: &mut TestAppContext) -> (gpui::WindowHandle<Editor>, TypeId) {
+    init_test(cx, |_| {});
+    let editor = cx.add_window(|window, cx| {
+        build_editor(
+            MultiBuffer::build_simple(CONCEAL_FOLD_TEST_TEXT, cx),
+            window,
+            cx,
+        )
+    });
+    let tag = editor
+        .update(cx, |editor, window, cx| {
+            let tag = register_test_conceal_tag(cx);
+            set_test_conceals(
+                editor,
+                tag,
+                Point::new(0, 0)..Point::new(4, 0),
+                &[
+                    Point::new(0, 0)..Point::new(0, 2),
+                    Point::new(3, 6)..Point::new(3, 8),
+                ],
+                cx,
+            );
+            editor.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
+                s.select_ranges([Point::new(0, 3)..Point::new(0, 3)])
+            });
+            assert_eq!(editor.display_text(cx), "⋯a** {\n    b\n}\nplain ⋯x**\n");
+            tag
+        })
+        .unwrap();
+    (editor, tag)
+}
+
+fn user_folds(editor: &mut Editor, cx: &mut Context<Editor>) -> Vec<Range<Point>> {
+    folds_with_tags(editor, cx)
+        .into_iter()
+        .filter(|(_, tag)| tag.is_none())
+        .map(|(range, _)| range)
+        .collect()
+}
+
+#[gpui::test]
+fn test_is_line_folded_with_conceals_on_several_rows(cx: &mut TestAppContext) {
+    let (editor, tag) = build_conceal_fold_test_editor(cx);
+
+    _ = editor.update(cx, |editor, window, cx| {
+        let snapshot = editor.display_snapshot(cx);
+        assert!(!snapshot.is_line_folded(MultiBufferRow(0)));
+        assert!(!snapshot.is_line_folded(MultiBufferRow(3)));
+
+        // An indent fold starts at the end of its first row.
+        editor.fold_at(MultiBufferRow(0), window, cx);
+        assert_eq!(
+            user_folds(editor, cx),
+            vec![Point::new(0, 7)..Point::new(1, 5)]
+        );
+        assert_eq!(folds_with_tags(editor, cx)[0].1, Some(tag));
+        let snapshot = editor.display_snapshot(cx);
+        assert!(snapshot.is_line_folded(MultiBufferRow(0)));
+        assert!(!snapshot.is_line_folded(MultiBufferRow(2)));
+        assert!(
+            !snapshot.is_line_folded(MultiBufferRow(3)),
+            "a row holding only a conceal is not folded"
+        );
+
+        editor.unfold_at(MultiBufferRow(0), window, cx);
+        assert!(user_folds(editor, cx).is_empty());
+        assert!(
+            !editor
+                .display_snapshot(cx)
+                .is_line_folded(MultiBufferRow(0))
+        );
+    });
+}
+
+#[gpui::test]
+fn test_toggle_fold_all_ignores_conceals(cx: &mut TestAppContext) {
+    let (editor, _) = build_conceal_fold_test_editor(cx);
+
+    _ = editor.update(cx, |editor, window, cx| {
+        editor.toggle_fold_all(&ToggleFoldAll, window, cx);
+        assert_eq!(
+            user_folds(editor, cx),
+            vec![Point::new(0, 7)..Point::new(1, 5)]
+        );
+        assert_eq!(editor.display_text(cx), "⋯a** {⋯\n}\nplain ⋯x**\n");
+
+        editor.toggle_fold_all(&ToggleFoldAll, window, cx);
+        assert!(user_folds(editor, cx).is_empty());
+        assert_eq!(editor.display_text(cx), "⋯a** {\n    b\n}\nplain ⋯x**\n");
+    });
+}
+
+#[gpui::test]
+fn test_toggle_fold_recursive_ignores_conceals_on_several_rows(cx: &mut TestAppContext) {
+    let (editor, _) = build_conceal_fold_test_editor(cx);
+
+    _ = editor.update(cx, |editor, window, cx| {
+        editor.toggle_fold_recursive(&ToggleFoldRecursive, window, cx);
+        assert_eq!(
+            user_folds(editor, cx),
+            vec![Point::new(0, 7)..Point::new(1, 5)]
+        );
+        assert_eq!(editor.display_text(cx), "⋯a** {⋯\n}\nplain ⋯x**\n");
+
+        editor.toggle_fold_recursive(&ToggleFoldRecursive, window, cx);
+        assert!(user_folds(editor, cx).is_empty());
+        assert_eq!(editor.display_text(cx), "⋯a** {\n    b\n}\nplain ⋯x**\n");
+    });
+}
