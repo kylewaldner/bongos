@@ -426,6 +426,7 @@ pub(crate) fn start(
 
     let weak = Rc::downgrade(&state);
     let session = Session::string(HOST, first_prompt)
+        .inline()
         .history(history_name(regexp))
         .initial_input(to_input(seed.as_deref().unwrap_or("")))
         .key_context(KEY_CONTEXT)

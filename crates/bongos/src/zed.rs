@@ -33,6 +33,8 @@ pub(crate) mod mac_only_instance;
 mod mark_keymap_tests;
 #[cfg(test)]
 mod meanings_tests;
+#[cfg(test)]
+mod minibuffer_placement_tests;
 mod migrate;
 #[cfg(test)]
 mod minibuffer_keymap_tests;

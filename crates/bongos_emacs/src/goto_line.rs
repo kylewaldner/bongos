@@ -113,6 +113,7 @@ fn ask(editor: &Entity<Editor>, window: &mut Window, cx: &mut App) {
     let on_confirm = editor.downgrade();
     let on_cancel = editor.downgrade();
     let session = Session::string(MINIBUFFER_NAME, "Goto line: ")
+        .inline()
         .on_input(move |text, handle, _window, cx| {
             let Some(editor) = on_input.upgrade() else {
                 return;
