@@ -6,6 +6,10 @@ use crate::{Basis, KeyLookup, Method, SignedApproval, TrustedApprovers};
 
 /// What an approval row must be about: its project and change, the author version it approves,
 /// and its basis.
+///
+/// This does not check the statement's `commit`, `amend_patch_id`, `base` or `adopted`; a caller
+/// that relies on them (an adopting approval's base and adopted changes, for one) compares them
+/// with what it expects itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Expected {
     pub project_id: String,
@@ -15,12 +19,16 @@ pub struct Expected {
 }
 
 /// The verification state of one approval row.
+///
+/// `approver` is the person named in the signed statement, the one the key is enrolled under.
+/// `method` is the signer's own claim of how the key was used, carried in the signed statement.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowState {
     /// Signed with a trusted key of the approver, on this machine's keyring.
-    Verified { method: Method },
+    Verified { approver: String, method: Method },
     /// Signed with a trusted key, through a weaker path.
     Weaker {
+        approver: String,
         method: Method,
         reason: WeakerReason,
     },
@@ -98,6 +106,10 @@ impl fmt::Display for UnverifiedReason {
 /// Verifies a signed approval: the key is trusted (a valid chain, not retired at the statement's
 /// time), the signature is the key's over the statement's signing bytes, the statement's approver
 /// is the one the key is enrolled under, and the statement is about `expected`.
+///
+/// The statement's `at` is chosen by the signer, so a retired key can still sign with an earlier
+/// `at`; callers must also bound `at` by the row's write time or the change's landing time. The
+/// statement's `method` is likewise the signer's claim, not something this check proves.
 pub fn verify(
     signed: &SignedApproval,
     trusted: &dyn TrustedApprovers,
@@ -144,13 +156,16 @@ pub fn verify(
         return unverified(UnverifiedReason::OtherChange);
     }
     let method = statement.method.clone();
+    let approver = statement.approver.clone();
     match method {
-        Method::Keyring => RowState::Verified { method },
+        Method::Keyring => RowState::Verified { approver, method },
         Method::Paired { .. } => RowState::Weaker {
+            approver,
             method,
             reason: WeakerReason::Paired,
         },
         Method::TestStore => RowState::Weaker {
+            approver,
             method,
             reason: WeakerReason::TestStore,
         },
@@ -158,7 +173,8 @@ pub fn verify(
 }
 
 /// Verifies a row's stored line. A row with no line has "no signature"; a line that cannot be
-/// read is "signature does not match".
+/// read is "signature does not match"; a line signed by someone other than the row's
+/// `claimed_by` is "approver does not match the key". The caveats on [`verify`] apply.
 pub fn verify_line(
     line: Option<&str>,
     claimed_by: &str,
@@ -169,6 +185,10 @@ pub fn verify_line(
         return RowState::unsigned(claimed_by);
     };
     match SignedApproval::from_line(line) {
+        Ok(signed) if signed.statement.approver != claimed_by => RowState::Unverified {
+            claimed_by: claimed_by.to_string(),
+            reason: UnverifiedReason::ApproverMismatch,
+        },
         Ok(signed) => verify(&signed, trusted, expected),
         Err(_) => RowState::Unverified {
             claimed_by: claimed_by.to_string(),

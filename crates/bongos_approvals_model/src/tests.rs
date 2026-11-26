@@ -75,6 +75,7 @@ fn signed_approval_round_trips_through_its_line_and_verifies() {
         assert_eq!(
             verify(&parsed, &trusted, &expected),
             RowState::Verified {
+                approver: "alice".into(),
                 method: Method::Keyring
             }
         );
@@ -388,10 +389,7 @@ fn unverified_words_never_say_approved() {
             claimed_by: "mallory".into(),
             reason,
         };
-        let (text, tone) = words(&ApprovalView::Row {
-            approver: "alice",
-            state: &state,
-        });
+        let (text, tone) = words(&ApprovalView::Row { state: &state });
         assert_eq!(
             text,
             format!("unverified approval claimed by mallory: {}", reason.text())
@@ -404,13 +402,11 @@ fn unverified_words_never_say_approved() {
     }
 
     let verified = RowState::Verified {
+        approver: "alice".into(),
         method: Method::Keyring,
     };
     assert_eq!(
-        words(&ApprovalView::Row {
-            approver: "alice",
-            state: &verified
-        }),
+        words(&ApprovalView::Row { state: &verified }),
         (
             "approved by alice, verified (signed with alice's approval key)".to_string(),
             Tone::Normal
@@ -463,13 +459,42 @@ fn paired_and_test_store_approvals_verify_as_weaker() {
             "{state:?}"
         );
         assert_eq!(
-            words(&ApprovalView::Row {
-                approver: "alice",
-                state: &state
-            }),
+            words(&ApprovalView::Row { state: &state }),
             (want.to_string(), Tone::Warning)
         );
     }
+}
+
+#[test]
+fn a_line_signed_by_someone_else_does_not_verify_for_the_claimed_row() {
+    let alice = new_key();
+    let bob = new_key();
+    let trusted = FixedApprovers::new(vec![
+        FixedKey::trusted("alice", alice.public),
+        FixedKey::trusted("bob", bob.public),
+    ]);
+    let line = sign_with(
+        &bob.pkcs8,
+        ApprovalStatement {
+            approver: "bob".into(),
+            ..statement()
+        },
+    )
+    .expect("sign")
+    .to_line();
+
+    assert_eq!(
+        verify_line(Some(&line), "alice", &trusted, &expected()),
+        RowState::Unverified {
+            claimed_by: "alice".into(),
+            reason: UnverifiedReason::ApproverMismatch,
+        }
+    );
+    let state = verify_line(Some(&line), "bob", &trusted, &expected());
+    assert_eq!(
+        words(&ApprovalView::Row { state: &state }).0,
+        "approved by bob, verified (signed with bob's approval key)"
+    );
 }
 
 #[test]
