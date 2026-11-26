@@ -3,3 +3,4 @@
 pub mod format;
 pub mod maildir;
 pub mod name;
+pub mod view_model;
