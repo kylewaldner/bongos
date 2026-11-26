@@ -985,6 +985,9 @@ fn a_mixed_waiter_whose_project_half_is_free_is_granted_not_moved_back(cx: &mut 
     // db is held through another broker of the project, which has no machine store: its release
     // is a transaction of the project store alone, granting nothing to the mixed request.
     let project_only = Rc::new(world.bare_broker(cx, &a));
+    let declared = project_only.declare(vec![pool("db", PoolKind::Mutex, 1)], vec![]);
+    cx.run_until_parked();
+    cx.foreground_executor().block_on(declared).unwrap();
     let db = watch(cx, project_only.acquire(ask("db-only", &[need("db")])));
     cx.run_until_parked();
     let db = lease(&db);
