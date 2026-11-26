@@ -349,3 +349,77 @@ async fn n_and_p_in_the_modal_pass_over_group_rows(cx: &mut TestAppContext) {
     assert!(win.has_modal());
     env.wait_unread(cx, 2).await;
 }
+
+/// Four items, two of them a group between the others; the modal open on `first`.
+async fn modal_over_a_group(cx: &mut TestAppContext) -> (Env, Win, Entity<InboxView>) {
+    let (env, mut win) = setup(cx).await;
+    put(&env, &grouped("first", None, 1), None);
+    put(&env, &grouped("grouped a", Some("batch"), 2), None);
+    put(&env, &grouped("grouped b", Some("batch"), 3), None);
+    put(&env, &grouped("last", None, 4), None);
+    wait_items(cx, &env, 4).await;
+    let view = open_view(&mut win);
+    view.update(&mut win.cx, |view, cx| view.set_layout(Layout::Sidebar, cx));
+    win.cx.run_until_parked();
+    win.cx.dispatch_action(OpenItem);
+    win.cx.run_until_parked();
+    assert!(win.has_modal());
+    assert_eq!(cursor_summary(&win, &view).as_deref(), Some("first"));
+    (env, win, view)
+}
+
+#[gpui::test]
+async fn d_in_the_modal_moves_to_an_item_row_and_a_second_d_archives_one_item(
+    cx: &mut TestAppContext,
+) {
+    let (env, mut win, view) = modal_over_a_group(cx).await;
+    let before = env.inbox.read_with(cx, |inbox, _| inbox.stats().operations);
+
+    win.cx.dispatch_action(Dismiss);
+    wait_items(cx, &env, 3).await;
+    wait_settled(&mut win, &view, 1, &env).await;
+    assert_eq!(cursor_summary(&win, &view).as_deref(), Some("last"));
+    let on_item = view.read_with(&win.cx, |view, _| {
+        view.cursor()
+            .is_some_and(|cursor| view.rows()[cursor].item.is_some())
+    });
+    assert!(on_item, "the cursor is on an item row");
+
+    win.cx.dispatch_action(Dismiss);
+    wait_items(cx, &env, 2).await;
+    wait_settled(&mut win, &view, 2, &env).await;
+    assert_eq!(names_in(&env, ARCHIVE).len(), 2);
+    assert_eq!(
+        summaries(&win, &view),
+        ["grouped a"],
+        "the group is untouched"
+    );
+    env.inbox.read_with(cx, |inbox, _| {
+        // Two archives and one mark-read of `last`; the group's members saw nothing.
+        assert_eq!(inbox.stats().operations, before + 3);
+    });
+}
+
+#[gpui::test]
+async fn d_in_the_modal_on_a_group_row_archives_nothing(cx: &mut TestAppContext) {
+    let (env, mut win, view) = modal_over_a_group(cx).await;
+    view.update(&mut win.cx, |view, cx| view.move_cursor(1, cx));
+    win.cx.run_until_parked();
+    assert_eq!(
+        view.read_with(&win.cx, |view, _| view
+            .selected()
+            .map(|row| row.key.clone())),
+        Some(RowKey::Group("batch".into()))
+    );
+    let count = file_count(&env);
+    let before = env.inbox.read_with(cx, |inbox, _| inbox.stats().operations);
+
+    win.cx.dispatch_action(Dismiss);
+    win.cx.run_until_parked();
+    assert!(!view.read_with(&win.cx, |view, _| view.is_dismissing()));
+    assert!(names_in(&env, ARCHIVE).is_empty());
+    assert_eq!(file_count(&env), count);
+    env.inbox.read_with(cx, |inbox, _| {
+        assert_eq!(inbox.stats().operations, before);
+    });
+}

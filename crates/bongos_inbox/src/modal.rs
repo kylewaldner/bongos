@@ -98,7 +98,8 @@ impl Render for ItemModal {
             .on_action(cx.listener(|this, _: &Next, _, cx| this.step(1, cx)))
             .on_action(cx.listener(|this, _: &Previous, _, cx| this.step(-1, cx)))
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
-                this.view.update(cx, |view, cx| view.dismiss(window, cx));
+                this.view
+                    .update(cx, |view, cx| view.dismiss_in_modal(window, cx));
             }))
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| {
                 this.view.update(cx, |view, cx| view.open_file(window, cx));

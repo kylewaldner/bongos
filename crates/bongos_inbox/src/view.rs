@@ -345,6 +345,31 @@ impl InboxView {
         .detach();
     }
 
+    /// `d` in the modal: archives the item shown and moves on to the next item row (group rows are
+    /// passed over; the previous item row when none follows) and marks it read, as `n` does. Does
+    /// nothing when the cursor is on a group row, so a group is never archived unseen.
+    pub fn dismiss_in_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(cursor) = self.cursor() else {
+            return;
+        };
+        if self.rows[cursor].item.is_none() {
+            return;
+        }
+        let is_item = |index: &usize| self.rows[*index].item.is_some();
+        let next = (cursor + 1..self.rows.len())
+            .find(is_item)
+            .or_else(|| (0..cursor).rev().find(is_item))
+            .map(|index| self.rows[index].key.clone());
+        self.dismiss(window, cx);
+        let Some(key) = next else {
+            return;
+        };
+        if let Some(index) = self.rows.iter().position(|row| row.key == key) {
+            self.set_cursor(index, cx);
+            self.operate(true, cx);
+        }
+    }
+
     /// `←` and Esc: the focus goes back to the list.
     pub fn focus_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle, cx);
