@@ -20,8 +20,12 @@
 //! Every scan also resolves each item's `target` (see [`targets`]) to tell stale rows.
 
 mod badge;
+#[cfg(debug_assertions)]
+mod dump;
 mod inbox_settings;
+pub mod rows;
 pub mod targets;
+mod view;
 
 use bongos_inbox_model::format::Item;
 use bongos_inbox_model::maildir::{self, ARCHIVE, CUR, Entry, NEW, ParseCache, ParseResult, TMP};
@@ -49,10 +53,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use targets::PreparedResolvers;
 use util::ResultExt as _;
+use workspace::Workspace;
 
 pub use badge::{InboxBadge, badge_label};
 pub use inbox_settings::InboxSettings;
 pub use targets::{TargetResolvers, TargetState};
+pub use view::{Clock, InboxView, now, set_clock};
+
+#[cfg(debug_assertions)]
+pub use dump::{DUMP_FILE, DumpDir};
 
 /// How long the watcher gathers events before delivering them.
 pub const WATCH_LATENCY: Duration = Duration::from_millis(200);
@@ -61,14 +70,34 @@ pub const RESCAN_INTERVAL: Duration = Duration::from_secs(30);
 /// What an operation on an item that is no longer where the last scan saw it reports.
 pub const MOVED_MESSAGE: &str = "item moved outside bongos";
 
-/// What opening the inbox says until the inbox view exists.
-pub const NOT_YET: &str = "The inbox view is not available yet";
+/// What opening the inbox says while it is off.
+pub const OFF_MESSAGE: &str = "The inbox is off (inbox.enabled)";
 
 actions!(
     inbox,
     [
-        /// Opens the inbox.
-        Open
+        /// Opens the inbox, or focuses it when this window shows it already.
+        Open,
+        /// Moves the inbox cursor to the next row.
+        Next,
+        /// Moves the inbox cursor to the previous row.
+        Previous,
+        /// Scans the inbox directory again.
+        Refresh,
+        /// Marks the item under the inbox cursor read.
+        OpenItem,
+        /// Marks the item under the inbox cursor unread.
+        MarkUnread,
+    ]
+);
+
+#[cfg(debug_assertions)]
+actions!(
+    inbox,
+    [
+        /// Debug builds only: writes the unread count and the rows of the inbox (of this window's
+        /// inbox view when it has one) to `inbox-view.txt` in the logs directory.
+        DumpView
     ]
 );
 
@@ -537,35 +566,61 @@ pub fn init(dirs: InboxDirs, fs: Arc<dyn Fs>, cx: &mut App) {
     InboxSettings::register(cx);
     let state = cx.new(|cx| InboxState::new(fs, dirs, periodic_rescan(RESCAN_INTERVAL), cx));
     cx.set_global(Inbox(state));
-    register_open(cx);
+    register_actions(cx);
 }
 
-/// The handler of [`Open`] until the inbox view exists.
-fn register_open(cx: &mut App) {
-    cx.on_action(|_: &Open, cx| say_not_yet(cx));
+/// Registers the workspace-level handlers on every workspace: `inbox: open`, `inbox: refresh`
+/// and, in debug builds, `inbox: dump view`. The cursor and read actions are the view's.
+fn register_actions(cx: &mut App) {
+    cx.observe_new(|workspace: &mut Workspace, _, _| register(workspace))
+        .detach();
 }
 
-/// Hides [`Open`] from the command palette: the badge opens the inbox, and the action has no
-/// name worth typing yet. Call after `command_palette_hooks::init`.
-pub fn init_palette(cx: &mut App) {
-    CommandPaletteFilter::update_global(cx, |filter, _| {
-        filter.hide_action_types(&[TypeId::of::<Open>()]);
+fn register(workspace: &mut Workspace) {
+    workspace
+        .register_action(|workspace, _: &Open, window, cx| view::open(workspace, window, cx))
+        .register_action(|_, _: &Refresh, _, cx| {
+            if let Some(inbox) = Inbox::global(cx) {
+                inbox.update(cx, |inbox, _| inbox.refresh());
+            }
+        });
+    #[cfg(debug_assertions)]
+    workspace.register_action(|workspace, _: &DumpView, window, cx| {
+        dump::dump_view(workspace, window, cx)
     });
 }
 
-/// Says in the echo area of the active window that opening the inbox is not there yet.
-fn say_not_yet(cx: &mut App) {
-    // The action is dispatched inside a window update; the echo area is reached after it.
-    cx.defer(|cx| {
-        let shown = cx.active_window().is_some_and(|window| {
-            window
-                .update(cx, |_, window, cx| {
-                    bongos_minibuffer::message(window, cx, NOT_YET);
-                })
-                .is_ok()
-        });
-        if !shown {
-            log::info!("inbox: {NOT_YET}");
+/// The inbox's actions, which the command palette shows only while `inbox.enabled` is true.
+pub fn action_types() -> Vec<TypeId> {
+    #[allow(unused_mut)]
+    let mut types = vec![
+        TypeId::of::<Open>(),
+        TypeId::of::<Next>(),
+        TypeId::of::<Previous>(),
+        TypeId::of::<Refresh>(),
+        TypeId::of::<OpenItem>(),
+        TypeId::of::<MarkUnread>(),
+    ];
+    #[cfg(debug_assertions)]
+    types.push(TypeId::of::<DumpView>());
+    types
+}
+
+/// Hides the inbox's actions from the command palette while `inbox.enabled` is false and shows
+/// them while it is true. Call after `command_palette_hooks::init`.
+pub fn init_palette(cx: &mut App) {
+    sync_palette(cx);
+    cx.observe_global::<SettingsStore>(sync_palette).detach();
+}
+
+fn sync_palette(cx: &mut App) {
+    let enabled = InboxSettings::get_global(cx).enabled;
+    let types = action_types();
+    CommandPaletteFilter::update_global(cx, |filter, _| {
+        if enabled {
+            filter.show_action_types(&types);
+        } else {
+            filter.hide_action_types(&types);
         }
     });
 }
@@ -928,3 +983,6 @@ mod tests;
 
 #[cfg(test)]
 mod badge_tests;
+
+#[cfg(test)]
+mod view_tests;

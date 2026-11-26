@@ -2553,6 +2553,7 @@ dependencies = [
 name = "bongos_inbox"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bongos_inbox_model",
  "bongos_minibuffer",
  "bongos_work_model",
@@ -2565,6 +2566,7 @@ dependencies = [
  "gpui",
  "log",
  "parking_lot",
+ "paths",
  "project",
  "settings",
  "tempfile",
