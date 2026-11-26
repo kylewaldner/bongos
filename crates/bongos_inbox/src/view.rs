@@ -739,13 +739,12 @@ fn render_second_line(row: &ViewRow, cx: &App) -> impl IntoElement {
         }
         first = false;
         let element = part(text, color, buffer);
-        // The source gives way first, then the type; the project stays whole.
+        // The source gives way; the project and the type stay whole.
         line = line.child(if buffer {
-            element.flex_1()
-        } else if color == Color::Muted {
-            element.flex_none()
+            // Never squeezed to nothing: a few characters and an ellipsis stay.
+            element.flex_1().min_w(px(28.))
         } else {
-            element.flex_shrink_1()
+            element.flex_none()
         });
     }
     line

@@ -394,12 +394,14 @@ capture() {
   say "smoke: screenshot $RUN/design-$size-list-$tone.png"
   act keys Return
   poll 30 "the first design item read" test -n "$(file_of cur design-01.md)"
+  # RET reads the item; the design's picture shows it still unread, so put it back before the shot.
+  act keys u
+  poll 30 "the first design item unread" test -f "$INBOX/cur/design-01.md:2,"
   wait_for_settled
   shot "design-$size-item-focus-$tone"
   say "smoke: screenshot $RUN/design-$size-item-focus-$tone.png"
   # Back to the list, and the first row unread again, as the next capture needs it.
   act keys Left
-  act keys u
   poll 30 "the first design item unread" test -f "$INBOX/cur/design-01.md:2,"
   dump_until "the first design row is not unread again" unread_is 3
 }

@@ -148,6 +148,8 @@ fn action_cap(name: &str) -> ActionCap {
     let key = match name {
         DISMISS => "d",
         OPEN => "f",
+        // `o` opens the target, which is what `overturn` does too.
+        "overturn" => "o",
         _ => "",
     };
     ActionCap {
@@ -517,6 +519,7 @@ mod tests {
         assert_eq!(cap("open-run"), ("".into(), "Open run".into()));
         assert_eq!(cap("dismiss"), ("d".into(), "Dismiss".into()));
         assert_eq!(cap("open"), ("f".into(), "Open file".into()));
+        assert_eq!(cap("overturn"), ("o".into(), "Overturn".into()));
         assert_eq!(cap("some-thing"), ("".into(), "Some thing".into()));
     }
 }
