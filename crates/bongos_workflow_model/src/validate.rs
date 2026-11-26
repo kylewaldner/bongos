@@ -12,11 +12,28 @@ use std::path::{Component, Path};
 
 use crate::definition::{
     AgentKind, CHECKS_PROGRAM, Definition, EndKind, FieldType, NO_VERDICT, Node, NodeKind, Outcome,
-    OutputField, Route, Target, checks_output,
+    OutputField, Route, SLACK_POST_PROGRAM, SLACK_READ_PROGRAM, Target, checks_output,
+    slack_post_output, slack_read_output,
 };
+use crate::template;
 
 /// The program nodes bongos ships, named by `use`.
-pub const SHIPPED_PROGRAMS: &[&str] = &["merge", "wait", CHECKS_PROGRAM];
+pub const SHIPPED_PROGRAMS: &[&str] = &[
+    "merge",
+    "wait",
+    CHECKS_PROGRAM,
+    SLACK_READ_PROGRAM,
+    SLACK_POST_PROGRAM,
+];
+
+/// The `with` keys a `slack-read` node takes.
+const SLACK_READ_WITH_KEYS: &[&str] = &["channel", "count", "thread"];
+/// The `with` keys a `slack-post` node takes.
+const SLACK_POST_WITH_KEYS: &[&str] = &["channel", "text", "thread"];
+/// The most messages one `slack-read` node reads.
+pub const SLACK_READ_MAX_COUNT: i64 = 200;
+/// How many messages a `slack-read` node reads when its `with` names no `count`.
+pub const SLACK_READ_DEFAULT_COUNT: i64 = 50;
 
 /// The `with` keys a checks node takes.
 const CHECKS_WITH_KEYS: &[&str] = &["checks", "items", "items_from", "item", "repeat", "tree"];
@@ -747,6 +764,9 @@ impl<'a> Validator<'a> {
         if node.is_checks() {
             self.check_checks_node(node);
         }
+        if let Some(program @ (SLACK_READ_PROGRAM | SLACK_POST_PROGRAM)) = node.program() {
+            self.check_slack_node(node, program);
+        }
         if let Some(language) = &node.language
             && language != PROGRAM_LANGUAGE
         {
@@ -859,6 +879,91 @@ impl<'a> Validator<'a> {
                 line,
                 "a checks node takes `with.items` or `with.items_from`, not both",
             );
+        }
+    }
+
+    /// A Slack node's output is fixed (parsing gives it to a node that declares none) and its
+    /// `with` takes only the keys its program reads: `channel` (and for a post `text`) as text,
+    /// templates allowed, `thread` as text, and for a read `count` from 1 to 200.
+    fn check_slack_node(&mut self, node: &'a Node, program: &str) {
+        let name = node.name.as_str();
+        let post = program == SLACK_POST_PROGRAM;
+        let (fixed, described, keys) = if post {
+            (
+                slack_post_output(node.line),
+                "link (text), channel (text), ts (text)",
+                SLACK_POST_WITH_KEYS,
+            )
+        } else {
+            (
+                slack_read_output(node.line),
+                "messages (text), quoted (text), count (number), has_older (choice: yes, no)",
+                SLACK_READ_WITH_KEYS,
+            )
+        };
+        if !same_output(&node.output, &fixed) {
+            let line = node.output.first().map_or(node.line, |field| field.line);
+            self.error(
+                Some(name),
+                line,
+                format!(
+                    "a {program} node's output is fixed: {described}; leave `output` out or \
+                     declare exactly these fields"
+                ),
+            );
+        }
+        let line = node
+            .use_node
+            .as_ref()
+            .map_or(node.line, |use_node| use_node.line);
+        let required: &[&str] = if post {
+            &["channel", "text"]
+        } else {
+            &["channel"]
+        };
+        for key in required {
+            if !node.with.contains_key(*key) {
+                self.error(
+                    Some(name),
+                    line,
+                    format!("a {program} node needs `with.{key}`"),
+                );
+            }
+        }
+        for (key, value) in &node.with {
+            let problem = match key.as_str() {
+                "channel" | "text" | "thread" if keys.contains(&key.as_str()) => {
+                    match value.as_str() {
+                        None => Some("must be text".to_string()),
+                        Some(text) if key != "thread" && text.trim().is_empty() => {
+                            Some("must not be empty".to_string())
+                        }
+                        Some(text) => template::references(text)
+                            .err()
+                            .map(|error| format!("is not a valid template: {error}")),
+                    }
+                }
+                "count" if !post => match value.as_integer() {
+                    Some(count) if (1..=SLACK_READ_MAX_COUNT).contains(&count) => None,
+                    _ => Some(format!(
+                        "must be a whole number from 1 to {SLACK_READ_MAX_COUNT}"
+                    )),
+                },
+                _ => {
+                    self.error(
+                        Some(name),
+                        line,
+                        format!(
+                            "unknown `with` key '{key}' for a {program} node (allowed: {})",
+                            keys.join(", ")
+                        ),
+                    );
+                    continue;
+                }
+            };
+            if let Some(problem) = problem {
+                self.error(Some(name), line, format!("`with.{key}` {problem}"));
+            }
         }
     }
 

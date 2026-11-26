@@ -291,7 +291,7 @@ fn use_naming_no_shipped_program() {
         &text,
         Some("merge"),
         "use = ",
-        "'mrege' is not a shipped program node (shipped: checks, merge, wait)",
+        "'mrege' is not a shipped program node (shipped: checks, merge, slack-post, slack-read, wait)",
     );
 }
 
@@ -1290,4 +1290,112 @@ fn project_subject_problems_name_every_task_or_todo_input() {
     );
     assert_eq!(problems[0].line, 5);
     assert!(problems.iter().all(Diagnostic::is_error));
+}
+
+/// A read of a channel feeding a post of the summary to another.
+const SLACK: &str = r##"
+schema = 1
+name = "slack"
+start = "read"
+
+[nodes.read]
+kind = "program"
+use = "slack-read"
+with = { channel = "#incidents", count = 50 }
+routes = [{ to = "post" }]
+
+[nodes.post]
+kind = "program"
+use = "slack-post"
+with = { channel = "#releases", text = "{{nodes.read.count}} messages" }
+routes = [{ to = "done" }]
+
+[ends.done]
+kind = "success"
+"##;
+
+#[test]
+fn slack_nodes_get_their_fixed_output_and_check_their_with_keys_and_count() {
+    assert_no_errors(SLACK);
+    let definition = parse(SLACK).unwrap();
+    let names = |node: &str| {
+        definition
+            .node(node)
+            .unwrap()
+            .output
+            .iter()
+            .map(|field| field.name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names("read"), ["messages", "quoted", "count", "has_older"]);
+    assert_eq!(names("post"), ["link", "channel", "ts"]);
+
+    let read_with = r##"with = { channel = "#incidents", count = 50 }"##;
+    assert_no_errors(&SLACK.replace(
+        read_with,
+        r##"with = { channel = "{{inputs.channel}}", count = 200, thread = "1730000000.000100" }"##,
+    ));
+    assert_no_errors(&SLACK.replace(read_with, r#"with = { channel = "C0123", count = 1 }"#));
+    let cases = [
+        (
+            r##"with = { channel = "#a", count = 0 }"##,
+            "`with.count` must be a whole number from 1 to 200",
+        ),
+        (
+            r##"with = { channel = "#a", count = 201 }"##,
+            "`with.count` must be a whole number from 1 to 200",
+        ),
+        (
+            r##"with = { channel = "#a", count = "ten" }"##,
+            "`with.count` must be a whole number from 1 to 200",
+        ),
+        (
+            r##"with = { channel = "#a", text = "hi" }"##,
+            "unknown `with` key 'text' for a slack-read node",
+        ),
+        (
+            r#"with = { count = 5 }"#,
+            "a slack-read node needs `with.channel`",
+        ),
+        (r#"with = { channel = 5 }"#, "`with.channel` must be text"),
+        (
+            r#"with = { channel = "{{inputs" }"#,
+            "`with.channel` is not a valid template",
+        ),
+    ];
+    for (with, message) in cases {
+        let text = SLACK.replace(read_with, with);
+        assert_error(&text, Some("read"), r#"use = "slack-read""#, message);
+    }
+
+    let post_with = r##"with = { channel = "#releases", text = "{{nodes.read.count}} messages" }"##;
+    let cases = [
+        (
+            r##"with = { channel = "#releases" }"##,
+            "a slack-post node needs `with.text`",
+        ),
+        (
+            r##"with = { channel = "#releases", text = "hi", count = 3 }"##,
+            "unknown `with` key 'count' for a slack-post node",
+        ),
+        (
+            r##"with = { channel = "", text = "hi" }"##,
+            "`with.channel` must not be empty",
+        ),
+    ];
+    for (with, message) in cases {
+        let text = SLACK.replace(post_with, with);
+        assert_error(&text, Some("post"), r#"use = "slack-post""#, message);
+    }
+
+    let declared = SLACK.replace(
+        r#"use = "slack-post""#,
+        "use = \"slack-post\"\noutput = { link = { type = \"text\" } }",
+    );
+    assert_error(
+        &declared,
+        Some("post"),
+        "output = { link",
+        "a slack-post node's output is fixed",
+    );
 }
