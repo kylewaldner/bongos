@@ -255,7 +255,7 @@ fn apply_live(editor: &mut Editor, cx: &mut Context<Editor>) {
     let mut refinement = base;
     refinement.font_family = Some(live_font_family(cx));
     refinement.font_size = Some(px(LIVE_FONT_SIZE * zoom_ratio(cx)).into());
-    refinement.line_height = Some(relative(LIVE_LINE_HEIGHT).into());
+    refinement.line_height = Some(relative(LIVE_LINE_HEIGHT));
     editor.set_text_style_refinement(refinement);
     editor.set_cursor_shape_override(Some(language::CursorShape::Bar), cx);
     editor.set_show_gutter(false, cx);

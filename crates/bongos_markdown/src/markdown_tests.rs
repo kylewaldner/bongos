@@ -203,7 +203,7 @@ async fn live_sets_the_typography_and_source_gives_back_what_was_there(cx: &mut 
     });
     assert_eq!(live.font_family, Some(family));
     assert_eq!(live_size(&editor, vcx), LIVE_FONT_SIZE);
-    assert_eq!(live.line_height, Some(relative(LIVE_LINE_HEIGHT).into()));
+    assert_eq!(live.line_height, Some(relative(LIVE_LINE_HEIGHT)));
     editor.read_with(vcx, |editor, _| {
         assert_eq!(editor.cursor_shape_override(), Some(CursorShape::Bar));
         assert!(!editor.show_gutter());
