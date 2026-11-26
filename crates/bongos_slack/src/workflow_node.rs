@@ -56,8 +56,8 @@ use crate::connection::{self, Connection};
 use crate::read_buffer::{ConversationEntry, conversation_entries, picker_entries};
 use crate::read_view::MessageLink;
 use crate::service::{
-    Answer, NOT_CONNECTED_MESSAGE, OFF_MESSAGE, RECONNECT_MESSAGE, Read, SlackError, SlackService,
-    SlackState,
+    Answer, NOT_CONNECTED_MESSAGE, OFF_MESSAGE, PostCheck, RECONNECT_MESSAGE, Read, SlackError,
+    SlackService, SlackState,
 };
 
 /// The most messages one history request asks for.
@@ -111,34 +111,44 @@ impl HostFiles {
         (enabled, connection::read_connection(&self.dir))
     }
 
-    /// Why Slack cannot be asked now, by the files alone.
-    fn ready(&self) -> Result<(), String> {
-        ready_of(self.read())
+    /// The connection Slack would be asked with now, by the files alone, or why it cannot be.
+    fn ready(&self) -> Result<Connection, SlackError> {
+        let (enabled, found) = self.read();
+        ready_of(enabled, found)
     }
 
-    /// [`Self::ready`], first setting the app's connection to the file's, so a connection that
-    /// changed drops the client and the caches of the earlier one.
-    fn refresh(&self, cx: &mut AsyncApp) -> Result<(), String> {
+    /// [`Self::ready`], first setting the app's `slack.enabled` and connection to the files', so
+    /// a connect or an enable in the window is seen here, and a connection that changed drops the
+    /// client and the caches of the earlier one.
+    fn refresh(&self, cx: &mut App) -> Result<(), SlackError> {
         let (enabled, found) = self.read();
-        let connected = found.is_some();
-        cx.update(|cx| connection::reload(found, cx));
-        ready_of((enabled, connected.then_some(())))
+        let ready = ready_of(enabled, found.clone()).map(|_| ());
+        SlackService::set_enabled_from_file(enabled, cx);
+        connection::reload(found, cx);
+        ready
+    }
+
+    /// [`Self::refresh`] before every send of a post, also after a rate-limit wait.
+    fn post_check(&self) -> PostCheck {
+        let host = self.clone();
+        Rc::new(move |cx: &mut AsyncApp| cx.update(|cx| host.refresh(cx)))
     }
 }
 
-fn ready_of<T>((enabled, connection): (bool, Option<T>)) -> Result<(), String> {
+fn ready_of(enabled: bool, connection: Option<Connection>) -> Result<Connection, SlackError> {
     if !enabled {
-        Err(OFF_MESSAGE.to_string())
-    } else if connection.is_none() {
-        Err(NOT_CONNECTED_MESSAGE.to_string())
+        Err(SlackError::Off)
     } else {
-        Ok(())
+        connection.ok_or(SlackError::NotConnected)
     }
 }
 
 /// [`HostFiles::refresh`] of a process with no window; the window's state is live already.
 fn refresh(host: Option<&HostFiles>, cx: &mut AsyncApp) -> Result<(), String> {
-    host.map_or(Ok(()), |host| host.refresh(cx))
+    host.map_or(Ok(()), |host| {
+        cx.update(|cx| host.refresh(cx))
+            .map_err(|error| error.to_string())
+    })
 }
 
 /// How a node's `channel` names its conversation.
@@ -472,18 +482,15 @@ impl Core {
         lock(&self.shared)
     }
 
-    /// Why Slack cannot be asked now: by the files first in a process with no window, then by the
-    /// app's state.
-    fn ready(&self, shared: &Shared) -> Result<(), String> {
-        if let Some(host) = &self.host {
-            host.ready()?;
+    /// The connection Slack would be asked with now, or why it cannot be: in a process with no
+    /// window by the files alone, read now (its loaded state may predate a connect or an enable
+    /// in the window, and the worker's refresh brings it up to date before Slack is asked), else
+    /// by the app's state.
+    fn ready(&self, shared: &Shared) -> Result<Connection, String> {
+        match &self.host {
+            Some(host) => host.ready().map_err(|error| error.to_string()),
+            None => shared.facts.ready.clone(),
         }
-        shared
-            .facts
-            .ready
-            .as_ref()
-            .map(|_| ())
-            .map_err(Clone::clone)
     }
 
     /// Records the try as in flight with `line` and hands `job` to the worker.
@@ -692,7 +699,7 @@ impl BuiltinNode for SlackPostNode {
         // A post that cannot be read, or Slack that is off, asks nothing: the start fails it.
         let job = PostJob::read(start).ok()?;
         let shared = self.0.shared();
-        let connection = shared.facts.ready.as_ref().ok()?;
+        let connection = self.0.ready(&shared).ok()?;
         let entries = &shared.facts.conversations;
         let destination = job.destination_label();
         let question = PostSummary {
@@ -967,12 +974,23 @@ async fn run_post(
         }
         return Err(message);
     }
+    // The post may wait behind earlier posts or a rate limit: the files are read again before
+    // every send, also the one that repeats a limited post.
+    let post_check = host.map(HostFiles::post_check);
     let posted = service
         .update(cx, |service, cx| {
-            service.post(destination, text, origin, cx)
+            service.post_checked(destination, text, origin, post_check, cx)
         })
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| {
+            if matches!(error, SlackError::Off | SlackError::NotConnected)
+                && let Some(intent) = &job.intent
+            {
+                // Nothing was sent.
+                std::fs::remove_file(intent).ok();
+            }
+            error.to_string()
+        })?;
     let url = cx
         .update(|cx| connection::current(cx))
         .map(|connection| connection.workspace_url)

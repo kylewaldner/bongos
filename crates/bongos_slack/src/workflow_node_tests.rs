@@ -1,9 +1,10 @@
 //! Tests of the workflow steps `slack-read` and `slack-post`: the real built-ins over the fake
 //! Slack, driven by the workflow runtime with a stand-in runner. Every answer is scripted and
-//! ready, so nothing waits and no clock is read; the run logs live in fresh temporary
-//! directories.
+//! ready; a rate-limit wait runs on the test executor's clock, advanced by the test and never
+//! slept. The run logs live in fresh temporary directories.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use bongos_slack_model::fake::{Call, FakeSlack};
 use bongos_slack_model::types::{
@@ -23,8 +24,8 @@ use gpui::TestAppContext;
 use serde_json::Value;
 use tempfile::TempDir;
 
-use crate::service::{NOT_CONNECTED_MESSAGE, OFF_MESSAGE};
-use crate::service_tests::{Fixture, setup};
+use crate::service::{NOT_CONNECTED_MESSAGE, OFF_MESSAGE, Read};
+use crate::service_tests::{Fixture, set_enabled, setup};
 use crate::workflow_node::{HostFiles, ProjectOf, SlackNodes, previous_try_warning};
 use crate::{allowed, connection};
 
@@ -180,17 +181,33 @@ impl World {
 /// A connected Slack over the fake, the built-ins with `project` as every run's project, and a
 /// runtime they are registered with.
 fn world(project: Option<&str>, cx: &mut TestAppContext) -> World {
-    world_with(project, None, cx)
+    world_with(project, None, |_, _| {}, cx)
 }
 
 /// [`world`] as in a process with no window: the built-ins read `connection.toml` and a user
 /// settings file of `settings` again before every try.
 fn host_world(settings: &str, cx: &mut TestAppContext) -> World {
-    world_with(None, Some(settings), cx)
+    world_with(None, Some(settings), |_, _| {}, cx)
 }
 
-fn world_with(project: Option<&str>, settings: Option<&str>, cx: &mut TestAppContext) -> World {
+/// [`host_world`] whose app state `at_start` changes before the built-ins are made, as a host
+/// that started with other files would have loaded it.
+fn host_world_started(
+    settings: &str,
+    at_start: impl FnOnce(&Fixture, &mut TestAppContext),
+    cx: &mut TestAppContext,
+) -> World {
+    world_with(None, Some(settings), at_start, cx)
+}
+
+fn world_with(
+    project: Option<&str>,
+    settings: Option<&str>,
+    at_start: impl FnOnce(&Fixture, &mut TestAppContext),
+    cx: &mut TestAppContext,
+) -> World {
     let fixture = setup(true, cx);
+    at_start(&fixture, cx);
     let project = project.map(str::to_string);
     let project_of: ProjectOf = Arc::new(move |_: Option<&RunBinding>| project.clone());
     let dir = fixture.dir.clone();
@@ -620,4 +637,164 @@ async fn a_slack_reply_links_to_the_message_in_its_thread(cx: &mut TestAppContex
         "https://acme.slack.com/archives/C0REL/p1730000009000100\
          ?thread_ts=1730000005.000100&cid=C0REL"
     );
+}
+
+fn limited(seconds: u64) -> ApiError {
+    ApiError::RateLimited {
+        retry_after: Duration::from_secs(seconds),
+    }
+}
+
+/// Starts try 1 of the attended post of `definition` in `world`, without the runtime.
+fn start_post(world: &World, definition: &str) {
+    let definition = parse(definition).unwrap();
+    let state = RunState::default();
+    let key = NodeKey::new("post", 1);
+    world
+        .nodes
+        .post
+        .start(attended_start(&definition, &state, &key))
+        .unwrap();
+}
+
+/// The one failure the post reported.
+fn post_failure(world: &World) -> Failure {
+    let finishes = world.nodes.post.poll();
+    assert_eq!(finishes.len(), 1);
+    finishes[0].outcome.clone().unwrap_err()
+}
+
+#[gpui::test]
+async fn a_slack_post_in_a_host_is_not_sent_again_when_the_connection_goes_during_its_rate_limit(
+    cx: &mut TestAppContext,
+) {
+    let world = host_world(ON, cx);
+    world.fake().push_post(Err(limited(10)));
+    push_posted(world.fake());
+    start_post(&world, &post_only("C0REL", GREEN));
+    cx.run_until_parked();
+    assert_eq!(posts(world.fake()).len(), 1, "the limited post");
+    assert!(world.nodes.post.poll().is_empty(), "the post waits");
+
+    // Another process disconnects during the wait.
+    remove_connection(&world);
+    cx.executor().advance_clock(Duration::from_secs(10));
+    cx.run_until_parked();
+
+    let failure = post_failure(&world);
+    assert_eq!(failure.reason, FailureReason::PostNotSent);
+    assert_eq!(failure.detail, NOT_CONNECTED_MESSAGE);
+    assert_eq!(posts(world.fake()).len(), 1, "nothing was sent again");
+}
+
+#[gpui::test]
+async fn a_slack_post_in_a_host_queued_behind_a_wait_is_not_sent_once_slack_is_off(
+    cx: &mut TestAppContext,
+) {
+    let world = host_world(ON, cx);
+    // A read's rate limit starts the shared wait.
+    world.fake().push_history(Err(limited(10)));
+    world.fake().push_history(Ok(Page {
+        items: Vec::new(),
+        next: None,
+    }));
+    push_posted(world.fake());
+    let read = world.fixture.service.update(cx, |service, cx| {
+        service.call(
+            Read::History {
+                channel: id("C0INC"),
+                latest: None,
+                limit: 1,
+            },
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    start_post(&world, &post_only("C0REL", GREEN));
+    cx.run_until_parked();
+    assert!(posts(world.fake()).is_empty(), "the post waits");
+
+    // The window turns Slack off during the wait.
+    std::fs::write(
+        world.fixture.dir.parent().unwrap().join("settings.json"),
+        r#"{ "slack": { "enabled": false } }"#,
+    )
+    .unwrap();
+    cx.executor().advance_clock(Duration::from_secs(10));
+    cx.run_until_parked();
+
+    let failure = post_failure(&world);
+    assert_eq!(failure.reason, FailureReason::PostNotSent);
+    assert_eq!(failure.detail, OFF_MESSAGE);
+    assert!(posts(world.fake()).is_empty(), "{:?}", world.fake().calls());
+    drop(read);
+}
+
+#[gpui::test]
+async fn a_slack_post_in_a_host_is_not_sent_when_the_connection_goes_while_its_name_resolves(
+    cx: &mut TestAppContext,
+) {
+    let world = host_world(ON, cx);
+    world.fake().push_conversations(Err(limited(10)));
+    push_channels(world.fake());
+    push_posted(world.fake());
+    start_post(&world, &post_only("#releases", GREEN));
+    cx.run_until_parked();
+
+    remove_connection(&world);
+    cx.executor().advance_clock(Duration::from_secs(10));
+    cx.run_until_parked();
+
+    let failure = post_failure(&world);
+    assert_eq!(failure.reason, FailureReason::PostNotSent);
+    assert_eq!(failure.detail, NOT_CONNECTED_MESSAGE);
+    assert!(posts(world.fake()).is_empty(), "{:?}", world.fake().calls());
+}
+
+/// Moves `connection.toml` aside and forgets the connection, as in a host that started before
+/// the window connected; [`connect_later`] puts it back.
+fn start_disconnected(fixture: &Fixture, cx: &mut TestAppContext) {
+    let path = connection::connection_path(&fixture.dir);
+    std::fs::rename(&path, path.with_extension("later")).unwrap();
+    cx.update(|cx| connection::reload(None, cx));
+}
+
+fn connect_later(world: &World) {
+    let path = connection::connection_path(&world.fixture.dir);
+    std::fs::rename(path.with_extension("later"), &path).unwrap();
+}
+
+#[gpui::test]
+async fn a_host_that_started_disconnected_posts_once_the_window_connects(cx: &mut TestAppContext) {
+    let mut world = host_world_started(ON, start_disconnected, cx);
+    let definition = parse(&post_only("C0REL", GREEN)).unwrap();
+    let state = RunState::default();
+    let key = NodeKey::new("post", 1);
+    let failure = world
+        .nodes
+        .post
+        .start(attended_start(&definition, &state, &key))
+        .unwrap_err();
+    assert_eq!(failure.detail, NOT_CONNECTED_MESSAGE);
+
+    connect_later(&world);
+    push_posted(world.fake());
+    world.add(&post_only("C0REL", GREEN), false);
+    world.drive(cx);
+
+    assert_eq!(posts(world.fake()), [post_of(GREEN)]);
+    assert_eq!(world.result("post")["channel"], "C0REL");
+}
+
+#[gpui::test]
+async fn a_host_that_started_with_slack_off_posts_once_the_settings_file_turns_it_on(
+    cx: &mut TestAppContext,
+) {
+    let mut world = host_world_started(ON, |_, cx| set_enabled(false, cx), cx);
+    push_posted(world.fake());
+    world.add(&post_only("C0REL", GREEN), false);
+    world.drive(cx);
+
+    assert_eq!(posts(world.fake()), [post_of(GREEN)]);
+    assert_eq!(world.result("post")["channel"], "C0REL");
 }

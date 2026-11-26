@@ -43,7 +43,7 @@ pub(crate) struct Fixture {
     pub(crate) service: Entity<SlackService>,
 }
 
-fn set_enabled(enabled: bool, cx: &mut TestAppContext) {
+pub(crate) fn set_enabled(enabled: bool, cx: &mut TestAppContext) {
     cx.update(|cx| {
         cx.update_global::<SettingsStore, _>(|store, cx| {
             store.update_user_settings(cx, |content| {
