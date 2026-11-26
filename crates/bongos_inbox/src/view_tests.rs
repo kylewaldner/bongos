@@ -14,13 +14,13 @@ use workspace::item::Item as _;
 use workspace::item::test::TestItem;
 
 /// The time the tests' clock reads; items are delivered at offsets before it.
-fn fixed_now() -> DateTime<Utc> {
+pub(crate) fn fixed_now() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 11, 11, 12, 0, 0).unwrap()
 }
 
 /// Delivers an item from source `agent/<summary>` (so no two group), created `minutes_ago`
 /// before [`fixed_now`]. Returns its path in `new/`.
-fn deliver(env: &Env, summary: &str, minutes_ago: i64) -> PathBuf {
+pub(crate) fn deliver(env: &Env, summary: &str, minutes_ago: i64) -> PathBuf {
     let mut item = item(summary);
     item.source = format!("agent/{summary}");
     item.created = fixed_now() - Duration::minutes(minutes_ago);
@@ -28,14 +28,14 @@ fn deliver(env: &Env, summary: &str, minutes_ago: i64) -> PathBuf {
 }
 
 /// An enabled inbox with a fixed clock and one window.
-async fn setup(cx: &mut TestAppContext) -> (Env, Win) {
+pub(crate) async fn setup(cx: &mut TestAppContext) -> (Env, Win) {
     let env = env(cx).await;
     cx.update(|cx| set_clock(fixed_now, cx));
     let win = window(cx, &env, false).await;
     (env, win)
 }
 
-fn views(win: &Win) -> Vec<Entity<InboxView>> {
+pub(crate) fn views(win: &Win) -> Vec<Entity<InboxView>> {
     win.workspace.read_with(&win.cx, |workspace, cx| {
         workspace.items_of_type::<InboxView>(cx).collect()
     })
@@ -47,7 +47,7 @@ fn is_focused(win: &mut Win, view: &Entity<InboxView>) -> bool {
 }
 
 /// Opens the view and returns it.
-fn open_view(win: &mut Win) -> Entity<InboxView> {
+pub(crate) fn open_view(win: &mut Win) -> Entity<InboxView> {
     win.cx.dispatch_action(Open);
     win.cx.run_until_parked();
     let views = views(win);
@@ -55,13 +55,13 @@ fn open_view(win: &mut Win) -> Entity<InboxView> {
     views[0].clone()
 }
 
-fn summaries(win: &Win, view: &Entity<InboxView>) -> Vec<String> {
+pub(crate) fn summaries(win: &Win, view: &Entity<InboxView>) -> Vec<String> {
     view.read_with(&win.cx, |view, _| {
         view.rows().iter().map(|row| row.summary.clone()).collect()
     })
 }
 
-fn cursor_summary(win: &Win, view: &Entity<InboxView>) -> Option<String> {
+pub(crate) fn cursor_summary(win: &Win, view: &Entity<InboxView>) -> Option<String> {
     view.read_with(&win.cx, |view, _| {
         view.selected().map(|row| row.summary.clone())
     })
@@ -80,11 +80,11 @@ fn names(env: &Env) -> Vec<String> {
     names
 }
 
-fn file_name(path: &Path) -> String {
+pub(crate) fn file_name(path: &Path) -> String {
     path.file_name().unwrap().to_string_lossy().into_owned()
 }
 
-fn messages(win: &mut Win) -> Vec<String> {
+pub(crate) fn messages(win: &mut Win) -> Vec<String> {
     let window: gpui::AnyWindowHandle = win.handle.into();
     win.cx.update(|_, cx| {
         bongos_minibuffer::minibuffer_for_window(window, cx)
@@ -330,12 +330,12 @@ async fn dump_view_writes_the_unread_count_and_the_rows(cx: &mut TestAppContext)
     assert_eq!(dumped(), "unread: off\n");
 }
 
-fn item_focused(win: &mut Win, view: &Entity<InboxView>) -> bool {
+pub(crate) fn item_focused(win: &mut Win, view: &Entity<InboxView>) -> bool {
     win.cx
         .update(|window, cx| view.read(cx).item_focused(window))
 }
 
-fn unread_flags(win: &Win, view: &Entity<InboxView>) -> Vec<bool> {
+pub(crate) fn unread_flags(win: &Win, view: &Entity<InboxView>) -> Vec<bool> {
     view.read_with(&win.cx, |view, _| {
         view.rows().iter().map(|row| row.unread).collect()
     })

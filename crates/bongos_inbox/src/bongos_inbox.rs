@@ -99,6 +99,8 @@ actions!(
         OpenFile,
         /// Marks the item under the inbox cursor unread.
         MarkUnread,
+        /// Archives the item under the inbox cursor, or every item of the group under it.
+        Dismiss,
     ]
 );
 
@@ -207,6 +209,17 @@ impl Snapshot {
 
     /// The visible rows, with stale items marked.
     pub fn rows(&self, filter: &Filter, known: &dyn Fn(&str) -> bool) -> Vec<Row> {
+        self.rows_hiding(filter, known, &|_| false)
+    }
+
+    /// [`Snapshot::rows`] without the items `hidden` names, as if they were gone: a group loses
+    /// them from its count.
+    pub fn rows_hiding(
+        &self,
+        filter: &Filter,
+        known: &dyn Fn(&str) -> bool,
+        hidden: &dyn Fn(&Entry) -> bool,
+    ) -> Vec<Row> {
         let stale: HashSet<(&str, u64)> = self
             .items
             .iter()
@@ -214,9 +227,18 @@ impl Snapshot {
             .filter(|(_, target)| **target == Some(TargetState::Stale))
             .map(|((entry, _), _)| (entry.unique.as_str(), entry.inode))
             .collect();
-        view_model::rows_marked(&self.items, filter, known, &|entry| {
-            stale.contains(&(entry.unique.as_str(), entry.inode))
-        })
+        let is_stale =
+            |entry: &Entry| stale.contains(&(entry.unique.as_str(), entry.inode));
+        if !self.items.iter().any(|(entry, _)| hidden(entry)) {
+            return view_model::rows_marked(&self.items, filter, known, &is_stale);
+        }
+        let shown: Vec<(Entry, ParseResult)> = self
+            .items
+            .iter()
+            .filter(|(entry, _)| !hidden(entry))
+            .cloned()
+            .collect();
+        view_model::rows_marked(&shown, filter, known, &is_stale)
     }
 }
 
@@ -614,6 +636,7 @@ pub fn action_types() -> Vec<TypeId> {
         TypeId::of::<FocusList>(),
         TypeId::of::<OpenFile>(),
         TypeId::of::<MarkUnread>(),
+        TypeId::of::<Dismiss>(),
     ];
     #[cfg(debug_assertions)]
     types.push(TypeId::of::<DumpView>());
