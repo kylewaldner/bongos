@@ -14,4 +14,9 @@ doctest = false
 
 [dependencies]
 chrono.workspace = true
+libc.workspace = true
+log.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
