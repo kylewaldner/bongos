@@ -3054,6 +3054,12 @@
       "codex": ["~/.codex"],
     },
   },
+  "approval_integrity": {
+    // Count only approvals whose signature verifies (and weaker ones, such as pairing) when
+    // deciding whether a change may land. Off means approval rows count as they always have;
+    // their verification state is still shown.
+    "enforce": false,
+  },
   // The server to connect to. If the environment variable
   // ZED_SERVER_URL is set, it will override this setting.
   "server_url": "https://bongos.invalid",

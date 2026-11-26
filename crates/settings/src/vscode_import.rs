@@ -236,6 +236,7 @@ impl VsCodeSettings {
             lanes: None,
             task_checks: None,
             confinement: None,
+            approval_integrity: None,
             modeline_lines: None,
             feature_flags: None,
             instrumentation: None,

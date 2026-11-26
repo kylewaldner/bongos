@@ -291,6 +291,9 @@ pub struct SettingsContent {
     /// Settings for confining jobs (agent steps and task checks) to their job tree.
     pub confinement: Option<ConfinementSettingsContent>,
 
+    /// Settings for signed, verifiable person approvals of changes.
+    pub approval_integrity: Option<ApprovalIntegritySettingsContent>,
+
     /// Settings related to Vim mode in bongos.
     pub vim: Option<VimSettingsContent>,
 
@@ -2049,6 +2052,18 @@ pub struct ConfinementSettingsContent {
     pub task_checks: Option<bool>,
     /// Paths each agent CLI must write to keep its session and login; `~` is the job's HOME.
     pub agent_state_paths: Option<ConfinementAgentStatePathsContent>,
+}
+
+/// Settings for signed, verifiable person approvals of changes.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct ApprovalIntegritySettingsContent {
+    /// Count only approvals whose signature verifies (and weaker ones, such as pairing) when
+    /// deciding whether a change may land. Off means approval rows count as they always have;
+    /// their verification state is still shown.
+    ///
+    /// Default: false
+    pub enforce: Option<bool>,
 }
 
 /// Paths each agent CLI may write while confined.
