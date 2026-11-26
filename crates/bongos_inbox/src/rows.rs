@@ -183,11 +183,16 @@ impl ViewRow {
 
 /// The rows of `snapshot`, newest first, a group at the position of its newest member.
 pub fn view_rows(snapshot: &Snapshot) -> Vec<ViewRow> {
-    view_rows_hiding(snapshot, &HashSet::new())
+    view_rows_hiding(snapshot, &HashSet::new(), &Filter::All)
 }
 
-/// [`view_rows`] without the items whose unique is in `hidden` (being archived).
-pub fn view_rows_hiding(snapshot: &Snapshot, hidden: &HashSet<String>) -> Vec<ViewRow> {
+/// [`view_rows`] of the items `filter` lets through, without the items whose unique is in
+/// `hidden` (being archived).
+pub fn view_rows_hiding(
+    snapshot: &Snapshot,
+    hidden: &HashSet<String>,
+    filter: &Filter,
+) -> Vec<ViewRow> {
     let items: HashMap<(&str, u64), &Item> = snapshot
         .items()
         .iter()
@@ -203,9 +208,7 @@ pub fn view_rows_hiding(snapshot: &Snapshot, hidden: &HashSet<String>) -> Vec<Vi
         item_row(row, extra)
     };
     snapshot
-        .rows_hiding(&Filter::All, &|_| false, &|entry| {
-            hidden.contains(&entry.unique)
-        })
+        .rows_hiding(filter, &|_| false, &|entry| hidden.contains(&entry.unique))
         .into_iter()
         .map(|row| match row {
             Row::Item(row) => to_row(row),
