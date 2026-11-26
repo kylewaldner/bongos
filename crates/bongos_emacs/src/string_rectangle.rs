@@ -43,7 +43,9 @@ pub(crate) fn string_rectangle_command(
     } else {
         format!("String rectangle (default {last}): ")
     };
-    let mut session = Session::string(MINIBUFFER_NAME, prompt).history(MINIBUFFER_NAME);
+    let mut session = Session::string(MINIBUFFER_NAME, prompt)
+        .inline()
+        .history(MINIBUFFER_NAME);
     if !last.is_empty() {
         session = session.default(last);
     }

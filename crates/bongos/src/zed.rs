@@ -36,6 +36,8 @@ mod meanings_tests;
 mod migrate;
 #[cfg(test)]
 mod minibuffer_keymap_tests;
+#[cfg(test)]
+mod minibuffer_placement_tests;
 #[cfg(target_os = "macos")]
 pub(crate) mod move_to_applications;
 #[cfg(test)]

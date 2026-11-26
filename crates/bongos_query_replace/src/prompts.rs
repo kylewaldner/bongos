@@ -393,6 +393,7 @@ fn open_stage(
     };
     let shared: Shared = Rc::new(RefCell::new(state));
     let mut session = Session::string(HOST, text)
+        .inline()
         .history(ring)
         .initial_input(initial.clone())
         .key_context(KEY_CONTEXT)

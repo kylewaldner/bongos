@@ -61,6 +61,7 @@ fn ask<A: Action>(
     let with_char = form.with_char;
     let prompt = ReadKey::new(MINIBUFFER_NAME, form.prompt)
         .any_char()
+        .inline()
         .on_answer(move |char, window, cx| {
             let Some(editor) = weak.upgrade() else {
                 return;
