@@ -2374,9 +2374,17 @@ fn grantable(table: &PoolTable, request: RequestId) -> bool {
     }
 }
 
+/// Whether some wait of `request` in `table` is blocked.
+fn blocked(table: &PoolTable, request: RequestId) -> bool {
+    match wait_status(table, request) {
+        ModelWaitStatus::Waiting(waits) => waits.iter().any(|wait| wait.blocked.is_some()),
+        ModelWaitStatus::NotWaiting => false,
+    }
+}
+
 /// Risk 3: each `mixed` waiter of `due` (this host's, first in its machine pool for
-/// `pools.mixed_head_seconds`) that its machine pools would admit, so it waits only for its
-/// project half, and that blocks a later waiter the pool would admit without it, is queued again
+/// `pools.mixed_head_seconds`) that its machine pools would admit and its project pools still
+/// block, so it waits only for its project half, and that blocks a later waiter the pool would admit without it, is queued again
 /// there with a new ticket, behind those waiters. One that blocks nobody keeps its place.
 fn move_back(
     machine: &mut PoolTable,
@@ -2397,6 +2405,10 @@ fn move_back(
         }
         if !grantable(machine, *request) {
             // Blocked in a machine pool itself: not by its project half.
+            continue;
+        }
+        if !blocked(project, *request) {
+            // Its project half is free too: the joint grant takes it whole.
             continue;
         }
         let ticket = head.ticket;
