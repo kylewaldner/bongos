@@ -139,11 +139,15 @@ fn a_reader_never_sees_a_torn_file() {
         std::thread::spawn(move || {
             let mut reads = 0u64;
             let mut last = 0;
-            while !done.load(Ordering::SeqCst) {
+            // At least one read, however soon the writer finishes.
+            loop {
                 let file = reader.read_file().expect("every read parses");
                 assert!(file.generation >= last, "generations never go back");
                 last = file.generation;
                 reads += 1;
+                if done.load(Ordering::SeqCst) {
+                    break;
+                }
             }
             reads
         })
@@ -451,4 +455,85 @@ fn the_holder_pid_is_cleared_when_the_lock_is_released() {
     );
     drop(lock);
     assert_eq!(std::fs::read_to_string(dir.join(LOCK_FILE)).unwrap(), "");
+}
+
+#[test]
+fn the_setting_project_may_change_its_pools_kind_while_nobody_uses_it() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("pools");
+    let live = Liveness::new();
+    let store = machine(&dir, host(1), &live);
+    store
+        .declare(&project("a"), &[config("gpu", PoolKind::Slots, 1)])
+        .unwrap();
+    store
+        .declare(&project("b"), &[config("gpu", PoolKind::Slots, 2)])
+        .unwrap();
+
+    // In use, its kind stands, even for the project that set it.
+    store
+        .transact(|table| {
+            enqueue(
+                table,
+                &request(1, holder("a", "job", host(1)), false, &[("gpu", 1)]),
+            );
+        })
+        .unwrap();
+    let refused = store
+        .declare(&project("a"), &[config("gpu", PoolKind::Rw, 1)])
+        .unwrap()
+        .value;
+    assert_eq!(refused.refused.len(), 1);
+    assert_eq!(refused.refused[0].set_by, None);
+    let file = store.read_file().unwrap();
+    assert_eq!(file.table.pools["gpu"].kind, PoolKind::Slots);
+    assert_eq!(file.meta["gpu"].set_by, Some(project("a")));
+
+    // Once nobody holds it, the setting project changes its kind.
+    store
+        .transact(|table| {
+            let ticket = table.pools["gpu"].holds[0].ticket;
+            table.release("gpu", ticket).unwrap();
+        })
+        .unwrap();
+    let changed = store
+        .declare(&project("a"), &[config("gpu", PoolKind::Rw, 1)])
+        .unwrap()
+        .value;
+    assert!(changed.refused.is_empty() && changed.warnings.is_empty());
+    let file = store.read_file().unwrap();
+    assert_eq!(file.table.pools["gpu"].kind, PoolKind::Rw);
+    assert_eq!(file.meta["gpu"].set_by, Some(project("a")));
+    let declared: Vec<&str> = file.meta["gpu"]
+        .declared
+        .iter()
+        .map(|entry| entry.project.id.as_str())
+        .collect();
+    assert_eq!(
+        declared,
+        vec!["a"],
+        "the declarations of the old kind are dropped"
+    );
+}
+
+#[test]
+fn a_pool_nobody_declares_is_set_afresh_by_the_next_project() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("pools");
+    let live = Liveness::new();
+    let store = machine(&dir, host(1), &live);
+    store
+        .declare(&project("a"), &[config("gpu", PoolKind::Slots, 1)])
+        .unwrap();
+    store.declare(&project("a"), &[]).unwrap();
+    assert_eq!(store.read_file().unwrap().meta["gpu"].set_by, None);
+
+    let fresh = store
+        .declare(&project("c"), &[config("gpu", PoolKind::Rw, 1)])
+        .unwrap()
+        .value;
+    assert!(fresh.refused.is_empty(), "not locked to its old kind");
+    let file = store.read_file().unwrap();
+    assert_eq!(file.table.pools["gpu"].kind, PoolKind::Rw);
+    assert_eq!(file.meta["gpu"].set_by, Some(project("c")));
 }

@@ -275,6 +275,9 @@ pub struct MachineStore {
     context: StoreContext,
     wait: LockWait,
     generation: AtomicU64,
+    /// Makes the next write of `machine.toml` fail: the seam tests use to inject a failed write.
+    #[cfg(test)]
+    pub(crate) fail_next_write: std::sync::atomic::AtomicBool,
 }
 
 impl MachineStore {
@@ -293,6 +296,8 @@ impl MachineStore {
             context,
             wait,
             generation: AtomicU64::new(0),
+            #[cfg(test)]
+            fail_next_write: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -352,6 +357,10 @@ impl MachineStore {
     /// Writes `file` in place of `machine.toml`. The caller holds the lock.
     pub(crate) fn write_file(&self, _lock: &MachineLock, file: &MachineFile) -> Result<()> {
         let path = self.file_path();
+        #[cfg(test)]
+        if self.fail_next_write.swap(false, Ordering::SeqCst) {
+            bail!("writing {}: injected failure", path.display());
+        }
         write_atomic(&path, file.to_text()?.as_bytes())
             .with_context(|| format!("writing {}", path.display()))
     }
@@ -382,14 +391,28 @@ impl MachineStore {
     /// Registers `project`'s machine pools. The first project to declare a pool sets its kind and
     /// size (`set_by`); a later one with the same kind and another size is recorded in `declared`
     /// and warned; one with another kind is refused and not recorded. The `set_by` project's own
-    /// declaration updates the pool. A pool `project` no longer declares loses its declaration;
-    /// when `project` had set it, the first project still declaring it sets it from then on.
+    /// declaration updates the pool, its kind included while nobody holds or waits for it (the
+    /// declarations of the old kind are dropped). A pool `project` no longer declares loses its
+    /// declaration; when `project` had set it, the first project still declaring it sets it from
+    /// then on. A pool nobody declares any more is set afresh by the next project to declare it,
+    /// any kind, once nobody holds or waits for it.
     pub fn declare(
         &self,
         project: &ProjectRef,
         configs: &[PoolConfig],
     ) -> Result<Transacted<DeclareOutcome>> {
         self.try_transact_file(|file| Ok(declare_machine(file, project, configs)))
+    }
+
+    /// [`MachineStore::declare`] on the background executor, where the lock may be waited for.
+    pub fn declare_in_background(
+        self: &Arc<Self>,
+        executor: &BackgroundExecutor,
+        project: ProjectRef,
+        configs: Vec<PoolConfig>,
+    ) -> Task<Result<Transacted<DeclareOutcome>>> {
+        let store = self.clone();
+        executor.spawn(async move { store.declare(&project, &configs) })
     }
 
     /// [`PoolStore::transact`] on the background executor, where the lock may be waited for.
@@ -451,15 +474,29 @@ pub(crate) fn declare_machine(
         };
         let meta = file.meta.entry(config.name.clone()).or_default();
         if pool.kind != config.kind {
-            outcome.refused.push(KindClash {
-                pool: config.name.clone(),
-                declared: config.kind,
-                stands: pool.kind,
-                set_by: meta.set_by.clone(),
-            });
+            // Only the setting project, or anybody once nobody declares it, may change its kind,
+            // and only while nobody holds or waits for it.
+            let may_set = meta
+                .set_by
+                .as_ref()
+                .is_none_or(|set_by| set_by.id == project.id);
+            let in_use = !pool.holds.is_empty() || !pool.waiters.is_empty();
+            if !may_set || in_use {
+                outcome.refused.push(KindClash {
+                    pool: config.name.clone(),
+                    declared: config.kind,
+                    stands: pool.kind,
+                    set_by: if may_set { None } else { meta.set_by.clone() },
+                });
+                if !may_set {
+                    meta.declared
+                        .retain(|declaration| declaration.project.id != project.id);
+                }
+                continue;
+            }
             meta.declared
-                .retain(|declaration| declaration.project.id != project.id);
-            continue;
+                .retain(|declaration| declaration.kind == config.kind);
+            meta.set_by = Some(project.clone());
         }
         match meta
             .declared

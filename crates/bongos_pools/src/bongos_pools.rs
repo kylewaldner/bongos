@@ -42,7 +42,9 @@ pub use machine_store::{
     LOCK_FILE, LOCK_RETRY, LockBusy, LockWait, MACHINE_FILE, MACHINE_SCHEMA, MachineFile,
     MachineStore, PoolMeta, machine_store_dir,
 };
-pub use mixed::{MixedTransacted, transact_mixed};
+pub use mixed::{
+    MachineHalfUnwritten, MixedTransacted, transact_mixed, transact_mixed_in_background,
+};
 pub use project_store::{
     POOL_KEY_PREFIX, POOLS_NAMESPACE, ProjectPoolsReader, ProjectStore, TABLE_KEY,
     read_project_table,
