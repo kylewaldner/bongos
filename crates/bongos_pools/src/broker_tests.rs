@@ -31,6 +31,7 @@ use crate::{
 pub(crate) const START: u64 = 1_700_000_000_000;
 pub(crate) const POLL: Duration = Duration::from_millis(1000);
 pub(crate) const GIB: u64 = 1024 * 1024 * 1024;
+pub(crate) const MIXED_HEAD: Duration = Duration::from_secs(60);
 
 /// The stores' clock, moved by the test.
 #[derive(Clone)]
@@ -224,6 +225,7 @@ pub(crate) fn timing() -> BrokerTiming {
         guard_interval: Duration::from_secs(5),
         guard_script_timeout: Duration::from_secs(30),
         max_hold: None,
+        mixed_head: MIXED_HEAD,
     }
 }
 
@@ -823,6 +825,132 @@ fn a_mixed_request_whose_first_machine_write_failed_is_queued_again(cx: &mut Tes
     let (project, machine) = read(&a);
     assert!(holds(&project, "db").is_empty());
     assert!(holds(&machine, "gpu").is_empty());
+}
+
+fn step(owner: &str, key: &str, needs: &[Need]) -> Request {
+    Request {
+        needs: needs.to_vec(),
+        holder: holder(
+            owner,
+            Level::Step {
+                key: key.to_string(),
+            },
+        ),
+    }
+}
+
+#[gpui::test]
+fn a_cross_project_deadlock_through_a_mixed_request_is_refused(cx: &mut TestAppContext) {
+    let world = World::new();
+    let machine = || {
+        vec![
+            pool("gpu", PoolKind::Mutex, 1),
+            pool("ssd", PoolKind::Mutex, 1),
+        ]
+    };
+    let a = world.project(
+        cx,
+        "a",
+        host(1),
+        vec![pool("db", PoolKind::Mutex, 1)],
+        machine(),
+    );
+    let b = world.project(cx, "b", host(2), vec![], machine());
+
+    // b's job y holds ssd; a's job q holds db, and a step of q waits for ssd.
+    let y = watch(cx, b.broker.acquire(ask("y", &[need("ssd")])));
+    cx.run_until_parked();
+    let _y = lease(&y);
+    let q = watch(cx, a.broker.acquire(ask("q", &[need("db")])));
+    cx.run_until_parked();
+    let _q = lease(&q);
+    let _q_step = a.broker.acquire(step("q", "copy", &[need("ssd")]));
+    cx.run_until_parked();
+    // a's mixed request m waits first in gpu, and for db, which q holds.
+    let m = a.broker.acquire(ask("m", &[need("gpu"), need("db")]));
+    cx.run_until_parked();
+    let machine_table = read(&a).1;
+    assert_eq!(waiters(&machine_table, "gpu"), vec!["m"]);
+    assert!(
+        machine_table.edges.iter().any(|edge| {
+            edge.from.holder.path.owner.0 == "m" && edge.to.holder.path.owner.0 == "q"
+        }),
+        "m's project side is written: {:?}",
+        machine_table.edges
+    );
+
+    // A step of y asking for gpu would wait behind m, which waits (through a's db) for q's step,
+    // which waits for y's ssd: b sees the cycle only through the written edges.
+    let closing = watch(cx, b.broker.acquire(step("y", "train", &[need("gpu")])));
+    cx.run_until_parked();
+    match closing.borrow_mut().take() {
+        Some(Err(Refused::Deadlock { cycle })) => {
+            let owners: Vec<&str> = cycle
+                .iter()
+                .map(|link| link.path.owner.0.as_str())
+                .collect();
+            assert!(owners.contains(&"m") && owners.contains(&"q"), "{cycle:?}");
+        }
+        other => panic!("expected a deadlock, got {other:?}"),
+    }
+    assert_eq!(waiters(&read(&b).1, "gpu"), vec!["m"]);
+
+    // Once m waits no more its edges go, and the same request just waits.
+    drop(m);
+    cx.run_until_parked();
+    assert!(read(&a).1.edges.is_empty());
+    let waits = b.broker.acquire(step("y", "train", &[need("gpu")]));
+    let waits = watch(cx, waits);
+    cx.run_until_parked();
+    let _gpu = lease(&waits);
+}
+
+#[gpui::test]
+fn a_mixed_waiter_first_too_long_moves_back_behind_a_waiter_it_blocks(cx: &mut TestAppContext) {
+    let world = World::new();
+    let a = world.project(
+        cx,
+        "a",
+        host(1),
+        vec![pool("db", PoolKind::Mutex, 1)],
+        vec![pool("gpu", PoolKind::Mutex, 1)],
+    );
+    let b = world.project(cx, "b", host(2), vec![], vec![pool("gpu", PoolKind::Mutex, 1)]);
+    let db = watch(cx, a.broker.acquire(ask("db-only", &[need("db")])));
+    cx.run_until_parked();
+    let db = lease(&db);
+    let mixed = watch(
+        cx,
+        a.broker.acquire(ask("mixed", &[need("gpu"), need("db")])),
+    );
+    cx.run_until_parked();
+    let ticket = |table: &PoolTable| table.pools["gpu"].waiters[0].ticket;
+    let first_ticket = ticket(&read(&a).1);
+
+    // Nobody waits behind it: it keeps its place however long it is first.
+    world.advance(cx, MIXED_HEAD * 2);
+    assert_eq!(waiters(&read(&a).1, "gpu"), vec!["mixed"]);
+    assert_eq!(ticket(&read(&a).1), first_ticket);
+
+    // Another project's request is blocked behind it: at the next poll it moves back, and the
+    // other project's broker converts its waiter.
+    let other = watch(cx, b.broker.acquire(ask("b-job", &[need("gpu")])));
+    cx.run_until_parked();
+    assert!(other.borrow().is_none());
+    world.advance(cx, POLL * 2);
+    let other = lease(&other);
+    let machine = read(&a).1;
+    assert_eq!(holds(&machine, "gpu"), vec!["b-job"]);
+    assert_eq!(waiters(&machine, "gpu"), vec!["mixed"]);
+    assert!(ticket(&machine) > first_ticket, "queued again with a new ticket");
+    assert!(mixed.borrow().is_none(), "the mixed request still waits");
+
+    // Both its halves are granted once both pools are free.
+    drop((other, db));
+    cx.run_until_parked();
+    world.advance(cx, POLL);
+    let mixed = lease(&mixed);
+    assert_eq!(mixed.hold_ids().len(), 2);
 }
 
 #[gpui::test]

@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
-use bongos_pools_model::{Grant, HostRef, PoolTable, Pruned, RequestId};
+use bongos_pools_model::{Grant, HostRef, PoolTable, Pruned, RequestId, project_side_edges};
 use gpui::{BackgroundExecutor, Task};
 
 use crate::machine_store::MachineStore;
@@ -64,6 +64,7 @@ pub fn transact_mixed<T>(
             let project_pruned = context.prune(project_table);
             let value = f(&mut file.table, project_table)?;
             let (machine, project) = joint_grant(context, &mut file.table, project_table);
+            write_edges(context, &mut file.table, project_table);
             machine_grants = machine;
             Ok((value, project_pruned, project))
         })
@@ -100,6 +101,26 @@ pub fn transact_mixed_in_background<T: Send + 'static>(
 ) -> Task<Result<MixedTransacted<T>>> {
     let (machine, project) = (machine.clone(), project.clone());
     executor.spawn(async move { transact_mixed(&machine, &project, f) })
+}
+
+/// Writes into the machine table the project side of the wait-for graph of every `mixed` waiter
+/// of this host and project still waiting there (D6), in place of what was written for them
+/// before, and drops the edges of mixed requests that wait no more.
+fn write_edges(context: &StoreContext, machine: &mut PoolTable, project: &PoolTable) {
+    let host = context.host;
+    let own = context.project();
+    let mine: BTreeSet<RequestId> = mixed_requests(project, &host, own)
+        .intersection(&mixed_requests(machine, &host, own))
+        .copied()
+        .collect();
+    machine.drop_stale_edges();
+    machine
+        .edges
+        .retain(|edge| !(edge.owner_host == host && mine.contains(&edge.owner)));
+    for request in mine {
+        let edges = project_side_edges(project, machine, &host, request);
+        machine.edges.extend(edges);
+    }
 }
 
 /// The requests of `host` with a hold in `table`.

@@ -268,6 +268,9 @@ pub struct BrokerTiming {
     pub guard_script_timeout: Duration,
     /// A hold older than this raises [`PoolsEvent::HoldTooLong`] once.
     pub max_hold: Option<Duration>,
+    /// How long a `mixed` waiter blocked on its project half may stay first in a machine pool
+    /// while it blocks a later waiter there (Risk 3).
+    pub mixed_head: Duration,
 }
 
 impl BrokerTiming {
@@ -277,6 +280,7 @@ impl BrokerTiming {
             guard_interval: settings.guard_interval,
             guard_script_timeout: settings.guard_script_timeout,
             max_hold: settings.max_hold,
+            mixed_head: settings.mixed_head,
         }
     }
 }
@@ -452,6 +456,8 @@ struct State {
     machine_table: PoolTable,
     guard_notes: BTreeMap<String, String>,
     flagged: BTreeSet<HoldId>,
+    /// Since when each `mixed` waiter of this broker has been first in its machine pool.
+    heads: BTreeMap<(RequestId, String), Timestamp>,
 }
 
 struct Shared {
@@ -1462,6 +1468,9 @@ impl Shared {
                 state.guard_notes.insert(pool.clone(), note.clone());
             }
         }
+        if done.machine_table.is_some() {
+            self.note_heads();
+        }
         for (_, pool, hold) in &done.pruned {
             log::info!(
                 "pools: released {pool}: holder {} exited",
@@ -1991,14 +2000,81 @@ impl Shared {
             stores
         };
         if stores.any() {
+            let due = self.due_heads();
+            let host = self.context.host;
             let result = self
-                .tx(stores, BTreeSet::new(), Box::new(|_, _| Ok(())))
+                .tx(
+                    stores,
+                    BTreeSet::new(),
+                    Box::new(move |machine, project| {
+                        Ok(match (machine, project) {
+                            (Some(machine), Some(project)) if !due.is_empty() => {
+                                move_back(machine, project, &host, &due)
+                            }
+                            _ => Vec::new(),
+                        })
+                    }),
+                )
                 .await;
-            if let Err(error) = result {
-                log::warn!("pools: polling the stores: {}", error.reason());
+            match result {
+                Ok(Done {
+                    value: Some(moved), ..
+                }) => {
+                    for moved in moved {
+                        log::info!(
+                            "pools: mixed request of {} moved back in {}: its project pool {} \
+                             is busy",
+                            moved.label.0,
+                            moved.pool,
+                            moved.project_pool
+                        );
+                        self.state
+                            .borrow_mut()
+                            .heads
+                            .remove(&(moved.request, moved.pool));
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => log::warn!("pools: polling the stores: {}", error.reason()),
             }
         }
         self.flag_long_holds();
+    }
+
+    /// Keeps since when each `mixed` waiter of this broker has been first in its machine pool.
+    fn note_heads(&self) {
+        let now = self.context.now();
+        let host = self.context.host;
+        let mut state = self.state.borrow_mut();
+        let mut first = BTreeSet::new();
+        for (name, pool) in &state.machine_table.pools {
+            let Some(head) = pool.waiters.iter().min_by_key(|waiter| waiter.ticket) else {
+                continue;
+            };
+            if head.mixed
+                && head.holder.host == host
+                && head.holder.project == self.parts.project.id
+            {
+                first.insert((head.request, name.clone()));
+            }
+        }
+        state.heads.retain(|key, _| first.contains(key));
+        for key in first {
+            state.heads.entry(key).or_insert(now);
+        }
+    }
+
+    /// The `mixed` waiters of this broker first in a machine pool for `pools.mixed_head_seconds`.
+    fn due_heads(&self) -> Vec<(RequestId, String)> {
+        let now = self.context.now();
+        let limit = u64::try_from(self.parts.timing.mixed_head.as_millis()).unwrap_or(u64::MAX);
+        self.state
+            .borrow()
+            .heads
+            .iter()
+            .filter(|(_, since)| now.0.saturating_sub(since.0) >= limit)
+            .map(|(key, _)| key.clone())
+            .collect()
     }
 
     fn flag_long_holds(self: &Rc<Self>) {
@@ -2277,6 +2353,87 @@ impl Shared {
             }
         }
     }
+}
+
+/// A `mixed` waiter moved back in a machine pool.
+struct MovedBack {
+    request: RequestId,
+    pool: String,
+    label: HolderLabel,
+    project_pool: String,
+}
+
+/// Whether every wait of `request` in `table` is grantable at its host's next grant.
+fn grantable(table: &PoolTable, request: RequestId) -> bool {
+    match wait_status(table, request) {
+        ModelWaitStatus::Waiting(waits) => waits.iter().all(|wait| wait.blocked.is_none()),
+        ModelWaitStatus::NotWaiting => false,
+    }
+}
+
+/// Risk 3: each `mixed` waiter of `due` (this host's, first in its machine pool for
+/// `pools.mixed_head_seconds`) that its machine pools would admit, so it waits only for its
+/// project half, and that blocks a later waiter the pool would admit without it, is queued again
+/// there with a new ticket, behind those waiters. One that blocks nobody keeps its place.
+fn move_back(
+    machine: &mut PoolTable,
+    project: &PoolTable,
+    host: &HostRef,
+    due: &[(RequestId, String)],
+) -> Vec<MovedBack> {
+    let mut moved = Vec::new();
+    for (request, pool_name) in due {
+        let Some(pool) = machine.pools.get(pool_name) else {
+            continue;
+        };
+        let Some(head) = pool.waiters.iter().min_by_key(|waiter| waiter.ticket) else {
+            continue;
+        };
+        if head.request != *request || !head.mixed || head.holder.host != *host {
+            continue;
+        }
+        if !grantable(machine, *request) {
+            // Blocked in a machine pool itself: not by its project half.
+            continue;
+        }
+        let ticket = head.ticket;
+        let mut without = machine.clone();
+        if let Some(pool) = without.pools.get_mut(pool_name) {
+            pool.waiters.retain(|waiter| waiter.ticket != ticket);
+        }
+        let blocks_someone = without.pools[pool_name]
+            .waiters
+            .iter()
+            .any(|later| grantable(&without, later.request));
+        if !blocks_someone {
+            continue;
+        }
+        let Some(pool) = machine.pools.get_mut(pool_name) else {
+            continue;
+        };
+        let Some(index) = pool.waiters.iter().position(|waiter| waiter.ticket == ticket) else {
+            continue;
+        };
+        let mut waiter = pool.waiters.remove(index);
+        waiter.ticket = machine.issue_ticket();
+        let label = waiter.holder.label.clone();
+        if let Some(pool) = machine.pools.get_mut(pool_name) {
+            pool.waiters.push(waiter);
+        }
+        let project_pool = project
+            .pools
+            .iter()
+            .find(|(_, pool)| pool.waiters.iter().any(|waiter| waiter.request == *request))
+            .map(|(name, _)| name.clone())
+            .unwrap_or_default();
+        moved.push(MovedBack {
+            request: *request,
+            pool: pool_name.clone(),
+            label,
+            project_pool,
+        });
+    }
+    moved
 }
 
 type Admitted = (Vec<HoldId>, Vec<String>);
