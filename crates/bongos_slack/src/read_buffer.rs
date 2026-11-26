@@ -108,7 +108,11 @@ async fn ask<T: 'static>(
 }
 
 /// Looks up the authors of `messages` that are not known yet, so the text shows their names.
-async fn resolve_authors(service: &Entity<SlackService>, messages: &[Message], cx: &mut AsyncApp) {
+pub(crate) async fn resolve_authors(
+    service: &Entity<SlackService>,
+    messages: &[Message],
+    cx: &mut AsyncApp,
+) {
     let known = service.read_with(cx, |service, _| service.user_names());
     let mut unknown: Vec<UserId> = Vec::new();
     for user in messages.iter().filter_map(|message| message.user.clone()) {
@@ -125,7 +129,7 @@ async fn resolve_authors(service: &Entity<SlackService>, messages: &[Message], c
 }
 
 /// Every message of a thread, its parent first, through the service.
-async fn replies_of(
+pub(crate) async fn replies_of(
     service: &Entity<SlackService>,
     channel: &ConversationId,
     thread_ts: &Ts,

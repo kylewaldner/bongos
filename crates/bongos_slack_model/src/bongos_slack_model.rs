@@ -3,13 +3,15 @@
 //! approval rule that says whether a post is sent or asked about first.
 //!
 //! It also parses Slack's answers (`wire`), renders messages as text (`render`) and as a quoted
-//! block for an agent (`quote`).
+//! block for an agent (`quote`). `bridge` holds the requests and answers of a chat agent's
+//! `bongos --slack <op>`.
 //!
 //! This crate is plain Rust and does no I/O: no network, no files and no clock.
 
 pub mod allowed;
 pub mod api;
 pub mod approval;
+pub mod bridge;
 pub mod quote;
 pub mod render;
 pub mod scopes;
@@ -31,6 +33,8 @@ pub use types::{
 
 #[cfg(test)]
 mod approval_tests;
+#[cfg(test)]
+mod bridge_tests;
 #[cfg(test)]
 mod fake_tests;
 #[cfg(test)]

@@ -4,10 +4,13 @@
 //! `slack: connect` and `slack: disconnect`, the token in the secret store and the files beside
 //! it (`allowed`, with `slack: allow channel` and `slack: disallow channel`), the service every
 //! request goes through (`service`), the status bar item with `slack: status` (`status_item`),
-//! the read commands (`read_commands`) and `slack: post` and `slack: reply` (`post`).
+//! the read commands (`read_commands`), `slack: post` and `slack: reply` (`post`), and the chat
+//! agents' `bongos --slack` bridge with its pending posts and `slack: review pending posts`
+//! (`bridge_handler`).
 
 mod actions;
 pub mod allowed;
+pub mod bridge_handler;
 pub mod client;
 pub mod connection;
 pub mod post;
@@ -24,6 +27,7 @@ use gpui::App;
 use workspace::Workspace;
 
 pub use actions::{action_types, init_palette, register, slack};
+pub use bongos_slack_model as model;
 pub use service::{SlackError, SlackService, SlackState};
 pub use settings::SlackSettings;
 pub use status_item::SlackStatusItem;
@@ -45,6 +49,8 @@ pub fn init(cx: &mut App) {
 mod actions_tests;
 #[cfg(test)]
 mod allowed_tests;
+#[cfg(test)]
+mod bridge_handler_tests;
 #[cfg(test)]
 mod client_tests;
 #[cfg(test)]

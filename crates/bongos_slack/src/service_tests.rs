@@ -37,7 +37,7 @@ pub(crate) const ZONE: FixedOffset = FixedOffset(3600);
 
 pub(crate) struct Fixture {
     _root: tempfile::TempDir,
-    dir: PathBuf,
+    pub(crate) dir: PathBuf,
     credentials: Arc<FakeCredentials>,
     pub(crate) fake: FakeSlack,
     pub(crate) service: Entity<SlackService>,
