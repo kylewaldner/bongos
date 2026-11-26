@@ -18,7 +18,7 @@ pub use change_record::{
     parse_trailers, strip_trailers,
 };
 pub use definitions::{
-    DefinitionNode, DefinitionTree, Problem, RelPath, StateLookup, work_tree_from,
+    DefinitionNode, DefinitionOp, DefinitionTree, Problem, RelPath, StateLookup, work_tree_from,
 };
 pub use split::{
     RESERVED_STATE_KEYS, TaskDefinition, TaskStateRecord, TodoDefinition, TodoStateRecord, join,

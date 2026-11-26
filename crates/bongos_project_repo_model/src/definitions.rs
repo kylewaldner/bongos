@@ -67,6 +67,25 @@ impl fmt::Display for RelPath {
     }
 }
 
+/// A change to the files of `definitions/`, relative to it. A landing makes the moves first, each
+/// against the tree the earlier ones left, so writes and deletes name the paths after them.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DefinitionOp {
+    Write {
+        path: RelPath,
+        bytes: Vec<u8>,
+    },
+    /// A task folder (relative to `definitions/`) and everything in it.
+    Move {
+        from: String,
+        to: String,
+    },
+    Delete {
+        path: RelPath,
+    },
+}
+
 /// Why a file of `definitions/` could not be read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Problem {
