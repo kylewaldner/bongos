@@ -6,9 +6,10 @@ use std::rc::Rc;
 
 use command_palette_hooks::CommandPaletteFilter;
 use gpui::{BorrowAppContext as _, TestAppContext};
-use settings::{Settings as _, SettingsStore};
+use settings::{ActiveSettingsProfileName, ParseStatus, Settings as _, SettingsStore};
 use workspace::{
-    MinibufferMessageKind, MinibufferMessageOutcome, MinibufferRouting, routes_to_minibuffer,
+    MinibufferHost, MinibufferMessageKind, MinibufferMessageOutcome, MinibufferRouting,
+    MinibufferStyle, PromptPlacement, minibuffer_host, routes_to_minibuffer,
 };
 
 use crate::MinibufferSettings;
@@ -188,4 +189,100 @@ async fn minibuffer_message_without_an_echo_area_reaches_the_hook_and_the_log(
         MinibufferRouting::message(window, cx, "hello", MinibufferMessageKind::Message)
     });
     assert_eq!(outcome, MinibufferMessageOutcome::Echoed);
+}
+
+fn set_user_json(cx: &mut TestAppContext, json: &str) -> settings::SettingsParseResult {
+    cx.update(|cx| {
+        cx.update_global::<SettingsStore, _>(|store, cx| store.set_user_settings(json, cx))
+    })
+}
+
+fn style_setting(cx: &mut TestAppContext) -> MinibufferStyle {
+    cx.update(|cx| {
+        let setting = MinibufferSettings::get_global(cx).style;
+        assert_eq!(cx.global::<MinibufferRouting>().style(), setting);
+        setting
+    })
+}
+
+#[gpui::test]
+async fn minibuffer_host_matches_routing_for_every_default_route(cx: &mut TestAppContext) {
+    use_default_settings(cx);
+    cx.update(|cx| {
+        for placement in [PromptPlacement::Picker, PromptPlacement::Inline] {
+            for name in DEFAULT_ROUTES {
+                assert!(routes_to_minibuffer(name, cx));
+                assert_eq!(
+                    minibuffer_host(name, placement, cx),
+                    Some(MinibufferHost::Strip),
+                    "{name} {placement:?}"
+                );
+            }
+            assert_eq!(minibuffer_host("something_else", placement, cx), None);
+        }
+    });
+    set_enabled_for(cx, &[]);
+    cx.update(|cx| {
+        for name in DEFAULT_ROUTES {
+            assert_eq!(minibuffer_host(name, PromptPlacement::Picker, cx), None);
+            assert_eq!(minibuffer_host(name, PromptPlacement::Inline, cx), None);
+        }
+    });
+}
+
+#[gpui::test]
+async fn minibuffer_style_defaults_to_minibuffer(cx: &mut TestAppContext) {
+    use_default_settings(cx);
+    assert_eq!(style_setting(cx), MinibufferStyle::Minibuffer);
+}
+
+#[gpui::test]
+async fn minibuffer_style_modal_survives_a_settings_reload(cx: &mut TestAppContext) {
+    use_default_settings(cx);
+    let user = r#"{ "minibuffer": { "style": "modal" } }"#;
+    set_user_json(cx, user).unwrap();
+    assert_eq!(style_setting(cx), MinibufferStyle::Modal);
+    cx.update(|cx| {
+        assert_eq!(
+            minibuffer_host("command_palette", PromptPlacement::Picker, cx),
+            Some(MinibufferHost::Dialog)
+        );
+        assert_eq!(
+            minibuffer_host("command_palette", PromptPlacement::Inline, cx),
+            Some(MinibufferHost::Strip)
+        );
+    });
+
+    // Another edit of the file reloads the settings; the value stays.
+    let reloaded = r#"{ "minibuffer": { "style": "modal", "max_rows": 9 } }"#;
+    set_user_json(cx, reloaded).unwrap();
+    assert_eq!(style_setting(cx), MinibufferStyle::Modal);
+}
+
+#[gpui::test]
+async fn minibuffer_style_unknown_value_falls_back_with_one_error(cx: &mut TestAppContext) {
+    use_default_settings(cx);
+    let result = set_user_json(cx, r#"{ "minibuffer": { "style": "sideways" } }"#);
+    let ParseStatus::Failed { error } = &result.parse_status else {
+        panic!("expected a failed parse, got {:?}", result.parse_status);
+    };
+    assert_eq!(error.lines().count(), 1, "exactly one error: {error}");
+    assert_eq!(style_setting(cx), MinibufferStyle::Minibuffer);
+}
+
+#[gpui::test]
+async fn minibuffer_style_profile_overrides_user_and_switching_flips_it(cx: &mut TestAppContext) {
+    use_default_settings(cx);
+    let user = r#"{
+        "minibuffer": { "style": "minibuffer" },
+        "profiles": { "dialogs": { "settings": { "minibuffer": { "style": "modal" } } } }
+    }"#;
+    set_user_json(cx, user).unwrap();
+    assert_eq!(style_setting(cx), MinibufferStyle::Minibuffer);
+
+    cx.update(|cx| cx.set_global(ActiveSettingsProfileName("dialogs".to_string())));
+    assert_eq!(style_setting(cx), MinibufferStyle::Modal);
+
+    cx.update(|cx| cx.remove_global::<ActiveSettingsProfileName>());
+    assert_eq!(style_setting(cx), MinibufferStyle::Minibuffer);
 }

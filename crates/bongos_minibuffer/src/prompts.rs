@@ -10,7 +10,7 @@ use gpui::{
     WeakEntity, Window, prelude::*,
 };
 use ui::prelude::*;
-use workspace::{DismissDecision, ModalView, Workspace};
+use workspace::{DismissDecision, ModalView, PromptPlacement, Workspace};
 
 use crate::session::{Outcome, Session, open};
 
@@ -36,6 +36,7 @@ pub struct ReadKey {
     any_char: bool,
     on_answer: Option<Box<dyn FnOnce(char, &mut Window, &mut App)>>,
     on_cancel: Option<Box<dyn FnOnce(&mut Window, &mut App)>>,
+    placement: PromptPlacement,
 }
 
 impl ReadKey {
@@ -48,7 +49,14 @@ impl ReadKey {
             any_char: false,
             on_answer: None,
             on_cancel: None,
+            placement: PromptPlacement::Picker,
         }
+    }
+
+    /// Marks the prompt as a short question answered in place rather than a picker.
+    pub fn inline(mut self) -> Self {
+        self.placement = PromptPlacement::Inline;
+        self
     }
 
     /// Declares a key that answers, with the label shown after it.
@@ -100,6 +108,7 @@ pub struct ReadKeyView {
     done: bool,
     on_answer: Option<Box<dyn FnOnce(char, &mut Window, &mut App)>>,
     on_cancel: Option<Box<dyn FnOnce(&mut Window, &mut App)>>,
+    placement: PromptPlacement,
 }
 
 /// Opens `prompt` as the workspace's modal, replacing the one that is open (which ends as
@@ -118,6 +127,7 @@ pub fn read_key(
         any_char,
         on_answer,
         on_cancel,
+        placement,
     } = prompt;
     let weak = cx.entity().downgrade();
     let mut parts = Some((prompt, keys, on_answer, on_cancel));
@@ -135,6 +145,7 @@ pub fn read_key(
             done: false,
             on_answer,
             on_cancel,
+            placement,
         }
     });
 }
@@ -300,6 +311,10 @@ impl Focusable for ReadKeyView {
 impl ModalView for ReadKeyView {
     fn minibuffer_name(&self) -> Option<&'static str> {
         Some(self.host)
+    }
+
+    fn prompt_placement(&self) -> PromptPlacement {
+        self.placement
     }
 
     /// Always lets the prompt go. C-g bound to `minibuffer::Cancel` lands here, so it answers the

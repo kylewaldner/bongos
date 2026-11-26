@@ -12,7 +12,7 @@ use gpui::{
 };
 use picker::{Direction, Picker, PickerAction, PickerDelegate};
 use ui::{HighlightedLabel, ListItem, ListItemSpacing, prelude::*};
-use workspace::{DismissDecision, ModalView};
+use workspace::{DismissDecision, ModalView, PromptPlacement};
 
 use crate::session::{Candidate, Core, DynamicSource, Finish, Outcome, Preview, Source, Value};
 
@@ -169,6 +169,10 @@ impl Focusable for SessionView {
 impl ModalView for SessionView {
     fn minibuffer_name(&self) -> Option<&'static str> {
         Some(self.core.host)
+    }
+
+    fn prompt_placement(&self) -> PromptPlacement {
+        self.core.placement
     }
 
     /// Always lets the session go (a session that refused would be stranded, undrawn, when the

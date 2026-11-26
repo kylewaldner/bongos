@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use settings::{RegisterSetting, Settings, SettingsContent};
+use settings::{MinibufferStyleContent, RegisterSetting, Settings, SettingsContent};
 
 /// The `minibuffer` settings.
 #[derive(Clone, Debug, PartialEq, RegisterSetting)]
@@ -16,6 +16,8 @@ pub struct MinibufferSettings {
     pub message_timeout: Duration,
     /// How long a pending key sequence waits before its keys are shown.
     pub key_hint_delay: Duration,
+    /// Where routed prompts open.
+    pub style: workspace::MinibufferStyle,
 }
 
 impl Settings for MinibufferSettings {
@@ -44,6 +46,13 @@ impl Settings for MinibufferSettings {
                     .key_hint_delay
                     .expect("default.json defines `minibuffer.key_hint_delay`"),
             ),
+            style: match minibuffer
+                .style
+                .expect("default.json defines `minibuffer.style`")
+            {
+                MinibufferStyleContent::Modal => workspace::MinibufferStyle::Modal,
+                MinibufferStyleContent::Minibuffer => workspace::MinibufferStyle::Minibuffer,
+            },
         }
     }
 }

@@ -1441,6 +1441,35 @@ pub struct MinibufferSettingsContent {
     ///
     /// Default: 500
     pub key_hint_delay: Option<u64>,
+    /// Where routed prompts open: `modal` opens pickers in a centered dialog and keeps inline
+    /// questions in the strip; `minibuffer` opens every routed prompt in the strip.
+    ///
+    /// Default: minibuffer
+    pub style: Option<MinibufferStyleContent>,
+}
+
+/// Where routed prompts open.
+#[derive(
+    Debug,
+    PartialEq,
+    Eq,
+    Clone,
+    Copy,
+    Default,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MinibufferStyleContent {
+    /// Pickers open in a centered dialog; inline questions stay in the strip.
+    Modal,
+    /// Every routed prompt opens in the strip.
+    #[default]
+    Minibuffer,
 }
 
 /// Settings for the navigation pickers.

@@ -35,6 +35,68 @@ pub trait ModalView: ManagedView {
     fn minibuffer_name(&self) -> Option<&'static str> {
         None
     }
+
+    /// Whether this prompt is a picker (a list of candidates) or an inline question; see
+    /// [`host_for`].
+    fn prompt_placement(&self) -> PromptPlacement {
+        PromptPlacement::Picker
+    }
+}
+
+/// The kind of a prompt, which decides where it opens in the `modal` minibuffer style.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PromptPlacement {
+    /// A list of candidates.
+    #[default]
+    Picker,
+    /// A short question answered in place.
+    Inline,
+}
+
+/// The `minibuffer.style` setting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MinibufferStyle {
+    /// Routed pickers open in a centered dialog; inline questions use the strip.
+    Modal,
+    /// Routed prompts open in the strip.
+    #[default]
+    Minibuffer,
+}
+
+/// Where a routed prompt opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MinibufferHost {
+    /// The strip at the bottom of the window.
+    Strip,
+    /// A centered dialog.
+    Dialog,
+}
+
+/// Where a prompt opens: `None` when it is not routed to the minibuffer at all.
+pub fn host_for(
+    style: MinibufferStyle,
+    placement: PromptPlacement,
+    routed: bool,
+) -> Option<MinibufferHost> {
+    match (style, placement, routed) {
+        (_, _, false) => None,
+        (MinibufferStyle::Minibuffer, _, true) => Some(MinibufferHost::Strip),
+        (MinibufferStyle::Modal, PromptPlacement::Inline, true) => Some(MinibufferHost::Strip),
+        (MinibufferStyle::Modal, PromptPlacement::Picker, true) => Some(MinibufferHost::Dialog),
+    }
+}
+
+/// [`host_for`] with the style from the [`MinibufferRouting`] global and whether `name` is routed.
+pub fn minibuffer_host(
+    name: &str,
+    placement: PromptPlacement,
+    cx: &App,
+) -> Option<MinibufferHost> {
+    let style = cx
+        .try_global::<MinibufferRouting>()
+        .map(|routing| routing.style())
+        .unwrap_or_default();
+    host_for(style, placement, routes_to_minibuffer(name, cx))
 }
 
 /// How a message sent to the echo area is shown.
@@ -70,6 +132,7 @@ pub struct MinibufferRouting {
     routes: Vec<String>,
     max_rows: usize,
     show_count: bool,
+    style: MinibufferStyle,
     toast_hook: Option<MinibufferToastHook>,
     message_hook: Option<MinibufferMessageHook>,
 }
@@ -82,6 +145,7 @@ impl Default for MinibufferRouting {
             routes: Vec::new(),
             max_rows: 15,
             show_count: true,
+            style: MinibufferStyle::default(),
             toast_hook: None,
             message_hook: None,
         }
@@ -118,6 +182,16 @@ impl MinibufferRouting {
     pub fn set_display(&mut self, max_rows: usize, show_count: bool) {
         self.max_rows = max_rows;
         self.show_count = show_count;
+    }
+
+    /// The `minibuffer.style` setting.
+    pub fn style(&self) -> MinibufferStyle {
+        self.style
+    }
+
+    /// Sets the style.
+    pub fn set_style(&mut self, style: MinibufferStyle) {
+        self.style = style;
     }
 
     /// The hook that sends toasts to the echo area, if one is installed.
@@ -528,5 +602,37 @@ impl Render for ModalLayer {
                     ),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_for_follows_the_style_placement_and_routing_table() {
+        use MinibufferHost::{Dialog, Strip};
+        use MinibufferStyle::{Minibuffer, Modal};
+        use PromptPlacement::{Inline, Picker};
+
+        let table = [
+            (Minibuffer, Picker, true, Some(Strip)),
+            (Minibuffer, Inline, true, Some(Strip)),
+            (Minibuffer, Picker, false, None),
+            (Minibuffer, Inline, false, None),
+            (Modal, Inline, true, Some(Strip)),
+            (Modal, Picker, true, Some(Dialog)),
+            (Modal, Picker, false, None),
+            (Modal, Inline, false, None),
+        ];
+        for (style, placement, routed, expected) in table {
+            assert_eq!(
+                host_for(style, placement, routed),
+                expected,
+                "{style:?} {placement:?} routed={routed}"
+            );
+        }
+        assert_eq!(MinibufferStyle::default(), Minibuffer);
+        assert_eq!(MinibufferRouting::default().style(), Minibuffer);
     }
 }
