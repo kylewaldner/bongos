@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
+pub use bongos_project_repo_model::DefinitionOp;
 use bongos_project_repo_model::layout::{PROJECT_FILE, TASK_FILE};
 use bongos_project_repo_model::{Author, RelPath, TaskStateRecord, TodoStateRecord, split};
 use bongos_work_model::commands::{Change, Write, create_prompts};
@@ -25,24 +26,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::StateWriter;
 use crate::state_ops::{SETTABLE_FIELDS, StateOp, move_work, work_of};
-
-/// A change to the files of `definitions/`, relative to it.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum DefinitionOp {
-    Write {
-        path: RelPath,
-        bytes: Vec<u8>,
-    },
-    /// A task folder (relative to `definitions/`) and everything in it.
-    Move {
-        from: String,
-        to: String,
-    },
-    Delete {
-        path: RelPath,
-    },
-}
 
 /// A change in the files folders, relative to the files root (`<task id>/...`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
