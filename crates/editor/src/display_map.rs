@@ -178,6 +178,8 @@ pub enum HighlightKey {
     InlineAssist,
     InputComposition,
     Isearch,
+    /// Live markdown styling; the value is the style slot index.
+    MarkdownLive(u8),
     MatchingBracket,
     NavigationOverlay(NavigationOverlayKey),
     PendingInput,
@@ -669,6 +671,7 @@ impl DisplayMap {
             masked: self.masked,
             use_lsp_folding_ranges: !self.lsp_folding_crease_ids.is_empty(),
             fold_placeholder: self.fold_placeholder.clone(),
+            conceal_tags: crate::fold::conceal_tags(cx),
         }
     }
 
@@ -693,6 +696,7 @@ impl DisplayMap {
             masked: self.masked,
             use_lsp_folding_ranges: !self.lsp_folding_crease_ids.is_empty(),
             fold_placeholder: self.fold_placeholder.clone(),
+            conceal_tags: crate::fold::conceal_tags(cx),
         }
     }
 
@@ -831,6 +835,19 @@ impl DisplayMap {
         inclusive: bool,
         cx: &mut Context<Self>,
     ) -> WrapSnapshot {
+        self.unfold_intersecting_keeping(ranges, inclusive, &HashSet::default(), cx)
+    }
+
+    /// Removes any folds whose ranges intersect any of the given ranges, except
+    /// folds whose type tag is in `keep_tags`.
+    #[instrument(skip_all)]
+    pub fn unfold_intersecting_keeping<T: ToOffset>(
+        &mut self,
+        ranges: impl IntoIterator<Item = Range<T>>,
+        inclusive: bool,
+        keep_tags: &HashSet<TypeId>,
+        cx: &mut Context<Self>,
+    ) -> WrapSnapshot {
         let snapshot = self.buffer.read(cx).snapshot(cx);
         let offset_ranges = ranges
             .into_iter()
@@ -847,8 +864,11 @@ impl DisplayMap {
             .update(cx, |map, cx| map.sync(snapshot, edits, cx));
         self.block_map.read(snapshot, edits, None);
 
-        let (snapshot, edits) =
-            fold_map.unfold_intersecting(offset_ranges.iter().cloned(), inclusive);
+        let (snapshot, edits) = fold_map.unfold_intersecting_keeping(
+            offset_ranges.iter().cloned(),
+            inclusive,
+            keep_tags,
+        );
         let (snapshot, edits) = self.tab_map.sync(snapshot, edits, tab_size);
         let (self_new_wrap_snapshot, self_new_wrap_edits) = self
             .wrap_map
@@ -1536,6 +1556,8 @@ pub struct DisplaySnapshot {
     /// When true, LSP folding ranges are used via the crease map and the
     /// indent-based fallback in `crease_for_buffer_row` is skipped.
     pub(crate) use_lsp_folding_ranges: bool,
+    /// Fold type tags registered as conceals when this snapshot was taken.
+    conceal_tags: Arc<HashSet<TypeId>>,
 }
 
 impl DisplaySnapshot {
@@ -2155,9 +2177,32 @@ impl DisplaySnapshot {
         self.fold_snapshot().intersects_fold(offset)
     }
 
+    /// Whether the row holds a fold or a replace block. Conceals (folds with a
+    /// registered conceal tag) alone do not make a row folded.
     pub fn is_line_folded(&self, buffer_row: MultiBufferRow) -> bool {
         self.block_snapshot.is_line_replaced(buffer_row)
-            || self.fold_snapshot().is_line_folded(buffer_row)
+            || (self.fold_snapshot().is_line_folded(buffer_row)
+                && (self.conceal_tags.is_empty() || self.row_has_non_conceal_fold(buffer_row)))
+    }
+
+    fn row_has_non_conceal_fold(&self, buffer_row: MultiBufferRow) -> bool {
+        // Indent and crease folds start at the row's end, so the lookup must
+        // include folds touching the range's endpoints. A fold that only ends
+        // at the row's start belongs to the rows above.
+        let buffer = self.buffer_snapshot();
+        let row_start = MultiBufferPoint::new(buffer_row.0, 0);
+        let row_end = MultiBufferPoint::new(buffer_row.0, buffer.line_len(buffer_row));
+        self.fold_snapshot()
+            .folds_touching_range(row_start..row_end)
+            .any(|fold| {
+                let start = fold.range.start.to_point(buffer);
+                let end = fold.range.end.to_point(buffer);
+                (start.row == buffer_row.0 || end > row_start)
+                    && !fold
+                        .placeholder
+                        .type_tag
+                        .is_some_and(|tag| self.conceal_tags.contains(&tag))
+            })
     }
 
     pub fn is_block_line(&self, display_row: DisplayRow) -> bool {

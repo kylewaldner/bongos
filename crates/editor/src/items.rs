@@ -1108,8 +1108,7 @@ impl Item for Editor {
             .update(cx, |display_map, cx| display_map.snapshot(cx));
         let has_folds = display_snapshot
             .folds_in_range(MultiBufferOffset(0)..display_snapshot.buffer_snapshot().len())
-            .next()
-            .is_some();
+            .any(|fold| !crate::fold::is_conceal_tag(fold.placeholder.type_tag, cx));
 
         if !has_folds {
             if let Some(workspace_id) = workspace.database_id()

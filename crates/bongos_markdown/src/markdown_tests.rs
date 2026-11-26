@@ -172,6 +172,67 @@ async fn attaches_on_markdown_only(cx: &mut TestAppContext) {
     assert!(!attached(&multi_editor, vcx));
 }
 
+/// Whether `editor` has the prompts mode and whether it has the markdown addon.
+fn addons(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> (bool, bool) {
+    editor.read_with(cx, |editor, _| {
+        (bongos_prompts::is_attached(editor), is_attached(editor))
+    })
+}
+
+#[gpui::test]
+async fn switching_between_prompts_and_markdown_moves_the_addon(cx: &mut TestAppContext) {
+    init(cx);
+    let markdown = language("Markdown", "md");
+    let registry = Arc::new(LanguageRegistry::test(cx.executor()));
+    bongos_prompts::register_language(&registry);
+    let prompts_language = registry.language_for_name("Prompts").await.unwrap();
+    let buffer = buffer_in("=== prompt ===\nhello", Some(prompts_language.clone()), cx);
+    let (editor, vcx) = editor_on(&buffer, cx);
+    assert_eq!(addons(&editor, vcx), (true, false), "a prompts buffer");
+
+    // While the prompts mode is on, a refresh asked for by the settings or the mode leaves the
+    // markdown addon off.
+    vcx.update(|_, cx| {
+        set_live_view(cx, true);
+        set_mode(&buffer, Mode::Live, cx);
+    });
+    vcx.run_until_parked();
+    assert_eq!(
+        addons(&editor, vcx),
+        (true, false),
+        "prompts blocks markdown"
+    );
+    assert_eq!(refinement(&editor, vcx), None);
+
+    for round in 0..2 {
+        buffer.update(vcx, |buffer, cx| {
+            buffer.set_language(Some(markdown.clone()), cx)
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            addons(&editor, vcx),
+            (false, true),
+            "round {round}: Prompts to Markdown"
+        );
+        assert_eq!(live_size(&editor, vcx), LIVE_FONT_SIZE, "round {round}");
+
+        buffer.update(vcx, |buffer, cx| {
+            buffer.set_language(Some(prompts_language.clone()), cx)
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            addons(&editor, vcx),
+            (true, false),
+            "round {round}: Markdown to Prompts"
+        );
+        assert_eq!(
+            refinement(&editor, vcx),
+            None,
+            "round {round}: the live typography is given back"
+        );
+    }
+}
+
 fn language_point_range() -> std::ops::Range<language::Point> {
     language::Point::new(0, 0)..language::Point::new(0, 3)
 }
