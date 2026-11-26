@@ -1923,14 +1923,21 @@ impl Shared {
                 }
             }
             Ok(Done { value: None, .. }) => {
-                // The project half committed but `machine.toml` was not written even on the
-                // retry: the request cannot stand in one store alone.
-                self.fail(
-                    id,
-                    Refused::Store {
-                        reason: "machine.toml could not be written".to_string(),
-                    },
-                );
+                // The project half committed, `machine.toml` was not written, and the retry that
+                // wrote it carried no change: the request stands in the project store alone (a
+                // waiter, or a hold its grant left there). Its rows go and it is queued again.
+                let stores = {
+                    let mut state = self.state.borrow_mut();
+                    let Some(pending) = state.pending.get_mut(&id) else {
+                        return;
+                    };
+                    pending.partial.clear();
+                    pending.granted_in = Stores::default();
+                    pending.needs_stores
+                };
+                log::warn!("pools: queuing again after machine.toml could not be written");
+                self.push(Op::Withdraw { request: id, stores });
+                self.push(Op::Enqueue(id));
             }
             Err(TxError::Busy(reason)) => {
                 log::info!("pools: queuing waits for the machine store: {reason}");
@@ -2046,6 +2053,9 @@ impl Shared {
 
     async fn run_drain(self: &Rc<Self>, holds: bool) {
         let host = self.context.host;
+        // The holds of the leases the drain keeps (bound to a live process), with that process:
+        // their rows stay, bound to it, even when the bind itself waits in the retry list.
+        let mut kept: BTreeMap<HoldId, ProcRef> = BTreeMap::new();
         if holds {
             let mut state = self.state.borrow_mut();
             let pending = std::mem::take(&mut state.pending);
@@ -2061,8 +2071,14 @@ impl Shared {
                 let live = lease
                     .process
                     .get()
-                    .is_some_and(|process| self.context.alive(process.pid, process.start));
-                if live || lease.holds.borrow().is_empty() {
+                    .filter(|process| self.context.alive(process.pid, process.start));
+                if let Some(process) = live {
+                    for hold in lease.holds.borrow().iter() {
+                        kept.insert(hold.clone(), process);
+                    }
+                    continue;
+                }
+                if lease.holds.borrow().is_empty() {
                     continue;
                 }
                 lease.holds.borrow_mut().clear();
@@ -2075,17 +2091,33 @@ impl Shared {
         }
         let context = self.context.clone();
         let project_id = self.parts.project.id.clone();
-        let remove = move |table: &mut PoolTable| {
-            let ours = |holder: &Holder| holder.host == host && holder.project == project_id;
-            for pool in table.pools.values_mut() {
-                pool.waiters.retain(|waiter| !ours(&waiter.holder));
-                if holds {
-                    pool.holds.retain(|hold| {
-                        !ours(&hold.holder)
-                            || hold
-                                .holder
-                                .process
-                                .is_some_and(|process| context.alive(process.pid, process.start))
+        let remove = move |store: StoreKind| {
+            let kept = kept.clone();
+            let context = context.clone();
+            let project_id = project_id.clone();
+            move |table: &mut PoolTable| {
+                let ours = |holder: &Holder| holder.host == host && holder.project == project_id;
+                for (name, pool) in &mut table.pools {
+                    pool.waiters.retain(|waiter| !ours(&waiter.holder));
+                    if !holds {
+                        continue;
+                    }
+                    pool.holds.retain_mut(|hold| {
+                        if !ours(&hold.holder) {
+                            return true;
+                        }
+                        let id = HoldId {
+                            store,
+                            pool: name.clone(),
+                            ticket: hold.ticket,
+                        };
+                        if let Some(process) = kept.get(&id) {
+                            hold.holder.process = Some(*process);
+                            return true;
+                        }
+                        hold.holder
+                            .process
+                            .is_some_and(|process| context.alive(process.pid, process.start))
                     });
                 }
             }
@@ -2095,12 +2127,13 @@ impl Shared {
         // them all, so nothing is converted here, another project's waiters least of all.
         let project = self.parts.project_store.clone();
         let machine = self.parts.machine.as_ref().map(|m| m.patient.clone());
-        let remove_machine = remove.clone();
+        let remove_project = remove(StoreKind::Project);
+        let remove_machine = remove(StoreKind::Machine);
         let result = self
             .parts
             .background
             .spawn(async move {
-                let project_result = project.transact(remove).map(|_| ());
+                let project_result = project.transact(remove_project).map(|_| ());
                 let machine_result = match &machine {
                     Some(machine) => machine.transact(remove_machine).map(|_| ()),
                     None => Ok(()),

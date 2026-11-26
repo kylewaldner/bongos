@@ -23,7 +23,7 @@ use gpui::TestAppContext;
 
 use crate::store_test_support::{Liveness, host, writer};
 use crate::{
-    BrokerParts, BrokerTiming, GuardReaders, LOCK_FILE, Lease, LockWait, MachineStore,
+    BrokerParts, BrokerTiming, DeclareOutcome, GuardReaders, LOCK_FILE, Lease, LockWait, MachineStore,
     MachineStores, PoolBroker, PoolConfig, PoolsEvent, ProjectRef, ProjectStore, Refused,
     ReleaseWhy, Request, ScriptOutput, ScriptRun, StoreContext, Waiting,
 };
@@ -116,7 +116,8 @@ impl World {
         )
     }
 
-    /// A broker of project `id` for `host`, with `project` and `machine` pools declared.
+    /// A broker of project `id` for `host`, with `project` and `machine` pools declared and none
+    /// refused.
     pub(crate) fn project(
         &self,
         cx: &mut TestAppContext,
@@ -125,6 +126,20 @@ impl World {
         project: Vec<PoolConfig>,
         machine: Vec<PoolConfig>,
     ) -> Project {
+        let (project, outcome) = self.project_declared(cx, id, host, project, machine);
+        assert!(outcome.refused.is_empty(), "{outcome:?}");
+        project
+    }
+
+    /// A broker of project `id` for `host` and what declaring its pools gave.
+    pub(crate) fn project_declared(
+        &self,
+        cx: &mut TestAppContext,
+        id: &str,
+        host: HostRef,
+        project: Vec<PoolConfig>,
+        machine: Vec<PoolConfig>,
+    ) -> (Project, DeclareOutcome) {
         let root = tempfile::tempdir().unwrap();
         let location = location(root.path(), id);
         let context = self.context(host);
@@ -163,15 +178,15 @@ impl World {
             .foreground_executor()
             .block_on(declared)
             .expect("declaring the pools");
-        assert!(outcome.refused.is_empty(), "{outcome:?}");
-        Project {
+        let project = Project {
             broker,
             project_store,
             machine: machine_store,
             readers,
             events,
             _root: root,
-        }
+        };
+        (project, outcome)
     }
 
     /// Another broker of the same project with nothing declared, to stand in for one dropped.
@@ -500,21 +515,9 @@ fn try_now_answers_not_now_while_another_process_holds_the_machine_lock(cx: &mut
         vec![],
         vec![pool("gpu", PoolKind::Slots, 1)],
     );
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(world.machine_dir.path().join(LOCK_FILE))
-        .unwrap();
-    // SAFETY: flock only takes a lock on this open file.
-    assert_eq!(
-        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
-        0
-    );
+    let lock = lock_machine(&world);
     assert!(a.broker.try_now(ask("part", &[need("gpu")])).is_none());
-    // SAFETY: as above.
-    unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) };
+    drop(lock);
     let lease = a
         .broker
         .try_now(ask("part", &[need("gpu")]))
@@ -548,6 +551,64 @@ fn two_brokers_share_a_machine_pool_and_each_converts_only_its_own(cx: &mut Test
     let second = lease(&second);
     assert_eq!(holds(&read(&b).1, "gpu"), vec!["b-job"]);
     drop(second);
+}
+
+#[gpui::test]
+fn acquire_answers_at_once_while_another_process_holds_the_machine_lock(cx: &mut TestAppContext) {
+    let world = World::new();
+    let a = world.project(
+        cx,
+        "a",
+        host(1),
+        vec![],
+        vec![pool("gpu", PoolKind::Slots, 1)],
+    );
+    let lock = lock_machine(&world);
+    // The call returns a wait at once; queuing waits for the lock in the background.
+    let waiting = a.broker.acquire(ask("job", &[need("gpu")]));
+    let status = waiting.status_source();
+    let outcome = watch(cx, waiting);
+    cx.run_until_parked();
+    assert!(outcome.borrow().is_none(), "nothing resolves while the lock is busy");
+    assert_eq!(status.status().position, 0, "not written yet");
+    assert!(waiters(&read(&a).1, "gpu").is_empty());
+    drop(lock);
+    world.advance(cx, POLL);
+    let lease = lease(&outcome);
+    assert_eq!(lease.hold_ids().len(), 1);
+    assert_eq!(holds(&read(&a).1, "gpu"), vec!["job"]);
+}
+
+#[gpui::test]
+fn a_machine_pool_another_project_set_with_another_kind_is_refused(cx: &mut TestAppContext) {
+    let world = World::new();
+    let _a = world.project(
+        cx,
+        "a",
+        host(1),
+        vec![],
+        vec![pool("gpu", PoolKind::Slots, 2)],
+    );
+    let (b, outcome) = world.project_declared(
+        cx,
+        "b",
+        host(2),
+        vec![],
+        vec![pool("gpu", PoolKind::Mutex, 1)],
+    );
+    assert_eq!(outcome.refused.len(), 1);
+    let refused = watch(cx, b.broker.acquire(ask("job", &[need("gpu")])));
+    cx.run_until_parked();
+    match refused.borrow_mut().take() {
+        Some(Err(Refused::KindClash { pool, set_by, text })) => {
+            assert_eq!(pool, "gpu");
+            assert_eq!(set_by.map(|project| project.id), Some("a".to_string()));
+            assert_eq!(text, outcome.refused[0].to_string());
+        }
+        other => panic!("expected a kind clash, got {other:?}"),
+    }
+    assert!(b.broker.try_now(ask("part", &[need("gpu")])).is_none());
+    assert!(waiters(&read(&b).1, "gpu").is_empty());
 }
 
 #[gpui::test]
@@ -724,6 +785,39 @@ fn a_mixed_grant_whose_machine_write_failed_is_completed_by_a_retry(cx: &mut Tes
     let (project, machine) = read(&a);
     assert_eq!(holds(&project, "db"), vec!["mixed"]);
     assert_eq!(holds(&machine, "gpu"), vec!["mixed"]);
+    drop(mixed);
+    cx.run_until_parked();
+    let (project, machine) = read(&a);
+    assert!(holds(&project, "db").is_empty());
+    assert!(holds(&machine, "gpu").is_empty());
+}
+
+#[gpui::test]
+fn a_mixed_request_whose_first_machine_write_failed_is_queued_again(cx: &mut TestAppContext) {
+    let world = World::new();
+    let a = world.project(
+        cx,
+        "a",
+        host(1),
+        vec![pool("db", PoolKind::Mutex, 1)],
+        vec![pool("gpu", PoolKind::Slots, 1)],
+    );
+    // The enqueue commits in the project store (granting the project half there) and fails to
+    // write machine.toml; the retry writes it with no change. The request is queued again, not
+    // refused.
+    a.machine.fail_next_write.store(true, Ordering::SeqCst);
+    let mixed = watch(
+        cx,
+        a.broker.acquire(ask("mixed", &[need("gpu"), need("db")])),
+    );
+    cx.run_until_parked();
+    let mixed = lease(&mixed);
+    assert_eq!(mixed.hold_ids().len(), 2);
+    let (project, machine) = read(&a);
+    assert_eq!(holds(&project, "db"), vec!["mixed"]);
+    assert_eq!(holds(&machine, "gpu"), vec!["mixed"]);
+    assert!(waiters(&project, "db").is_empty());
+    assert!(waiters(&machine, "gpu").is_empty());
     drop(mixed);
     cx.run_until_parked();
     let (project, machine) = read(&a);
@@ -954,6 +1048,63 @@ fn a_drain_keeps_a_live_bound_hold_and_a_take_back_asks_again(cx: &mut TestAppCo
     drop((waiting, unbound));
     cx.run_until_parked();
     assert!(holds(&read(&a).0, "cpu").is_empty());
+}
+
+/// Takes the machine lock as another process would, until the file is dropped.
+fn lock_machine(world: &World) -> std::fs::File {
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(world.machine_dir.path().join(LOCK_FILE))
+        .unwrap();
+    // SAFETY: flock only takes a lock on this open file.
+    assert_eq!(
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    lock
+}
+
+#[gpui::test]
+fn a_drain_keeps_the_hold_of_a_live_lease_whose_bind_waits_for_a_retry(cx: &mut TestAppContext) {
+    let world = World::new();
+    let a = world.project(
+        cx,
+        "a",
+        host(1),
+        vec![],
+        vec![pool("gpu", PoolKind::Slots, 1)],
+    );
+    let outcome = watch(cx, a.broker.acquire(ask("job", &[need("gpu")])));
+    cx.run_until_parked();
+    let job = lease(&outcome);
+    // The bind cannot take the machine lock: it waits in the retry list for the next poll.
+    let lock = lock_machine(&world);
+    job.bind_process(ProcessRecord {
+        pid: 600,
+        start_time: 1_600,
+    });
+    cx.run_until_parked();
+    drop(lock);
+    assert!(read(&a).1.pools["gpu"].holds[0].holder.process.is_none());
+
+    let drained = a.broker.drain();
+    cx.run_until_parked();
+    cx.foreground_executor().block_on(drained);
+    let machine = read(&a).1;
+    assert_eq!(holds(&machine, "gpu"), vec!["job"], "the live lease keeps its hold");
+    assert_eq!(
+        machine.pools["gpu"].holds[0].holder.process.map(|process| process.pid),
+        Some(600),
+        "bound to its process by the drain"
+    );
+    assert!(a.broker.given_up().is_empty());
+    assert_eq!(job.hold_ids().len(), 1);
+    drop(job);
+    cx.run_until_parked();
+    assert!(holds(&read(&a).1, "gpu").is_empty());
 }
 
 #[gpui::test]
