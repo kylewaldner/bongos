@@ -258,6 +258,27 @@ impl FoldMapWriter<'_> {
         self.remove_folds_with(ranges, |_| true, inclusive)
     }
 
+    /// Removes any folds whose ranges intersect the given ranges, except folds
+    /// whose type tag is in `keep_tags`.
+    #[ztracing::instrument(skip_all)]
+    pub(crate) fn unfold_intersecting_keeping<T: ToOffset>(
+        &mut self,
+        ranges: impl IntoIterator<Item = Range<T>>,
+        inclusive: bool,
+        keep_tags: &collections::HashSet<TypeId>,
+    ) -> (FoldSnapshot, Vec<FoldEdit>) {
+        self.remove_folds_with(
+            ranges,
+            |fold| {
+                !fold
+                    .placeholder
+                    .type_tag
+                    .is_some_and(|tag| keep_tags.contains(&tag))
+            },
+            inclusive,
+        )
+    }
+
     /// Removes any folds that intersect the given ranges and for which the given predicate
     /// returns true.
     #[ztracing::instrument(skip_all)]

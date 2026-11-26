@@ -178,6 +178,8 @@ pub enum HighlightKey {
     InlineAssist,
     InputComposition,
     Isearch,
+    /// Live markdown styling; the value is the style slot index.
+    MarkdownLive(u8),
     MatchingBracket,
     NavigationOverlay(NavigationOverlayKey),
     PendingInput,
@@ -831,6 +833,19 @@ impl DisplayMap {
         inclusive: bool,
         cx: &mut Context<Self>,
     ) -> WrapSnapshot {
+        self.unfold_intersecting_keeping(ranges, inclusive, &HashSet::default(), cx)
+    }
+
+    /// Removes any folds whose ranges intersect any of the given ranges, except
+    /// folds whose type tag is in `keep_tags`.
+    #[instrument(skip_all)]
+    pub fn unfold_intersecting_keeping<T: ToOffset>(
+        &mut self,
+        ranges: impl IntoIterator<Item = Range<T>>,
+        inclusive: bool,
+        keep_tags: &HashSet<TypeId>,
+        cx: &mut Context<Self>,
+    ) -> WrapSnapshot {
         let snapshot = self.buffer.read(cx).snapshot(cx);
         let offset_ranges = ranges
             .into_iter()
@@ -848,7 +863,7 @@ impl DisplayMap {
         self.block_map.read(snapshot, edits, None);
 
         let (snapshot, edits) =
-            fold_map.unfold_intersecting(offset_ranges.iter().cloned(), inclusive);
+            fold_map.unfold_intersecting_keeping(offset_ranges.iter().cloned(), inclusive, keep_tags);
         let (snapshot, edits) = self.tab_map.sync(snapshot, edits, tab_size);
         let (self_new_wrap_snapshot, self_new_wrap_edits) = self
             .wrap_map

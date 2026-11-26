@@ -89,6 +89,7 @@ pub use display_map::{
     NavigationOverlayKey, SemanticTokenHighlight,
 };
 pub use edit_prediction::make_suggestion_styles;
+pub use fold::{is_conceal_tag, register_conceal_tag};
 pub(crate) use edit_prediction::{
     EditDisplayMode, EditPrediction, EditPredictionPreview, EditPredictionSettings,
     EditPredictionState, MenuEditPredictionsPolicy, RegisteredEditPredictionDelegate,
@@ -1748,6 +1749,7 @@ impl Editor {
             });
             snapshot
         });
+        clone.remove_conceals(cx);
         let clone_snapshot = clone.display_map.update(cx, |map, cx| map.snapshot(cx));
         clone.folds_did_change(cx);
         clone.selections.clone_state(&self.selections);
