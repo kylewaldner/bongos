@@ -2549,6 +2549,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bongos_inbox_model"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "uuid",
+]
+
+[[package]]
 name = "bongos_isearch"
 version = "0.1.0"
 dependencies = [
