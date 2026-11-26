@@ -12,7 +12,7 @@ use gpui::{
 };
 use project::Project;
 use settings::SettingsStore;
-use workspace::{AppState, MultiWorkspace, Workspace};
+use workspace::{AppState, ModalView as _, MultiWorkspace, PromptPlacement, Workspace};
 use zed_actions::minibuffer;
 
 use crate::{
@@ -524,4 +524,44 @@ async fn a_selected_initial_input_is_replaced_by_typing(cx: &mut TestAppContext)
     );
     cx.simulate_input("x");
     assert_eq!(input(&workspace, cx), "x", "typing replaces the selection");
+}
+
+#[gpui::test]
+async fn inline_reaches_the_prompt_placement_of_the_views(cx: &mut TestAppContext) {
+    let (workspace, mut cx) = window(cx, &[HOST]).await;
+    let log = Log::default();
+    let cx = &mut cx;
+
+    open_session(&workspace, cx, string_session(&log));
+    let view = session_view(&workspace, cx).expect("a session is open");
+    assert_eq!(
+        view.read_with(cx, |view, _| view.prompt_placement()),
+        PromptPlacement::Picker,
+        "a session is a picker by default"
+    );
+
+    open_session(&workspace, cx, string_session(&log).inline());
+    let view = session_view(&workspace, cx).expect("a session is open");
+    assert_eq!(
+        view.read_with(cx, |view, _| view.prompt_placement()),
+        PromptPlacement::Inline
+    );
+
+    open_read_key(&workspace, cx, &log, Some('n'));
+    let view = key_view(&workspace, cx).expect("a read-key is open");
+    assert_eq!(
+        view.read_with(cx, |view, _| view.prompt_placement()),
+        PromptPlacement::Picker
+    );
+
+    let prompt = ReadKey::new(HOST, "Save? ").key('y', "yes").inline();
+    workspace.update_in(cx, |workspace, window, cx| {
+        read_key(workspace, prompt, window, cx)
+    });
+    cx.run_until_parked();
+    let view = key_view(&workspace, cx).expect("a read-key is open");
+    assert_eq!(
+        view.read_with(cx, |view, _| view.prompt_placement()),
+        PromptPlacement::Inline
+    );
 }

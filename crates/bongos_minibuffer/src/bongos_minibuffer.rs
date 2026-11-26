@@ -95,6 +95,7 @@ fn sync(cx: &mut App) {
     cx.update_global::<MinibufferRouting, _>(|routing, _| {
         routing.set_routes(settings.enabled_for);
         routing.set_display(settings.max_rows, settings.show_count);
+        routing.set_style(settings.style);
     });
     strip::sync_windows(cx);
     CommandPaletteFilter::update_global(cx, |filter, _| {

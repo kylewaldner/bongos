@@ -2735,6 +2735,9 @@
     // Delay in milliseconds before the minibuffer shows the keys typed so far of a pending
     // key sequence.
     "key_hint_delay": 500,
+    // Where routed prompts open. "modal": pickers open in a centered dialog and inline
+    // questions stay in the strip. "minibuffer": every routed prompt opens in the strip.
+    "style": "minibuffer",
   },
   // Settings for the navigation pickers: the buffer switcher, go to file and find in files.
   "navigation": {

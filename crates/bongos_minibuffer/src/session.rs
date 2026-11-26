@@ -14,7 +14,7 @@ use bongos_minibuffer_model::Cancel;
 use futures::channel::mpsc;
 use gpui::{App, Context, KeyContext, SharedString, WeakEntity, Window};
 use util::ResultExt as _;
-use workspace::Workspace;
+use workspace::{PromptPlacement, Workspace};
 
 use crate::history_store::HistoryStore;
 use crate::session_view::SessionView;
@@ -164,6 +164,7 @@ pub struct Session {
     on_history_entry: Option<HistoryEntryHandler>,
     on_confirm: Option<ConfirmHandler>,
     on_cancel: Option<CancelHandler>,
+    placement: PromptPlacement,
 }
 
 impl Session {
@@ -192,7 +193,14 @@ impl Session {
             on_history_entry: None,
             on_confirm: None,
             on_cancel: None,
+            placement: PromptPlacement::Picker,
         }
+    }
+
+    /// Marks the session as a short question answered in place rather than a picker.
+    pub fn inline(mut self) -> Self {
+        self.placement = PromptPlacement::Inline;
+        self
     }
 
     pub fn source(mut self, source: Source) -> Self {
@@ -389,6 +397,7 @@ pub(crate) struct Core {
     pub(crate) on_history_entry: Option<HistoryEntryHandler>,
     on_confirm: RefCell<Option<ConfirmHandler>>,
     on_cancel: RefCell<Option<CancelHandler>>,
+    pub(crate) placement: PromptPlacement,
 }
 
 impl Core {
@@ -603,6 +612,7 @@ pub fn open(
         on_history_entry,
         on_confirm,
         on_cancel,
+        placement,
     } = session;
     let core = Rc::new(Core {
         host,
@@ -626,6 +636,7 @@ pub fn open(
         on_history_entry,
         on_confirm: RefCell::new(on_confirm),
         on_cancel: RefCell::new(on_cancel),
+        placement,
     });
 
     // `toggle_modal` alone would close a modal of the same type instead of replacing it.
