@@ -37,6 +37,10 @@ impl Liveness {
         self.dead.lock().unwrap().insert(pid);
     }
 
+    pub(crate) fn is_dead(&self, pid: u32) -> bool {
+        self.dead.lock().unwrap().contains(&pid)
+    }
+
     fn alive(&self, pid: u32, start: u64) -> bool {
         start == 1_000 + u64::from(pid) && !self.dead.lock().unwrap().contains(&pid)
     }

@@ -10,19 +10,26 @@
 //! The pool stores ([`ProjectStore`], [`MachineStore`], [`transact_mixed`]) keep the tables the
 //! grant rule works on.
 
+pub mod broker;
+pub mod checks;
 mod declare;
+mod guards;
 mod machine_store;
 mod mixed;
+mod participant;
 mod project_store;
 mod references;
 mod settings;
 mod store;
 
 use std::path::{Component, Path};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use ::settings::{Settings as _, SettingsStore};
+use bongos_checks::CheckPoolsRegistry;
+use bongos_engine_host::WriterParticipants;
 use bongos_lanes::LaneTableFields;
 use bongos_project_repo::{
     CheckInput, CheckOutcome, CheckPhase, DefinitionFolders, LandingCheck, LandingChecks,
@@ -35,9 +42,15 @@ use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use gpui::{App, Global};
 
+pub use broker::{
+    BrokerParts, BrokerTiming, GivenUp, HoldId, Lease, MachineStores, PoolBroker, PoolsEvent,
+    Refused, ReleaseWhy, Request, StatusSource, StoreKind, WaitStatus51, Waiting,
+};
+pub use checks::PoolsForChecks;
 pub use declare::{
     DeclDefaults, Declaration, DeclareOutcome, KindClash, PoolConfig, ProjectRef, SizeWarning,
 };
+pub use guards::{GuardReaders, ScriptOutput, ScriptRun, SystemGuardReaders};
 pub use machine_store::{
     LOCK_FILE, LOCK_RETRY, LockBusy, LockWait, MACHINE_FILE, MACHINE_SCHEMA, MachineFile,
     MachineStore, PoolMeta, machine_store_dir,
@@ -45,6 +58,7 @@ pub use machine_store::{
 pub use mixed::{
     MachineHalfUnwritten, MixedTransacted, transact_mixed, transact_mixed_in_background,
 };
+pub use participant::PoolsParticipant;
 pub use project_store::{
     POOL_KEY_PREFIX, POOLS_NAMESPACE, ProjectPoolsReader, ProjectStore, TABLE_KEY,
     read_project_table,
@@ -71,8 +85,11 @@ fn enabled() -> bool {
 /// What this process registered.
 #[derive(Default)]
 struct Registration {
-    /// Whether the folders, the landing check and the validation hook were registered.
+    /// Whether the folders, the landing check, the validation hook, the checks' pools and the
+    /// writer participant were registered.
     registered: bool,
+    /// The pools served to the checks, one broker per project this process is the writer of.
+    checks: Option<Rc<PoolsForChecks>>,
 }
 
 impl Global for Registration {}
@@ -114,6 +131,16 @@ fn sync_registration(cx: &mut App) {
     DefinitionFolders::register(TRIGGERS_FOLDER, validate_triggers_folder, cx);
     LandingChecks::register(Arc::new(PoolReferences), cx);
     ValidationHooks::register(workflow_reference_diagnostics);
+    let checks = PoolsForChecks::new();
+    CheckPoolsRegistry::set(checks.clone(), cx);
+    WriterParticipants::register(Rc::new(PoolsParticipant::new(checks.clone())), cx);
+    cx.default_global::<Registration>().checks = Some(checks);
+}
+
+/// The pools served to the checks, once `pools.enabled` registered them.
+pub fn pools_for_checks(cx: &App) -> Option<Rc<PoolsForChecks>> {
+    cx.try_global::<Registration>()
+        .and_then(|registration| registration.checks.clone())
 }
 
 /// The problems of the declaration file `file` when `path` (relative to `definitions/`) is it.
@@ -231,6 +258,10 @@ pub fn workflow_reference_diagnostics(_definition: &Definition, dir: &Path) -> V
         .collect()
 }
 
+#[cfg(test)]
+mod broker_tests;
+#[cfg(test)]
+mod checks_tests;
 #[cfg(test)]
 mod machine_store_tests;
 #[cfg(test)]
