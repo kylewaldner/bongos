@@ -17,8 +17,8 @@ use bongos_markdown_model::MarkdownIndex;
 use collections::HashMap;
 use editor::{Addon, Editor, EditorEvent, ToOffset as _};
 use gpui::{
-    App, BorrowAppContext as _, Context, Entity, EntityId, Global, KeyContext, SharedString,
-    TextStyleRefinement, px, relative,
+    App, BorrowAppContext as _, Context, Entity, EntityId, Global, KeyContext, Pixels,
+    SharedString, TextStyleRefinement, px, relative,
 };
 use language::Buffer;
 use settings::{Settings as _, SettingsStore};
@@ -368,7 +368,7 @@ fn refresh_table_context(editor: &mut Editor, cx: &mut Context<Editor>) {
 
 /// Refreshes every layer over the window, in the live mode. `force` makes the layers refresh
 /// even when the index, the text and the window are as they were.
-fn refresh_layers(editor: &mut Editor, force: bool, cx: &mut Context<Editor>) {
+pub(crate) fn refresh_layers(editor: &mut Editor, force: bool, cx: &mut Context<Editor>) {
     if !is_live(editor, cx) {
         return;
     }
@@ -429,6 +429,11 @@ fn zoom_ratio(cx: &App) -> f32 {
         return 1.0;
     }
     f32::from(settings.buffer_font_size(cx)) / base
+}
+
+/// The live line height in pixels, as the editor lays it out (rounded).
+pub(crate) fn live_line_height(cx: &App) -> Pixels {
+    (px(LIVE_FONT_SIZE * zoom_ratio(cx)) * LIVE_LINE_HEIGHT).round()
 }
 
 fn apply_live(editor: &mut Editor, cx: &mut Context<Editor>) {

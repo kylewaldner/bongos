@@ -46,6 +46,11 @@ impl LoadedImages {
     pub fn insert(&self, url: impl Into<String>) -> bool {
         self.0.borrow_mut().insert(url.into())
     }
+
+    /// Removes `url`; true when it was there.
+    pub fn remove(&self, url: &str) -> bool {
+        self.0.borrow_mut().remove(url)
+    }
 }
 
 const BULLET: &str = "•";
