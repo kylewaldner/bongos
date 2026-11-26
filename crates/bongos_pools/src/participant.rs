@@ -128,7 +128,7 @@ async fn open_broker(
             hold.holder.label.0
         );
     }
-    let machine = MachineStores::from_settings(&settings, context)?;
+    let machine = MachineStores::from_settings(&settings, context, &location.id)?;
     let defaults = DeclDefaults::from_settings(&settings);
     let project_configs = PoolConfig::of_scope(&decls, PoolScope::Project, |_| None, defaults);
     let machine_configs = PoolConfig::of_scope(&decls, PoolScope::Machine, |_| None, defaults);

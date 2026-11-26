@@ -281,8 +281,10 @@ impl BrokerTiming {
     }
 }
 
-/// Two handles on the machine store: one that waits for the lock (background transactions) and
-/// one that tries it once (the synchronous [`PoolBroker::try_now`]).
+/// Two handles on the machine store of one project's broker: one that waits for the lock
+/// (background transactions) and one that tries it once (the synchronous [`PoolBroker::try_now`]).
+/// Their transactions convert only `project`'s waiters, since every broker of this process shares
+/// its host.
 #[derive(Clone)]
 pub struct MachineStores {
     pub patient: Arc<MachineStore>,
@@ -290,7 +292,13 @@ pub struct MachineStores {
 }
 
 impl MachineStores {
-    pub fn open(dir: PathBuf, context: StoreContext, wait: LockWait) -> Result<MachineStores> {
+    pub fn open(
+        dir: PathBuf,
+        context: StoreContext,
+        wait: LockWait,
+        project: &str,
+    ) -> Result<MachineStores> {
+        let context = context.with_project(project);
         Ok(MachineStores {
             patient: Arc::new(MachineStore::open(dir.clone(), context.clone(), wait)?),
             once: Arc::new(MachineStore::open(dir, context, LockWait::once())?),
@@ -298,11 +306,16 @@ impl MachineStores {
     }
 
     /// The store of `pools.machine_store_dir`, waiting as `pools.lock_timeout_seconds` says.
-    pub fn from_settings(settings: &PoolsSettings, context: StoreContext) -> Result<MachineStores> {
+    pub fn from_settings(
+        settings: &PoolsSettings,
+        context: StoreContext,
+        project: &str,
+    ) -> Result<MachineStores> {
         MachineStores::open(
             machine_store_dir(settings),
             context,
             LockWait::from_settings(settings),
+            project,
         )
     }
 }
@@ -1718,6 +1731,7 @@ impl Shared {
             }
             Op::Release { request, holds } => {
                 let host = self.context.host;
+                let project_id = self.parts.project.id.clone();
                 let tickets = holds.clone();
                 let result = self
                     .tx(
@@ -1735,7 +1749,9 @@ impl Shared {
                                 };
                                 let mine = table.pools.get(&hold.pool).is_some_and(|pool| {
                                     pool.holds.iter().any(|held| {
-                                        held.ticket == hold.ticket && held.holder.host == host
+                                        held.ticket == hold.ticket
+                                            && held.holder.host == host
+                                            && held.holder.project == project_id
                                     })
                                 });
                                 if mine {
@@ -1984,6 +2000,7 @@ impl Shared {
         };
         let now = self.context.now();
         let host = self.context.host;
+        let project_id = &self.parts.project.id;
         let mut events = Vec::new();
         {
             let mut state = self.state.borrow_mut();
@@ -1993,7 +2010,10 @@ impl Shared {
                 (StoreKind::Machine, &state.machine_table),
             ] {
                 for (name, pool) in &table.pools {
-                    for hold in pool.holds.iter().filter(|hold| hold.holder.host == host) {
+                    let ours = |hold: &&Hold| {
+                        hold.holder.host == host && hold.holder.project == *project_id
+                    };
+                    for hold in pool.holds.iter().filter(ours) {
                         let held = Duration::from_millis(now.0.saturating_sub(hold.since.0));
                         if held > max_hold {
                             found.push((
@@ -2070,7 +2090,9 @@ impl Shared {
                 }
             }
         };
-        // One transaction per store, never both at once: nothing is converted here.
+        // One transaction per store, never both at once. Each converts only this project's
+        // waiters of this host (the stores' context names the project), and the change removed
+        // them all, so nothing is converted here, another project's waiters least of all.
         let project = self.parts.project_store.clone();
         let machine = self.parts.machine.as_ref().map(|m| m.patient.clone());
         let remove_machine = remove.clone();

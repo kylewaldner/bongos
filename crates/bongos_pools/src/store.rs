@@ -64,6 +64,11 @@ pub trait PoolStore {
 #[derive(Clone)]
 pub struct StoreContext {
     pub host: HostRef,
+    /// The project whose broker transacts through this context. Several brokers of one process
+    /// share its host, so a transaction converts only this project's waiters of the host; another
+    /// project's waiter is judged as another host's and left for its own broker (`None` converts
+    /// every waiter of the host).
+    project: Option<String>,
     probe: Arc<dyn Probe + Send + Sync>,
     clock: Arc<dyn Fn() -> Timestamp + Send + Sync>,
 }
@@ -76,6 +81,7 @@ impl StoreContext {
     ) -> StoreContext {
         StoreContext {
             host,
+            project: None,
             probe: Arc::new(probe),
             clock: Arc::new(clock),
         }
@@ -85,6 +91,18 @@ impl StoreContext {
     /// start time cannot be read.
     pub fn this_process() -> Option<StoreContext> {
         Some(StoreContext::new(this_host()?, ProcessProbe, system_now))
+    }
+
+    /// This context for the broker of `project`: its transactions convert only that project's
+    /// waiters.
+    pub fn with_project(mut self, project: &str) -> StoreContext {
+        self.project = Some(project.to_string());
+        self
+    }
+
+    /// The project this context converts waiters for, if one.
+    pub fn project(&self) -> Option<&str> {
+        self.project.as_deref()
     }
 
     pub fn now(&self) -> Timestamp {
@@ -114,13 +132,14 @@ impl StoreContext {
         prune(table, &|pid, start| self.alive(pid, start))
     }
 
-    /// Converts this host's grantable waiters except those `held` names, and returns the grants.
+    /// Converts this host's (and project's) grantable waiters except those `held` names, and
+    /// returns the grants.
     pub(crate) fn grant(
         &self,
         table: &mut PoolTable,
         held: impl Fn(&Waiter) -> bool,
     ) -> Vec<Grant> {
-        let grants = grant_holding_back(table, self.now(), &self.host, held);
+        let grants = grant_holding_back(table, self.now(), &self.host, self.project(), held);
         table.apply(&grants);
         grants
     }
@@ -162,27 +181,35 @@ pub fn system_now() -> Timestamp {
 const HELD_BACK: HostRef = HostRef { pid: 0, start: 0 };
 
 /// `grant` for `host`, except that `host`'s waiters for which `held` is true are not converted
-/// and block their pools as a `mixed` waiter of another host would. Guards are judged on the
-/// readings recorded in the table: the caller records fresh ones in its change.
+/// and block their pools as a `mixed` waiter of another host would. With a `project`, `host`'s
+/// waiters of every other project are judged as another host's (they count in ticket order, and a
+/// `mixed` one stops its pool's scan) and are left for their own project's broker. Guards are
+/// judged on the readings recorded in the table: the caller records fresh ones in its change.
 pub(crate) fn grant_holding_back(
     table: &PoolTable,
     now: Timestamp,
     host: &HostRef,
+    project: Option<&str>,
     held: impl Fn(&Waiter) -> bool,
 ) -> Vec<Grant> {
+    let foreign = |waiter: &Waiter| {
+        waiter.holder.host == *host && project.is_some_and(|project| waiter.holder.project != project)
+    };
     let is_held = |waiter: &Waiter| waiter.holder.host == *host && held(waiter);
     let any_held = table
         .pools
         .values()
         .flat_map(|pool| &pool.waiters)
-        .any(is_held);
+        .any(|waiter| foreign(waiter) || is_held(waiter));
     if !any_held {
         return grant(table, &GuardReadings::default(), now, host);
     }
     let mut judged = table.clone();
     for pool in judged.pools.values_mut() {
         for waiter in &mut pool.waiters {
-            if is_held(waiter) {
+            if foreign(waiter) {
+                waiter.holder.host = HELD_BACK;
+            } else if is_held(waiter) {
                 waiter.holder.host = HELD_BACK;
                 waiter.mixed = true;
             }
@@ -191,13 +218,21 @@ pub(crate) fn grant_holding_back(
     grant(&judged, &GuardReadings::default(), now, host)
 }
 
-/// The requests of `host` with a `mixed` waiter in `table`.
-pub(crate) fn mixed_requests(table: &PoolTable, host: &HostRef) -> BTreeSet<RequestId> {
+/// The requests of `host` (and `project`, when given) with a `mixed` waiter in `table`.
+pub(crate) fn mixed_requests(
+    table: &PoolTable,
+    host: &HostRef,
+    project: Option<&str>,
+) -> BTreeSet<RequestId> {
     table
         .pools
         .values()
         .flat_map(|pool| &pool.waiters)
-        .filter(|waiter| waiter.mixed && waiter.holder.host == *host)
+        .filter(|waiter| {
+            waiter.mixed
+                && waiter.holder.host == *host
+                && project.is_none_or(|project| waiter.holder.project == project)
+        })
         .map(|waiter| waiter.request)
         .collect()
 }

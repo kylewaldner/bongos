@@ -125,8 +125,9 @@ fn joint_grant(
     project: &mut PoolTable,
 ) -> (Vec<Grant>, Vec<Grant>) {
     let host = context.host;
-    let in_machine = mixed_requests(machine, &host);
-    let in_project = mixed_requests(project, &host);
+    let own = context.project();
+    let in_machine = mixed_requests(machine, &host, own);
+    let in_project = mixed_requests(project, &host, own);
     let joint: BTreeSet<RequestId> = in_machine.intersection(&in_project).copied().collect();
     let (held_in_machine, held_in_project) =
         (held_requests(machine, &host), held_requests(project, &host));
@@ -144,8 +145,10 @@ fn joint_grant(
     loop {
         let is_held =
             |waiter: &bongos_pools_model::Waiter| waiter.mixed && held.contains(&waiter.request);
-        let machine_grants = crate::store::grant_holding_back(machine, now, &host, is_held);
-        let project_grants = crate::store::grant_holding_back(project, now, &host, is_held);
+        let machine_grants =
+            crate::store::grant_holding_back(machine, now, &host, own, is_held);
+        let project_grants =
+            crate::store::grant_holding_back(project, now, &host, own, is_held);
         let granted = |grants: &[Grant]| -> BTreeSet<RequestId> {
             grants.iter().map(|grant| grant.request).collect()
         };

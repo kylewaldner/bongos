@@ -134,6 +134,7 @@ impl World {
             self.machine_dir.path().to_path_buf(),
             context,
             LockWait::once(),
+            id,
         )
         .unwrap();
         let machine_store = stores.patient.clone();
@@ -547,6 +548,53 @@ fn two_brokers_share_a_machine_pool_and_each_converts_only_its_own(cx: &mut Test
     let second = lease(&second);
     assert_eq!(holds(&read(&b).1, "gpu"), vec!["b-job"]);
     drop(second);
+}
+
+#[gpui::test]
+fn two_brokers_of_one_process_never_convert_each_others_waiters(cx: &mut TestAppContext) {
+    let world = World::new();
+    let gpu = || vec![pool("gpu", PoolKind::Slots, 1)];
+    // Both brokers run in the same process: one host.
+    let a = world.project(cx, "a", host(1), vec![], gpu());
+    let b = world.project(cx, "b", host(1), vec![], gpu());
+
+    // A transaction of the first broker (the release of its hold) leaves the second's waiter for
+    // the second broker, which converts it at its next poll.
+    let first = watch(cx, a.broker.acquire(ask("a-job", &[need("gpu")])));
+    cx.run_until_parked();
+    let first = lease(&first);
+    let second = watch(cx, b.broker.acquire(ask("b-job", &[need("gpu")])));
+    cx.run_until_parked();
+    drop(first);
+    cx.run_until_parked();
+    let machine = read(&a).1;
+    assert!(holds(&machine, "gpu").is_empty());
+    assert_eq!(waiters(&machine, "gpu"), vec!["b-job"]);
+    world.advance(cx, POLL);
+    let second = lease(&second);
+    assert_eq!(holds(&read(&b).1, "gpu"), vec!["b-job"]);
+    drop(second);
+    cx.run_until_parked();
+
+    // The first broker's drain (whose transaction removes its unbound hold) leaves the second's
+    // waiter for the second broker too.
+    let held = watch(cx, a.broker.acquire(ask("a-held", &[need("gpu")])));
+    cx.run_until_parked();
+    let _held = lease(&held);
+    let next = watch(cx, b.broker.acquire(ask("b-next", &[need("gpu")])));
+    cx.run_until_parked();
+    let drained = a.broker.drain();
+    cx.run_until_parked();
+    cx.foreground_executor().block_on(drained);
+    let machine = read(&a).1;
+    assert!(holds(&machine, "gpu").is_empty(), "{machine:?}");
+    assert_eq!(waiters(&machine, "gpu"), vec!["b-next"]);
+    world.advance(cx, POLL);
+    let next = lease(&next);
+    assert_eq!(holds(&read(&b).1, "gpu"), vec!["b-next"]);
+    drop(next);
+    cx.run_until_parked();
+    assert!(holds(&read(&b).1, "gpu").is_empty());
 }
 
 #[gpui::test]
