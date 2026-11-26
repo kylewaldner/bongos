@@ -47,6 +47,7 @@ pub enum Block {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActionCap {
     pub name: String,
+    /// The key that runs the action in the inbox view, empty when none does.
     pub key: String,
     pub label: String,
 }
@@ -99,6 +100,16 @@ impl ItemDetail {
             age => format!("{age} ago"),
         };
         let mut actions: Vec<ActionCap> = names.iter().map(|name| action_cap(name)).collect();
+        // `a` runs the first registered action the item lists, so only that one shows the cap.
+        let listed: &[String] = match parsed.as_ref() {
+            Ok(item) => &item.actions,
+            Err(_) => &[],
+        };
+        if let Some(primary) = view_model::primary_action(listed, known) {
+            if let Some(cap) = actions.iter_mut().find(|cap| cap.name == primary) {
+                cap.key = "a".into();
+            }
+        }
         actions.push(ActionCap {
             name: "mark-unread".into(),
             key: "u".into(),
@@ -120,27 +131,24 @@ impl ItemDetail {
     }
 }
 
-/// The key cap and label of an action name. The first action of an item is on `a`, the ones that
-/// open something on `o`.
+/// The label of an action name. The key is empty: a cap is shown only for a key that really runs
+/// the action (see [`ActionCap::key`]).
 fn action_cap(name: &str) -> ActionCap {
-    let (key, label) = match name {
-        "accept" => ("a", "Accept".to_string()),
-        "done" => ("a", "Done".to_string()),
-        "overturn" => ("o", "Overturn".to_string()),
-        "open-run" => ("o", "Open run".to_string()),
-        "open-task" => ("o", "Open task".to_string()),
-        DISMISS => ("d", "Dismiss".to_string()),
-        OPEN => ("f", "Open file".to_string()),
+    let label = match name {
+        DISMISS => "Dismiss".to_string(),
+        OPEN => "Open file".to_string(),
         other => {
             let mut label = other.replace('-', " ");
             if let Some(first) = label.get_mut(..1) {
                 first.make_ascii_uppercase();
             }
-            (
-                &other[..other.chars().next().map_or(0, char::len_utf8)],
-                label,
-            )
+            label
         }
+    };
+    let key = match name {
+        DISMISS => "d",
+        OPEN => "f",
+        _ => "",
     };
     ActionCap {
         name: name.to_string(),
@@ -366,18 +374,20 @@ pub fn render_item<V: 'static>(
         let entry = h_flex()
             .id(("inbox-action", index))
             .gap(px(6.))
-            .child(
-                div()
-                    .font_buffer(cx)
-                    .text_size(rems_from_px(12.))
-                    .px(px(5.))
-                    .border_1()
-                    .border_color(colors.border)
-                    .rounded(px(3.))
-                    .bg(colors.panel_background)
-                    .text_color(colors.text)
-                    .child(SharedString::from(action.key.clone())),
-            )
+            .when(!action.key.is_empty(), |entry| {
+                entry.child(
+                    div()
+                        .font_buffer(cx)
+                        .text_size(rems_from_px(12.))
+                        .px(px(5.))
+                        .border_1()
+                        .border_color(colors.border)
+                        .rounded(px(3.))
+                        .bg(colors.panel_background)
+                        .text_color(colors.text)
+                        .child(SharedString::from(action.key.clone())),
+                )
+            })
             .child(SharedString::from(action.label.clone()));
         actions = actions.child(if action.name == OPEN {
             let open = open.clone();
@@ -502,9 +512,11 @@ mod tests {
             let cap = action_cap(name);
             (cap.key, cap.label)
         };
-        assert_eq!(cap("accept"), ("a".into(), "Accept".into()));
-        assert_eq!(cap("open-run"), ("o".into(), "Open run".into()));
+        // Only keys that are bound to the action get a cap; `a` is set on the primary action.
+        assert_eq!(cap("accept"), ("".into(), "Accept".into()));
+        assert_eq!(cap("open-run"), ("".into(), "Open run".into()));
         assert_eq!(cap("dismiss"), ("d".into(), "Dismiss".into()));
-        assert_eq!(cap("some-thing"), ("s".into(), "Some thing".into()));
+        assert_eq!(cap("open"), ("f".into(), "Open file".into()));
+        assert_eq!(cap("some-thing"), ("".into(), "Some thing".into()));
     }
 }
