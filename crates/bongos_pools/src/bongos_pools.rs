@@ -6,9 +6,17 @@
 //! Nothing is registered while `pools.enabled` is false. The first time it is true everything is
 //! registered; the registries keep no way to take a folder, a check or a hook back, so while it
 //! is false again they report nothing, and the lane table refuses its keys again.
+//!
+//! The pool stores ([`ProjectStore`], [`MachineStore`], [`transact_mixed`]) keep the tables the
+//! grant rule works on.
 
+mod declare;
+mod machine_store;
+mod mixed;
+mod project_store;
 mod references;
 mod settings;
+mod store;
 
 use std::path::{Component, Path};
 use std::sync::Arc;
@@ -27,12 +35,27 @@ use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use gpui::{App, Global};
 
+pub use declare::{
+    DeclDefaults, Declaration, DeclareOutcome, KindClash, PoolConfig, ProjectRef, SizeWarning,
+};
+pub use machine_store::{
+    LOCK_FILE, LOCK_RETRY, LockBusy, LockWait, MACHINE_FILE, MACHINE_SCHEMA, MachineFile,
+    MachineStore, PoolMeta, machine_store_dir,
+};
+pub use mixed::{
+    MachineHalfUnwritten, MixedTransacted, transact_mixed, transact_mixed_in_background,
+};
+pub use project_store::{
+    POOL_KEY_PREFIX, POOLS_NAMESPACE, ProjectPoolsReader, ProjectStore, TABLE_KEY,
+    read_project_table,
+};
 pub use references::{
     LANE_TABLE, LANE_TABLE_KEYS, POOLS_FILE, POOLS_FOLDER, QUEUES_FILE, QUEUES_FOLDER,
     ReferenceInputs, TRIGGERS_FILE, TRIGGERS_FOLDER, WorkflowText, items_may_lack_task,
     read_inputs, reference_problems,
 };
 pub use settings::{HooksSettings, PoolsSettings, QueuesSettings, TriggersSettings};
+pub use store::{PoolStore, ProcessProbe, StoreContext, Transacted, system_now, this_host};
 
 /// The name of the landing check over the references between folders.
 pub const POOL_REFERENCES: &str = "pool-references";
@@ -209,6 +232,14 @@ pub fn workflow_reference_diagnostics(_definition: &Definition, dir: &Path) -> V
 }
 
 #[cfg(test)]
+mod machine_store_tests;
+#[cfg(test)]
+mod mixed_tests;
+#[cfg(test)]
 mod pools_tests;
 #[cfg(test)]
+mod project_store_tests;
+#[cfg(test)]
 mod references_tests;
+#[cfg(test)]
+mod store_test_support;

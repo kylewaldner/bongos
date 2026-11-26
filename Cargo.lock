@@ -2881,18 +2881,24 @@ dependencies = [
 name = "bongos_pools"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bongos_checks_model",
  "bongos_lanes",
  "bongos_lanes_model",
  "bongos_pools_model",
  "bongos_project_repo",
  "bongos_project_repo_model",
+ "bongos_work_model",
  "bongos_workflow",
  "bongos_workflow_model",
  "futures 0.3.32",
  "gpui",
+ "libc",
+ "paths",
+ "serde",
  "settings",
  "tempfile",
+ "thiserror 2.0.17",
  "toml 0.8.23",
 ]
 

@@ -1,20 +1,25 @@
 //! The grammar of a `needs` entry, the same wherever a pool is named: a pool name, or a table
 //! `{ pool, mode, count }`.
 
+use serde::{Deserialize, Serialize};
+
 use crate::decl::{PoolDecl, PoolKind};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum NeedMode {
     Shared,
     Exclusive,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Need {
     pub pool: String,
     /// Written `mode`; `None` is the pool's default (`shared` on `rw`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<NeedMode>,
     /// Written `count`; `None` is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count: Option<u32>,
 }
 
