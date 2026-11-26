@@ -282,14 +282,20 @@ fn a_bad_middle_line_is_an_error() {
 }
 
 #[test]
-fn a_bad_terminated_last_line_is_an_error() {
-    let text = format!("{}{{\"event\": \"Nope\"}}\n", Event::Created.to_line());
-    let error = parse_log(&text).unwrap_err();
-    assert_eq!(error.line, 2);
-    // Half a line followed by a newline is damage too, not a crash tail.
+fn a_bad_terminated_last_line_is_dropped_like_a_crash_tail() {
+    let good = Event::Created.to_line();
+    let text = format!("{good}{{\"event\": \"Nope\"}}\n");
+    let parsed = parse_log(&text).unwrap();
+    assert_eq!(parsed.events, vec![Event::Created]);
+    assert!(parsed.dropped_tail);
+    assert_eq!(parsed.valid_len, good.len());
+    // Half a line followed by a newline is a torn last line too.
     let tail = Event::Queued.to_line();
-    let text = format!("{}{}\n", Event::Created.to_line(), &tail[..tail.len() / 2]);
-    assert_eq!(parse_log(&text).unwrap_err().line, 2);
+    let text = format!("{good}{}\n", &tail[..tail.len() / 2]);
+    let parsed = parse_log(&text).unwrap();
+    assert_eq!(parsed.events, vec![Event::Created]);
+    assert!(parsed.dropped_tail);
+    assert_eq!(parsed.valid_len, good.len());
 }
 
 #[test]

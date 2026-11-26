@@ -271,9 +271,10 @@ pub struct LogError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedLog {
     pub events: Vec<Event>,
-    /// Whether the log ended in an unterminated line (a crash mid-write), which was dropped.
+    /// Whether the log ended in an unterminated or unparseable last line (a crash mid-write), which
+    /// was dropped.
     pub dropped_tail: bool,
-    /// The byte length of the newline-terminated prefix the events came from. [`repair`]
+    /// The byte length of the valid, newline-terminated prefix the events came from. [`repair`]
     /// truncates the file to it so the next append starts on a fresh line.
     pub valid_len: usize,
 }
@@ -281,9 +282,11 @@ pub struct ParsedLog {
 /// Parses `events.jsonl`. An event counts only once its line, newline included, is in the file:
 /// [`append`] writes the newline last, so an unterminated last line is a crash mid-write and is
 /// dropped (`dropped_tail`), even when its JSON happens to be complete; nothing acted on it,
-/// because `append` had not returned. Blank lines are skipped. A terminated line that does not
-/// parse is an error wherever it is, because the log was written one whole line at a time and
-/// something else damaged it.
+/// because `append` had not returned. Blank lines are skipped. A terminated last line that does
+/// not parse, after at least one good line, is dropped the same way (a torn write that a later
+/// writer's newline terminated; `valid_len` stops before it). Any other terminated line that does
+/// not parse is an error, because the log was written one whole line at a time and something
+/// else damaged it.
 pub fn parse_log(bytes: impl AsRef<[u8]>) -> Result<ParsedLog, LogError> {
     let bytes = bytes.as_ref();
     let valid_len = bytes
@@ -291,14 +294,31 @@ pub fn parse_log(bytes: impl AsRef<[u8]>) -> Result<ParsedLog, LogError> {
         .rposition(|byte| *byte == b'\n')
         .map_or(0, |index| index + 1);
     let tail = &bytes[valid_len..];
+    let tail_blank = tail.trim_ascii().is_empty();
     let mut events = Vec::new();
+    let mut offset = 0;
+    let mut kept_len = valid_len;
+    let mut dropped_line = false;
     for (index, line) in bytes[..valid_len].split(|byte| *byte == b'\n').enumerate() {
+        let start = offset;
+        offset += line.len() + 1;
         if line.trim_ascii().is_empty() {
             continue;
         }
         match serde_json::from_slice::<Event>(line) {
             Ok(event) => events.push(event),
             Err(error) => {
+                // A torn last line that still ended in a newline (another writer's partial
+                // write) is dropped like a crash tail, but only after a good line and with
+                // nothing after it.
+                let is_last = bytes[offset.min(valid_len)..valid_len]
+                    .trim_ascii()
+                    .is_empty();
+                if is_last && tail_blank && !events.is_empty() {
+                    kept_len = start;
+                    dropped_line = true;
+                    break;
+                }
                 return Err(LogError {
                     line: index + 1,
                     message: error.to_string(),
@@ -308,8 +328,8 @@ pub fn parse_log(bytes: impl AsRef<[u8]>) -> Result<ParsedLog, LogError> {
     }
     Ok(ParsedLog {
         events,
-        dropped_tail: !tail.trim_ascii().is_empty(),
-        valid_len,
+        dropped_tail: dropped_line || !tail_blank,
+        valid_len: kept_len,
     })
 }
 
@@ -321,7 +341,7 @@ pub enum RepairError {
     Log(#[from] LogError),
 }
 
-/// Reads the open log from its start, truncates an unterminated tail left by a crash (see
+/// Reads the open log from its start, truncates an unterminated or torn last line left by a crash (see
 /// [`parse_log`]) and syncs, then leaves the cursor at the end, ready for [`append`]. A damaged
 /// log is returned as an error and left untouched.
 pub fn repair(file: &mut File) -> Result<ParsedLog, RepairError> {
