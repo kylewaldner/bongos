@@ -467,7 +467,7 @@ fn a_trigger_with_merge_into_but_no_repo_is_refused() {
 fn a_trigger_repo_run_merges_only_with_merge_into() {
     let triggers = TRIGGER_REPO.replace("base = \"main\"", "merge_into = \"release\"");
     let inputs = ReferenceInputs {
-        triggers: triggers.clone(),
+        triggers,
         project_workflows: vec![workflow("fix-release", MERGES)],
         ..base()
     };
