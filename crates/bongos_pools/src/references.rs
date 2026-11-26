@@ -112,10 +112,12 @@ impl Workflows {
     }
 
     fn resolve(&self, name: &str) -> Resolution<'_> {
-        let found = |entry: &'_ (String, Option<Definition>)| match entry {
-            (label, Some(definition)) => Resolution::Found(label.as_str(), definition),
-            (_, None) => Resolution::Unread,
-        };
+        fn found(entry: &(String, Option<Definition>)) -> Resolution<'_> {
+            match entry {
+                (label, Some(definition)) => Resolution::Found(label.as_str(), definition),
+                (_, None) => Resolution::Unread,
+            }
+        }
         if let Some(entry) = self.project.get(name) {
             return found(entry);
         }
@@ -526,7 +528,7 @@ fn check_trigger(
             let reads_item = inputs
                 .iter()
                 .filter(|(_, source)| item_field(source).is_some());
-            match &on_queue {
+            match on_queue {
                 Some((queue, _)) => check_item_inputs(
                     inputs
                         .iter()
@@ -624,7 +626,7 @@ pub fn reference_problems(inputs: &ReferenceInputs) -> Vec<Problem> {
 
     check_lane_table(inputs, &pools, &queues, &workflows, &mut out);
 
-    for (_, (label, definition)) in &workflows.project {
+    for (label, definition) in workflows.project.values() {
         let Some(definition) = definition else {
             continue;
         };
