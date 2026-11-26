@@ -9,7 +9,14 @@
 //! unlinks the first. A file is never written, overwritten or opened for
 //! writing once delivered, and a hard link never replaces an existing name.
 //! A crash between the link and the unlink leaves two names for one inode,
-//! which [`recover`] resolves by inode (and [`scan`] hides in the meantime).
+//! which [`scan`] lists once. [`recover`] unlinks the earlier name of a pair
+//! in different directories; a pair in one directory (`cur/`) stays until the
+//! next read or unread of that item resolves it.
+//!
+//! A move holds an advisory lock on the file from its link to its unlink, and
+//! removing one name of a same-directory pair takes the same lock and checks
+//! again that both names still point at the file, so two processes resolving
+//! one pair in opposite directions never unlink both names.
 
 use crate::format::{self, Item, Unreadable};
 use crate::name::{self, Flags, ParsedName, SEEN};
@@ -99,11 +106,12 @@ impl Entry {
             .unwrap_or_default()
     }
 
-    /// Among names sharing an inode the greatest key is kept: archive over
-    /// cur over new. Two `cur/` names for one inode come from a crash during
-    /// read or unread, and which one was the destination cannot be told from
-    /// the names, so the lexicographically greatest flags string wins (the
-    /// read name, when the two differ only by `S`).
+    /// Among names sharing an inode the greatest key is listed: archive over
+    /// cur over new. Two `cur/` names for one inode come from a read or unread
+    /// that was interrupted (or is still running), and which one is the
+    /// destination cannot be told from the names, so the scan deterministically
+    /// lists the greatest flags string (the read name, when the two differ only
+    /// by `S`). [`recover`] never unlinks either of them.
     fn keep_key(&self) -> (Dir, String, String) {
         (self.dir, self.flags_string(), self.file_name())
     }
@@ -124,7 +132,7 @@ pub fn scan(root: &Path) -> io::Result<Vec<Entry>> {
 /// by path. `tmp/` is never read. Names starting with `.`, names with a
 /// malformed `:2,` suffix, directories and other non-regular files are
 /// skipped. When a crash left two names for one inode only the one that is
-/// furthest along is listed; [`recover`] unlinks the others.
+/// furthest along is listed (see [`Entry::keep_key`]).
 pub fn scan_with(root: &Path, options: ScanOptions) -> io::Result<Vec<Entry>> {
     let (keep, _) = resolve(collect(root, options.include_archive)?);
     let mut entries: Vec<Entry> = keep
@@ -136,21 +144,34 @@ pub fn scan_with(root: &Path, options: ScanOptions) -> io::Result<Vec<Entry>> {
 }
 
 /// Unlinks the extra names a crash between link and unlink left behind and
-/// returns their paths. Every unlinked name shares its inode with a kept one,
-/// so no bytes are lost.
+/// returns their paths. Only a name in an earlier directory than the kept one
+/// (`new/` before `cur/` before `archive/`) is unlinked: every move goes
+/// forward or stays in its directory and links before it unlinks, so the
+/// later name always still exists or has a successor, even while another
+/// process is moving the file. Two names in one directory are never touched,
+/// because an interrupted read and an interrupted (or running) unread look
+/// the same; the next read or unread of the item resolves them.
 pub fn recover(root: &Path) -> io::Result<Vec<PathBuf>> {
     let (_, extra) = resolve(collect(root, false)?);
     let mut removed = Vec::new();
-    for entry in extra {
-        // Only unlink the name if it still points at the same file.
-        let still_same = fs::symlink_metadata(&entry.path)
-            .is_ok_and(|meta| meta.ino() == entry.inode && meta.dev() == entry.dev);
-        if still_same && remove_if_present(&entry.path)? {
+    for (entry, kept) in extra {
+        if entry.dir >= kept.dir {
+            continue;
+        }
+        // Only unlink the name if both it and the kept name still point at
+        // the same file.
+        if still_names(&entry) && still_names(&kept) && remove_if_present(&entry.path)? {
             removed.push(entry.path);
         }
     }
     removed.sort();
     Ok(removed)
+}
+
+/// Whether `entry.path` still names the file it named when scanned.
+fn still_names(entry: &Entry) -> bool {
+    fs::symlink_metadata(&entry.path)
+        .is_ok_and(|meta| meta.ino() == entry.inode && meta.dev() == entry.dev)
 }
 
 fn entry_at(dir: Dir, parsed: ParsedName, path: PathBuf) -> io::Result<Option<Entry>> {
@@ -227,8 +248,9 @@ fn collect(root: &Path, all_archive: bool) -> io::Result<Vec<Entry>> {
     Ok(entries)
 }
 
-/// Splits entries into the names to keep (one per inode) and the extra names.
-fn resolve(entries: Vec<Entry>) -> (Vec<Entry>, Vec<Entry>) {
+/// Splits entries into the names to keep (one per inode) and the extra names,
+/// each paired with the name kept for its inode.
+fn resolve(entries: Vec<Entry>) -> (Vec<Entry>, Vec<(Entry, Entry)>) {
     let mut groups: HashMap<(u64, u64), Vec<Entry>> = HashMap::new();
     for entry in entries {
         groups
@@ -241,9 +263,9 @@ fn resolve(entries: Vec<Entry>) -> (Vec<Entry>, Vec<Entry>) {
     for (_, mut group) in groups {
         group.sort_by_key(Entry::keep_key);
         if let Some(kept) = group.pop() {
+            extra.extend(group.into_iter().map(|entry| (entry, kept.clone())));
             keep.push(kept);
         }
-        extra.extend(group);
     }
     (keep, extra)
 }
@@ -273,6 +295,28 @@ fn same_file(a: &Path, b: &Path) -> bool {
         (Ok(a), Ok(b)) => a.ino() == b.ino() && a.dev() == b.dev(),
         _ => false,
     }
+}
+
+/// Takes the advisory lock on the file `path` names, held until the returned
+/// handle drops. Best effort: `None` when the file cannot be opened (read
+/// only) or the file system has no locks.
+fn lock_file(path: &Path) -> Option<File> {
+    let file = File::open(path).ok()?;
+    file.lock().ok()?;
+    Some(file)
+}
+
+/// Finishes an interrupted move whose destination `kept` already names the
+/// file: unlinks `extra` only if, under the file's lock, both names still
+/// point at one file. Returns whether the two still matched (and `extra` is
+/// now gone).
+fn unlink_twin(kept: &Path, extra: &Path) -> io::Result<bool> {
+    let _lock = lock_file(kept);
+    if !same_file(kept, extra) {
+        return Ok(false);
+    }
+    remove_if_present(extra)?;
+    Ok(true)
 }
 
 /// Removes `path`, treating an already missing name as done.
@@ -307,10 +351,23 @@ fn change_seen(root: &Path, entry: &Entry, seen: bool) -> io::Result<PathBuf> {
     let mut source = entry.clone();
     let mut retried = false;
     loop {
+        let parsed = source.parsed_name();
         if source.is_read() == seen {
+            if source.dir == Dir::Cur {
+                // An interrupted read or unread may have left the other
+                // state's name for the same file beside this one: drop it.
+                let other = if seen {
+                    parsed.with_flag_removed(SEEN)
+                } else {
+                    parsed.with_flag_added(SEEN)
+                };
+                let twin = root.join(CUR).join(other.render());
+                if twin != source.path {
+                    unlink_twin(&source.path, &twin)?;
+                }
+            }
             return Ok(source.path);
         }
-        let parsed = source.parsed_name();
         let target = if seen {
             parsed.with_flag_added(SEEN)
         } else {
@@ -321,20 +378,25 @@ fn change_seen(root: &Path, entry: &Entry, seen: bool) -> io::Result<PathBuf> {
             Ok(()) => return Ok(destination),
             Err(error) => error,
         };
-        match error.kind() {
+        let retry = match error.kind() {
             io::ErrorKind::AlreadyExists if same_file(&source.path, &destination) => {
-                // A crash left both names: finish the unlink.
-                remove_if_present(&source.path)?;
-                return Ok(destination);
-            }
-            io::ErrorKind::AlreadyExists | io::ErrorKind::NotFound if !retried => {
-                retried = true;
-                match find_moved(root, &source)? {
-                    Some(moved) => source = moved,
-                    None => return Err(error),
+                // An interrupted move left both names: finish the unlink,
+                // unless another process changed them in the meantime.
+                if unlink_twin(&destination, &source.path)? {
+                    return Ok(destination);
                 }
+                true
             }
-            _ => return Err(error),
+            io::ErrorKind::AlreadyExists | io::ErrorKind::NotFound => true,
+            _ => false,
+        };
+        if !retry || retried {
+            return Err(error);
+        }
+        retried = true;
+        match find_moved(root, &source)? {
+            Some(moved) => source = moved,
+            None => return Err(error),
         }
     }
 }
@@ -342,11 +404,22 @@ fn change_seen(root: &Path, entry: &Entry, seen: bool) -> io::Result<PathBuf> {
 /// Archives an item: `new/<u>` or `cur/<u>:2,<f>` becomes
 /// `archive/<u>:2,<f>` with its flags kept. When that name is taken the
 /// unique gets `.<n>` appended, with `n` counting up from 1 until a name is
-/// free. Archiving an archived item does nothing.
+/// free. Archiving an archived item does nothing. A stale `entry` whose file
+/// was read or unread since the scan is found again by unique and inode.
 pub fn archive(root: &Path, entry: &Entry) -> io::Result<PathBuf> {
     if entry.dir == Dir::Archive {
         return Ok(entry.path.clone());
     }
+    match archive_once(root, entry) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => match find_moved(root, entry)? {
+            Some(moved) => archive_once(root, &moved),
+            None => Err(error),
+        },
+        result => result,
+    }
+}
+
+fn archive_once(root: &Path, entry: &Entry) -> io::Result<PathBuf> {
     let flags = entry.flags.clone().unwrap_or_default();
     for n in 0..=MAX_ARCHIVE_SUFFIX {
         let unique = if n == 0 {
@@ -358,8 +431,7 @@ pub fn archive(root: &Path, entry: &Entry) -> io::Result<PathBuf> {
         match move_no_replace(&entry.path, &destination) {
             Ok(()) => return Ok(destination),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                if same_file(&entry.path, &destination) {
-                    remove_if_present(&entry.path)?;
+                if same_file(&entry.path, &destination) && unlink_twin(&destination, &entry.path)? {
                     return Ok(destination);
                 }
             }
@@ -457,6 +529,8 @@ fn move_with(
     destination: &Path,
     link: impl Fn(&Path, &Path) -> io::Result<()>,
 ) -> io::Result<()> {
+    // Held from the link to the unlink; see the module docs.
+    let _lock = lock_file(source);
     match link(source, destination) {
         Ok(()) => {
             remove_if_present(source)?;

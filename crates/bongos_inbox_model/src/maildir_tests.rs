@@ -245,6 +245,23 @@ fn a_stale_entry_finds_the_moved_file() {
 }
 
 #[test]
+fn archiving_a_stale_entry_finds_the_moved_file() {
+    let (_temp, root) = setup();
+    deliver(&root, &item("stale archive")).unwrap();
+    let stale = only(&root);
+    let bytes = fs::read(&stale.path).unwrap();
+    // Another process marked it read: the stale new/ name is gone.
+    mark_read(&root, &stale).unwrap();
+    let archived = archive(&root, &stale).unwrap();
+    assert_eq!(
+        archived,
+        root.join(ARCHIVE).join(format!("{}:2,S", stale.unique))
+    );
+    assert_eq!(names(&root), vec![format!("archive/{}:2,S", stale.unique)]);
+    assert_eq!(fs::read(&archived).unwrap(), bytes);
+}
+
+#[test]
 fn an_existing_read_destination_is_never_replaced() {
     let (_temp, root) = setup();
     let source = put(&root, NEW, "u.md", b"source bytes");
@@ -312,14 +329,62 @@ fn a_crash_during_read_recovers_to_one_name() {
     assert_eq!(names(&root), vec!["cur/u.md:2,S"]);
 }
 
+/// A same-directory pair: one row (the read name), no name unlinked by
+/// `recover`, bytes intact.
+fn assert_pair_kept(root: &Path, read: &Path, unread: &Path) {
+    let bytes = fs::read(read).unwrap();
+    let rows: Vec<PathBuf> = all(root).into_iter().map(|e| e.path).collect();
+    assert_eq!(rows, vec![read.to_path_buf()]);
+    assert!(recover(root).unwrap().is_empty());
+    assert_eq!(fs::read(read).unwrap(), bytes);
+    assert_eq!(fs::read(unread).unwrap(), bytes);
+}
+
+/// A crash during a read (`2,` to `2,S`) or an unread (`2,S` to `2,`) in
+/// `cur/` leaves both names; the next read or unread converges to one.
 #[test]
-fn a_crash_during_unread_keeps_the_greatest_flags() {
+fn a_crash_during_read_or_unread_in_cur_keeps_both_names_until_the_next_change() {
+    let orders = [("u.md:2,", "u.md:2,S"), ("u.md:2,S", "u.md:2,")];
+    let changes = [(true, "cur/u.md:2,S"), (false, "cur/u.md:2,")];
+    for (from, to) in orders {
+        for (seen, kept) in changes {
+            let (_temp, root) = setup();
+            crash(&root, (CUR, from), (CUR, to));
+            let read = root.join(CUR).join("u.md:2,S");
+            let unread = root.join(CUR).join("u.md:2,");
+            assert_pair_kept(&root, &read, &unread);
+            let bytes = fs::read(&read).unwrap();
+            let path = if seen {
+                mark_read(&root, &only(&root)).unwrap()
+            } else {
+                mark_unread(&root, &only(&root)).unwrap()
+            };
+            assert_eq!(names(&root), vec![kept], "{from} -> {to}, seen {seen}");
+            assert_eq!(path, root.join(kept));
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+    }
+}
+
+#[test]
+fn recover_during_an_unread_never_drops_the_last_name() {
     let (_temp, root) = setup();
-    let (destination, source) = crash(&root, (CUR, "u.md:2,S"), (CUR, "u.md:2,"));
-    // Which name was the destination cannot be told from the names, so the
-    // greater flags string ("S") is kept.
-    assert_recovers(&root, &source, &destination);
-    assert_eq!(names(&root), vec!["cur/u.md:2,S"]);
+    let read = put_item(&root, CUR, "u.md:2,S", "racing");
+    let unread = root.join(CUR).join("u.md:2,");
+    let bytes = fs::read(&read).unwrap();
+    // The unread as `mark_unread` does it, with `recover` run by "another
+    // process" between the link and the unlink.
+    move_with(&read, &unread, |source, destination| {
+        fs::hard_link(source, destination)?;
+        assert!(recover(&root).unwrap().is_empty());
+        assert!(source.exists() && destination.exists());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(names(&root), vec!["cur/u.md:2,"]);
+    assert_eq!(fs::read(&unread).unwrap(), bytes);
+    assert!(recover(&root).unwrap().is_empty());
+    assert_eq!(names(&root), vec!["cur/u.md:2,"]);
 }
 
 #[test]
