@@ -17,10 +17,13 @@
 pub mod annotate;
 pub mod private_git;
 mod promise_text;
+pub mod protected;
 pub mod safe_git;
 
 #[cfg(test)]
 mod private_git_tests;
+#[cfg(test)]
+mod protected_tests;
 #[cfg(test)]
 mod safe_git_tests;
 #[cfg(test)]
@@ -35,6 +38,8 @@ use std::{
 
 use sandbox::{GitSandboxPolicy, SandboxFsPolicy, SandboxNetPolicy, SandboxPolicy};
 use util::job_roots::RootLifetime;
+
+use crate::protected::{ProtectedKind, ProtectedLocation};
 
 pub use promise_text::{Platform, Promise, SandboxAvailability, promise, switch_off_notes};
 
@@ -155,6 +160,17 @@ pub enum ConfineError {
         records_dir.display()
     )]
     RecordsDirectory { root: PathBuf, records_dir: PathBuf },
+    #[error(
+        "the writable path {} overlaps {} {}",
+        path.display(),
+        kind.noun(),
+        protected.display()
+    )]
+    ProtectedLocation {
+        path: PathBuf,
+        kind: ProtectedKind,
+        protected: PathBuf,
+    },
     #[error("a read-only tree cannot have private git: {}", tree.display())]
     ReadOnlyTreeWithPrivateGit { tree: PathBuf },
     #[error(
@@ -296,7 +312,8 @@ impl Confinement {
     /// git directory (except a main worktree's own `.git`, which is masked), a writable root
     /// that contains or lies inside the run records directory, a read-only tree with private
     /// git, a read-only tree that equals or lies inside a writable root and a main worktree with
-    /// private git. A read-only tree is not a writable root.
+    /// private git. A read-only tree is not a writable root. A writable root that equals,
+    /// contains or lies inside a protected location ([`protected::current`]) is refused too.
     ///
     /// Once the declaration is accepted, every writable root is recorded in the process's job
     /// roots registry: a main worktree (a writable tree whose `.git` is a directory) for the
@@ -323,9 +340,20 @@ impl Confinement {
         Ok(confinement)
     }
 
-    /// Checks the declaration and works out the roots and masks, writing nothing.
+    /// Checks the declaration against this process's protected locations and works out the
+    /// roots and masks, writing nothing.
     fn plan(declaration: &JobDeclaration, host: &HostGit) -> Result<Self, ConfineError> {
+        Self::plan_with_protected(declaration, host, &protected::current())
+    }
+
+    /// [`Confinement::plan`] against the given protected locations.
+    pub(crate) fn plan_with_protected(
+        declaration: &JobDeclaration,
+        host: &HostGit,
+        protected: &[ProtectedLocation],
+    ) -> Result<Self, ConfineError> {
         let mut roots = vec![canonical(&declaration.scratch)?];
+        let mut given_roots = vec![(declaration.scratch.clone(), roots[0].clone())];
         let mut writable_trees = Vec::new();
         let mut read_only_trees = Vec::new();
         for tree in &declaration.trees {
@@ -337,6 +365,7 @@ impl Confinement {
             let path = canonical(&tree.path)?;
             match tree.access {
                 TreeAccess::Writable => {
+                    given_roots.push((tree.path.clone(), path.clone()));
                     roots.push(path.clone());
                     writable_trees.push((path, tree.git));
                 }
@@ -348,13 +377,17 @@ impl Confinement {
             .iter()
             .chain(&declaration.extra_writable)
         {
-            roots.push(canonical(dir)?);
+            let path = canonical(dir)?;
+            given_roots.push((dir.clone(), path.clone()));
+            roots.push(path);
         }
         dedup(&mut roots);
 
         if let Some(root) = roots.iter().find(|root| root.parent().is_none()) {
             return Err(ConfineError::FilesystemRoot { path: root.clone() });
         }
+
+        check_protected(&given_roots, protected)?;
 
         for tree in &read_only_trees {
             if let Some(root) = roots.iter().find(|root| tree.starts_with(root)) {
@@ -627,6 +660,30 @@ fn canonical(path: &Path) -> Result<PathBuf, ConfineError> {
         });
     }
     std::fs::canonicalize(path).map_err(|error| unresolved(path, error))
+}
+
+/// Refuses a writable root, as given or canonical, that overlaps a protected location as given or
+/// resolved.
+fn check_protected(
+    roots: &[(PathBuf, PathBuf)],
+    protected: &[ProtectedLocation],
+) -> Result<(), ConfineError> {
+    for location in protected {
+        let forms = protected::forms(&location.path);
+        for (given, root) in roots {
+            let overlaps = forms
+                .iter()
+                .any(|form| protected::overlaps(root, form) || protected::overlaps(given, form));
+            if overlaps {
+                return Err(ConfineError::ProtectedLocation {
+                    path: root.clone(),
+                    kind: location.kind,
+                    protected: location.path.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn dedup(paths: &mut Vec<PathBuf>) {
