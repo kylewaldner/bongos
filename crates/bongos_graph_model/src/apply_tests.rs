@@ -606,7 +606,7 @@ fn generated_batch(rng: &mut Lcg) -> Value {
             3 => json!({ "op": "remove", "task": rng.pick(&names) }),
             4 => json!({
                 "op": "add_edge", "from": rng.pick(&names), "to": rng.pick(&names),
-                "kind": if rng.next() % 2 == 0 { "after" } else { "stacked_on" },
+                "kind": if rng.next().is_multiple_of(2) { "after" } else { "stacked_on" },
             }),
             _ => json!({
                 "op": "remove_edge", "from": rng.pick(&names), "to": rng.pick(&names),
