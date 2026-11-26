@@ -14,7 +14,7 @@ use crate::grant::{Hold, PoolTable, Waiter};
 pub struct OwnerKey(pub String);
 
 /// Where inside its owner a holder sits. `Job` and `Run` enclose every other level of the same
-/// owner and `Step { key }` encloses `Part { key, .. }`; enclosure itself is not decided here.
+/// owner and `Step { key }` encloses `Part { key, .. }` (see [`HolderPath::encloses`]).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Level {
     Job,
@@ -28,6 +28,23 @@ pub enum Level {
 pub struct HolderPath {
     pub owner: OwnerKey,
     pub level: Level,
+}
+
+impl HolderPath {
+    /// Whether this path strictly encloses `other`: both have the same owner, the paths differ,
+    /// and either this is a `Job` or `Run` level (each encloses every other level of its owner,
+    /// so they enclose each other), or this is `Step { key }` and `other` is a `Part` of that key.
+    /// Siblings (two steps, two parts, two hooks) never enclose each other.
+    pub fn encloses(&self, other: &HolderPath) -> bool {
+        if self.owner != other.owner || self == other {
+            return false;
+        }
+        match (&self.level, &other.level) {
+            (Level::Job | Level::Run, _) => true,
+            (Level::Step { key }, Level::Part { key: part_key, .. }) => key == part_key,
+            _ => false,
+        }
+    }
 }
 
 /// The text the views show for a holder ("lane build-2, job on Invoice export").
@@ -57,6 +74,20 @@ pub struct Holder {
     pub label: HolderLabel,
     pub host: HostRef,
     pub process: Option<ProcRef>,
+}
+
+impl Holder {
+    /// Whether this holder's path strictly encloses `other`'s within the same project.
+    pub fn encloses(&self, other: &Holder) -> bool {
+        self.project == other.project && self.path.encloses(&other.path)
+    }
+
+    /// Whether this holder's path is `other`'s or strictly encloses it, within the same project:
+    /// such a holder cannot release while `other` waits.
+    pub fn is_or_encloses(&self, other: &Holder) -> bool {
+        self.project == other.project
+            && (self.path == other.path || self.path.encloses(&other.path))
+    }
 }
 
 /// Answers whether the process with this pid and start time still runs. A pid whose process

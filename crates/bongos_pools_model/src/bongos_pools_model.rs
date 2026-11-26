@@ -1,7 +1,8 @@
 //! Declaration model for pools, queues and triggers: the three declaration files parsed with line
 //! numbers (an unknown key is an error), the grammar of a `needs` entry, schedule parsing, and the
-//! per-folder validation that names file and line; the grant rule over a table of pools, and the
-//! holders of those pools with their liveness.
+//! per-folder validation that names file and line; the grant rule over a table of pools, the
+//! holders of those pools with their liveness and enclosure, and the wait-for graph that refuses
+//! a deadlocking request.
 //!
 //! This crate is plain Rust: no gpui, no store, no file access. A missing file is the empty text.
 
@@ -12,6 +13,7 @@ pub mod needs;
 pub mod schedule;
 pub mod source;
 pub mod validate;
+pub mod wait_for;
 
 pub use decl::{
     Action, AllDone, ExhaustedAction, FieldType, Guard, GuardCheck, ItemField, LaneFields, On,
@@ -19,9 +21,9 @@ pub use decl::{
     parse_pools, parse_queues, parse_triggers,
 };
 pub use grant::{
-    Blocked, Grant, GrantedPool, GuardReading, GuardReadings, GuardState, GuardValue, Hold,
-    PoolState, PoolTable, PoolWait, QueueError, Request, RequestId, Timestamp, WaitStatus, Waiter,
-    admit_now, grant, try_now, wait_status,
+    Admit, Blocked, Grant, GrantedPool, GuardReading, GuardReadings, GuardState, GuardValue, Hold,
+    PoolState, PoolTable, PoolWait, QueueError, Request, RequestId, Satisfied, Timestamp,
+    WaitStatus, Waiter, admit_now, check_own_hold, grant, try_now, wait_status,
 };
 pub use holder::{
     Holder, HolderLabel, HolderPath, HostRef, Level, OwnerKey, Probe, ProcRef, Pruned, alive,
@@ -34,6 +36,7 @@ pub use schedule::{
 };
 pub use source::{Diagnostic, Located, ParseError, SCHEMA_VERSION};
 pub use validate::{Problem, validate_pools, validate_queues, validate_triggers};
+pub use wait_for::{CycleLink, Refused, judge, would_cycle};
 
 #[cfg(test)]
 mod decl_tests;
@@ -49,3 +52,7 @@ mod needs_tests;
 mod schedule_tests;
 #[cfg(test)]
 mod validate_tests;
+#[cfg(test)]
+mod wait_for_prop_tests;
+#[cfg(test)]
+mod wait_for_tests;
