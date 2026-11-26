@@ -2810,6 +2810,7 @@ dependencies = [
  "theme",
  "theme_settings",
  "workspace",
+ "zed_actions",
 ]
 
 [[package]]
