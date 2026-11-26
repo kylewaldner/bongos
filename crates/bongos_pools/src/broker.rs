@@ -478,6 +478,8 @@ struct Shared {
     guards: GuardInputs,
     state: RefCell<State>,
     listeners: RefCell<Vec<Rc<dyn Fn(&PoolsEvent)>>>,
+    /// Called after every drain, undrain and start.
+    writer_listeners: RefCell<Vec<Rc<dyn Fn()>>>,
 }
 
 /// Request ids are unique in this process, so no two brokers (or a broker and its successor)
@@ -512,6 +514,7 @@ impl PoolBroker {
             guards,
             state: RefCell::new(State::default()),
             listeners: RefCell::new(Vec::new()),
+            writer_listeners: RefCell::new(Vec::new()),
         });
         // Prunes the machine store before the first grant (the project store pruned at open).
         shared.push(Op::Poll);
@@ -529,6 +532,22 @@ impl PoolBroker {
     /// Calls `listener` with every event from now on.
     pub fn subscribe(&self, listener: impl Fn(&PoolsEvent) + 'static) {
         self.shared.listeners.borrow_mut().push(Rc::new(listener));
+    }
+
+    /// Calls `listener` after every [`PoolBroker::drain`], [`PoolBroker::undrain`] and
+    /// [`PoolBroker::started`] from now on.
+    pub fn on_writer(&self, listener: impl Fn() + 'static) {
+        self.shared
+            .writer_listeners
+            .borrow_mut()
+            .push(Rc::new(listener));
+    }
+
+    fn writer_changed(&self) {
+        let listeners: Vec<_> = self.shared.writer_listeners.borrow().clone();
+        for listener in listeners {
+            listener();
+        }
     }
 
     /// Registers the project's pools in its store and its machine pools in the machine store. A
@@ -619,6 +638,7 @@ impl PoolBroker {
             holds: true,
             done: Some(done),
         });
+        self.writer_changed();
         self.shared.parts.foreground.spawn(async move {
             finished.await.ok();
         })
@@ -627,6 +647,7 @@ impl PoolBroker {
     /// The writer stays here after a drain: requests are accepted again.
     pub fn undrain(&self) {
         self.shared.state.borrow_mut().draining = false;
+        self.writer_changed();
     }
 
     /// This process is the writer (again): drops the given-up requests nobody waits for any more,
@@ -664,6 +685,7 @@ impl PoolBroker {
             self.shared.push(Op::Enqueue(id));
         }
         self.shared.ensure_timer();
+        self.writer_changed();
     }
 
     /// What the last drain gave up and [`PoolBroker::started`] has not asked again yet.

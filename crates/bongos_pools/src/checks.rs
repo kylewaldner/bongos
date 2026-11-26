@@ -35,6 +35,8 @@ pub struct PoolsForChecks {
     brokers: RefCell<BTreeMap<String, Rc<PoolBroker>>>,
     /// The goal of a task by its id, for the holder labels; none names the task by id.
     goals: RefCell<Option<Box<dyn Fn(&str) -> Option<String>>>>,
+    /// Called with every broker inserted.
+    inserted: RefCell<Vec<Rc<dyn Fn(&Rc<PoolBroker>)>>>,
 }
 
 impl PoolsForChecks {
@@ -45,7 +47,20 @@ impl PoolsForChecks {
     /// Serves `broker`'s project from now on, in place of any broker it had.
     pub fn insert(&self, broker: Rc<PoolBroker>) {
         let id = broker.project().id.clone();
-        self.brokers.borrow_mut().insert(id, broker);
+        self.brokers.borrow_mut().insert(id, broker.clone());
+        let listeners: Vec<_> = self.inserted.borrow().clone();
+        for listener in listeners {
+            listener(&broker);
+        }
+    }
+
+    /// Calls `listener` with each broker open now and every one inserted from now on.
+    pub fn on_insert(&self, listener: impl Fn(&Rc<PoolBroker>) + 'static) {
+        let brokers: Vec<_> = self.brokers.borrow().values().cloned().collect();
+        for broker in &brokers {
+            listener(broker);
+        }
+        self.inserted.borrow_mut().push(Rc::new(listener));
     }
 
     pub fn remove(&self, project: &str) -> Option<Rc<PoolBroker>> {
