@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
-use bongos_project_repo_model::layout::{PROJECT_FILE, TASK_FILE};
 pub use bongos_project_repo_model::DefinitionOp;
+use bongos_project_repo_model::layout::{PROJECT_FILE, TASK_FILE};
 use bongos_project_repo_model::{Author, RelPath, TaskStateRecord, TodoStateRecord, split};
 use bongos_work_model::commands::{Change, Write, create_prompts};
 use bongos_work_model::files::write_atomic;
