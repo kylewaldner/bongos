@@ -316,6 +316,7 @@ pub fn render_item<V: 'static>(
                     )
                 });
                 div()
+                    .flex_none()
                     .mb(px(12.))
                     .child(
                         StyledText::new(SharedString::from(paragraph.text.clone()))
@@ -399,7 +400,11 @@ pub fn render_item<V: 'static>(
         .py(px(pad_y))
         .child(
             v_flex()
-                .max_w(rems(COLUMN_EMS))
+                // A definite width (the reading column, or the pane when that is narrower): with
+                // only a `max_w` the last wrapped paragraph was measured too short and the action
+                // line was drawn over its last line.
+                .w(rems(COLUMN_EMS))
+                .max_w_full()
                 .child(meta)
                 .child(title)
                 .child(body)

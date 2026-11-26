@@ -15,3 +15,20 @@ impl Settings for InboxSettings {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use settings::SettingsStore;
+
+    #[gpui::test]
+    fn the_inbox_is_on_by_default(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            InboxSettings::register(cx);
+            assert!(InboxSettings::get_global(cx).enabled);
+        });
+    }
+}
