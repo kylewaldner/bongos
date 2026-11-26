@@ -1809,9 +1809,8 @@ fn open_run(spec: RunSpec) -> Result<LiveRun, RuntimeError> {
     let path = spec.attempt_dir.join(EVENTS_FILE);
     let mut log = OpenOptions::new()
         .read(true)
-        .write(true)
+        .append(true)
         .create(true)
-        .truncate(false)
         .open(&path)
         .map_err(|error| RuntimeError::io(&path, error))?;
     let parsed = record::repair(&mut log).map_err(|error| RuntimeError::io(&path, error))?;
