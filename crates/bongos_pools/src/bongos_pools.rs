@@ -8,7 +8,9 @@
 //! is false again they report nothing, and the lane table refuses its keys again.
 //!
 //! The pool stores ([`ProjectStore`], [`MachineStore`], [`transact_mixed`]) keep the tables the
-//! grant rule works on.
+//! grant rule works on. The [`PoolBroker`] of each project this process is the writer of drives
+//! them; it is opened, drained and restarted by the [`PoolsParticipant`] and served to the task
+//! checks as [`PoolsForChecks`], both registered once `pools.enabled` is on.
 
 pub mod broker;
 pub mod checks;

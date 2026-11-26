@@ -1839,6 +1839,23 @@ impl Shared {
             }
             (pending.request.clone(), pending.needs_stores)
         };
+        // Covered whole by the holds of enclosing holders (this broker's own grants, so the last
+        // tables it read show them): granted at once, without touching a store.
+        let covered = {
+            let state = self.state.borrow();
+            let tables = [&state.project_table, &state.machine_table];
+            judge(&tables, &request)
+                .ok()
+                .filter(|satisfied| satisfied.remaining(&request).needs.is_empty())
+        };
+        if let Some(satisfied) = covered {
+            if let Some(pending) = self.state.borrow_mut().pending.get_mut(&id) {
+                pending.satisfied = satisfied.pools;
+                pending.queued = true;
+            }
+            self.deliver(id);
+            return;
+        }
         let extra: BTreeSet<String> = request.needs.iter().map(|need| need.pool.clone()).collect();
         let machine_pools = self.machine_pools();
         let now = self.context.now();

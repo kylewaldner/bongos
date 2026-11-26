@@ -810,11 +810,28 @@ fn requests_are_refused_for_an_undeclared_pool_and_an_own_incompatible_hold(
             },
         ),
     };
+    let generation = {
+        use crate::PoolStore as _;
+        a.project_store.read().unwrap();
+        a.project_store.generation()
+    };
     let covered = watch(cx, a.broker.acquire(shared));
     cx.run_until_parked();
     let covered = lease(&covered);
     assert_eq!(covered.satisfied(), ["jobs".to_string()]);
     assert!(covered.hold_ids().is_empty());
+    {
+        use crate::PoolStore as _;
+        a.project_store.read().unwrap();
+        assert_eq!(
+            a.project_store.generation(),
+            generation,
+            "granted without touching a store"
+        );
+    }
+    drop(covered);
+    cx.run_until_parked();
+    assert_eq!(holds(&read(&a).0, "jobs"), vec!["run-1"]);
 }
 
 #[gpui::test]
