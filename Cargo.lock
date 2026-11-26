@@ -2055,6 +2055,7 @@ dependencies = [
  "bongos_emacs",
  "bongos_engine_host",
  "bongos_extensions",
+ "bongos_inbox",
  "bongos_isearch",
  "bongos_java",
  "bongos_kotlin",
@@ -2546,6 +2547,22 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.17",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "bongos_inbox"
+version = "0.1.0"
+dependencies = [
+ "bongos_inbox_model",
+ "chrono",
+ "fs",
+ "futures 0.3.32",
+ "gpui",
+ "log",
+ "parking_lot",
+ "settings",
+ "tempfile",
+ "util",
 ]
 
 [[package]]

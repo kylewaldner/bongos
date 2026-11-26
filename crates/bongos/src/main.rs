@@ -594,11 +594,13 @@ fn main() {
             },
             cx,
         );
-        bongos_work::init(
+        let work_dirs = bongos_work::WorkDirs::new(util::paths::home_dir(), paths::data_dir());
+        bongos_inbox::init(
+            bongos_inbox::InboxDirs::new(&work_dirs.root),
             fs.clone(),
-            bongos_work::WorkDirs::new(util::paths::home_dir(), paths::data_dir()),
             cx,
         );
+        bongos_work::init(fs.clone(), work_dirs, cx);
         bongos_chat::init(
             bongos_chat::ChatDirs::new(util::paths::home_dir(), paths::data_dir()),
             chat_channel_config(),

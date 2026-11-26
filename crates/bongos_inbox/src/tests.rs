@@ -1,0 +1,474 @@
+//! `InboxState` against the real file system: other processes deliver and move items with plain
+//! file system calls, which `FakeFs::watch` never reports, so most tests use `RealFs` in a
+//! `TempDir` with parking allowed so real watcher events can arrive. The periodic rescan is
+//! injected, so no test waits on it; the one test of it uses `FakeFs`, whose watcher reports
+//! nothing, and ticks it by hand.
+
+use super::*;
+use bongos_inbox_model::format;
+use chrono::{TimeZone as _, Utc};
+use fs::{FakeFs, RealFs};
+use gpui::{TestAppContext, UpdateGlobal as _};
+use std::io::Write as _;
+use tempfile::TempDir;
+
+/// How long a test waits for something it expects before failing, well past the watcher latency
+/// and a scan on a loaded machine.
+const HANG_GUARD: Duration = Duration::from_secs(10);
+
+fn item_text(summary: &str) -> String {
+    format::render(&item(summary))
+}
+
+fn item(summary: &str) -> Item {
+    Item {
+        version: 1,
+        kind: "note".into(),
+        created: Utc.with_ymd_and_hms(2026, 11, 11, 3, 12, 45).unwrap(),
+        source: "agent/test".into(),
+        group: None,
+        target: None,
+        summary: summary.into(),
+        actions: vec!["accept".into()],
+        extra: Vec::new(),
+        body: format!("Body of {summary}.\n"),
+        body_loaded: true,
+    }
+}
+
+/// The temporary directory with symbolic links resolved, as the inbox reports paths.
+fn canonical(temp: &TempDir) -> PathBuf {
+    std::fs::canonicalize(temp.path()).unwrap()
+}
+
+/// Writes an item outside the inbox and renames it into `dir/name`, the way a delivering process
+/// that stages elsewhere on the same disk would.
+fn rename_in(temp: &Path, dir: &Path, name: &str, summary: &str) -> PathBuf {
+    let staging = temp.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    let staged = staging.join(name);
+    std::fs::write(&staged, item_text(summary)).unwrap();
+    let path = dir.join(name);
+    std::fs::rename(&staged, &path).unwrap();
+    path
+}
+
+fn init_settings(cx: &mut TestAppContext, enabled: bool) {
+    cx.update(|cx| {
+        let settings = SettingsStore::test(cx);
+        cx.set_global(settings);
+        InboxSettings::register(cx);
+    });
+    set_enabled(cx, enabled);
+}
+
+fn set_enabled(cx: &mut TestAppContext, enabled: bool) {
+    cx.update(|cx| {
+        SettingsStore::update_global(cx, |store, cx| {
+            store.update_user_settings(cx, |content| {
+                content.inbox.get_or_insert_default().enabled = Some(enabled);
+            });
+        });
+    });
+}
+
+/// A timer that never ticks.
+fn no_rescan() -> RescanTimer {
+    Arc::new(|_: &BackgroundExecutor| futures::stream::pending().boxed())
+}
+
+/// A timer the test ticks by sending on the returned channel (the first enabled period only).
+fn manual_rescan() -> (RescanTimer, mpsc::UnboundedSender<()>) {
+    let (sender, receiver) = mpsc::unbounded();
+    let receiver = Mutex::new(Some(receiver));
+    let timer: RescanTimer = Arc::new(move |_: &BackgroundExecutor| match receiver.lock().take() {
+        Some(receiver) => receiver.boxed(),
+        None => futures::stream::pending().boxed(),
+    });
+    (timer, sender)
+}
+
+fn new_inbox(
+    cx: &mut TestAppContext,
+    fs: Arc<dyn Fs>,
+    root: &Path,
+    timer: RescanTimer,
+) -> Entity<InboxState> {
+    cx.new(|cx| InboxState::new(fs, InboxDirs::at(root.to_path_buf()), timer, cx))
+}
+
+fn real_inbox(cx: &mut TestAppContext, root: &Path) -> Entity<InboxState> {
+    cx.executor().allow_parking();
+    let fs: Arc<dyn Fs> = Arc::new(RealFs::new(None, cx.executor()));
+    new_inbox(cx, fs, root, no_rescan())
+}
+
+/// Waits for `check` to hold, looking again after every `InboxEvent` (and every stats change,
+/// which notifies), and fails after [`HANG_GUARD`].
+async fn wait_for(
+    cx: &mut TestAppContext,
+    inbox: &Entity<InboxState>,
+    what: &str,
+    check: impl Fn(&InboxState) -> bool,
+) {
+    let (sender, mut receiver) = mpsc::unbounded::<()>();
+    let _subscriptions = cx.update(|cx| {
+        let on_event = sender.clone();
+        [
+            cx.subscribe(inbox, move |_, _: &InboxEvent, _| {
+                on_event.unbounded_send(()).ok();
+            }),
+            cx.observe(inbox, move |_, _| {
+                sender.unbounded_send(()).ok();
+            }),
+        ]
+    });
+    let mut guard = cx.executor().timer(HANG_GUARD).fuse();
+    loop {
+        if inbox.read_with(cx, |inbox, _| check(inbox)) {
+            return;
+        }
+        select_biased! {
+            _ = receiver.next() => {}
+            _ = guard => panic!("timed out waiting for {what}"),
+        }
+    }
+}
+
+fn summaries(inbox: &InboxState) -> Vec<String> {
+    let Some(snapshot) = inbox.snapshot() else {
+        return Vec::new();
+    };
+    (0..snapshot.len())
+        .filter_map(|index| snapshot.item(index).map(|item| item.summary.clone()))
+        .collect()
+}
+
+fn has_summaries(inbox: &InboxState, expected: &[&str]) -> bool {
+    summaries(inbox) == expected
+}
+
+/// Waits until `dir` has seen a change made after every earlier one: a probe file is written and
+/// its watcher event awaited, so any watcher event the inbox could get for earlier changes has
+/// been delivered by then.
+async fn probe_events(cx: &mut TestAppContext, dir: &Path) {
+    let fs = RealFs::new(None, cx.executor());
+    let (events, _watcher) = fs.watch(dir, WATCH_LATENCY).await;
+    let mut events = events.fuse();
+    let probe = dir.join(".probe");
+    std::fs::write(&probe, "probe").unwrap();
+    let mut guard = cx.executor().timer(HANG_GUARD).fuse();
+    loop {
+        select_biased! {
+            batch = events.next() => {
+                if batch.is_some_and(|batch| batch.iter().any(|event| event.path == probe)) {
+                    break;
+                }
+            }
+            _ = guard => panic!("timed out waiting for the probe event"),
+        }
+    }
+    std::fs::remove_file(&probe).unwrap();
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+async fn an_item_renamed_into_new_reaches_the_snapshot(cx: &mut TestAppContext) {
+    let temp = TempDir::new().unwrap();
+    let base = canonical(&temp);
+    let root = base.join("inbox");
+    init_settings(cx, true);
+    let inbox = real_inbox(cx, &root);
+    wait_for(cx, &inbox, "the first scan", |inbox| {
+        inbox.snapshot().is_some() && inbox.stats().watches == 1
+    })
+    .await;
+    assert!(root.join(TMP).is_dir() && root.join(ARCHIVE).is_dir());
+
+    let path = rename_in(&base, &root.join(NEW), "1700000000.a1.host", "First");
+    wait_for(cx, &inbox, "the delivered item", |inbox| {
+        has_summaries(inbox, &["First"])
+    })
+    .await;
+    inbox.read_with(cx, |inbox, _| {
+        let snapshot = inbox.snapshot().unwrap();
+        assert_eq!(snapshot.items()[0].0.path, path);
+        assert_eq!(snapshot.unread_count(), 1);
+    });
+}
+
+#[gpui::test]
+async fn a_file_growing_in_tmp_never_reaches_the_snapshot(cx: &mut TestAppContext) {
+    let temp = TempDir::new().unwrap();
+    let base = canonical(&temp);
+    let root = base.join("inbox");
+    init_settings(cx, true);
+    let inbox = real_inbox(cx, &root);
+    wait_for(cx, &inbox, "the first scan", |inbox| {
+        inbox.snapshot().is_some()
+    })
+    .await;
+
+    let text = item_text("Still writing");
+    let growing = root.join(TMP).join("1700000000.b2.host");
+    let mut file = std::fs::File::create(&growing).unwrap();
+    for chunk in text.as_bytes().chunks(16) {
+        file.write_all(chunk).unwrap();
+        file.flush().unwrap();
+    }
+    // The pipeline is alive: a later delivery shows, and the tmp file still does not.
+    rename_in(&base, &root.join(NEW), "1700000001.c3.host", "Delivered");
+    wait_for(cx, &inbox, "the delivered item", |inbox| {
+        has_summaries(inbox, &["Delivered"])
+    })
+    .await;
+    file.write_all(b"more").unwrap();
+    drop(file);
+    inbox.read_with(cx, |inbox, _| {
+        let snapshot = inbox.snapshot().unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert!(
+            snapshot
+                .items()
+                .iter()
+                .all(|(entry, _)| !entry.path.starts_with(root.join(TMP)))
+        );
+    });
+}
+
+#[gpui::test]
+async fn moving_an_item_to_archive_drops_its_row(cx: &mut TestAppContext) {
+    let temp = TempDir::new().unwrap();
+    let base = canonical(&temp);
+    let root = base.join("inbox");
+    maildir::ensure_layout(&root).unwrap();
+    std::fs::write(
+        root.join(CUR).join("1700000000.d4.host:2,S"),
+        item_text("Read"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join(NEW).join("1700000001.e5.host"),
+        item_text("Unread"),
+    )
+    .unwrap();
+    init_settings(cx, true);
+    let inbox = real_inbox(cx, &root);
+    wait_for(cx, &inbox, "both items", |inbox| {
+        has_summaries(inbox, &["Read", "Unread"]) && inbox.stats().watches == 1
+    })
+    .await;
+
+    std::fs::rename(
+        root.join(CUR).join("1700000000.d4.host:2,S"),
+        root.join(ARCHIVE).join("1700000000.d4.host:2,S"),
+    )
+    .unwrap();
+    wait_for(cx, &inbox, "the cur item to go", |inbox| {
+        has_summaries(inbox, &["Unread"])
+    })
+    .await;
+    std::fs::rename(
+        root.join(NEW).join("1700000001.e5.host"),
+        root.join(ARCHIVE).join("1700000001.e5.host:2,"),
+    )
+    .unwrap();
+    wait_for(cx, &inbox, "the new item to go", |inbox| {
+        inbox.snapshot().is_some_and(|snapshot| snapshot.is_empty())
+    })
+    .await;
+}
+
+#[gpui::test]
+async fn delivery_keeps_working_after_new_is_deleted_and_recreated(cx: &mut TestAppContext) {
+    let temp = TempDir::new().unwrap();
+    let base = canonical(&temp);
+    let root = base.join("inbox");
+    init_settings(cx, true);
+    let inbox = real_inbox(cx, &root);
+    wait_for(cx, &inbox, "the first scan", |inbox| {
+        inbox.snapshot().is_some() && inbox.stats().watches == 1
+    })
+    .await;
+
+    std::fs::remove_dir(root.join(NEW)).unwrap();
+    // The inbox may have put it back already when it saw the removal.
+    std::fs::create_dir_all(root.join(NEW)).unwrap();
+    wait_for(cx, &inbox, "new/ to be watched again", |inbox| {
+        inbox.stats().rewatches >= 1
+    })
+    .await;
+
+    rename_in(&base, &root.join(NEW), "1700000002.f6.host", "After");
+    wait_for(cx, &inbox, "the item in the recreated new/", |inbox| {
+        has_summaries(inbox, &["After"])
+    })
+    .await;
+}
+
+#[gpui::test]
+async fn a_second_inbox_on_the_same_directory_reports_the_same_read_state(cx: &mut TestAppContext) {
+    let temp = TempDir::new().unwrap();
+    let base = canonical(&temp);
+    let root = base.join("inbox");
+    maildir::ensure_layout(&root).unwrap();
+    std::fs::write(root.join(CUR).join("1700000000.a.host:2,S"), item_text("A")).unwrap();
+    std::fs::write(root.join(CUR).join("1700000001.b.host:2,"), item_text("B")).unwrap();
+    std::fs::write(root.join(NEW).join("1700000002.c.host"), item_text("C")).unwrap();
+    init_settings(cx, true);
+
+    let states = |inbox: &InboxState| {
+        let snapshot = inbox.snapshot().unwrap();
+        let read: Vec<String> = snapshot.read().map(Entry::file_name).collect();
+        let unread: Vec<String> = snapshot.unread().map(Entry::file_name).collect();
+        (read, unread)
+    };
+    let first = real_inbox(cx, &root);
+    wait_for(cx, &first, "the first scan", |inbox| {
+        inbox.snapshot().is_some()
+    })
+    .await;
+    let before = first.read_with(cx, |inbox, _| states(inbox));
+    assert_eq!(
+        before,
+        (
+            vec!["1700000000.a.host:2,S".to_string()],
+            vec![
+                "1700000001.b.host:2,".to_string(),
+                "1700000002.c.host".to_string(),
+            ],
+        )
+    );
+    drop(first);
+    cx.run_until_parked();
+
+    let second = real_inbox(cx, &root);
+    wait_for(cx, &second, "the restarted scan", |inbox| {
+        inbox.snapshot().is_some()
+    })
+    .await;
+    assert_eq!(second.read_with(cx, |inbox, _| states(inbox)), before);
+}
+
+#[gpui::test]
+async fn nothing_is_created_or_watched_while_disabled(cx: &mut TestAppContext) {
+    let temp = TempDir::new().unwrap();
+    let base = canonical(&temp);
+    let root = base.join("inbox");
+    init_settings(cx, false);
+    let inbox = real_inbox(cx, &root);
+    let changes = Arc::new(Mutex::new(0usize));
+    let _subscription = cx.update(|cx| {
+        let changes = changes.clone();
+        cx.subscribe(&inbox, move |_, _: &InboxEvent, _| *changes.lock() += 1)
+    });
+
+    // A delivery elsewhere, and a refresh, while disabled.
+    let elsewhere = base.join("elsewhere");
+    maildir::ensure_layout(&elsewhere).unwrap();
+    maildir::deliver(&elsewhere, &item("Elsewhere")).unwrap();
+    inbox.update(cx, |inbox, _| inbox.refresh());
+    probe_events(cx, &elsewhere.join(NEW)).await;
+    assert!(!root.exists(), "a disabled inbox created its directory");
+    inbox.read_with(cx, |inbox, _| {
+        assert!(!inbox.is_watching());
+        assert!(inbox.snapshot().is_none());
+        assert_eq!(inbox.stats(), Stats::default());
+    });
+
+    set_enabled(cx, true);
+    wait_for(cx, &inbox, "the first scan", |inbox| {
+        inbox.snapshot().is_some() && inbox.stats().watches == 1
+    })
+    .await;
+    rename_in(&base, &root.join(NEW), "1700000003.g7.host", "Seen");
+    wait_for(cx, &inbox, "the delivered item", |inbox| {
+        has_summaries(inbox, &["Seen"])
+    })
+    .await;
+
+    // Turning it off drops the snapshot (one Changed) and the watcher.
+    let changes_before = *changes.lock();
+    set_enabled(cx, false);
+    cx.run_until_parked();
+    assert_eq!(*changes.lock(), changes_before + 1);
+    let stats = inbox.read_with(cx, |inbox, _| {
+        assert!(!inbox.is_watching());
+        assert!(inbox.snapshot().is_none());
+        inbox.stats()
+    });
+    rename_in(&base, &root.join(NEW), "1700000004.h8.host", "Unseen");
+    probe_events(cx, &root.join(NEW)).await;
+    assert_eq!(*changes.lock(), changes_before + 1);
+    inbox.read_with(cx, |inbox, _| {
+        assert!(inbox.snapshot().is_none());
+        assert_eq!(inbox.stats(), stats);
+    });
+}
+
+#[gpui::test]
+async fn the_periodic_rescan_sees_what_the_watcher_missed(cx: &mut TestAppContext) {
+    let temp = TempDir::new().unwrap();
+    let base = canonical(&temp);
+    let root = base.join("inbox");
+    init_settings(cx, true);
+    // `FakeFs` reports none of the real file system's changes: only the timer can see them.
+    let fs: Arc<dyn Fs> = FakeFs::new(cx.executor());
+    let (timer, ticks) = manual_rescan();
+    let inbox = new_inbox(cx, fs, &root, timer);
+    cx.run_until_parked();
+    let scans = inbox.read_with(cx, |inbox, _| {
+        assert!(inbox.snapshot().is_some_and(|snapshot| snapshot.is_empty()));
+        inbox.stats().scans
+    });
+    assert_eq!(scans, 1);
+
+    rename_in(&base, &root.join(NEW), "1700000005.i9.host", "Missed");
+    cx.run_until_parked();
+    inbox.read_with(cx, |inbox, _| {
+        assert!(inbox.snapshot().unwrap().is_empty());
+        assert_eq!(inbox.stats().scans, 1);
+    });
+
+    ticks.unbounded_send(()).unwrap();
+    cx.run_until_parked();
+    inbox.read_with(cx, |inbox, _| {
+        assert!(has_summaries(inbox, &["Missed"]));
+        assert_eq!(inbox.stats().scans, 2);
+    });
+}
+
+#[gpui::test]
+async fn overlapping_rescans_coalesce_and_an_identical_scan_emits_nothing(cx: &mut TestAppContext) {
+    let temp = TempDir::new().unwrap();
+    let root = canonical(&temp).join("inbox");
+    maildir::ensure_layout(&root).unwrap();
+    std::fs::write(root.join(NEW).join("1700000006.j.host"), item_text("Kept")).unwrap();
+    init_settings(cx, true);
+    let fs: Arc<dyn Fs> = FakeFs::new(cx.executor());
+    let (timer, ticks) = manual_rescan();
+    let inbox = new_inbox(cx, fs, &root, timer);
+    cx.run_until_parked();
+    assert!(inbox.read_with(cx, |inbox, _| has_summaries(inbox, &["Kept"])));
+    let changes = Arc::new(Mutex::new(0usize));
+    let _subscription = cx.update(|cx| {
+        let changes = changes.clone();
+        cx.subscribe(&inbox, move |_, _: &InboxEvent, _| *changes.lock() += 1)
+    });
+
+    inbox.update(cx, |inbox, _| {
+        for _ in 0..10 {
+            inbox.refresh();
+        }
+    });
+    for _ in 0..10 {
+        ticks.unbounded_send(()).unwrap();
+    }
+    cx.run_until_parked();
+    inbox.read_with(cx, |inbox, _| {
+        // The first scan, then one for all twenty triggers.
+        assert_eq!(inbox.stats().scans, 2);
+        assert!(has_summaries(inbox, &["Kept"]));
+    });
+    assert_eq!(*changes.lock(), 0);
+}
