@@ -5,7 +5,8 @@
 //! The built-in names are `open` (the item's file in a read-only tab), `dismiss` and `accept` and
 //! `done` (archive the item), `overturn` (the item's target in a normal editor at its line, and
 //! the item stays, read, until dismissed), `open-task` (focuses the task of a `task:<id>`
-//! target) and `open-run` (shows the run of a `run:<id>` target). A handler says what becomes of
+//! target) and `open-run` (a `run:<id>` target; the run cannot be shown by id yet, so it says so
+//! and leaves the item as it is). A handler says what becomes of
 //! the item with an [`ActionOutcome`]. `inbox: open target` (`o`) opens the target of the item
 //! whatever its form, see [`crate::targets`].
 
@@ -180,17 +181,17 @@ fn open_task(item: &ItemRef, window: &mut Window, cx: &mut App) -> ActionOutcome
     }
 }
 
-/// `open-run`: shows the run of a `run:<id>` target.
+/// What `open-run` says for a `run:<id>` target: the work crate shows only the run of the current
+/// run or task context, so showing the run an id names is not possible yet.
+pub const RUN_BY_ID_UNAVAILABLE: &str = "cannot show the run by id yet";
+
+/// `open-run`: for a `run:<id>` target, says the run cannot be shown by id yet and leaves the item
+/// unread, rather than showing some other run.
 fn open_run(item: &ItemRef, window: &mut Window, cx: &mut App) -> ActionOutcome {
     match locate(item, cx) {
         Ok(Located::Run(_)) => {
-            if let Ok(action) = cx.build_action("workflow::ShowRun", None) {
-                window.dispatch_action(action, cx);
-                ActionOutcome::MarkRead
-            } else {
-                bongos_minibuffer::message(window, cx, "runs are not available here");
-                ActionOutcome::Keep
-            }
+            bongos_minibuffer::message(window, cx, RUN_BY_ID_UNAVAILABLE);
+            ActionOutcome::Keep
         }
         Ok(_) => {
             bongos_minibuffer::message(window, cx, "open-run needs a run: target");

@@ -237,6 +237,61 @@ async fn open_task_focuses_the_task_of_the_target(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn open_run_says_it_cannot_show_a_run_by_id_and_keeps_the_item_unread(
+    cx: &mut TestAppContext,
+) {
+    let (env, mut win, _) = setup(cx).await;
+    deliver_with(&env, "look", &["open-run"], Some("run:abc"), None, 5);
+    wait_unread(cx, &env, 1).await;
+    open_view(&mut win);
+
+    win.cx.dispatch_action(Accept);
+    win.cx.run_until_parked();
+    assert_eq!(messages(&mut win), [actions::RUN_BY_ID_UNAVAILABLE]);
+    let unread = env
+        .inbox
+        .read_with(cx, |inbox, _| inbox.snapshot().unwrap().len());
+    assert_eq!(unread, 1, "the item stays");
+    env.wait_unread(cx, 1).await;
+}
+
+#[gpui::test]
+async fn o_on_a_relative_target_with_no_open_worktree_says_why(cx: &mut TestAppContext) {
+    let env = env(cx).await;
+    cx.update(|cx| set_clock(fixed_now, cx));
+    let mut win = window_in(cx, &env, false, &[]).await;
+    deliver_with(&env, "nowhere", &["overturn"], Some("plan.md:3"), None, 5);
+    wait_unread(cx, &env, 1).await;
+    open_view(&mut win);
+
+    win.cx.dispatch_action(OpenTarget);
+    win.cx.run_until_parked();
+    let said = messages(&mut win);
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(
+        said[0].contains("cannot open plan.md:3") && said[0].contains("no worktree is open"),
+        "{said:?}"
+    );
+    assert_eq!(editor_state(&mut win), None, "nothing opened");
+    env.wait_unread(cx, 1).await;
+}
+
+#[gpui::test]
+async fn o_on_a_live_path_target_opens_it_and_marks_read(cx: &mut TestAppContext) {
+    let (env, mut win, proj) = setup(cx).await;
+    let target = format!("{}:5", proj.join("plan.md").display());
+    deliver_with(&env, "see", &["accept"], Some(&target), None, 5);
+    wait_unread(cx, &env, 1).await;
+    open_view(&mut win);
+
+    win.cx.dispatch_action(OpenTarget);
+    win.cx.run_until_parked();
+    win.cx.run_until_parked();
+    assert_eq!(editor_state(&mut win), Some((false, 4)), "on line 5");
+    wait_unread(cx, &env, 0).await;
+}
+
+#[gpui::test]
 async fn an_unregistered_action_is_not_shown_and_a_says_no_primary_action(cx: &mut TestAppContext) {
     let (env, mut win, _) = setup(cx).await;
     deliver_with(&env, "promote", &["promote-to-profile"], None, None, 5);
