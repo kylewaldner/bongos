@@ -594,6 +594,11 @@ pub struct HighlightStyle {
 
     /// Similar to the CSS `opacity` property, this will cause the text to be less vibrant.
     pub fade_out: Option<f32>,
+
+    /// Whether the text is shaped with the code (monospace) font instead of
+    /// the surrounding text font. Consumers that own a code font read this;
+    /// `TextStyle::highlight` does not change the font family.
+    pub monospace: Option<bool>,
 }
 
 impl Eq for HighlightStyle {}
@@ -606,6 +611,7 @@ impl Hash for HighlightStyle {
         self.background_color.hash(state);
         self.underline.hash(state);
         self.strikethrough.hash(state);
+        self.monospace.hash(state);
         state.write_u32(u32::from_be_bytes(
             self.fade_out.map(|f| f.to_be_bytes()).unwrap_or_default(),
         ));
@@ -902,6 +908,7 @@ impl From<&TextStyle> for HighlightStyle {
             underline: other.underline,
             strikethrough: other.strikethrough,
             fade_out: None,
+            monospace: None,
         }
     }
 }
@@ -942,6 +949,7 @@ impl HighlightStyle {
                         .unwrap_or(source_fade)
                 })
                 .or(self.fade_out),
+            monospace: other.monospace.or(self.monospace),
         }
     }
 }
@@ -1350,6 +1358,7 @@ mod tests {
                 color: Some(blue()),
             }),
             fade_out: Some(0.),
+            monospace: None,
             font_style: Some(FontStyle::Italic),
             font_weight: Some(FontWeight(300.)),
             background_color: Some(yellow()),
@@ -1382,6 +1391,7 @@ mod tests {
                 color: Some(crate::red()),
             }),
             fade_out: Some(0.),
+            monospace: None,
             font_style: Some(FontStyle::Oblique),
             font_weight: Some(FontWeight(800.)),
             background_color: Some(green()),
@@ -1400,6 +1410,7 @@ mod tests {
             }),
             // TODO this does not seem right
             fade_out: Some(0.),
+            monospace: None,
             font_style: Some(FontStyle::Oblique),
             font_weight: Some(FontWeight(800.)),
             background_color: Some(green()),
@@ -1415,6 +1426,26 @@ mod tests {
             style_c, expected_style,
             "Blending styles should blend properties where possible and override all others"
         );
+    }
+
+    #[perf]
+    fn test_highlight_style_monospace_counts_in_equality_and_hash() {
+        use std::hash::{BuildHasher, RandomState};
+
+        let plain = HighlightStyle::default();
+        let code = HighlightStyle {
+            monospace: Some(true),
+            ..Default::default()
+        };
+        assert_ne!(plain, code);
+        assert_eq!(code, code);
+
+        let state = RandomState::new();
+        assert_ne!(state.hash_one(plain), state.hash_one(code));
+        assert_eq!(state.hash_one(code), state.hash_one(code));
+
+        assert_eq!(plain.highlight(code).monospace, Some(true));
+        assert_eq!(code.highlight(plain).monospace, Some(true));
     }
 
     #[perf]

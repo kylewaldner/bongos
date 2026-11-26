@@ -71,6 +71,8 @@ pub mod kill_ring;
 mod kill_ring_tests;
 mod markdown_actions;
 mod navigation;
+#[cfg(test)]
+mod perf_tests;
 mod rewrap;
 mod selection;
 
@@ -535,6 +537,27 @@ pub struct EditorStyle {
     pub edit_prediction_styles: EditPredictionStyles,
     pub unnecessary_code_fade: f32,
     pub show_underlines: bool,
+    /// The font of text highlighted as monospace; `None` keeps the text font.
+    pub code_font: Option<gpui::Font>,
+}
+
+impl EditorStyle {
+    /// The font to shape a run of `styled` text in: the code font when the highlight asks for
+    /// monospace and a code font is set, otherwise the text font.
+    pub(crate) fn run_font(
+        &self,
+        styled: &TextStyle,
+        highlight: Option<&HighlightStyle>,
+    ) -> gpui::Font {
+        match (&self.code_font, highlight.and_then(|style| style.monospace)) {
+            (Some(code_font), Some(true)) => gpui::Font {
+                weight: styled.font_weight,
+                style: styled.font_style,
+                ..code_font.clone()
+            },
+            _ => styled.font(),
+        }
+    }
 }
 
 impl Default for EditorStyle {
@@ -559,6 +582,7 @@ impl Default for EditorStyle {
             },
             unnecessary_code_fade: Default::default(),
             show_underlines: true,
+            code_font: None,
         }
     }
 }
@@ -11007,6 +11031,7 @@ impl Editor {
             edit_prediction_styles: make_suggestion_styles(cx),
             unnecessary_code_fade: settings.unnecessary_code_fade,
             show_underlines: self.diagnostics_enabled(),
+            code_font: Some(settings.buffer_font.clone()),
         }
     }
 
