@@ -109,6 +109,7 @@ pub use element::{
     CursorLayout, EditorElement, HighlightedRange, HighlightedRangeLine, PointForPosition,
     render_breadcrumb_text,
 };
+pub use fold::{is_conceal_tag, register_conceal_tag};
 pub use git::blame::BlameRenderer;
 pub(crate) use git::{DiffHunkKey, StoredReviewComment};
 use git::{
@@ -1748,6 +1749,7 @@ impl Editor {
             });
             snapshot
         });
+        clone.remove_conceals(cx);
         let clone_snapshot = clone.display_map.update(cx, |map, cx| map.snapshot(cx));
         clone.folds_did_change(cx);
         clone.selections.clone_state(&self.selections);

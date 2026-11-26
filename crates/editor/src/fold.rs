@@ -1,5 +1,35 @@
 use super::*;
 
+/// Fold type tags registered as conceals: folds that hide text for display
+/// only. Their folds are kept out of fold persistence and editor clones, survive
+/// user unfolds, and are ignored when toggling a fold.
+#[derive(Default)]
+struct ConcealTags(Arc<HashSet<TypeId>>);
+
+impl gpui::Global for ConcealTags {}
+
+/// Registers `tag` as a conceal fold type tag. Registering twice is a no-op.
+pub fn register_conceal_tag(tag: TypeId, cx: &mut App) {
+    let tags = &mut cx.default_global::<ConcealTags>().0;
+    if !tags.contains(&tag) {
+        Arc::make_mut(tags).insert(tag);
+    }
+}
+
+/// Whether `tag` was registered with [`register_conceal_tag`].
+pub fn is_conceal_tag(tag: Option<TypeId>, cx: &App) -> bool {
+    tag.is_some_and(|tag| {
+        cx.try_global::<ConcealTags>()
+            .is_some_and(|tags| tags.0.contains(&tag))
+    })
+}
+
+pub(crate) fn conceal_tags(cx: &App) -> Arc<HashSet<TypeId>> {
+    cx.try_global::<ConcealTags>()
+        .map(|tags| tags.0.clone())
+        .unwrap_or_default()
+}
+
 impl GutterDimensions {
     /// The width of the space reserved for the fold indicators,
     /// use alongside 'justify_end' and `gutter_width` to
@@ -112,7 +142,10 @@ impl Editor {
             } else {
                 selection.range()
             };
-            if display_map.folds_in_range(range).next().is_some() {
+            let has_user_fold = display_map
+                .folds_in_range(range)
+                .any(|fold| !is_conceal_tag(fold.placeholder.type_tag, cx));
+            if has_user_fold {
                 self.unfold_lines(&Default::default(), window, cx)
             } else {
                 self.fold(&Default::default(), window, cx)
@@ -599,7 +632,8 @@ impl Editor {
         self.folds_did_change(cx);
     }
 
-    /// Removes any folds whose ranges intersect any of the given ranges.
+    /// Removes any folds whose ranges intersect any of the given ranges, except
+    /// conceals (folds with a tag registered by [`register_conceal_tag`]).
     pub fn unfold_ranges<T: ToOffset + Clone>(
         &mut self,
         ranges: &[Range<T>],
@@ -607,10 +641,45 @@ impl Editor {
         auto_scroll: bool,
         cx: &mut Context<Self>,
     ) {
+        let keep_tags = conceal_tags(cx);
         self.remove_folds_with(ranges, auto_scroll, cx, |map, cx| {
-            map.unfold_intersecting(ranges.iter().cloned(), inclusive, cx);
+            map.unfold_intersecting_keeping(ranges.iter().cloned(), inclusive, &keep_tags, cx);
         });
         self.folds_did_change(cx);
+    }
+
+    /// Replaces the folds tagged `tag` that intersect `within` with `conceals`,
+    /// in one display map update. Folds with other tags are kept. Does not
+    /// scroll, change selections or persist folds; an empty `conceals` clears
+    /// the tag's folds in `within`.
+    pub fn set_conceals(
+        &mut self,
+        tag: TypeId,
+        within: Range<Anchor>,
+        conceals: Vec<Crease<Anchor>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.display_map.update(cx, |map, cx| {
+            map.remove_folds_with_type([within], tag, cx);
+            map.fold(conceals, cx);
+        });
+        cx.notify();
+        self.scrollbar_marker_state.dirty = true;
+        self.active_indent_guides_state.dirty = true;
+    }
+
+    /// Removes every conceal fold, leaving only user folds.
+    pub(super) fn remove_conceals(&mut self, cx: &mut Context<Self>) {
+        let tags = conceal_tags(cx);
+        if tags.is_empty() {
+            return;
+        }
+        let len = self.buffer.read(cx).snapshot(cx).len();
+        self.display_map.update(cx, |map, cx| {
+            for &tag in tags.iter() {
+                map.remove_folds_with_type([MultiBufferOffset(0)..len], tag, cx);
+            }
+        });
     }
 
     pub fn fold_buffer(&mut self, buffer_id: BufferId, cx: &mut Context<Self>) {
@@ -819,8 +888,19 @@ impl Editor {
         let Some(buffer_snapshot) = display_snapshot.buffer_snapshot().as_singleton() else {
             return;
         };
-        let inmemory_folds = display_snapshot
-            .folds_in_range(MultiBufferOffset(0)..display_snapshot.buffer_snapshot().len())
+        // Conceals are display-only, so they never reach restoration data or the database.
+        let conceal_tags = conceal_tags(cx);
+        let user_folds = || {
+            display_snapshot
+                .folds_in_range(MultiBufferOffset(0)..display_snapshot.buffer_snapshot().len())
+                .filter(|fold| {
+                    !fold
+                        .placeholder
+                        .type_tag
+                        .is_some_and(|tag| conceal_tags.contains(&tag))
+                })
+        };
+        let inmemory_folds = user_folds()
             .map(|fold| {
                 let start = fold.range.start.text_anchor_in(buffer_snapshot);
                 let end = fold.range.end.text_anchor_in(buffer_snapshot);
@@ -845,8 +925,7 @@ impl Editor {
 
         let background_executor = cx.background_executor().clone();
         const FINGERPRINT_LEN: usize = 32;
-        let db_folds = display_snapshot
-            .folds_in_range(MultiBufferOffset(0)..display_snapshot.buffer_snapshot().len())
+        let db_folds = user_folds()
             .map(|fold| {
                 let start = fold
                     .range

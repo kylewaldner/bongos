@@ -39839,3 +39839,581 @@ fn test_transaction_selections_by_transaction_id(cx: &mut TestAppContext) {
         assert!(editor.transaction_selections(foreign_id.unwrap()).is_none());
     });
 }
+
+struct ConcealTestTag;
+struct OtherConcealTestTag;
+
+fn register_test_conceal_tag(cx: &mut App) -> TypeId {
+    let tag = TypeId::of::<ConcealTestTag>();
+    register_conceal_tag(tag, cx);
+    register_conceal_tag(tag, cx);
+    tag
+}
+
+fn set_test_conceals(
+    editor: &mut Editor,
+    tag: TypeId,
+    within: Range<Point>,
+    conceals: &[Range<Point>],
+    cx: &mut Context<Editor>,
+) {
+    let snapshot = editor.buffer().read(cx).snapshot(cx);
+    let placeholder = FoldPlaceholder {
+        render: Arc::new(|_, _, _| gpui::Empty.into_any_element()),
+        constrain_width: false,
+        merge_adjacent: false,
+        type_tag: Some(tag),
+        collapsed_text: None,
+    };
+    let conceals = conceals
+        .iter()
+        .map(|range| {
+            Crease::simple(
+                snapshot.anchor_after(range.start)..snapshot.anchor_before(range.end),
+                placeholder.clone(),
+            )
+        })
+        .collect();
+    let within = snapshot.anchor_before(within.start)..snapshot.anchor_after(within.end);
+    editor.set_conceals(tag, within, conceals, cx);
+}
+
+fn folds_with_tags(
+    editor: &mut Editor,
+    cx: &mut Context<Editor>,
+) -> Vec<(Range<Point>, Option<TypeId>)> {
+    let snapshot = editor.display_snapshot(cx);
+    let buffer = snapshot.buffer_snapshot();
+    snapshot
+        .folds_in_range(MultiBufferOffset(0)..buffer.len())
+        .map(|fold| {
+            (
+                fold.range.start.to_point(buffer)..fold.range.end.to_point(buffer),
+                fold.placeholder.type_tag,
+            )
+        })
+        .collect()
+}
+
+fn head_point(editor: &mut Editor, cx: &mut Context<Editor>) -> Point {
+    editor
+        .selections
+        .newest::<Point>(&editor.display_snapshot(cx))
+        .head()
+}
+
+#[gpui::test]
+fn test_conceals_hide_text_without_editing_buffer(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let text = "a **b** c\nline two";
+    let editor =
+        cx.add_window(|window, cx| build_editor(MultiBuffer::build_simple(text, cx), window, cx));
+
+    _ = editor.update(cx, |editor, _, cx| {
+        // The tag is registered after the editor exists and still applies.
+        let tag = register_test_conceal_tag(cx);
+        assert!(is_conceal_tag(Some(tag), cx));
+        assert!(!is_conceal_tag(None, cx));
+        set_test_conceals(
+            editor,
+            tag,
+            Point::new(0, 0)..Point::new(1, 8),
+            &[
+                Point::new(0, 2)..Point::new(0, 4),
+                Point::new(0, 5)..Point::new(0, 7),
+            ],
+            cx,
+        );
+        assert_eq!(editor.display_text(cx), "a ⋯b⋯ c\nline two");
+        assert!(!editor.display_text(cx).contains("**"));
+        assert_eq!(editor.buffer().read(cx).read(cx).text(), text);
+        assert_eq!(head_point(editor, cx), Point::new(0, 0));
+    });
+}
+
+#[gpui::test]
+fn test_conceals_move_horizontally_as_a_unit(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let editor = cx.add_window(|window, cx| {
+        build_editor(MultiBuffer::build_simple("a**b**c", cx), window, cx)
+    });
+
+    _ = editor.update(cx, |editor, window, cx| {
+        let tag = register_test_conceal_tag(cx);
+        set_test_conceals(
+            editor,
+            tag,
+            Point::new(0, 0)..Point::new(0, 7),
+            &[
+                Point::new(0, 1)..Point::new(0, 3),
+                Point::new(0, 4)..Point::new(0, 6),
+            ],
+            cx,
+        );
+        assert_eq!(editor.display_text(cx), "a⋯b⋯c");
+
+        let right_stops = [
+            ("a", Point::new(0, 1)),
+            ("a⋯", Point::new(0, 3)),
+            ("a⋯b", Point::new(0, 4)),
+            ("a⋯b⋯", Point::new(0, 6)),
+        ];
+        for (display_prefix, buffer_point) in right_stops {
+            editor.move_right(&MoveRight, window, cx);
+            assert_eq!(
+                display_ranges(editor, cx),
+                &[empty_range(0, display_prefix.len())]
+            );
+            assert_eq!(head_point(editor, cx), buffer_point);
+        }
+
+        let left_stops = [
+            ("a⋯b", Point::new(0, 4)),
+            ("a⋯", Point::new(0, 3)),
+            ("a", Point::new(0, 1)),
+            ("", Point::new(0, 0)),
+        ];
+        for (display_prefix, buffer_point) in left_stops {
+            editor.move_left(&MoveLeft, window, cx);
+            assert_eq!(
+                display_ranges(editor, cx),
+                &[empty_range(0, display_prefix.len())]
+            );
+            assert_eq!(head_point(editor, cx), buffer_point);
+        }
+    });
+}
+
+#[gpui::test]
+fn test_toggle_fold_ignores_conceals(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let text = "**a** {\n    b\n}\n";
+    let editor =
+        cx.add_window(|window, cx| build_editor(MultiBuffer::build_simple(text, cx), window, cx));
+
+    _ = editor.update(cx, |editor, window, cx| {
+        let tag = register_test_conceal_tag(cx);
+        let conceal = Point::new(0, 0)..Point::new(0, 2);
+        set_test_conceals(
+            editor,
+            tag,
+            Point::new(0, 0)..Point::new(3, 0),
+            std::slice::from_ref(&conceal),
+            cx,
+        );
+        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
+            s.select_ranges([Point::new(0, 3)..Point::new(0, 3)])
+        });
+        assert_eq!(editor.display_text(cx), "⋯a** {\n    b\n}\n");
+
+        // The row holds only a conceal, so the row gets folded and the conceal stays.
+        editor.toggle_fold(&ToggleFold, window, cx);
+        assert_eq!(editor.display_text(cx), "⋯a** {⋯\n}\n");
+        let folds = folds_with_tags(editor, cx);
+        assert_eq!(folds.len(), 2);
+        assert_eq!(folds[0], (conceal.clone(), Some(tag)));
+        assert_eq!(folds[1].1, None);
+
+        // The row holds a user fold, so that fold alone is unfolded.
+        editor.toggle_fold(&ToggleFold, window, cx);
+        assert_eq!(editor.display_text(cx), "⋯a** {\n    b\n}\n");
+        assert_eq!(folds_with_tags(editor, cx), vec![(conceal, Some(tag))]);
+    });
+}
+
+#[gpui::test]
+fn test_move_down_across_conceals_keeps_one_row_per_press(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let editor = cx.add_window(|window, cx| {
+        build_editor(
+            MultiBuffer::build_simple("abcdefg\na**b**c\nabcdefg\n", cx),
+            window,
+            cx,
+        )
+    });
+
+    _ = editor.update(cx, |editor, window, cx| {
+        let tag = register_test_conceal_tag(cx);
+        set_test_conceals(
+            editor,
+            tag,
+            Point::new(0, 0)..Point::new(3, 0),
+            &[
+                Point::new(1, 1)..Point::new(1, 3),
+                Point::new(1, 4)..Point::new(1, 6),
+            ],
+            cx,
+        );
+        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
+            s.select_ranges([Point::new(0, 2)..Point::new(0, 2)])
+        });
+
+        for expected_row in 1..=3 {
+            editor.move_down(&MoveDown, window, cx);
+            assert_eq!(head_point(editor, cx).row, expected_row);
+            assert_eq!(display_ranges(editor, cx)[0].start.row().0, expected_row);
+        }
+        for expected_row in (0..=2).rev() {
+            editor.move_up(&MoveUp, window, cx);
+            assert_eq!(head_point(editor, cx).row, expected_row);
+        }
+    });
+}
+
+#[gpui::test]
+fn test_set_conceals_replaces_only_within_range(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let editor = cx.add_window(|window, cx| {
+        build_editor(
+            MultiBuffer::build_simple("0123456789\n0123456789\n0123456789", cx),
+            window,
+            cx,
+        )
+    });
+
+    _ = editor.update(cx, |editor, window, cx| {
+        let tag = register_test_conceal_tag(cx);
+        let other_tag = TypeId::of::<OtherConcealTestTag>();
+        register_conceal_tag(other_tag, cx);
+        let whole = Point::new(0, 0)..Point::new(2, 10);
+        let row_1 = Point::new(1, 0)..Point::new(1, 10);
+        set_test_conceals(
+            editor,
+            tag,
+            whole.clone(),
+            &[
+                Point::new(0, 1)..Point::new(0, 2),
+                Point::new(1, 1)..Point::new(1, 2),
+                Point::new(2, 1)..Point::new(2, 2),
+            ],
+            cx,
+        );
+        set_test_conceals(
+            editor,
+            other_tag,
+            whole,
+            &[Point::new(1, 8)..Point::new(1, 9)],
+            cx,
+        );
+        editor.fold_creases(
+            vec![Crease::simple(
+                Point::new(1, 5)..Point::new(1, 7),
+                FoldPlaceholder::test(),
+            )],
+            false,
+            window,
+            cx,
+        );
+
+        set_test_conceals(
+            editor,
+            tag,
+            row_1.clone(),
+            &[Point::new(1, 3)..Point::new(1, 4)],
+            cx,
+        );
+        assert_eq!(
+            folds_with_tags(editor, cx),
+            vec![
+                (Point::new(0, 1)..Point::new(0, 2), Some(tag)),
+                (Point::new(1, 3)..Point::new(1, 4), Some(tag)),
+                (Point::new(1, 5)..Point::new(1, 7), None),
+                (Point::new(1, 8)..Point::new(1, 9), Some(other_tag)),
+                (Point::new(2, 1)..Point::new(2, 2), Some(tag)),
+            ]
+        );
+
+        set_test_conceals(editor, tag, row_1, &[], cx);
+        assert_eq!(
+            folds_with_tags(editor, cx),
+            vec![
+                (Point::new(0, 1)..Point::new(0, 2), Some(tag)),
+                (Point::new(1, 5)..Point::new(1, 7), None),
+                (Point::new(1, 8)..Point::new(1, 9), Some(other_tag)),
+                (Point::new(2, 1)..Point::new(2, 2), Some(tag)),
+            ]
+        );
+        assert_eq!(
+            editor.buffer().read(cx).read(cx).text(),
+            "0123456789\n0123456789\n0123456789"
+        );
+    });
+}
+
+#[gpui::test]
+fn test_unfold_all_keeps_conceals(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let editor = cx.add_window(|window, cx| {
+        build_editor(
+            MultiBuffer::build_simple("a**b**c\nsecond line\nthird", cx),
+            window,
+            cx,
+        )
+    });
+
+    _ = editor.update(cx, |editor, window, cx| {
+        let tag = register_test_conceal_tag(cx);
+        let conceal = Point::new(0, 1)..Point::new(0, 3);
+        set_test_conceals(
+            editor,
+            tag,
+            Point::new(0, 0)..Point::new(0, 7),
+            std::slice::from_ref(&conceal),
+            cx,
+        );
+        editor.fold_creases(
+            vec![Crease::simple(
+                Point::new(1, 0)..Point::new(2, 0),
+                FoldPlaceholder::test(),
+            )],
+            false,
+            window,
+            cx,
+        );
+        assert_eq!(folds_with_tags(editor, cx).len(), 2);
+
+        editor.unfold_all(&UnfoldAll, window, cx);
+        assert_eq!(folds_with_tags(editor, cx), vec![(conceal, Some(tag))]);
+        assert_eq!(editor.display_text(cx), "a⋯b**c\nsecond line\nthird");
+    });
+}
+
+const CONCEAL_TEST_TEXT: &str = "first **bold** line\nsecond line\nthird line\nfourth line";
+
+/// Opens `/a/main.md` in a workspace whose database row exists, so fold
+/// changes reach both the restoration data and the workspace database.
+async fn open_conceal_test_workspace(
+    cx: &mut TestAppContext,
+) -> (
+    Entity<Workspace>,
+    WorkspaceId,
+    project::WorktreeId,
+    Entity<Editor>,
+    &mut VisualTestContext,
+) {
+    init_test(cx, |_| {});
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/a"),
+        json!({ "main.md": CONCEAL_TEST_TEXT, "lib.rs": "mod foo {}" }),
+    )
+    .await;
+    let project = Project::test(fs, [path!("/a").as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    workspace.update(cx, |workspace, _| workspace.set_random_database_id());
+    let workspace_id = workspace.read_with(cx, |workspace, _| workspace.database_id().unwrap());
+    // Saved folds reference the workspace row, so it has to exist.
+    cx.update(|_, cx| workspace::WorkspaceDb::global(cx))
+        .write(move |conn| {
+            conn.exec_bound("INSERT OR IGNORE INTO workspaces(workspace_id) VALUES (?)")?(
+                workspace_id,
+            )
+        })
+        .await
+        .unwrap();
+    let worktree_id = workspace.update(cx, |workspace, cx| {
+        workspace.project().update(cx, |project, cx| {
+            project.worktrees(cx).next().unwrap().read(cx).id()
+        })
+    });
+    let editor = workspace
+        .update_in(cx, |workspace, window, cx| {
+            workspace.open_path((worktree_id, rel_path("main.md")), None, true, window, cx)
+        })
+        .await
+        .unwrap()
+        .downcast::<Editor>()
+        .unwrap();
+    (workspace, workspace_id, worktree_id, editor, cx)
+}
+
+fn saved_test_folds(workspace_id: WorkspaceId, cx: &mut VisualTestContext) -> Vec<(usize, usize)> {
+    cx.update(|_, cx| EditorDb::global(cx))
+        .get_file_folds(workspace_id, Path::new(path!("/a/main.md")))
+        .unwrap()
+        .into_iter()
+        .map(|(start, end, _, _)| (start, end))
+        .collect()
+}
+
+fn flush_fold_serialization(cx: &mut VisualTestContext) {
+    cx.run_until_parked();
+    cx.executor().advance_clock(SERIALIZATION_THROTTLE_TIME);
+    cx.run_until_parked();
+}
+
+/// Closes every item in `pane`, then reopens `main.md` there, so the reopened
+/// editor starts from the pane's restoration data alone.
+async fn reopen_from_restoration_data(
+    workspace: &Entity<Workspace>,
+    workspace_id: WorkspaceId,
+    worktree_id: project::WorktreeId,
+    pane: &Entity<Pane>,
+    cx: &mut VisualTestContext,
+) -> Entity<Editor> {
+    pane.update_in(cx, |pane, window, cx| {
+        pane.close_all_items(&CloseAllItems::default(), window, cx)
+    })
+    .await
+    .unwrap();
+    cx.update(|_, cx| EditorDb::global(cx))
+        .delete_file_folds(workspace_id, Arc::from(Path::new(path!("/a/main.md"))))
+        .await
+        .unwrap();
+    let pane = pane.downgrade();
+    workspace
+        .update_in(cx, |workspace, window, cx| {
+            workspace.open_path(
+                (worktree_id, rel_path("main.md")),
+                Some(pane),
+                true,
+                window,
+                cx,
+            )
+        })
+        .await
+        .unwrap()
+        .downcast::<Editor>()
+        .unwrap()
+}
+
+#[gpui::test]
+async fn test_conceals_are_not_persisted(cx: &mut TestAppContext) {
+    let (workspace, workspace_id, worktree_id, editor, cx) = open_conceal_test_workspace(cx).await;
+    let user_fold = Point::new(2, 0)..Point::new(2, 5);
+
+    editor.update_in(cx, |editor, window, cx| {
+        let tag = register_test_conceal_tag(cx);
+        set_test_conceals(
+            editor,
+            tag,
+            Point::new(0, 0)..Point::new(0, 19),
+            &[
+                Point::new(0, 6)..Point::new(0, 8),
+                Point::new(0, 12)..Point::new(0, 14),
+            ],
+            cx,
+        );
+        // Persisting a user fold must not carry the conceals along.
+        editor.fold_creases(
+            vec![Crease::simple(user_fold.clone(), FoldPlaceholder::test())],
+            false,
+            window,
+            cx,
+        );
+        assert_eq!(
+            editor.display_text(cx),
+            "first ⋯bold⋯ line\nsecond line\n⋯ line\nfourth line"
+        );
+    });
+    flush_fold_serialization(cx);
+
+    let start = CONCEAL_TEST_TEXT.find("third").unwrap();
+    assert_eq!(saved_test_folds(workspace_id, cx), vec![(start, start + 5)]);
+
+    let pane = workspace.update(cx, |workspace, _| workspace.active_pane().clone());
+    drop(editor);
+    let reopened =
+        reopen_from_restoration_data(&workspace, workspace_id, worktree_id, &pane, cx).await;
+    reopened.update(cx, |editor, cx| {
+        assert_eq!(
+            editor.display_text(cx),
+            "first **bold** line\nsecond line\n⋯ line\nfourth line",
+            "restoration data holds the user fold and no conceal"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_editor_clone_drops_conceals(cx: &mut TestAppContext) {
+    let (workspace, workspace_id, worktree_id, editor, cx) = open_conceal_test_workspace(cx).await;
+    let user_fold = Point::new(2, 0)..Point::new(2, 5);
+    let conceal = Point::new(0, 6)..Point::new(0, 8);
+    let tag = editor.update_in(cx, |editor, window, cx| {
+        let tag = register_test_conceal_tag(cx);
+        set_test_conceals(
+            editor,
+            tag,
+            Point::new(0, 0)..Point::new(0, 19),
+            std::slice::from_ref(&conceal),
+            cx,
+        );
+        editor.fold_creases(
+            vec![Crease::simple(user_fold.clone(), FoldPlaceholder::test())],
+            false,
+            window,
+            cx,
+        );
+        tag
+    });
+    flush_fold_serialization(cx);
+
+    let pane_1 = workspace.update(cx, |workspace, _| workspace.active_pane().clone());
+    let pane_2 = workspace
+        .update_in(cx, |workspace, window, cx| {
+            workspace.split_and_clone(pane_1.clone(), SplitDirection::Right, window, cx)
+        })
+        .await
+        .unwrap();
+    flush_fold_serialization(cx);
+    let clone = pane_2.update(cx, |pane, _| {
+        pane.active_item().unwrap().downcast::<Editor>().unwrap()
+    });
+    assert_ne!(clone.entity_id(), editor.entity_id());
+
+    editor.update_in(cx, |editor, _, cx| {
+        assert_eq!(
+            folds_with_tags(editor, cx),
+            vec![(conceal.clone(), Some(tag)), (user_fold.clone(), None)]
+        );
+    });
+    clone.update_in(cx, |clone, _, cx| {
+        assert_eq!(folds_with_tags(clone, cx), vec![(user_fold.clone(), None)]);
+        assert_eq!(
+            clone.display_text(cx),
+            "first **bold** line\nsecond line\n⋯ line\nfourth line"
+        );
+    });
+    let third = CONCEAL_TEST_TEXT.find("third").unwrap();
+    assert_eq!(saved_test_folds(workspace_id, cx), vec![(third, third + 5)]);
+
+    // A fold change in the clone persists its folds, which hold no conceal.
+    let second_fold = Point::new(1, 0)..Point::new(1, 6);
+    clone.update_in(cx, |clone, window, cx| {
+        clone.fold_creases(
+            vec![Crease::simple(second_fold, FoldPlaceholder::test())],
+            false,
+            window,
+            cx,
+        );
+    });
+    flush_fold_serialization(cx);
+    let second = CONCEAL_TEST_TEXT.find("second").unwrap();
+    assert_eq!(
+        saved_test_folds(workspace_id, cx),
+        vec![(second, second + 6), (third, third + 5)]
+    );
+
+    drop(clone);
+    drop(editor);
+    let expected_texts = [
+        (
+            &pane_1,
+            "first **bold** line\nsecond line\n⋯ line\nfourth line",
+        ),
+        (&pane_2, "first **bold** line\n⋯ line\n⋯ line\nfourth line"),
+    ];
+    for (pane, expected_text) in expected_texts {
+        let reopened =
+            reopen_from_restoration_data(&workspace, workspace_id, worktree_id, pane, cx).await;
+        reopened.update(cx, |editor, cx| {
+            assert_eq!(
+                editor.display_text(cx),
+                expected_text,
+                "restoration data holds the user folds and no conceal"
+            );
+        });
+    }
+}
