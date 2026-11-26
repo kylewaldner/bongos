@@ -61,8 +61,10 @@ impl Display {
         let range = clamp(&snapshot, found);
 
         let display = editor.display_snapshot(cx);
+        // Conceals stay: reveal at point shows the markup around a match once the cursor lands.
         let folds: Vec<_> = display
             .folds_in_range(range.clone())
+            .filter(|fold| !editor::is_conceal_tag(fold.placeholder.type_tag, cx))
             .map(|fold| OpenedFold {
                 range: fold.range.start..fold.range.end,
                 placeholder: fold.placeholder.clone(),
@@ -101,6 +103,9 @@ impl Display {
 
         let mut creases = Vec::new();
         self.folds.retain(|fold| {
+            if editor::is_conceal_tag(fold.placeholder.type_tag, cx) {
+                return false;
+            }
             let start = fold.range.start.to_offset(&snapshot);
             let end = fold.range.end.to_offset(&snapshot);
             let hides = keep
