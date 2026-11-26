@@ -1,7 +1,7 @@
 use crate::decl::{GuardCheck, PoolKind};
 use crate::grant::{
-    Blocked, Grant, GuardReadings, GuardValue, PoolState, PoolTable, PoolWait, Request, RequestId,
-    Timestamp, WaitStatus, admit_now, grant, try_now, wait_status,
+    Admit, Blocked, Grant, GuardReadings, GuardValue, PoolState, PoolTable, PoolWait, Request,
+    RequestId, Timestamp, WaitStatus, admit_now, grant, try_now, wait_status,
 };
 use crate::holder::{Holder, HolderLabel, HolderPath, HostRef, Level, OwnerKey};
 use crate::needs::{Need, NeedMode};
@@ -271,7 +271,7 @@ fn try_now_refuses_while_any_waiter_is_queued() {
     let probe = request(9, vec![need("jobs")]);
     assert_eq!(
         try_now(&t, &probe, &GuardReadings::default()),
-        Ok(vec![("jobs".to_string(), None)])
+        Ok(vec![("jobs".to_string(), Admit::Granted(None))])
     );
     let big = Need {
         count: Some(2),

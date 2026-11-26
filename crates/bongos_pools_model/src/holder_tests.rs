@@ -113,3 +113,87 @@ fn prune_drops_a_dead_hosts_holds_and_waiters() {
     assert_eq!(pruned.waiters.len(), 1);
     assert!(prune(&mut table, &probe(&[])).is_empty());
 }
+
+fn at_level(owner: &str, level: Level) -> HolderPath {
+    HolderPath {
+        owner: OwnerKey(owner.to_string()),
+        level,
+    }
+}
+
+fn step(key: &str) -> Level {
+    Level::Step {
+        key: key.to_string(),
+    }
+}
+
+fn part(key: &str, part: &str) -> Level {
+    Level::Part {
+        key: key.to_string(),
+        part: part.to_string(),
+    }
+}
+
+#[test]
+fn job_and_run_enclose_every_other_level_of_their_owner() {
+    let levels = [
+        Level::Job,
+        Level::Run,
+        step("a"),
+        part("a", "1"),
+        Level::Hook {
+            point: "before_job".to_string(),
+        },
+    ];
+    for outer in [Level::Job, Level::Run] {
+        for inner in &levels {
+            let encloses = at_level("r1", outer.clone()).encloses(&at_level("r1", inner.clone()));
+            assert_eq!(encloses, outer != *inner, "{outer:?} over {inner:?}");
+            assert!(
+                !at_level("r1", outer.clone()).encloses(&at_level("r2", inner.clone())),
+                "another owner"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_step_encloses_only_its_own_parts_and_siblings_never_enclose() {
+    let node = at_level("r1", step("build"));
+    assert!(node.encloses(&at_level("r1", part("build", "2"))));
+    assert!(!node.encloses(&at_level("r1", part("lint", "2"))));
+    assert!(!node.encloses(&at_level("r1", step("build"))), "not itself");
+    assert!(
+        !node.encloses(&at_level("r1", step("lint"))),
+        "a sibling node"
+    );
+    assert!(!node.encloses(&at_level("r1", Level::Job)));
+    assert!(!node.encloses(&at_level("r2", part("build", "2"))));
+    let one = at_level("r1", part("build", "1"));
+    let two = at_level("r1", part("build", "2"));
+    assert!(!one.encloses(&two) && !two.encloses(&one), "sibling parts");
+    let hook = at_level("r1", Level::Hook { point: "x".into() });
+    assert!(!hook.encloses(&at_level("r1", part("build", "1"))));
+}
+
+#[test]
+fn owners_that_differ_only_partly_or_by_project_never_enclose() {
+    let job = at_level("run-1", Level::Job);
+    assert!(!job.encloses(&at_level("run-10", step("a"))));
+    assert!(!job.encloses(&at_level("run-", step("a"))));
+    assert!(
+        !at_level("check/t/build", step("")).encloses(&at_level("check/t/buildx", part("", "1")))
+    );
+    let holder = |project: &str, path: HolderPath| Holder {
+        project: project.to_string(),
+        path,
+        label: HolderLabel::default(),
+        host: HOST,
+        process: None,
+    };
+    let outer = holder("p", job.clone());
+    assert!(outer.encloses(&holder("p", at_level("run-1", step("a")))));
+    assert!(!outer.encloses(&holder("q", at_level("run-1", step("a")))));
+    assert!(outer.is_or_encloses(&holder("p", job.clone())));
+    assert!(!outer.encloses(&holder("p", job)));
+}

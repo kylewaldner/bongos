@@ -11,6 +11,11 @@
 //! `mixed` waiter (the machine half of a request that also names a project pool) is judged only by
 //! its own host; for every other host the scan of its pool stops at it.
 //!
+//! Before queuing, a need is judged against the holds of the requester's enclosing holders
+//! ([`check_own_hold`]): covered needs are satisfied with no ticket, and a need such a hold makes
+//! impossible is refused as [`Refused::OwnHold`]. The broker queues only the remaining needs
+//! ([`Satisfied::remaining`]); [`PoolTable::enqueue`] itself is unchanged.
+//!
 //! Time and guard readings are inputs; nothing here reads a clock or the system.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,6 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::decl::{GuardCheck, PoolKind};
 use crate::holder::{Holder, HostRef};
 use crate::needs::{Need, NeedMode};
+use crate::wait_for::Refused;
 
 /// Milliseconds since the Unix epoch, as given by the caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -164,6 +170,43 @@ pub struct Grant {
     pub host: HostRef,
     pub at: Timestamp,
     pub pools: Vec<GrantedPool>,
+    /// Pools covered by an enclosing holder's hold: no ticket, no hold, no reading spent. Only
+    /// [`admit_now`] fills it.
+    pub satisfied: Vec<String>,
+}
+
+/// How [`try_now`] admits one need.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Admit {
+    /// Granted, with the guard reading that admits it, if the pool has a guard.
+    Granted(Option<GuardReading>),
+    /// Covered by an enclosing holder's hold: no ticket, no hold, no reading.
+    Satisfied,
+}
+
+/// The pools of a request covered by an enclosing holder's hold, in need order.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Satisfied {
+    pub pools: Vec<String>,
+}
+
+impl Satisfied {
+    pub fn contains(&self, pool: &str) -> bool {
+        self.pools.iter().any(|name| name == pool)
+    }
+
+    /// The request with only the needs still to queue.
+    pub fn remaining(&self, request: &Request) -> Request {
+        Request {
+            needs: request
+                .needs
+                .iter()
+                .filter(|need| !self.contains(&need.pool))
+                .cloned()
+                .collect(),
+            ..request.clone()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -201,6 +244,8 @@ pub enum Blocked {
     OtherPool { pool: String, other: String },
     /// `try_now` only: the request names this pool in more than one need.
     NamedTwice { pool: String },
+    /// `try_now` only: an enclosing holder holds this pool incompatibly (see [`Refused::OwnHold`]).
+    OwnHold { pool: String },
 }
 
 impl Blocked {
@@ -215,7 +260,8 @@ impl Blocked {
             | Blocked::GuardSettling { pool, .. }
             | Blocked::Mixed { pool, .. }
             | Blocked::OtherPool { pool, .. }
-            | Blocked::NamedTwice { pool } => pool,
+            | Blocked::NamedTwice { pool }
+            | Blocked::OwnHold { pool } => pool,
         }
     }
 
@@ -392,6 +438,7 @@ pub fn grant(
                     host: waiter.holder.host,
                     at: now,
                     pools: Vec::new(),
+                    satisfied: Vec::new(),
                 })
                 .pools
                 .push(GrantedPool {
@@ -406,18 +453,20 @@ pub fn grant(
     grants
 }
 
-/// Whether the request could be admitted at once without queuing: only when every pool it names
-/// has no waiter at all and the grant rule would admit it now. Nothing is queued either way.
+/// Whether the request could be admitted at once without queuing. A request naming a pool twice
+/// is `Blocked::NamedTwice` before anything else. Each pool is first judged
+/// against the enclosing holders' holds: a covered pool is [`Admit::Satisfied`] whatever waits
+/// there, and an incompatible one is `Blocked::OwnHold`. Every other pool must have no waiter at
+/// all and the grant rule must admit it now. Nothing is queued either way.
 ///
-/// On success it returns, per need in order, the pool name and the guard reading that admits it.
-/// It does not spend that reading: use [`admit_now`] to admit and spend it, or a second caller on
-/// the same reading would be admitted too.
+/// On success it returns, per need in order, the pool name and how it is admitted. It does not
+/// spend a guard reading: use [`admit_now`] to admit and spend it, or a second caller on the same
+/// reading would be admitted too.
 pub fn try_now(
     table: &PoolTable,
     request: &Request,
     guards: &GuardReadings,
-) -> Result<Vec<(String, Option<GuardReading>)>, Blocked> {
-    let mut admitted = Vec::new();
+) -> Result<Vec<(String, Admit)>, Blocked> {
     let mut named = BTreeSet::new();
     for need in &request.needs {
         if !named.insert(need.pool.as_str()) {
@@ -425,11 +474,26 @@ pub fn try_now(
                 pool: need.pool.clone(),
             });
         }
+    }
+    let mut admitted = Vec::new();
+    for need in &request.needs {
         let Some(pool) = table.pools.get(&need.pool) else {
             return Err(Blocked::UnknownPool {
                 pool: need.pool.clone(),
             });
         };
+        match cover(pool, need, &request.holder) {
+            Cover::Satisfied => {
+                admitted.push((need.pool.clone(), Admit::Satisfied));
+                continue;
+            }
+            Cover::OwnHold => {
+                return Err(Blocked::OwnHold {
+                    pool: need.pool.clone(),
+                });
+            }
+            Cover::Open => {}
+        }
         if !pool.waiters.is_empty() {
             return Err(Blocked::Queued {
                 pool: need.pool.clone(),
@@ -445,14 +509,15 @@ pub fn try_now(
                 pool: need.pool.clone(),
             });
         }
-        admitted.push((need.pool.clone(), reading));
+        admitted.push((need.pool.clone(), Admit::Granted(reading)));
     }
     Ok(admitted)
 }
 
 /// Admits the request at once when [`try_now`] would, taking its holds (none in a `guard` pool)
 /// and spending each guard's reading, so a second admission on the same reading is refused as
-/// settling. Nothing changes when the request is blocked.
+/// settling. A satisfied pool takes no ticket, hold or reading and is listed in
+/// [`Grant::satisfied`]. Nothing changes when the request is blocked.
 pub fn admit_now(
     table: &mut PoolTable,
     request: &Request,
@@ -461,7 +526,15 @@ pub fn admit_now(
 ) -> Result<Grant, Blocked> {
     let admitted = try_now(table, request, guards)?;
     let mut pools = Vec::new();
-    for (need, (name, reading)) in request.needs.iter().zip(admitted) {
+    let mut satisfied = Vec::new();
+    for (need, (name, admit)) in request.needs.iter().zip(admitted) {
+        let reading = match admit {
+            Admit::Satisfied => {
+                satisfied.push(name);
+                continue;
+            }
+            Admit::Granted(reading) => reading,
+        };
         let ticket = table.issue_ticket();
         if let Some(pool) = table.pools.get_mut(&name) {
             if let (Some(guard), Some(reading)) = (pool.guard.as_mut(), reading) {
@@ -489,7 +562,137 @@ pub fn admit_now(
         host: request.holder.host,
         at: now,
         pools,
+        satisfied,
     })
+}
+
+/// Judges the request's needs in this table against the holds of its enclosing holders (paths
+/// that strictly enclose the requester's, in the same project). A need is satisfied when those
+/// holds cover it: a held `exclusive` covers any mode, a held `shared` covers `shared`, and held
+/// slots (summed) cover an equal or smaller count. It is refused as [`Refused::OwnHold`] when the
+/// need cannot fit beside those holds (`exclusive` over a held `shared`, more slots than the pool
+/// has beside them), since they are not released while the requester waits. The first refused
+/// need in need order is reported.
+///
+/// Pools this table does not have are left alone (another table, or `enqueue` refuses them), as
+/// is a pool the request names twice, so `enqueue` still refuses it. A `guard` pool records no
+/// hold, so it is never satisfied or refused here.
+pub fn check_own_hold(table: &PoolTable, request: &Request) -> Result<Satisfied, Refused> {
+    own_holds(|name| table.pools.get(name), request)
+}
+
+pub(crate) fn own_holds<'a>(
+    lookup: impl Fn(&str) -> Option<&'a PoolState>,
+    request: &Request,
+) -> Result<Satisfied, Refused> {
+    let mut satisfied = Satisfied::default();
+    for need in &request.needs {
+        let named = request
+            .needs
+            .iter()
+            .filter(|other| other.pool == need.pool)
+            .count();
+        let Some(pool) = lookup(&need.pool).filter(|_| named == 1) else {
+            continue;
+        };
+        match cover(pool, need, &request.holder) {
+            Cover::Satisfied => satisfied.pools.push(need.pool.clone()),
+            Cover::OwnHold => {
+                return Err(Refused::OwnHold {
+                    pool: need.pool.clone(),
+                });
+            }
+            Cover::Open => {}
+        }
+    }
+    Ok(satisfied)
+}
+
+/// How the requester's enclosing holders' holds in one pool stand toward one need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Cover {
+    /// No enclosing hold covers it or rules it out: it queues as usual.
+    Open,
+    Satisfied,
+    OwnHold,
+}
+
+pub(crate) fn cover(pool: &PoolState, need: &Need, requester: &Holder) -> Cover {
+    let enclosing: Vec<&Hold> = pool
+        .holds
+        .iter()
+        .filter(|hold| hold.holder.encloses(requester))
+        .collect();
+    if enclosing.is_empty() || pool.kind == PoolKind::Guard {
+        return Cover::Open;
+    }
+    let usage = Usage::of_holds(pool, enclosing);
+    let covered = match pool.kind {
+        PoolKind::Rw => usage.exclusive || mode(need) == NeedMode::Shared,
+        PoolKind::Slots | PoolKind::Mutex => usage.count >= u64::from(need.count()),
+        PoolKind::Guard => false,
+    };
+    if covered {
+        Cover::Satisfied
+    } else if !usage.fits(pool, need) {
+        Cover::OwnHold
+    } else {
+        Cover::Open
+    }
+}
+
+/// What a waiter with one need waits for in one pool, by [`blocking_holds`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Blockers<'a> {
+    /// Every one of these holds must release before the need fits (none when it fits now).
+    All(Vec<&'a Hold>),
+    /// A `slots` pool where the need fits beside the holds of the waiter's own and enclosing
+    /// paths: it fits once enough of these other holds release to add `need` slots to the `free`
+    /// ones, so any of them may be the one that must release, but not all of them need to.
+    Enough {
+        holds: Vec<&'a Hold>,
+        free: u64,
+        need: u64,
+    },
+}
+
+/// The holds a waiter with this need waits for, by the grant rule's own fit test: none when it
+/// fits beside every hold. Otherwise, when it would fit beside the holds of its own path and its
+/// enclosing paths (which are not released while it waits), only the other holds that conflict
+/// with it; when it would not, every conflicting hold, its own included. A hold conflicts unless
+/// the need is `shared` on an `rw` pool and the hold is `shared` too. On a `slots` pool that the
+/// need fits beside its own holds, the other holds are [`Blockers::Enough`]: some of them must
+/// release, as many as free the slots it lacks.
+pub(crate) fn blocking_holds<'a>(
+    pool: &'a PoolState,
+    need: &Need,
+    requester: &Holder,
+) -> Blockers<'a> {
+    let usage = Usage::of(pool);
+    if usage.fits(pool, need) {
+        return Blockers::All(Vec::new());
+    }
+    let own = |hold: &Hold| hold.holder.is_or_encloses(requester);
+    let own_fits =
+        Usage::of_holds(pool, pool.holds.iter().filter(|hold| own(hold))).fits(pool, need);
+    if own_fits && pool.kind == PoolKind::Slots {
+        return Blockers::Enough {
+            holds: pool.holds.iter().filter(|hold| !own(hold)).collect(),
+            free: u64::from(pool.size).saturating_sub(usage.count),
+            need: u64::from(need.count()),
+        };
+    }
+    Blockers::All(
+        pool.holds
+            .iter()
+            .filter(|hold| !own_fits || !own(hold))
+            .filter(|hold| {
+                !(pool.kind == PoolKind::Rw
+                    && mode(need) == NeedMode::Shared
+                    && mode(&hold.need) == NeedMode::Shared)
+            })
+            .collect(),
+    )
 }
 
 /// Where the request waits and why, judged as its own host would judge it, with the readings
@@ -595,12 +798,16 @@ fn mode(need: &Need) -> NeedMode {
 
 impl Usage {
     fn of(pool: &PoolState) -> Usage {
+        Usage::of_holds(pool, &pool.holds)
+    }
+
+    fn of_holds<'a>(pool: &PoolState, holds: impl IntoIterator<Item = &'a Hold>) -> Usage {
         let mut usage = Usage {
             count: 0,
             holds: 0,
             exclusive: false,
         };
-        for hold in &pool.holds {
+        for hold in holds {
             usage.add(pool, &hold.need);
         }
         usage
